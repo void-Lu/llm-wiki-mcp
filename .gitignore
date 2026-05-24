@@ -11,7 +11,8 @@ build/
 
 # Local/generated project-adjacent content
 rag/
-docs/
+docs/plan/
+docs/superpowers/
 
 # Virtual environment
 .venv/
