@@ -529,6 +529,8 @@ def search_netsuite_knowledge(
     source_kind: str | None = None,
     source_name: str | None = None,
     store: ChromaVectorStore | None = None,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     config = load_config(vault_root)
     selected_embedder = embedder or SentenceTransformerEmbedder(
@@ -545,6 +547,8 @@ def search_netsuite_knowledge(
 
     # Post-filtering with metadata_matches_filters (includes source_kind/source_name)
     active_filters = dict(filters or {})
+    if content_type:
+        active_filters["type"] = content_type
     if source_kind:
         active_filters["source_kind"] = source_kind
     if source_name:
@@ -552,6 +556,8 @@ def search_netsuite_knowledge(
 
     selected = []
     for result in raw_results:
+        if not include_archived and result.metadata.get("archived") is True:
+            continue
         if active_filters and not metadata_matches_filters(result.metadata, active_filters):
             continue
         selected.append(result)
@@ -662,6 +668,8 @@ def ask_netsuite_rag(
     source_kind: str | None = None,
     source_name: str | None = None,
     store: ChromaVectorStore | None = None,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     # Route the query to determine the best source filter
     routing = route_query(question, source_kind=source_kind)
@@ -675,6 +683,7 @@ def ask_netsuite_rag(
     search = search_netsuite_knowledge(
         vault_root, question, filters, top_k, embedder,
         source_kind=effective_source_kind, source_name=source_name, store=store,
+        content_type=content_type, include_archived=include_archived,
     )
     context_blocks = []
     sources = []

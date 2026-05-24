@@ -74,13 +74,19 @@ def search_netsuite_knowledge_tool(
     source_kind: str | None = None,
     source_name: str | None = None,
     top_k: int = 5,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
-    filters = _build_filters(project, script_type, related_objects, related_scripts, object_type, status, source_kind, source_name)
+    filters = _build_filters(
+        project, script_type, related_objects, related_scripts, object_type, status,
+        source_kind, source_name, content_type,
+    )
     try:
         runtime = _resolve_runtime(vault_root)
         return run_search_netsuite_knowledge(
             runtime.vault_root, question, filters=filters, top_k=top_k,
             source_kind=source_kind, source_name=source_name,
+            content_type=content_type, include_archived=include_archived,
         )
     except RuntimeConfigError as exc:
         return _runtime_error_payload(exc)
@@ -98,13 +104,19 @@ def ask_netsuite_rag_tool(
     source_kind: str | None = None,
     source_name: str | None = None,
     top_k: int = 5,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
-    filters = _build_filters(project, script_type, related_objects, related_scripts, object_type, status, source_kind, source_name)
+    filters = _build_filters(
+        project, script_type, related_objects, related_scripts, object_type, status,
+        source_kind, source_name, content_type,
+    )
     try:
         runtime = _resolve_runtime(vault_root)
         return run_ask_netsuite_rag(
             runtime.vault_root, question, filters=filters, top_k=top_k,
             source_kind=source_kind, source_name=source_name,
+            content_type=content_type, include_archived=include_archived,
         )
     except RuntimeConfigError as exc:
         return _runtime_error_payload(exc)
@@ -249,6 +261,7 @@ def _build_filters(
     status: str | None,
     source_kind: str | None = None,
     source_name: str | None = None,
+    content_type: str | None = None,
 ) -> dict[str, Any]:
     filters: dict[str, Any] = {}
     for key, value in {
@@ -260,6 +273,7 @@ def _build_filters(
         "status": status,
         "source_kind": source_kind,
         "source_name": source_name,
+        "type": content_type,
     }.items():
         if value:
             filters[key] = value
@@ -310,6 +324,8 @@ def search_netsuite_knowledge(
     source_kind: str | None = None,
     source_name: str | None = None,
     top_k: int = 5,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     """Search NetSuite Obsidian knowledge and return retrieved chunks with citations.
 
@@ -324,6 +340,8 @@ def search_netsuite_knowledge(
         status: Filter by status (active, inactive).
         source_kind: Filter by source kind (note, code).
         source_name: Filter by source name (e.g., obsidian, netsuite_repo).
+        content_type: Filter by metadata type (e.g., generated_wiki).
+        include_archived: Include archived generated Wiki pages.
         top_k: Number of results to return.
     """
     return search_netsuite_knowledge_tool(
@@ -338,6 +356,8 @@ def search_netsuite_knowledge(
         source_kind,
         source_name,
         top_k,
+        content_type,
+        include_archived,
     )
 
 
@@ -354,6 +374,8 @@ def ask_netsuite_rag(
     source_kind: str | None = None,
     source_name: str | None = None,
     top_k: int = 5,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     """Return RAG context, sources, and answer policy for the Copilot model.
 
@@ -368,6 +390,8 @@ def ask_netsuite_rag(
         status: Filter by status.
         source_kind: Filter by source kind (note, code).
         source_name: Filter by source name (e.g., obsidian, netsuite_repo).
+        content_type: Filter by metadata type (e.g., generated_wiki).
+        include_archived: Include archived generated Wiki pages.
         top_k: Number of chunks to retrieve.
     """
     return ask_netsuite_rag_tool(
@@ -382,6 +406,8 @@ def ask_netsuite_rag(
         source_kind,
         source_name,
         top_k,
+        content_type,
+        include_archived,
     )
 
 

@@ -252,6 +252,21 @@ class TestBuildFiltersWithSourceParams:
         assert "source_name" not in filters
         assert filters["project"] == "project-a"
 
+    def test_content_type_filter_is_mapped_to_type(self):
+        filters = _build_filters(
+            project=None,
+            script_type=None,
+            related_objects=None,
+            related_scripts=None,
+            object_type=None,
+            status=None,
+            source_kind=None,
+            source_name=None,
+            content_type="generated_wiki",
+        )
+
+        assert filters["type"] == "generated_wiki"
+
 
 class TestIndexSourcesTool:
     """Test the index_sources_tool function."""

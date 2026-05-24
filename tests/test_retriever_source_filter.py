@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from netsuite_rag_mcp.models import Chunk
+from netsuite_rag_mcp.models import Chunk, SearchResult
 from netsuite_rag_mcp.retriever import _build_where_clause, ask_netsuite_rag, search_netsuite_knowledge
 from netsuite_rag_mcp.vector_store import ChromaVectorStore, FakeEmbedder
 
@@ -326,3 +326,74 @@ def test_build_where_clause_both_filters_uses_and():
     """_build_where_clause returns $and clause when both source_kind and source_name are set."""
     result = _build_where_clause(source_kind="code", source_name="netsuite_repo")
     assert result == {"$and": [{"source_kind": "code"}, {"source_name": "netsuite_repo"}]}
+
+
+class StubStore:
+    def __init__(self, results: list[SearchResult]):
+        self.results = results
+        self.where = None
+
+    def query(self, query_text: str, n_results: int = 5, where: dict | None = None):
+        self.where = where
+        return self.results
+
+
+def test_search_excludes_archived_results_by_default(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "rag").mkdir()
+    (vault / "rag" / "sources.yaml").write_text(
+        "schema_version: 2\nworkspace_root: .\nsources: []\n",
+        encoding="utf-8",
+    )
+    active = SearchResult(
+        citation_id="S1",
+        chunk_id="active",
+        text="active wiki",
+        metadata={"type": "generated_wiki", "archived": False},
+        distance=0.1,
+    )
+    archived = SearchResult(
+        citation_id="S2",
+        chunk_id="archived",
+        text="archived wiki",
+        metadata={"type": "generated_wiki", "archived": True},
+        distance=0.2,
+    )
+
+    result = search_netsuite_knowledge(
+        vault,
+        "wiki",
+        top_k=5,
+        store=StubStore([archived, active]),
+        include_archived=False,
+    )
+
+    assert [row["chunk_id"] for row in result["results"]] == ["active"]
+
+
+def test_search_can_include_archived_results(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "rag").mkdir()
+    (vault / "rag" / "sources.yaml").write_text(
+        "schema_version: 2\nworkspace_root: .\nsources: []\n",
+        encoding="utf-8",
+    )
+    archived = SearchResult(
+        citation_id="S1",
+        chunk_id="archived",
+        text="archived wiki",
+        metadata={"type": "generated_wiki", "archived": True},
+        distance=0.1,
+    )
+
+    result = search_netsuite_knowledge(
+        vault,
+        "wiki",
+        top_k=5,
+        store=StubStore([archived]),
+        include_archived=True,
+    )
+
+    assert [row["chunk_id"] for row in result["results"]] == ["archived"]
