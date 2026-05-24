@@ -1,0 +1,124 @@
+from pathlib import Path
+
+import yaml
+
+from netsuite_rag_mcp.config import load_config
+from netsuite_rag_mcp.runtime_config import resolve_runtime_config
+from netsuite_rag_mcp.wiki_generator import _collect_wiki_source_files, _is_utility_file
+
+
+RESTLET_JS = """/**
+ * @NScriptType Restlet
+ * @NApiVersion 2.1
+ */
+define(["N/record", "./tools/common_api"], function(record, commonApi) {
+  function get(context) {
+    return record.load({ type: "salesorder", id: context.id });
+  }
+  return { get: get };
+});
+"""
+
+UTILITY_JS = """define([], function() {
+  function normalize(value) {
+    return String(value || "").trim();
+  }
+  return { normalize: normalize };
+});
+"""
+
+MOMENT_JS = """//! moment.js
+function moment() { return "third party"; }
+"""
+
+CUSTOMSCRIPT_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<script scriptid="customscript_order_sync_restlet">
+  <name>Order Sync RESTlet</name>
+</script>
+"""
+
+
+def write_sources_yaml(vault: Path, repo: Path) -> None:
+    (vault / "rag").mkdir(parents=True, exist_ok=True)
+    (vault / "rag" / "sources.yaml").write_text(
+        "\n".join(
+            [
+                "schema_version: 2",
+                "workspace_root: .",
+                "index:",
+                "  embedding_model: fake",
+                "  collections:",
+                "    default: netsuite_knowledge",
+                "sources:",
+                "  - source_name: obsidian",
+                "    source_kind: note",
+                "    root: .",
+                "    include: [projects]",
+                "    exclude: [.git, .obsidian, .rag-index]",
+                "    file_types: [md]",
+                "    parser: markdown_frontmatter_h2",
+                "    collection: netsuite_knowledge",
+                "    authority: curated_note_source",
+                "  - source_name: huideng",
+                "    source_kind: code",
+                f"    root: {repo.as_posix()}",
+                "    include: [src/FileCabinet/SuiteScripts, src/Objects]",
+                "    exclude: [.git, node_modules, dist, build]",
+                "    file_types: [js, ts, xml, json]",
+                "    parser: suitescript_code_and_config",
+                "    collection: netsuite_knowledge",
+                "    authority: implementation_source_of_truth",
+                "    library_exclude_patterns:",
+                "      - src/FileCabinet/SuiteScripts/tools/extra-lib.js",
+                "    utility_allowlist:",
+                "      - src/FileCabinet/SuiteScripts/tools/common_api.js",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def make_repo(tmp_path: Path) -> tuple[Path, Path]:
+    vault = tmp_path / "vault"
+    repo = tmp_path / "HuiDeng"
+    vault.mkdir()
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL").mkdir(parents=True)
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "tools").mkdir(parents=True)
+    (repo / "src" / "Objects" / "Objects_GL").mkdir(parents=True)
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "rl_order_sync.js").write_text(RESTLET_JS, encoding="utf-8")
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "tools" / "common_api.js").write_text(UTILITY_JS, encoding="utf-8")
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "tools" / "moment.js").write_text(MOMENT_JS, encoding="utf-8")
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "tools" / "extra-lib.js").write_text(MOMENT_JS, encoding="utf-8")
+    (repo / "src" / "Objects" / "Objects_GL" / "customscript_order_sync_restlet.xml").write_text(CUSTOMSCRIPT_XML, encoding="utf-8")
+    write_sources_yaml(vault, repo)
+    return vault, repo
+
+
+def load_huideng_source(vault: Path):
+    runtime = resolve_runtime_config(vault_root_arg=vault, data_root=vault / ".test-data")
+    config = load_config(vault, runtime_config=runtime)
+    return next(source for source in config.sources if source.source_name == "huideng")
+
+
+def test_collect_wiki_source_files_excludes_third_party_libraries(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    source = load_huideng_source(vault)
+
+    files = _collect_wiki_source_files(source)
+    relative_paths = [path.relative_to(repo).as_posix() for path in files]
+
+    assert "src/FileCabinet/SuiteScripts/SuiteScripts_GL/rl_order_sync.js" in relative_paths
+    assert "src/Objects/Objects_GL/customscript_order_sync_restlet.xml" in relative_paths
+    assert "src/FileCabinet/SuiteScripts/tools/common_api.js" in relative_paths
+    assert "src/FileCabinet/SuiteScripts/tools/moment.js" not in relative_paths
+    assert "src/FileCabinet/SuiteScripts/tools/extra-lib.js" not in relative_paths
+
+
+def test_is_utility_file_detects_tools_allowlist(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    source = load_huideng_source(vault)
+    utility_path = repo / "src" / "FileCabinet" / "SuiteScripts" / "tools" / "common_api.js"
+    script_path = repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "rl_order_sync.js"
+
+    assert _is_utility_file(utility_path, source) is True
+    assert _is_utility_file(script_path, source) is False
