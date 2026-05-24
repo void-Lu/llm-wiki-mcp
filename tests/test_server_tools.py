@@ -4,6 +4,7 @@ import pytest
 
 from netsuite_rag_mcp.server import (
     _build_filters,
+    generate_suitecloud_wiki_tool,
     get_index_status_tool,
     index_sources_tool,
     index_vault_tool,
@@ -334,7 +335,6 @@ class TestIndexSourcesTool:
         assert result["mode"] == "bad_mode"
         assert "full" in result["error"]
         assert "incremental" in result["error"]
-
     def test_unknown_exception_is_not_swallowed(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "vault"
         vault.mkdir()
@@ -365,6 +365,37 @@ class TestIndexSourcesTool:
             str(vault), source_names=["obsidian"], mode="incremental", embedder=FakeEmbedder()
         )
         assert "total_skipped" in result2
+
+
+class TestGenerateSuitecloudWikiTool:
+    def test_generate_suitecloud_wiki_tool_delegates_to_core(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        payload = {"ok": True, "written": 3, "archived": 1}
+        calls: list[dict[str, object]] = []
+
+        def fake_generate_suitecloud_wiki(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_rag_mcp.server.run_generate_suitecloud_wiki", fake_generate_suitecloud_wiki)
+
+        result = generate_suitecloud_wiki_tool(
+            vault_root=str(vault),
+            project="huideng",
+            source_name="huideng",
+            auto_index=False,
+        )
+
+        assert result == payload
+        assert calls == [
+            {
+                "vault_root": str(vault),
+                "project": "huideng",
+                "source_name": "huideng",
+                "auto_index": False,
+            }
+        ]
 
 
 class TestGetIndexStatusPerSource:

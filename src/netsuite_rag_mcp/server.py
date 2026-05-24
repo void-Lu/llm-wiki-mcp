@@ -13,6 +13,7 @@ from netsuite_rag_mcp.retriever import ask_netsuite_rag as run_ask_netsuite_rag
 from netsuite_rag_mcp.retriever import search_netsuite_knowledge as run_search_netsuite_knowledge
 from netsuite_rag_mcp.runtime_config import RuntimeConfig, RuntimeConfigError, resolve_runtime_config
 from netsuite_rag_mcp.vector_store import Embedder
+from netsuite_rag_mcp.wiki_generator import generate_suitecloud_wiki as run_generate_suitecloud_wiki
 
 mcp = FastMCP("netsuite-obsidian-rag")
 
@@ -252,6 +253,20 @@ def save_obsidian_note_tool(
     )
 
 
+def generate_suitecloud_wiki_tool(
+    project: str,
+    source_name: str,
+    vault_root: str | None = None,
+    auto_index: bool = True,
+) -> dict[str, Any]:
+    return run_generate_suitecloud_wiki(
+        vault_root=vault_root,
+        project=project,
+        source_name=source_name,
+        auto_index=auto_index,
+    )
+
+
 def _build_filters(
     project: str | None,
     script_type: str | None,
@@ -462,6 +477,29 @@ def save_obsidian_note(
         overwrite=overwrite,
         auto_index=auto_index,
         vault_root=vault_root,
+    )
+
+
+@mcp.tool()
+def generate_suitecloud_wiki(
+    project: str,
+    source_name: str,
+    vault_root: str | None = None,
+    auto_index: bool = True,
+) -> dict[str, Any]:
+    """Generate code-fact Obsidian Wiki pages for a SuiteCloud code source.
+
+    Args:
+        project: Project directory name under projects/<project>/wiki.
+        source_name: Code source name from rag/sources.yaml.
+        vault_root: Root path of the Obsidian vault.
+        auto_index: Whether to incrementally index the obsidian source after writing pages.
+    """
+    return generate_suitecloud_wiki_tool(
+        project=project,
+        source_name=source_name,
+        vault_root=vault_root,
+        auto_index=auto_index,
     )
 
 
