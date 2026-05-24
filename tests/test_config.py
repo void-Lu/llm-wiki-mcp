@@ -301,6 +301,51 @@ def test_load_config_v2_multi_source(tmp_path: Path):
     assert suitecode_src.authority == "curated_code_source"
 
 
+def test_load_config_parses_wiki_library_rules(tmp_path: Path):
+    vault = tmp_path / "vault"
+    repo = tmp_path / "suitecloud"
+    vault.mkdir()
+    repo.mkdir()
+    (vault / "rag").mkdir()
+    (vault / "rag" / "sources.yaml").write_text(
+        "\n".join(
+            [
+                "schema_version: 2",
+                "workspace_root: .",
+                "index:",
+                "  collections:",
+                "    default: netsuite_knowledge",
+                "sources:",
+                "  - source_name: huideng",
+                "    source_kind: code",
+                f"    root: {repo.as_posix()}",
+                "    include: [src/FileCabinet/SuiteScripts, src/Objects]",
+                "    exclude: [.git, node_modules, dist, build]",
+                "    file_types: [js, ts, xml, json]",
+                "    parser: suitescript_code_and_config",
+                "    collection: netsuite_knowledge",
+                "    authority: implementation_source_of_truth",
+                "    library_exclude_patterns:",
+                "      - src/FileCabinet/SuiteScripts/tools/moment.js",
+                "      - src/FileCabinet/SuiteScripts/tools/crypto-js.js",
+                "    utility_allowlist:",
+                "      - src/FileCabinet/SuiteScripts/tools/common_api.js",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = resolve_runtime_config(vault_root_arg=vault, data_root=tmp_path / "user-data")
+    config = load_config(vault, runtime_config=runtime)
+
+    source = config.sources[0]
+    assert source.library_exclude_patterns == [
+        "src/FileCabinet/SuiteScripts/tools/moment.js",
+        "src/FileCabinet/SuiteScripts/tools/crypto-js.js",
+    ]
+    assert source.utility_allowlist == ["src/FileCabinet/SuiteScripts/tools/common_api.js"]
+
+
 def test_load_config_uses_runtime_storage_even_when_sources_yaml_contains_vault_local_index_paths(tmp_path: Path):
     vault = tmp_path / "vault"
     vault.mkdir()

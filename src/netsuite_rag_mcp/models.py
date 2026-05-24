@@ -18,6 +18,8 @@ class SourceConfig:
     parser: str
     collection: str
     authority: str
+    library_exclude_patterns: list[str] = field(default_factory=list)
+    utility_allowlist: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
