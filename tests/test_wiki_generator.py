@@ -229,3 +229,53 @@ def test_generate_suitecloud_wiki_redacts_sensitive_values(tmp_path: Path):
     )
     assert "sk-abc1234567890" not in generated_text
     assert "[REDACTED_SECRET]" in generated_text
+
+
+def test_generate_suitecloud_wiki_refuses_to_overwrite_manual_page(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    manual = vault / "projects" / "huideng" / "wiki" / "index.md"
+    manual.parent.mkdir(parents=True)
+    manual.write_text("---\ntype: manual\n---\n\n# Manual", encoding="utf-8")
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+
+    assert result["ok"] is False
+    assert result["code"] == "manual_wiki_page_exists"
+    assert manual.read_text(encoding="utf-8") == "---\ntype: manual\n---\n\n# Manual"
+
+
+def test_removed_script_page_is_archived_not_deleted(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    first = generate_suitecloud_wiki(
+        vault,
+        "huideng",
+        "huideng",
+        auto_index=False,
+        generated_at="2026-05-24T00:00:00+00:00",
+    )
+    assert first["ok"] is True
+    script_dir = vault / "projects" / "huideng" / "wiki" / "scripts"
+    script_page = next(path for path in script_dir.glob("*.md") if "rl-order-sync" in path.name)
+    original_name = script_page.name
+
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "rl_order_sync.js").unlink()
+    second = generate_suitecloud_wiki(
+        vault,
+        "huideng",
+        "huideng",
+        auto_index=False,
+        generated_at="2026-05-25T00:00:00+00:00",
+    )
+
+    assert second["ok"] is True
+    assert second["archived"] == 1
+    assert not (script_dir / original_name).exists()
+    archive_page = vault / "projects" / "huideng" / "wiki" / "archive" / "scripts" / original_name
+    assert archive_page.is_file()
+    fm = frontmatter(archive_page)
+    assert fm["archived"] is True
+    assert fm["archived_reason"] == "source_removed"
+    assert fm["former_source_path"] == "src/FileCabinet/SuiteScripts/SuiteScripts_GL/rl_order_sync.js"
+
+    index_text = (vault / "projects" / "huideng" / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "rl_order_sync.js" not in index_text

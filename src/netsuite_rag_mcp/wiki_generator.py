@@ -387,6 +387,86 @@ def _render_flow_page(
     )
 
 
+def _read_frontmatter(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        return {}
+    try:
+        end = next(index for index, line in enumerate(lines[1:], 1) if line == "---")
+    except StopIteration:
+        return {}
+    loaded = yaml.safe_load("\n".join(lines[1:end]))
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _is_generated_wiki_page(path: Path) -> bool:
+    fm = _read_frontmatter(path)
+    return fm.get("type") == "generated_wiki" and fm.get("generated") is True
+
+
+def _ensure_can_write_pages(vault_root: Path, pages: list[WikiPage]) -> dict[str, Any] | None:
+    for page in pages:
+        target = vault_root / page.relative_path
+        if target.exists() and not _is_generated_wiki_page(target):
+            return _error(
+                "manual_wiki_page_exists",
+                f"refusing to overwrite non-generated wiki page: {page.relative_path.as_posix()}",
+            )
+    return None
+
+
+def _unique_archive_path(base: Path) -> Path:
+    if not base.exists():
+        return base
+    stem = base.stem
+    suffix = base.suffix
+    parent = base.parent
+    index = 1
+    while True:
+        candidate = parent / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _archive_removed_script_pages(
+    vault_root: Path,
+    project: str,
+    active_script_paths: set[str],
+    archived_at: str,
+) -> list[str]:
+    scripts_dir = vault_root / "projects" / project / "wiki" / "scripts"
+    if not scripts_dir.exists():
+        return []
+
+    archived_paths: list[str] = []
+    for existing in sorted(scripts_dir.glob("*.md")):
+        relative_existing = existing.relative_to(vault_root).as_posix()
+        if relative_existing in active_script_paths:
+            continue
+        if not _is_generated_wiki_page(existing):
+            continue
+        fm = _read_frontmatter(existing)
+        original_text = existing.read_text(encoding="utf-8")
+        updated_frontmatter = dict(fm)
+        updated_frontmatter["archived"] = True
+        updated_frontmatter["archived_at"] = archived_at
+        updated_frontmatter["archived_reason"] = "source_removed"
+        updated_frontmatter["former_source_path"] = fm.get("source_path", "")
+        yaml_text = yaml.safe_dump(updated_frontmatter, allow_unicode=True, sort_keys=False).strip()
+        body = original_text.split("---", 2)[2].lstrip() if original_text.startswith("---") else original_text
+        archive_target = _unique_archive_path(
+            vault_root / "projects" / project / "wiki" / "archive" / "scripts" / existing.name
+        )
+        archive_target.parent.mkdir(parents=True, exist_ok=True)
+        archive_target.write_text(f"---\n{yaml_text}\n---\n\n{body}", encoding="utf-8")
+        existing.unlink()
+        archived_paths.append(archive_target.relative_to(vault_root).as_posix())
+    return archived_paths
+
+
 def generate_suitecloud_wiki(
     vault_root: str | Path,
     project: str,
@@ -427,6 +507,17 @@ def generate_suitecloud_wiki(
     pages.extend(_render_object_page(item, project, source.source_name, timestamp) for item in objects)
     pages.append(_render_flow_page(project, source.source_name, timestamp, scripts, objects))
 
+    write_error = _ensure_can_write_pages(runtime.vault_root, pages)
+    if write_error is not None:
+        return write_error
+
+    active_script_paths = {
+        page.relative_path.as_posix()
+        for page in pages
+        if page.relative_path.parent.name == "scripts"
+    }
+    archived_paths = _archive_removed_script_pages(runtime.vault_root, project, active_script_paths, timestamp)
+
     written_paths: list[str] = []
     for page in pages:
         target = runtime.vault_root / page.relative_path
@@ -443,7 +534,8 @@ def generate_suitecloud_wiki(
         "project": project,
         "source_name": source.source_name,
         "written": len(written_paths),
-        "archived": 0,
+        "archived": len(archived_paths),
+        "archived_paths": archived_paths,
         "paths": written_paths,
         "errors": errors,
         "indexed": indexed,
