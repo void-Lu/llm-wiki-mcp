@@ -1,10 +1,11 @@
+from dataclasses import replace
 from pathlib import Path
 
 import yaml
 
 from netsuite_rag_mcp.config import load_config
 from netsuite_rag_mcp.runtime_config import resolve_runtime_config
-from netsuite_rag_mcp.wiki_generator import _collect_wiki_source_files, _is_utility_file
+from netsuite_rag_mcp.wiki_generator import _collect_wiki_source_files, _is_library_file, _is_utility_file
 
 
 RESTLET_JS = """/**
@@ -122,3 +123,25 @@ def test_is_utility_file_detects_tools_allowlist(tmp_path: Path):
 
     assert _is_utility_file(utility_path, source) is True
     assert _is_utility_file(script_path, source) is False
+
+
+def test_library_detection_respects_case_insensitive_utility_allowlist(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    source = load_huideng_source(vault)
+    source = replace(
+        source,
+        utility_allowlist=["SRC/FileCabinet/SuiteScripts/tools/COMMON_API.JS"],
+        library_exclude_patterns=["src/FileCabinet/SuiteScripts/tools/common_api.js"],
+    )
+    utility_path = repo / "src" / "FileCabinet" / "SuiteScripts" / "tools" / "common_api.js"
+
+    assert _is_library_file(utility_path, source) is False
+
+
+def test_library_detection_treats_outside_source_root_as_excluded(tmp_path: Path):
+    vault, _repo = make_repo(tmp_path)
+    source = load_huideng_source(vault)
+    outside_file = tmp_path / "outside.js"
+    outside_file.write_text("function outside() {}", encoding="utf-8")
+
+    assert _is_library_file(outside_file, source) is True

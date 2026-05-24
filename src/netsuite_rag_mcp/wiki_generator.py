@@ -8,12 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from netsuite_rag_mcp.models import SourceConfig, SourceDocument
-from netsuite_rag_mcp.parser import parse_code_file
-from netsuite_rag_mcp.parser_xml_json import parse_json_config, parse_xml_file
-from netsuite_rag_mcp.redaction import redact_sensitive_text
 
 DEFAULT_LIBRARY_EXCLUDE_PATTERNS = (
     "src/FileCabinet/SuiteScripts/tools/crypto-js.js",
@@ -58,29 +53,49 @@ def _source_relative_path(file_path: Path, source: SourceConfig) -> str:
     return file_path.resolve().relative_to(source.root.resolve()).as_posix()
 
 
+def _try_source_relative_path(file_path: Path, source: SourceConfig) -> str | None:
+    try:
+        return _source_relative_path(file_path, source)
+    except ValueError:
+        return None
+
+
+def _normalized_path(value: str) -> str:
+    return value.replace("\\", "/").casefold()
+
+
+def _is_utility_allowlisted(relative_path: str, source: SourceConfig) -> bool:
+    normalized = _normalized_path(relative_path)
+    return normalized in {_normalized_path(item) for item in source.utility_allowlist}
+
+
 def _matches_pattern(relative_path: str, patterns: list[str] | tuple[str, ...]) -> bool:
-    normalized = relative_path.replace("\\", "/").casefold()
+    normalized = _normalized_path(relative_path)
     name = Path(relative_path).name.casefold()
     for pattern in patterns:
-        pattern_text = pattern.replace("\\", "/").casefold()
+        pattern_text = _normalized_path(pattern)
         if fnmatch.fnmatch(normalized, pattern_text) or fnmatch.fnmatch(name, pattern_text):
             return True
     return False
 
 
 def _is_utility_file(file_path: Path, source: SourceConfig) -> bool:
-    relative_path = _source_relative_path(file_path, source)
+    relative_path = _try_source_relative_path(file_path, source)
+    if relative_path is None:
+        return False
     parts = Path(relative_path).parts
     if "tools" not in {part.casefold() for part in parts}:
         return False
-    if relative_path in source.utility_allowlist:
+    if _is_utility_allowlisted(relative_path, source):
         return True
     return file_path.suffix.lower() in CODE_EXTENSIONS
 
 
 def _is_library_file(file_path: Path, source: SourceConfig) -> bool:
-    relative_path = _source_relative_path(file_path, source)
-    if relative_path in source.utility_allowlist:
+    relative_path = _try_source_relative_path(file_path, source)
+    if relative_path is None:
+        return True
+    if _is_utility_allowlisted(relative_path, source):
         return False
     patterns = list(DEFAULT_LIBRARY_EXCLUDE_PATTERNS) + list(source.library_exclude_patterns)
     return _matches_pattern(relative_path, patterns)
@@ -91,7 +106,8 @@ def _should_exclude_by_component(file_path: Path, base_path: Path, exclude_names
         relative = file_path.relative_to(base_path)
     except ValueError:
         return True
-    return any(part in exclude_names for part in relative.parts)
+    normalized_exclude_names = {name.casefold() for name in exclude_names}
+    return any(part.casefold() in normalized_exclude_names for part in relative.parts)
 
 
 def _collect_wiki_source_files(source: SourceConfig) -> list[Path]:
