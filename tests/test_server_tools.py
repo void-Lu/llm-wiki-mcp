@@ -394,6 +394,7 @@ class TestGenerateSuitecloudWikiTool:
                 "project": "huideng",
                 "source_name": "huideng",
                 "auto_index": False,
+                "llm_summary": False,
             }
         ]
 

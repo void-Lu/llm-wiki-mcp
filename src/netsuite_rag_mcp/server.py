@@ -14,6 +14,7 @@ from netsuite_rag_mcp.retriever import search_netsuite_knowledge as run_search_n
 from netsuite_rag_mcp.runtime_config import RuntimeConfig, RuntimeConfigError, resolve_runtime_config
 from netsuite_rag_mcp.vector_store import Embedder
 from netsuite_rag_mcp.wiki_generator import generate_suitecloud_wiki as run_generate_suitecloud_wiki
+from netsuite_rag_mcp.wiki_generator import write_wiki_summaries as run_write_wiki_summaries
 
 mcp = FastMCP("netsuite-obsidian-rag")
 
@@ -258,12 +259,14 @@ def generate_suitecloud_wiki_tool(
     source_name: str,
     vault_root: str | None = None,
     auto_index: bool = True,
+    llm_summary: bool = False,
 ) -> dict[str, Any]:
     return run_generate_suitecloud_wiki(
         vault_root=vault_root,
         project=project,
         source_name=source_name,
         auto_index=auto_index,
+        llm_summary=llm_summary,
     )
 
 
@@ -486,6 +489,7 @@ def generate_suitecloud_wiki(
     source_name: str,
     vault_root: str | None = None,
     auto_index: bool = True,
+    llm_summary: bool = False,
 ) -> dict[str, Any]:
     """Generate code-fact Obsidian Wiki pages for a SuiteCloud code source.
 
@@ -494,13 +498,38 @@ def generate_suitecloud_wiki(
         source_name: Code source name from rag/sources.yaml.
         vault_root: Root path of the Obsidian vault.
         auto_index: Whether to incrementally index the obsidian source after writing pages.
+        llm_summary: Whether to return summary_prompts for the calling model to generate business summaries.
     """
     return generate_suitecloud_wiki_tool(
         project=project,
         source_name=source_name,
         vault_root=vault_root,
         auto_index=auto_index,
+        llm_summary=llm_summary,
     )
+
+
+@mcp.tool()
+def write_wiki_summaries(
+    project: str,
+    summaries: list[dict[str, str]],
+    vault_root: str | None = None,
+) -> dict[str, Any]:
+    """Write LLM-generated business summaries into existing wiki pages.
+
+    Call this after generate_suitecloud_wiki returns summary_prompts.
+    Each summary dict must have 'wiki_path' (relative path from vault root) and 'summary' (the generated text).
+
+    Args:
+        project: Project directory name.
+        summaries: List of {wiki_path, summary} dicts to write into wiki pages.
+        vault_root: Root path of the Obsidian vault.
+    """
+    try:
+        runtime = _resolve_runtime(vault_root)
+    except RuntimeConfigError as exc:
+        return _runtime_error_payload(exc)
+    return run_write_wiki_summaries(runtime.vault_root, project, summaries)
 
 
 def main() -> None:

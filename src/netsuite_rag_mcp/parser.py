@@ -149,6 +149,10 @@ def parse_code_file(
     entry_points = NETSUITE_ENTRY_POINTS.get(script_type, set())
     frontmatter["functions"] = _detect_function_boundaries(text, entry_points)
 
+    # ── Static analysis: related objects & scripts ──
+    frontmatter["related_objects"] = _extract_related_objects(text)
+    frontmatter["related_scripts"] = _extract_related_scripts(text)
+
     # ── Build doc_id, paths, timestamps ──
     vault_root = repo_root or path.parent
     relative_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
@@ -254,6 +258,67 @@ def _detect_function_boundaries(
 def _line_from_offset(text: str, offset: int) -> int:
     """Return 0-based line number for a character offset in *text*."""
     return text[:offset].count("\n")
+
+
+# ── Static analysis: related objects & scripts ──
+
+# Patterns for record type references (custom records, lists, etc.)
+_RECORD_TYPE_RE = re.compile(
+    r"""(?:type\s*[:=]\s*|\.type\s*[:=]\s*)['"]?(customrecord_\w+|customlist_\w+|customsearch_\w+)['"]?""",
+    re.IGNORECASE,
+)
+_RECORD_TYPE_STR_RE = re.compile(
+    r"""['"](?:customrecord_\w+|customlist_\w+|customsearch_\w+)['"]""",
+    re.IGNORECASE,
+)
+# search.load({id: 'customsearch_xxx'})
+_SEARCH_LOAD_RE = re.compile(
+    r"""search\.load\s*\(\s*\{[^}]*id\s*:\s*['"](\w+)['"]""",
+    re.DOTALL,
+)
+# task.create with scriptId
+_TASK_SCRIPT_RE = re.compile(
+    r"""scriptId\s*[:=]\s*['"]?(customscript_\w+|customdeploy_\w+)['"]?""",
+    re.IGNORECASE,
+)
+# url.resolveScript / url.resolveRecord with scriptId
+_URL_SCRIPT_RE = re.compile(
+    r"""(?:resolveScript|resolveRecord)\s*\(\s*\{[^}]*scriptId\s*:\s*['"](\w+)['"]""",
+    re.DOTALL,
+)
+# Generic customscript_ / customdeploy_ references in string literals
+_SCRIPT_REF_RE = re.compile(
+    r"""['"](?:customscript_\w+|customdeploy_\w+)['"]""",
+    re.IGNORECASE,
+)
+
+
+def _extract_related_objects(text: str) -> list[str]:
+    """Extract custom record/list/search IDs referenced in code."""
+    found: set[str] = set()
+    for m in _RECORD_TYPE_RE.finditer(text):
+        found.add(m.group(1).lower())
+    for m in _RECORD_TYPE_STR_RE.finditer(text):
+        found.add(m.group(0).strip("'\"").lower())
+    for m in _SEARCH_LOAD_RE.finditer(text):
+        val = m.group(1).lower()
+        if val.startswith("custom"):
+            found.add(val)
+    return sorted(found)
+
+
+def _extract_related_scripts(text: str) -> list[str]:
+    """Extract customscript_/customdeploy_ IDs referenced in code."""
+    found: set[str] = set()
+    for m in _TASK_SCRIPT_RE.finditer(text):
+        found.add(m.group(1).lower())
+    for m in _URL_SCRIPT_RE.finditer(text):
+        val = m.group(1).lower()
+        if val.startswith("custom"):
+            found.add(val)
+    for m in _SCRIPT_REF_RE.finditer(text):
+        found.add(m.group(0).strip("'\"").lower())
+    return sorted(found)
 
 
 # ── Unified file dispatcher ──

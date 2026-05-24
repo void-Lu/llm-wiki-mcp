@@ -49,6 +49,55 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_HEADER_MAX_LINES = 40
+
+
+def _extract_header_excerpt(source_text: str) -> str:
+    """Extract only the file header: leading comments + define()/require() imports.
+
+    Returns at most ``_HEADER_MAX_LINES`` lines to keep wiki pages concise.
+    The full source is already indexed separately by the RAG code source.
+    """
+    lines = source_text.splitlines()
+    end = 0
+    in_block_comment = False
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Track block comments
+        if "/*" in stripped:
+            in_block_comment = True
+        if in_block_comment:
+            end = i + 1
+            if "*/" in stripped:
+                in_block_comment = False
+            continue
+        # Single-line comments or blank lines at the top
+        if stripped.startswith("//") or stripped.startswith("*") or stripped == "":
+            end = i + 1
+            continue
+        # define() / require() opening (may span multiple lines)
+        if re.match(r"^(define\s*\(|const\s+\w+\s*=\s*require|import\s)", stripped):
+            # Capture until the opening callback body `=> {` or `function(`
+            for j in range(i, min(len(lines), i + 30)):
+                end = j + 1
+                if re.search(r"(=>\s*\{|\)\s*\{)", lines[j]):
+                    break
+            break
+        # If we hit actual code that isn't a comment/import, stop
+        break
+
+    # Ensure we don't exceed the max
+    end = min(end, _HEADER_MAX_LINES)
+    if end == 0:
+        end = min(len(lines), _HEADER_MAX_LINES)
+
+    excerpt = "\n".join(lines[:end])
+    if end < len(lines):
+        excerpt += "\n// ... (完整源码见源文件)"
+    return excerpt
+
+
 def _slug(value: str) -> str:
     slug = value.strip()
     punctuation = re.escape(string.punctuation)
@@ -231,8 +280,8 @@ def _render_script_page(parsed: ParsedWikiSource, project: str, source_name: str
             "script_type": parsed.script_type,
             "script_id": doc.frontmatter.get("script_id", ""),
             "deployment_id": doc.frontmatter.get("deployment_id", ""),
-            "related_objects": [],
-            "related_scripts": [],
+            "related_objects": doc.frontmatter.get("related_objects", []),
+            "related_scripts": doc.frontmatter.get("related_scripts", []),
             "confidence": "fact",
         }
     )
@@ -244,7 +293,13 @@ def _render_script_page(parsed: ParsedWikiSource, project: str, source_name: str
         )
     function_table = "\n".join(rows) if rows else "| 未识别 |  | False |"
     dependency_text = "\n".join(f"- `{item}`" for item in dependencies) if dependencies else "- 无"
+    related_objects = doc.frontmatter.get("related_objects", [])
+    related_scripts = doc.frontmatter.get("related_scripts", [])
+    related_objects_text = "\n".join(f"- `{item}`" for item in related_objects) if related_objects else "- 无"
+    related_scripts_text = "\n".join(f"- `{item}`" for item in related_scripts) if related_scripts else "- 无"
     code_fence = "```javascript" if doc.language == "javascript" else "```"
+    header_excerpt = _extract_header_excerpt(doc.body)
+
     body = "\n".join(
         [
             "## 代码事实",
@@ -256,6 +311,12 @@ def _render_script_page(parsed: ParsedWikiSource, project: str, source_name: str
             "## 依赖模块",
             dependency_text,
             "",
+            "## 关联对象",
+            related_objects_text,
+            "",
+            "## 关联脚本",
+            related_scripts_text,
+            "",
             "## 函数与入口",
             "| 函数 | 行号 | 是否入口 |",
             "| --- | --- | --- |",
@@ -266,7 +327,7 @@ def _render_script_page(parsed: ParsedWikiSource, project: str, source_name: str
             "",
             "## 源码摘录",
             code_fence,
-            doc.body,
+            header_excerpt,
             "```",
         ]
     )
@@ -473,6 +534,7 @@ def generate_suitecloud_wiki(
     source_name: str,
     auto_index: bool = True,
     generated_at: str | None = None,
+    llm_summary: bool = False,
 ) -> dict[str, Any]:
     try:
         runtime = resolve_runtime_config(vault_root_arg=vault_root, require_sources_config=True)
@@ -529,7 +591,7 @@ def generate_suitecloud_wiki(
     if auto_index:
         indexed = run_index_sources(runtime.vault_root, source_names=["obsidian"], mode="incremental", config=config)
 
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "project": project,
         "source_name": source.source_name,
@@ -540,3 +602,92 @@ def generate_suitecloud_wiki(
         "errors": errors,
         "indexed": indexed,
     }
+
+    if llm_summary:
+        result["summary_prompts"] = _build_summary_prompts(scripts, project)
+
+    return result
+
+
+def _build_summary_prompts(scripts: list[ParsedWikiSource], project: str) -> list[dict[str, Any]]:
+    """Build per-script metadata prompts for the calling model to generate summaries."""
+    prompts: list[dict[str, Any]] = []
+    for parsed in scripts:
+        doc = parsed.document
+        functions = doc.frontmatter.get("functions", [])
+        dependencies = doc.frontmatter.get("dependencies", [])
+        related_objects = doc.frontmatter.get("related_objects", [])
+        func_names = [f.get("name", "") for f in functions]
+        header_excerpt = _extract_header_excerpt(doc.body)
+        wiki_path = (Path("projects") / project / "wiki" / "scripts" / _page_name(parsed.relative_path)).as_posix()
+
+        prompts.append({
+            "wiki_path": wiki_path,
+            "script_name": Path(parsed.relative_path).name,
+            "script_type": parsed.script_type,
+            "dependencies": dependencies,
+            "functions": func_names,
+            "related_objects": related_objects,
+            "header_excerpt": header_excerpt,
+        })
+    return prompts
+
+
+def write_wiki_summaries(
+    vault_root: str | Path,
+    project: str,
+    summaries: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Write LLM-generated business summaries into existing wiki pages.
+
+    Each item in summaries must have:
+        - wiki_path: relative path from vault root (e.g. projects/huideng/wiki/scripts/xxx.md)
+        - summary: the generated business summary text
+    """
+    vault_root = Path(vault_root)
+    written = 0
+    errors: list[dict[str, str]] = []
+
+    for item in summaries:
+        wiki_path = item.get("wiki_path", "")
+        summary = item.get("summary", "")
+        if not wiki_path or not summary:
+            errors.append({"wiki_path": wiki_path, "error": "missing wiki_path or summary"})
+            continue
+
+        target = vault_root / wiki_path
+        if not target.exists():
+            errors.append({"wiki_path": wiki_path, "error": "wiki page not found"})
+            continue
+
+        try:
+            content = target.read_text(encoding="utf-8")
+            # Insert summary section after "## 代码事实" block (after the blank line following file_hash)
+            marker = "## 依赖模块"
+            summary_section = f"## 业务语义摘要\n{summary}\n\n"
+            if "## 业务语义摘要" in content:
+                # Replace existing summary
+                content = re.sub(
+                    r"## 业务语义摘要\n.*?\n\n(?=## )",
+                    summary_section,
+                    content,
+                    count=1,
+                    flags=re.DOTALL,
+                )
+            elif marker in content:
+                content = content.replace(marker, summary_section + marker, 1)
+            else:
+                errors.append({"wiki_path": wiki_path, "error": "cannot locate insertion point"})
+                continue
+
+            target.write_text(content, encoding="utf-8")
+            written += 1
+        except Exception as e:
+            errors.append({"wiki_path": wiki_path, "error": str(e)})
+
+    return {
+        "ok": len(errors) == 0,
+        "written": written,
+        "errors": errors,
+    }
+

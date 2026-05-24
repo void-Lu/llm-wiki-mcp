@@ -15,6 +15,7 @@ from netsuite_rag_mcp.wiki_generator import (
     _is_library_file,
     _is_utility_file,
     generate_suitecloud_wiki,
+    write_wiki_summaries,
 )
 
 
@@ -224,7 +225,12 @@ def test_generate_suitecloud_wiki_writes_script_object_flow_and_index_pages(tmp_
 def test_generate_suitecloud_wiki_redacts_sensitive_values(tmp_path: Path):
     vault, repo = make_repo(tmp_path)
     sensitive = repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "rl_order_sync.js"
-    sensitive.write_text(RESTLET_JS + "\nvar token = 'sk-abc1234567890';\n", encoding="utf-8")
+    # Place the secret in the file header (a comment) so it appears in the truncated excerpt
+    sensitive.write_text(
+        "/**\n * @NScriptType Restlet\n * @NApiVersion 2.1\n * token: sk-abc1234567890\n */\n"
+        + 'define(["N/record"], function(record) { return {}; });\n',
+        encoding="utf-8",
+    )
 
     result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
 
@@ -362,3 +368,141 @@ def test_huideng_repo_structure_smoke(monkeypatch: pytest.MonkeyPatch, tmp_path:
     source_paths = [str(frontmatter(path).get("source_path", "")) for path in (vault / "projects" / "huideng" / "wiki").rglob("*.md")]
     assert not any(path.endswith("src/FileCabinet/SuiteScripts/tools/moment.js") for path in source_paths)
     assert not any(path.endswith("src/FileCabinet/SuiteScripts/tools/crypto-js.js") for path in source_paths)
+
+
+def test_wiki_extracts_related_objects_and_scripts(tmp_path: Path):
+    """Static analysis should populate related_objects and related_scripts from code."""
+    vault, repo = make_repo(tmp_path)
+    script_with_refs = (
+        '/**\n * @NScriptType MapReduceScript\n * @NApiVersion 2.1\n */\n'
+        'define(["N/record", "N/search", "N/task"], function(record, search, task) {\n'
+        '  const REC_TYPE = "customrecord_con_deposit_received";\n'
+        '  function getInputData() {\n'
+        '    var s = search.load({id: "customsearch_con_intermediate_table"});\n'
+        '    task.create({taskType: task.TaskType.MAP_REDUCE, scriptId: "customscript_hc_mr_vendpay"});\n'
+        '    return s;\n'
+        '  }\n'
+        '  return {getInputData: getInputData};\n'
+        '});\n'
+    )
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "mr_test_refs.js").write_text(
+        script_with_refs, encoding="utf-8"
+    )
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert result["ok"] is True
+
+    wiki_dir = vault / "projects" / "huideng" / "wiki" / "scripts"
+    page = next(p for p in wiki_dir.glob("*.md") if "mr-test-refs" in p.name)
+    fm = frontmatter(page)
+    content = page.read_text(encoding="utf-8")
+
+    assert "customrecord_con_deposit_received" in fm["related_objects"]
+    assert "customsearch_con_intermediate_table" in fm["related_objects"]
+    assert "customscript_hc_mr_vendpay" in fm["related_scripts"]
+    assert "## 关联对象" in content
+    assert "## 关联脚本" in content
+
+
+def test_wiki_llm_summary_returns_prompts_when_enabled(tmp_path: Path):
+    """When llm_summary=True, result includes summary_prompts for each script."""
+    vault, repo = make_repo(tmp_path)
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False, llm_summary=True)
+    assert result["ok"] is True
+    assert "summary_prompts" in result
+
+    prompts = result["summary_prompts"]
+    assert len(prompts) >= 1
+    # Check structure of a prompt entry
+    prompt = prompts[0]
+    assert "wiki_path" in prompt
+    assert "script_name" in prompt
+    assert "script_type" in prompt
+    assert "dependencies" in prompt
+    assert "functions" in prompt
+    assert "header_excerpt" in prompt
+
+
+def test_wiki_llm_summary_not_returned_when_disabled(tmp_path: Path):
+    """When llm_summary=False (default), result does not include summary_prompts."""
+    vault, repo = make_repo(tmp_path)
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False, llm_summary=False)
+    assert result["ok"] is True
+    assert "summary_prompts" not in result
+
+
+def test_wiki_source_excerpt_is_truncated(tmp_path: Path):
+    """Source excerpt should only contain the file header, not full source."""
+    vault, repo = make_repo(tmp_path)
+    # Write a long script
+    long_script = (
+        '/**\n * @NScriptType Suitelet\n * @NApiVersion 2.1\n */\n'
+        'define(["N/ui/serverWidget"], function(serverWidget) {\n'
+        + '  function onRequest(ctx) {\n' + '    // line\n' * 100
+        + '  }\n  return {onRequest: onRequest};\n});\n'
+    )
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "sl_long.js").write_text(
+        long_script, encoding="utf-8"
+    )
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert result["ok"] is True
+
+    wiki_dir = vault / "projects" / "huideng" / "wiki" / "scripts"
+    page = next(p for p in wiki_dir.glob("*.md") if "sl-long" in p.name)
+    content = page.read_text(encoding="utf-8")
+
+    assert "// ... (完整源码见源文件)" in content
+    # The full 100 repeated lines should NOT be in the wiki
+    assert content.count("// line") < 40
+
+
+def test_write_wiki_summaries_inserts_summary_section(tmp_path: Path):
+    """write_wiki_summaries should insert a business summary section into existing wiki pages."""
+    vault, repo = make_repo(tmp_path)
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False, llm_summary=True)
+    assert result["ok"] is True
+
+    prompts = result["summary_prompts"]
+    assert len(prompts) >= 1
+
+    # Simulate model generating summaries
+    summaries = [
+        {"wiki_path": prompts[0]["wiki_path"], "summary": "这是一个测试业务摘要。"}
+    ]
+    write_result = write_wiki_summaries(vault, "huideng", summaries)
+    assert write_result["ok"] is True
+    assert write_result["written"] == 1
+
+    # Verify the summary was written into the wiki page
+    page = vault / prompts[0]["wiki_path"]
+    content = page.read_text(encoding="utf-8")
+    assert "## 业务语义摘要" in content
+    assert "这是一个测试业务摘要。" in content
+    # Summary should appear before dependencies
+    assert content.index("## 业务语义摘要") < content.index("## 依赖模块")
+
+
+def test_write_wiki_summaries_replaces_existing_summary(tmp_path: Path):
+    """write_wiki_summaries should replace an existing summary if called again."""
+    vault, repo = make_repo(tmp_path)
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False, llm_summary=True)
+    prompts = result["summary_prompts"]
+
+    # Write first summary
+    write_wiki_summaries(vault, "huideng", [
+        {"wiki_path": prompts[0]["wiki_path"], "summary": "第一版摘要。"}
+    ])
+    # Write second summary (should replace)
+    write_wiki_summaries(vault, "huideng", [
+        {"wiki_path": prompts[0]["wiki_path"], "summary": "第二版摘要。"}
+    ])
+
+    page = vault / prompts[0]["wiki_path"]
+    content = page.read_text(encoding="utf-8")
+    assert "第一版摘要。" not in content
+    assert "第二版摘要。" in content
+    # Should only have one summary section
+    assert content.count("## 业务语义摘要") == 1
