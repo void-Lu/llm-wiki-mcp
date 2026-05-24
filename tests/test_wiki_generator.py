@@ -1,6 +1,8 @@
 from dataclasses import replace
+import os
 from pathlib import Path
 
+import pytest
 import yaml
 
 from netsuite_rag_mcp.config import load_config
@@ -335,3 +337,28 @@ def test_archived_wiki_pages_are_excluded_from_current_search_by_default(tmp_pat
 
     assert all(row["metadata"].get("archived") is not True for row in current["results"])
     assert any(row["metadata"].get("archived") is True for row in historical["results"])
+
+
+def test_huideng_repo_structure_smoke(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo_root = os.environ.get("NETSUITE_RAG_HUIDENG_REPO_ROOT")
+    if not repo_root:
+        pytest.skip("NETSUITE_RAG_HUIDENG_REPO_ROOT is not set")
+
+    repo = Path(repo_root)
+    if not repo.exists():
+        pytest.skip(f"HuiDeng repo does not exist: {repo}")
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    write_sources_yaml(vault, repo)
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+
+    assert result["ok"] is True
+    assert result["written"] > 0
+    generated_paths = set(result["paths"])
+    assert any(path.startswith("projects/huideng/wiki/scripts/") for path in generated_paths)
+    assert any(path.startswith("projects/huideng/wiki/objects/") for path in generated_paths)
+    source_paths = [str(frontmatter(path).get("source_path", "")) for path in (vault / "projects" / "huideng" / "wiki").rglob("*.md")]
+    assert not any(path.endswith("src/FileCabinet/SuiteScripts/tools/moment.js") for path in source_paths)
+    assert not any(path.endswith("src/FileCabinet/SuiteScripts/tools/crypto-js.js") for path in source_paths)
