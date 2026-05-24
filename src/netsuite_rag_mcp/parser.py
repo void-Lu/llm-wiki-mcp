@@ -55,6 +55,23 @@ NETSUITE_ENTRY_POINTS: dict[str, set[str]] = {
     "Portlet": {"render"},
 }
 
+SCRIPT_TYPE_ALIASES: dict[str, str] = {
+    "restlet": "Restlet",
+    "restletscript": "Restlet",
+    "userevent": "UserEvent",
+    "usereventscript": "UserEvent",
+    "mapreduce": "MapReduce",
+    "mapreducescript": "MapReduce",
+    "suitelet": "Suitelet",
+    "suiteletscript": "Suitelet",
+    "client": "ClientScript",
+    "clientscript": "ClientScript",
+    "scheduled": "Scheduled",
+    "scheduledscript": "Scheduled",
+    "portlet": "Portlet",
+    "portletscript": "Portlet",
+}
+
 CODE_EXTENSIONS = {".js", ".ts"}
 MD_EXTENSIONS = {".md"}
 XML_EXTENSION = {".xml"}
@@ -145,13 +162,19 @@ def parse_code_file(
     frontmatter["description"] = _extract_description(text)
 
     # ── Detect function boundaries ──
-    script_type = frontmatter.get("script_type", "")
+    script_type = _canonical_script_type(str(frontmatter.get("script_type", "")))
     entry_points = NETSUITE_ENTRY_POINTS.get(script_type, set())
     frontmatter["functions"] = _detect_function_boundaries(text, entry_points)
 
     # ── Static analysis: related objects & scripts ──
     frontmatter["related_objects"] = _extract_related_objects(text)
-    frontmatter["related_scripts"] = _extract_related_scripts(text)
+    script_refs = _extract_related_script_refs(text)
+    frontmatter["related_scripts"] = script_refs["script_ids"]
+    frontmatter["related_deployments"] = script_refs["deployment_ids"]
+    frontmatter["field_ids"] = _extract_field_ids(text)
+    frontmatter["script_parameters"] = _extract_script_parameters(text)
+    frontmatter["record_operations"] = _extract_record_operations(text)
+    frontmatter["search_operations"] = _extract_search_operations(text)
 
     # ── Build doc_id, paths, timestamps ──
     vault_root = repo_root or path.parent
@@ -173,6 +196,11 @@ def parse_code_file(
         repo_relative_path=relative_path,
         language=language,
     )
+
+
+def _canonical_script_type(raw: str) -> str:
+    key = re.sub(r"[^a-z]", "", raw.casefold())
+    return SCRIPT_TYPE_ALIASES.get(key, raw)
 
 
 def _parse_define_deps(raw: str) -> list[str]:
@@ -291,6 +319,28 @@ _SCRIPT_REF_RE = re.compile(
     r"""['"](?:customscript_\w+|customdeploy_\w+)['"]""",
     re.IGNORECASE,
 )
+_FIELD_ID_RE = re.compile(
+    r"""\b(?:setValue|getValue|setText|getText|setSublistValue|getSublistValue|setCurrentSublistValue|getCurrentSublistValue)\s*\(\s*\{[^}]*fieldId\s*:\s*['"]([^'"]+)['"]""",
+    re.IGNORECASE | re.DOTALL,
+)
+_SCRIPT_PARAMETER_RE = re.compile(
+    r"""\.getParameter\s*\(\s*\{[^}]*name\s*:\s*['"](custscript_\w+)['"]""",
+    re.IGNORECASE | re.DOTALL,
+)
+_RECORD_OPERATION_RE = re.compile(
+    r"""\brecord\.(create|load|submitFields|transform|delete)\s*\(\s*\{(?P<body>.*?)\}\s*\)""",
+    re.IGNORECASE | re.DOTALL,
+)
+_SEARCH_CREATE_RE = re.compile(
+    r"""\bsearch\.create\s*\(\s*\{(?P<body>.*?)\}\s*\)""",
+    re.IGNORECASE | re.DOTALL,
+)
+_SEARCH_LOAD_OPERATION_RE = re.compile(
+    r"""\bsearch\.load\s*\(\s*\{(?P<body>.*?)\}\s*\)""",
+    re.IGNORECASE | re.DOTALL,
+)
+_TYPE_PROPERTY_RE = re.compile(r"""\btype\s*:\s*(?P<value>[^,}\n]+)""", re.IGNORECASE)
+_ID_PROPERTY_RE = re.compile(r"""\bid\s*:\s*(?P<value>[^,}\n]+)""", re.IGNORECASE)
 
 
 def _extract_related_objects(text: str) -> list[str]:
@@ -307,18 +357,99 @@ def _extract_related_objects(text: str) -> list[str]:
     return sorted(found)
 
 
-def _extract_related_scripts(text: str) -> list[str]:
-    """Extract customscript_/customdeploy_ IDs referenced in code."""
-    found: set[str] = set()
+def _extract_related_script_refs(text: str) -> dict[str, list[str]]:
+    """Extract customscript_ and customdeploy_ IDs referenced in code."""
+    script_ids: set[str] = set()
+    deployment_ids: set[str] = set()
+
+    def add(value: str) -> None:
+        normalized = value.strip("'\"").lower()
+        if normalized.startswith("customscript_"):
+            script_ids.add(normalized)
+        elif normalized.startswith("customdeploy_"):
+            deployment_ids.add(normalized)
+
     for m in _TASK_SCRIPT_RE.finditer(text):
-        found.add(m.group(1).lower())
+        add(m.group(1))
     for m in _URL_SCRIPT_RE.finditer(text):
-        val = m.group(1).lower()
-        if val.startswith("custom"):
-            found.add(val)
+        add(m.group(1))
     for m in _SCRIPT_REF_RE.finditer(text):
-        found.add(m.group(0).strip("'\"").lower())
-    return sorted(found)
+        add(m.group(0))
+    return {"script_ids": sorted(script_ids), "deployment_ids": sorted(deployment_ids)}
+
+
+def _extract_related_scripts(text: str) -> list[str]:
+    """Extract customscript_ IDs referenced in code."""
+    return _extract_related_script_refs(text)["script_ids"]
+
+
+def _extract_field_ids(text: str) -> list[str]:
+    return sorted({m.group(1).lower() for m in _FIELD_ID_RE.finditer(text)})
+
+
+def _extract_script_parameters(text: str) -> list[str]:
+    return sorted({m.group(1).lower() for m in _SCRIPT_PARAMETER_RE.finditer(text)})
+
+
+def _extract_record_operations(text: str) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    for match in _RECORD_OPERATION_RE.finditer(text):
+        body = match.group("body")
+        record_type = _extract_property_value(body, _TYPE_PROPERTY_RE)
+        operations.append(
+            {
+                "operation": f"record.{match.group(1)}",
+                "record_type": record_type,
+                "line": _line_from_offset(text, match.start()) + 1,
+            }
+        )
+    return _dedupe_operations(operations)
+
+
+def _extract_search_operations(text: str) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    for match in _SEARCH_CREATE_RE.finditer(text):
+        body = match.group("body")
+        search_type = _extract_property_value(body, _TYPE_PROPERTY_RE)
+        operations.append(
+            {
+                "operation": "search.create",
+                "target": search_type,
+                "line": _line_from_offset(text, match.start()) + 1,
+            }
+        )
+    for match in _SEARCH_LOAD_OPERATION_RE.finditer(text):
+        body = match.group("body")
+        search_id = _extract_property_value(body, _ID_PROPERTY_RE)
+        operations.append(
+            {
+                "operation": "search.load",
+                "target": search_id,
+                "line": _line_from_offset(text, match.start()) + 1,
+            }
+        )
+    return _dedupe_operations(operations)
+
+
+def _extract_property_value(body: str, pattern: re.Pattern[str]) -> str:
+    match = pattern.search(body)
+    if not match:
+        return ""
+    value = match.group("value").strip().strip("'\"")
+    return value.lower() if value.startswith("custom") else value
+
+
+def _dedupe_operations(operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, int]] = set()
+    result: list[dict[str, Any]] = []
+    for operation in operations:
+        target = str(operation.get("record_type") or operation.get("target") or "")
+        key = (str(operation.get("operation", "")), target, int(operation.get("line", 0)))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(operation)
+    return result
 
 
 # ── Unified file dispatcher ──

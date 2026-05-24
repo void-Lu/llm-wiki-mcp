@@ -45,6 +45,15 @@ class ParsedWikiSource:
     script_type: str
 
 
+@dataclass(frozen=True)
+class ScriptConfigLink:
+    script_id: str
+    deployment_ids: tuple[str, ...]
+    script_parameters: tuple[str, ...]
+    config_paths: tuple[str, ...]
+    script_file: str
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -269,36 +278,236 @@ def _render_markdown(page: WikiPage) -> str:
     return f"---\n{frontmatter}\n---\n\n# {page.title}\n\n{body}\n"
 
 
-def _render_script_page(parsed: ParsedWikiSource, project: str, source_name: str, generated_at: str) -> WikiPage:
+def _unique(items: list[str] | tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        value = str(item).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _bullet_list(items: list[str] | tuple[str, ...]) -> str:
+    values = _unique(items)
+    return "\n".join(f"- `{item}`" for item in values) if values else "- 无"
+
+
+def _bullet_list_limited(items: list[str] | tuple[str, ...], limit: int = 20) -> str:
+    values = _unique(items)
+    if not values:
+        return "- 无"
+    shown = values[:limit]
+    lines = [f"- `{item}`" for item in shown]
+    if len(values) > limit:
+        lines.append(f"- …（共 {len(values)} 个；完整列表见 frontmatter `deployment_ids`）")
+    return "\n".join(lines)
+
+
+def _inline_id_summary(items: list[str] | tuple[str, ...], limit: int = 5) -> str:
+    values = _unique(items)
+    if not values:
+        return "未识别"
+    shown = values[:limit]
+    text = ", ".join(f"`{item}`" for item in shown)
+    if len(values) > limit:
+        text += f"，…（共 {len(values)} 个）"
+    return text
+
+
+def _table_or_empty(rows: list[str], empty_row: str) -> str:
+    return "\n".join(rows) if rows else empty_row
+
+
+def _dependency_category(dependency: str) -> str:
+    normalized = dependency.replace("\\", "/").casefold()
+    name = Path(normalized).name
+    third_party_names = {"crypto-js.js", "moment.js", "papaparse.js", "ramda.min.js", "ramda.js"}
+    if normalized.startswith("n/"):
+        return "netsuite"
+    if name in third_party_names:
+        return "third_party"
+    if "/tools/" in f"/{normalized}" or normalized.startswith("tools/"):
+        return "utility"
+    if normalized.startswith(".") or "suitescripts_" in normalized:
+        return "internal"
+    return "other"
+
+
+def _render_dependencies(dependencies: list[str]) -> str:
+    groups = {
+        "netsuite": [],
+        "utility": [],
+        "internal": [],
+        "third_party": [],
+        "other": [],
+    }
+    for dependency in dependencies:
+        groups[_dependency_category(str(dependency))].append(str(dependency))
+
+    sections = [
+        ("NetSuite 标准模块", groups["netsuite"]),
+        ("项目公共工具", groups["utility"]),
+        ("内部业务脚本", groups["internal"]),
+        ("第三方库", groups["third_party"]),
+        ("其他模块", groups["other"]),
+    ]
+    return "\n\n".join(f"### {title}\n{_bullet_list(items)}" for title, items in sections)
+
+
+def _operation_rows(operations: list[dict[str, Any]], target_key: str) -> list[str]:
+    rows: list[str] = []
+    for operation in operations:
+        rows.append(
+            f"| `{operation.get('operation', '')}` | `{operation.get(target_key, '')}` | {operation.get('line', '')} |"
+        )
+    return rows
+
+
+def _render_data_effects(record_operations: list[dict[str, Any]], search_operations: list[dict[str, Any]]) -> str:
+    record_rows = _operation_rows(record_operations, "record_type")
+    search_rows = _operation_rows(search_operations, "target")
+    return "\n".join(
+        [
+            "## 数据与副作用",
+            "### Record 操作",
+            "| 操作 | 对象/类型 | 行号 |",
+            "| --- | --- | --- |",
+            _table_or_empty(record_rows, "| 未识别 |  |  |"),
+            "",
+            "### Search 操作",
+            "| 操作 | 查询/对象 | 行号 |",
+            "| --- | --- | --- |",
+            _table_or_empty(search_rows, "| 未识别 |  |  |"),
+        ]
+    )
+
+
+def _render_fields_and_parameters(script_parameters: list[str], field_ids: list[str]) -> str:
+    return "\n".join(
+        [
+            "## 字段与参数",
+            "### Script Parameters",
+            _bullet_list(script_parameters),
+            "",
+            "### Field IDs",
+            _bullet_list(field_ids),
+        ]
+    )
+
+
+def _script_config_key(path: str) -> str:
+    return _normalized_path(path)
+
+
+def _merge_config_link(existing: ScriptConfigLink | None, parsed: ParsedWikiSource) -> ScriptConfigLink:
+    fm = parsed.document.frontmatter
+    script_file = str(fm.get("script_file", ""))
+    script_id = str(fm.get("script_id", ""))
+    deployment_ids = tuple(_unique(list(fm.get("deployment_ids", []))))
+    script_parameters = tuple(_unique(list(fm.get("script_parameters", []))))
+    config_paths = (parsed.relative_path,)
+    if existing is None:
+        return ScriptConfigLink(script_id, deployment_ids, script_parameters, config_paths, script_file)
+    return ScriptConfigLink(
+        existing.script_id or script_id,
+        tuple(_unique(list(existing.deployment_ids) + list(deployment_ids))),
+        tuple(_unique(list(existing.script_parameters) + list(script_parameters))),
+        tuple(_unique(list(existing.config_paths) + list(config_paths))),
+        existing.script_file or script_file,
+    )
+
+
+def _build_script_config_links(objects: list[ParsedWikiSource]) -> dict[str, ScriptConfigLink]:
+    links: dict[str, ScriptConfigLink] = {}
+    for obj in objects:
+        script_file = str(obj.document.frontmatter.get("script_file", ""))
+        if not script_file:
+            continue
+        key = _script_config_key(script_file)
+        links[key] = _merge_config_link(links.get(key), obj)
+    return links
+
+
+def _render_config_link(config_link: ScriptConfigLink | None) -> str:
+    if config_link is None:
+        return "\n".join(["## 配置关联", "- Script ID：未识别", "- Deployment：未识别", "- Script Parameter：未识别", "- 配置文件：未识别"])
+    return "\n".join(
+        [
+            "## 配置关联",
+            f"- Script ID：`{config_link.script_id}`" if config_link.script_id else "- Script ID：未识别",
+            f"- Script File：`{config_link.script_file}`" if config_link.script_file else "- Script File：未识别",
+            "- Deployment：" + _inline_id_summary(config_link.deployment_ids),
+            "- Script Parameter：" + _inline_id_summary(config_link.script_parameters),
+            "- 配置文件：" + _inline_id_summary(config_link.config_paths),
+        ]
+    )
+
+
+def _render_script_page(
+    parsed: ParsedWikiSource,
+    project: str,
+    source_name: str,
+    generated_at: str,
+    config_link: ScriptConfigLink | None = None,
+) -> WikiPage:
     doc = parsed.document
     fm = _base_frontmatter(project, source_name, generated_at)
     functions = doc.frontmatter.get("functions", [])
     dependencies = doc.frontmatter.get("dependencies", [])
+    related_scripts = doc.frontmatter.get("related_scripts", [])
+    related_deployments = doc.frontmatter.get("related_deployments", [])
+    deployment_ids = list(config_link.deployment_ids) if config_link else []
+    script_parameters = _unique(list(doc.frontmatter.get("script_parameters", [])) + (list(config_link.script_parameters) if config_link else []))
+    field_ids = _unique(list(doc.frontmatter.get("field_ids", [])))
+    record_operations = doc.frontmatter.get("record_operations", [])
+    search_operations = doc.frontmatter.get("search_operations", [])
+    script_id = str(doc.frontmatter.get("script_id", "") or (config_link.script_id if config_link else ""))
     fm.update(
         {
             "source_path": parsed.relative_path,
             "script_type": parsed.script_type,
-            "script_id": doc.frontmatter.get("script_id", ""),
-            "deployment_id": doc.frontmatter.get("deployment_id", ""),
+            "script_id": script_id,
+            "deployment_id": deployment_ids[0] if deployment_ids else doc.frontmatter.get("deployment_id", ""),
+            "deployment_ids": deployment_ids,
             "related_objects": doc.frontmatter.get("related_objects", []),
-            "related_scripts": doc.frontmatter.get("related_scripts", []),
+            "related_scripts": related_scripts,
+            "related_deployments": related_deployments,
+            "script_parameters": script_parameters,
+            "field_ids": field_ids,
+            "config_paths": list(config_link.config_paths) if config_link else [],
             "confidence": "fact",
         }
     )
     rows = []
     for fn in functions:
+        role = "NetSuite 入口" if bool(fn.get("entry_point", False)) else "普通函数"
         rows.append(
             f"| `{fn.get('name', '')}` | {fn.get('start_line', '')}-{fn.get('end_line', '')} | "
-            f"{bool(fn.get('entry_point', False))} |"
+            f"{role} |"
         )
-    function_table = "\n".join(rows) if rows else "| 未识别 |  | False |"
-    dependency_text = "\n".join(f"- `{item}`" for item in dependencies) if dependencies else "- 无"
+    function_table = "\n".join(rows) if rows else "| 未识别 |  | 普通函数 |"
+    dependency_text = _render_dependencies(list(dependencies))
     related_objects = doc.frontmatter.get("related_objects", [])
-    related_scripts = doc.frontmatter.get("related_scripts", [])
-    related_objects_text = "\n".join(f"- `{item}`" for item in related_objects) if related_objects else "- 无"
-    related_scripts_text = "\n".join(f"- `{item}`" for item in related_scripts) if related_scripts else "- 无"
+    related_objects_text = _bullet_list(related_objects)
+    related_scripts_text = _bullet_list(related_scripts)
+    related_deployments_text = _bullet_list(related_deployments)
+    deployment_ids_text = _bullet_list_limited(deployment_ids)
     code_fence = "```javascript" if doc.language == "javascript" else "```"
     header_excerpt = _extract_header_excerpt(doc.body)
+    evidence_lines = [f"- `source_path={parsed.relative_path}`"]
+    if config_link:
+        evidence_lines.extend(f"- `config_path={item}`" for item in config_link.config_paths)
+    evidence_lines.extend(
+        f"- `{operation.get('operation', '')} line={operation.get('line', '')} target={operation.get('record_type', '')}`"
+        for operation in record_operations
+    )
+    evidence_lines.extend(
+        f"- `{operation.get('operation', '')} line={operation.get('line', '')} target={operation.get('target', '')}`"
+        for operation in search_operations
+    )
 
     body = "\n".join(
         [
@@ -307,6 +516,8 @@ def _render_script_page(parsed: ParsedWikiSource, project: str, source_name: str
             f"- 脚本类型：`{parsed.script_type}`",
             f"- 语言：`{doc.language}`",
             f"- 文件哈希：`{doc.file_hash}`",
+            "",
+            _render_config_link(config_link),
             "",
             "## 依赖模块",
             dependency_text,
@@ -317,13 +528,23 @@ def _render_script_page(parsed: ParsedWikiSource, project: str, source_name: str
             "## 关联脚本",
             related_scripts_text,
             "",
+            "## 关联部署",
+            related_deployments_text,
+            "",
+            "## 本脚本部署",
+            deployment_ids_text,
+            "",
             "## 函数与入口",
-            "| 函数 | 行号 | 是否入口 |",
+            "| 函数 | 行号 | 角色 |",
             "| --- | --- | --- |",
             function_table,
             "",
+            _render_data_effects(record_operations, search_operations),
+            "",
+            _render_fields_and_parameters(script_parameters, field_ids),
+            "",
             "## 证据",
-            f"- `source_path={parsed.relative_path}`",
+            "\n".join(evidence_lines),
             "",
             "## 源码摘录",
             code_fence,
@@ -344,12 +565,18 @@ def _render_object_page(parsed: ParsedWikiSource, project: str, source_name: str
     fm = _base_frontmatter(project, source_name, generated_at)
     object_type = str(doc.frontmatter.get("record_type", Path(parsed.relative_path).suffix.lstrip("."))).lower()
     related_scripts = [doc.frontmatter.get("script_id", "")] if doc.frontmatter.get("script_id") else []
+    deployment_ids = list(doc.frontmatter.get("deployment_ids", []))
+    script_parameters = list(doc.frontmatter.get("script_parameters", []))
+    script_file = str(doc.frontmatter.get("script_file", ""))
     fm.update(
         {
             "source_path": parsed.relative_path,
             "object_type": object_type,
             "script_id": doc.frontmatter.get("script_id", ""),
             "deployment_id": doc.frontmatter.get("deployment_id", ""),
+            "deployment_ids": deployment_ids,
+            "script_parameters": script_parameters,
+            "script_file": script_file,
             "related_objects": [],
             "related_scripts": related_scripts,
             "confidence": "fact",
@@ -362,10 +589,18 @@ def _render_object_page(parsed: ParsedWikiSource, project: str, source_name: str
             f"- Object 类型：`{object_type}`",
             f"- Script ID：`{doc.frontmatter.get('script_id', '')}`",
             f"- Deployment ID：`{doc.frontmatter.get('deployment_id', '')}`",
+            f"- Script File：`{script_file}`",
             f"- 名称：`{doc.frontmatter.get('name', '')}`",
+            "",
+            "## Deployment 列表",
+            _bullet_list_limited(deployment_ids),
+            "",
+            "## Script Parameters",
+            _bullet_list(script_parameters),
             "",
             "## 证据",
             f"- `source_path={parsed.relative_path}`",
+            f"- `script_file={script_file}`" if script_file else "- `script_file=未识别`",
         ]
     )
     return WikiPage(
@@ -385,12 +620,9 @@ def _render_index_page(
 ) -> WikiPage:
     fm = _base_frontmatter(project, source_name, generated_at)
     fm["confidence"] = "fact"
-    script_lines = "\n".join(
-        f"- [[scripts/{_page_name(item.relative_path)}|{Path(item.relative_path).name}]]" for item in scripts
-    ) or "- 无"
-    object_lines = "\n".join(
-        f"- [[objects/{_page_name(item.relative_path)}|{Path(item.relative_path).name}]]" for item in objects
-    ) or "- 无"
+    script_lines_by_type = _render_script_index_by_type(scripts)
+    script_lines_by_dir = _render_script_index_by_directory(scripts)
+    object_lines = _render_object_index(objects)
     body = "\n".join(
         [
             "## 项目总览",
@@ -399,8 +631,11 @@ def _render_index_page(
             f"- 脚本数量：`{len(scripts)}`",
             f"- 配置数量：`{len(objects)}`",
             "",
-            "## 脚本清单",
-            script_lines,
+            "## 脚本清单（按类型）",
+            script_lines_by_type,
+            "",
+            "## 脚本清单（按目录）",
+            script_lines_by_dir,
             "",
             "## Object/Deployment 清单",
             object_lines,
@@ -412,6 +647,56 @@ def _render_index_page(
     return WikiPage(Path("projects") / project / "wiki" / "index.md", fm, f"{project} Wiki", body)
 
 
+def _script_link(item: ParsedWikiSource) -> str:
+    return f"[[scripts/{_page_name(item.relative_path)}|{Path(item.relative_path).name}]]"
+
+
+def _object_link(item: ParsedWikiSource) -> str:
+    return f"[[objects/{_page_name(item.relative_path)}|{Path(item.relative_path).name}]]"
+
+
+def _render_script_index_by_type(scripts: list[ParsedWikiSource]) -> str:
+    if not scripts:
+        return "- 无"
+    grouped: dict[str, list[ParsedWikiSource]] = {}
+    for script in scripts:
+        grouped.setdefault(script.script_type or "script", []).append(script)
+    sections: list[str] = []
+    for script_type in sorted(grouped):
+        lines = "\n".join(f"- {_script_link(item)}" for item in sorted(grouped[script_type], key=lambda x: x.relative_path))
+        sections.append(f"### {script_type}\n{lines}")
+    return "\n\n".join(sections)
+
+
+def _render_script_index_by_directory(scripts: list[ParsedWikiSource]) -> str:
+    if not scripts:
+        return "- 无"
+    grouped: dict[str, list[ParsedWikiSource]] = {}
+    for script in scripts:
+        parts = Path(script.relative_path).parts
+        directory = parts[-2] if len(parts) >= 2 else "."
+        grouped.setdefault(directory, []).append(script)
+    sections: list[str] = []
+    for directory in sorted(grouped):
+        lines = "\n".join(f"- {_script_link(item)}" for item in sorted(grouped[directory], key=lambda x: x.relative_path))
+        sections.append(f"### {directory}\n{lines}")
+    return "\n\n".join(sections)
+
+
+def _render_object_index(objects: list[ParsedWikiSource]) -> str:
+    if not objects:
+        return "- 无"
+    grouped: dict[str, list[ParsedWikiSource]] = {}
+    for obj in objects:
+        object_type = str(obj.document.frontmatter.get("record_type", Path(obj.relative_path).suffix.lstrip("."))).lower()
+        grouped.setdefault(object_type, []).append(obj)
+    sections: list[str] = []
+    for object_type in sorted(grouped):
+        lines = "\n".join(f"- {_object_link(item)}" for item in sorted(grouped[object_type], key=lambda x: x.relative_path))
+        sections.append(f"### {object_type}\n{lines}")
+    return "\n\n".join(sections)
+
+
 def _render_flow_page(
     project: str,
     source_name: str,
@@ -421,23 +706,53 @@ def _render_flow_page(
 ) -> WikiPage:
     fm = _base_frontmatter(project, source_name, generated_at)
     fm["confidence"] = "inferred"
-    rows = []
+    config_rows = []
+    script_by_path = {_script_config_key(script.relative_path): script for script in scripts}
+    object_by_script_id: dict[str, ParsedWikiSource] = {}
+    object_by_deployment_id: dict[str, ParsedWikiSource] = {}
     for obj in objects:
         script_id = str(obj.document.frontmatter.get("script_id", ""))
-        if not script_id:
+        if script_id:
+            object_by_script_id[script_id] = obj
+        for deployment_id in obj.document.frontmatter.get("deployment_ids", []):
+            object_by_deployment_id[str(deployment_id)] = obj
+        script_file = str(obj.document.frontmatter.get("script_file", ""))
+        if not script_file:
             continue
-        matched = [script for script in scripts if script_id and script_id in script.relative_path]
-        target = Path(matched[0].relative_path).name if matched else "未定位脚本文件"
-        rows.append(f"| `{script_id}` | `{Path(obj.relative_path).name}` | `{target}` | inferred |")
-    relation_table = "\n".join(rows) if rows else "| 未识别 |  |  | unknown |"
+        matched = script_by_path.get(_script_config_key(script_file))
+        target = Path(matched.relative_path).name if matched else "未定位脚本文件"
+        deployment_text = _inline_id_summary(list(obj.document.frontmatter.get("deployment_ids", [])))
+        config_rows.append(
+            f"| `{Path(obj.relative_path).name}` | `{script_id}` | {deployment_text} | `{script_file}` | `{target}` | fact |"
+        )
+
+    call_rows = []
+    for script in scripts:
+        for script_id in script.document.frontmatter.get("related_scripts", []):
+            obj = object_by_script_id.get(str(script_id))
+            target = Path(obj.relative_path).name if obj else "未定位配置"
+            call_rows.append(f"| `{Path(script.relative_path).name}` | script | `{script_id}` | `{target}` | inferred |")
+        for deployment_id in script.document.frontmatter.get("related_deployments", []):
+            obj = object_by_deployment_id.get(str(deployment_id))
+            target = Path(obj.relative_path).name if obj else "未定位配置"
+            call_rows.append(f"| `{Path(script.relative_path).name}` | deployment | `{deployment_id}` | `{target}` | inferred |")
+
+    config_table = _table_or_empty(config_rows, "| 未识别 |  |  |  |  | unknown |")
+    call_table = _table_or_empty(call_rows, "| 未识别 |  |  |  | unknown |")
     body = "\n".join(
         [
             "## 推测关联",
             "这些关系由配置 ID、文件名或路径命名推断，不代表业务设计原因。",
             "",
-            "| Script ID | 配置文件 | 候选脚本 | 置信度 |",
-            "| --- | --- | --- | --- |",
-            relation_table,
+            "## 配置到脚本",
+            "| 配置文件 | Script ID | Deployment | Script File | 候选脚本 | 置信度 |",
+            "| --- | --- | --- | --- | --- | --- |",
+            config_table,
+            "",
+            "## 代码调用关系",
+            "| 来源脚本 | 引用类型 | 引用 ID | 候选配置 | 置信度 |",
+            "| --- | --- | --- | --- | --- |",
+            call_table,
         ]
     )
     return WikiPage(
@@ -564,8 +879,18 @@ def generate_suitecloud_wiki(
 
     scripts = [item for item in parsed_items if item.page_kind == "script"]
     objects = [item for item in parsed_items if item.page_kind == "object"]
+    config_links = _build_script_config_links(objects)
     pages: list[WikiPage] = [_render_index_page(project, source.source_name, timestamp, scripts, objects)]
-    pages.extend(_render_script_page(item, project, source.source_name, timestamp) for item in scripts)
+    pages.extend(
+        _render_script_page(
+            item,
+            project,
+            source.source_name,
+            timestamp,
+            config_links.get(_script_config_key(item.relative_path)),
+        )
+        for item in scripts
+    )
     pages.extend(_render_object_page(item, project, source.source_name, timestamp) for item in objects)
     pages.append(_render_flow_page(project, source.source_name, timestamp, scripts, objects))
 

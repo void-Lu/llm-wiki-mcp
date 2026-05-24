@@ -197,6 +197,11 @@ def test_array_metadata_fields_includes_expected_fields():
     """ARRAY_METADATA_FIELDS must include existing array fields."""
     assert "related_objects" in ARRAY_METADATA_FIELDS
     assert "related_scripts" in ARRAY_METADATA_FIELDS
+    assert "related_deployments" in ARRAY_METADATA_FIELDS
+    assert "deployment_ids" in ARRAY_METADATA_FIELDS
+    assert "script_parameters" in ARRAY_METADATA_FIELDS
+    assert "field_ids" in ARRAY_METADATA_FIELDS
+    assert "config_paths" in ARRAY_METADATA_FIELDS
     assert "tags" in ARRAY_METADATA_FIELDS
     assert "zentao_urls" in ARRAY_METADATA_FIELDS
 

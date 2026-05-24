@@ -506,3 +506,190 @@ def test_write_wiki_summaries_replaces_existing_summary(tmp_path: Path):
     assert "第二版摘要。" in content
     # Should only have one summary section
     assert content.count("## 业务语义摘要") == 1
+
+
+def test_wiki_marks_mapreduce_entries_and_classifies_dependencies(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    script = (
+        '/**\n * @NScriptType MapReduceScript\n * @NApiVersion 2.1\n */\n'
+        'define(["N/record", "../tools/common_api.js", "../tools/ramda.min.js", '
+        '"../SuiteScripts_GL/rl_order_sync.js"], function(record, commonApi, R, orderSync) {\n'
+        '  function getInputData() { return []; }\n'
+        '  function map(context) { return context; }\n'
+        '  function reduce(context) { return context; }\n'
+        '  function helper() { return true; }\n'
+        '  return {getInputData: getInputData, map: map, reduce: reduce};\n'
+        '});\n'
+    )
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "mr_dependency_view.js").write_text(
+        script,
+        encoding="utf-8",
+    )
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert result["ok"] is True
+
+    page = next((vault / "projects" / "huideng" / "wiki" / "scripts").glob("*mr-dependency-view*.md"))
+    content = page.read_text(encoding="utf-8")
+
+    assert "| `getInputData` |" in content
+    assert "| `getInputData` | 6-6 | NetSuite 入口 |" in content
+    assert "| `map` | 7-7 | NetSuite 入口 |" in content
+    assert "| `reduce` | 8-8 | NetSuite 入口 |" in content
+    assert "| `helper` | 9-" in content
+    assert "普通函数" in content
+    assert "### NetSuite 标准模块" in content
+    assert "- `N/record`" in content
+    assert "### 项目公共工具" in content
+    assert "- `../tools/common_api.js`" in content
+    assert "### 内部业务脚本" in content
+    assert "- `../SuiteScripts_GL/rl_order_sync.js`" in content
+    assert "### 第三方库" in content
+    assert "- `../tools/ramda.min.js`" in content
+
+
+def test_wiki_extracts_records_fields_parameters_and_searches(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    script = (
+        '/**\n * @NScriptType MapReduceScript\n * @NApiVersion 2.1\n */\n'
+        'define(["N/record", "N/runtime", "N/search"], function(record, runtime, search) {\n'
+        '  function getInputData() {\n'
+        '    var logId = runtime.getCurrentScript().getParameter({ name: "custscript_con_vp_logid" });\n'
+        '    var loaded = search.load({ id: "customsearch_con_vendor_prepay" });\n'
+        '    return search.create({ type: "customrecord_hc_external_sys_to_ns_log", filters: [] });\n'
+        '  }\n'
+        '  function map(context) {\n'
+        '    var rec = record.create({ type: "customrecord_con_prepay" });\n'
+        '    rec.setValue({ fieldId: "custrecord_con_amount", value: 1 });\n'
+        '    rec.getValue({ fieldId: "custrecord_con_status" });\n'
+        '    rec.save();\n'
+        '  }\n'
+        '  return {getInputData: getInputData, map: map};\n'
+        '});\n'
+    )
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "mr_diagnostics.js").write_text(
+        script,
+        encoding="utf-8",
+    )
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert result["ok"] is True
+
+    page = next((vault / "projects" / "huideng" / "wiki" / "scripts").glob("*mr-diagnostics*.md"))
+    fm = frontmatter(page)
+    content = page.read_text(encoding="utf-8")
+
+    assert "customrecord_con_prepay" in fm["related_objects"]
+    assert "customrecord_hc_external_sys_to_ns_log" in fm["related_objects"]
+    assert "customsearch_con_vendor_prepay" in fm["related_objects"]
+    assert "custscript_con_vp_logid" in fm["script_parameters"]
+    assert "custrecord_con_amount" in fm["field_ids"]
+    assert "custrecord_con_status" in fm["field_ids"]
+    assert "## 数据与副作用" in content
+    assert "`record.create`" in content
+    assert "`customrecord_con_prepay`" in content
+    assert "`search.load`" in content
+    assert "`customsearch_con_vendor_prepay`" in content
+    assert "## 字段与参数" in content
+    assert "`custscript_con_vp_logid`" in content
+    assert "`custrecord_con_amount`" in content
+
+
+def test_wiki_uses_object_config_for_script_ids_deployments_and_flow(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    object_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<restlet scriptid="customscript_order_sync_restlet">
+  <name>Order Sync RESTlet</name>
+  <scriptfile>[/SuiteScripts/SuiteScripts_GL/rl_order_sync.js]</scriptfile>
+  <scriptcustomfields>
+    <scriptcustomfield scriptid="custscript_order_batch" />
+  </scriptcustomfields>
+  <scriptdeployments>
+    <scriptdeployment scriptid="customdeploy_order_sync_restlet">
+      <title>Order Sync Deployment</title>
+    </scriptdeployment>
+  </scriptdeployments>
+</restlet>
+"""
+    (repo / "src" / "Objects" / "Objects_GL" / "customscript_order_sync_restlet.xml").write_text(
+        object_xml,
+        encoding="utf-8",
+    )
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert result["ok"] is True
+
+    script_page = next((vault / "projects" / "huideng" / "wiki" / "scripts").glob("*rl-order-sync*.md"))
+    script_fm = frontmatter(script_page)
+    script_content = script_page.read_text(encoding="utf-8")
+
+    assert script_fm["script_id"] == "customscript_order_sync_restlet"
+    assert script_fm["deployment_ids"] == ["customdeploy_order_sync_restlet"]
+    assert script_fm["script_parameters"] == ["custscript_order_batch"]
+    assert "## 配置关联" in script_content
+    assert "`customscript_order_sync_restlet`" in script_content
+    assert "`customdeploy_order_sync_restlet`" in script_content
+    assert "`custscript_order_batch`" in script_content
+    assert "## 关联部署" in script_content
+
+    object_page = next((vault / "projects" / "huideng" / "wiki" / "objects").glob("*customscript-order-sync-restlet*.md"))
+    object_fm = frontmatter(object_page)
+    assert object_fm["script_file"] == "src/FileCabinet/SuiteScripts/SuiteScripts_GL/rl_order_sync.js"
+    assert object_fm["deployment_ids"] == ["customdeploy_order_sync_restlet"]
+
+    flow_page = vault / "projects" / "huideng" / "wiki" / "flows" / "inferred-relationships.md"
+    flow_content = flow_page.read_text(encoding="utf-8")
+    assert "## 配置到脚本" in flow_content
+    assert "customscript_order_sync_restlet.xml" in flow_content
+    assert "rl_order_sync.js" in flow_content
+    assert "customdeploy_order_sync_restlet" in flow_content
+
+
+def test_wiki_index_groups_scripts_by_type_and_directory(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert result["ok"] is True
+
+    index_text = (vault / "projects" / "huideng" / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "## 脚本清单（按类型）" in index_text
+    assert "### restlet" in index_text
+    assert "### utility" in index_text
+    assert "## 脚本清单（按目录）" in index_text
+    assert "SuiteScripts_GL" in index_text
+    assert "tools" in index_text
+
+
+def test_wiki_summarizes_long_deployment_lists_in_display(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    deployments = "\n".join(
+        f'    <scriptdeployment scriptid="customdeploy_order_sync_{idx}" />' for idx in range(1, 8)
+    )
+    object_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<restlet scriptid="customscript_order_sync_restlet">
+  <name>Order Sync RESTlet</name>
+  <scriptfile>[/SuiteScripts/SuiteScripts_GL/rl_order_sync.js]</scriptfile>
+  <scriptdeployments>
+{deployments}
+  </scriptdeployments>
+</restlet>
+"""
+    (repo / "src" / "Objects" / "Objects_GL" / "customscript_order_sync_restlet.xml").write_text(
+        object_xml,
+        encoding="utf-8",
+    )
+
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert result["ok"] is True
+
+    script_page = next((vault / "projects" / "huideng" / "wiki" / "scripts").glob("*rl-order-sync*.md"))
+    script_content = script_page.read_text(encoding="utf-8")
+    flow_content = (vault / "projects" / "huideng" / "wiki" / "flows" / "inferred-relationships.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "共 7 个" in script_content
+    assert "共 7 个" in flow_content
+    assert "customdeploy_order_sync_7" in script_content
+    config_line = next(line for line in script_content.splitlines() if line.startswith("- Deployment："))
+    assert "customdeploy_order_sync_7" not in config_line

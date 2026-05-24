@@ -19,6 +19,10 @@ NETSUITE_CUSTOMIZATION_TAGS = frozenset({
     "savedsearch",
     "script",
     "scriptdeployment",
+    "clientscript",
+    "mapreducescript",
+    "scheduledscript",
+    "usereventscript",
     "customfield",
     "customlist",
     "customtab",
@@ -28,7 +32,6 @@ NETSUITE_CUSTOMIZATION_TAGS = frozenset({
     "userevent",
     "mapreduce",
     "scheduled",
-    "clientscript",
     "portlet",
     "bundleinstallationscript",
     "massupdate",
@@ -97,6 +100,19 @@ def _extract_xml_metadata(element: ET.Element, frontmatter: dict[str, Any]) -> N
     deployment_id = _find_attr_recursive(element, DEPLOYMENT_ID_ATTRS)
     if deployment_id:
         frontmatter["deployment_id"] = deployment_id
+
+    script_file = _extract_script_file(element)
+    if script_file:
+        frontmatter["script_file"] = script_file
+
+    deployment_ids = _extract_child_script_ids(element, "scriptdeployment")
+    if deployment_ids:
+        frontmatter["deployment_ids"] = deployment_ids
+        frontmatter.setdefault("deployment_id", deployment_ids[0])
+
+    script_parameters = _extract_child_script_ids(element, "scriptcustomfield")
+    if script_parameters:
+        frontmatter["script_parameters"] = script_parameters
 
     # Identify the record type from container element tags
     record_type = _identify_record_type(element)
@@ -172,6 +188,26 @@ def _identify_record_type(element: ET.Element) -> str | None:
             return child_tag
 
     return None
+
+
+def _extract_script_file(element: ET.Element) -> str | None:
+    script_file = element.findtext("scriptfile")
+    if not script_file:
+        return None
+    normalized = script_file.strip().strip("[]").strip().replace("\\", "/")
+    normalized = normalized.lstrip("/")
+    if normalized.startswith("SuiteScripts/"):
+        return f"src/FileCabinet/{normalized}"
+    return normalized or None
+
+
+def _extract_child_script_ids(element: ET.Element, tag: str) -> list[str]:
+    values: list[str] = []
+    for child in element.iter(tag):
+        value = child.get("scriptid") or child.get("script_id")
+        if value and value not in values:
+            values.append(value)
+    return values
 
 
 def parse_json_config(

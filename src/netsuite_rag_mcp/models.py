@@ -4,7 +4,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-ARRAY_METADATA_FIELDS = {"related_objects", "related_scripts", "tags", "zentao_urls"}
+ARRAY_METADATA_FIELDS = {
+    "related_objects",
+    "related_scripts",
+    "related_deployments",
+    "deployment_ids",
+    "script_parameters",
+    "field_ids",
+    "config_paths",
+    "tags",
+    "zentao_urls",
+}
 
 
 @dataclass(frozen=True)
