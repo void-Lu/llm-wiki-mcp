@@ -13,6 +13,7 @@ from netsuite_rag_mcp.retriever import ask_netsuite_rag as run_ask_netsuite_rag
 from netsuite_rag_mcp.retriever import search_netsuite_knowledge as run_search_netsuite_knowledge
 from netsuite_rag_mcp.runtime_config import RuntimeConfig, RuntimeConfigError, resolve_runtime_config
 from netsuite_rag_mcp.vector_store import Embedder
+from netsuite_rag_mcp.wiki_generator import generate_suitecloud_wiki as run_generate_suitecloud_wiki
 
 mcp = FastMCP("netsuite-obsidian-rag")
 
@@ -74,13 +75,19 @@ def search_netsuite_knowledge_tool(
     source_kind: str | None = None,
     source_name: str | None = None,
     top_k: int = 5,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
-    filters = _build_filters(project, script_type, related_objects, related_scripts, object_type, status, source_kind, source_name)
+    filters = _build_filters(
+        project, script_type, related_objects, related_scripts, object_type, status,
+        source_kind, source_name, content_type,
+    )
     try:
         runtime = _resolve_runtime(vault_root)
         return run_search_netsuite_knowledge(
             runtime.vault_root, question, filters=filters, top_k=top_k,
             source_kind=source_kind, source_name=source_name,
+            content_type=content_type, include_archived=include_archived,
         )
     except RuntimeConfigError as exc:
         return _runtime_error_payload(exc)
@@ -98,13 +105,19 @@ def ask_netsuite_rag_tool(
     source_kind: str | None = None,
     source_name: str | None = None,
     top_k: int = 5,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
-    filters = _build_filters(project, script_type, related_objects, related_scripts, object_type, status, source_kind, source_name)
+    filters = _build_filters(
+        project, script_type, related_objects, related_scripts, object_type, status,
+        source_kind, source_name, content_type,
+    )
     try:
         runtime = _resolve_runtime(vault_root)
         return run_ask_netsuite_rag(
             runtime.vault_root, question, filters=filters, top_k=top_k,
             source_kind=source_kind, source_name=source_name,
+            content_type=content_type, include_archived=include_archived,
         )
     except RuntimeConfigError as exc:
         return _runtime_error_payload(exc)
@@ -240,6 +253,20 @@ def save_obsidian_note_tool(
     )
 
 
+def generate_suitecloud_wiki_tool(
+    project: str,
+    source_name: str,
+    vault_root: str | None = None,
+    auto_index: bool = True,
+) -> dict[str, Any]:
+    return run_generate_suitecloud_wiki(
+        vault_root=vault_root,
+        project=project,
+        source_name=source_name,
+        auto_index=auto_index,
+    )
+
+
 def _build_filters(
     project: str | None,
     script_type: str | None,
@@ -249,6 +276,7 @@ def _build_filters(
     status: str | None,
     source_kind: str | None = None,
     source_name: str | None = None,
+    content_type: str | None = None,
 ) -> dict[str, Any]:
     filters: dict[str, Any] = {}
     for key, value in {
@@ -260,6 +288,7 @@ def _build_filters(
         "status": status,
         "source_kind": source_kind,
         "source_name": source_name,
+        "type": content_type,
     }.items():
         if value:
             filters[key] = value
@@ -310,6 +339,8 @@ def search_netsuite_knowledge(
     source_kind: str | None = None,
     source_name: str | None = None,
     top_k: int = 5,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     """Search NetSuite Obsidian knowledge and return retrieved chunks with citations.
 
@@ -324,6 +355,8 @@ def search_netsuite_knowledge(
         status: Filter by status (active, inactive).
         source_kind: Filter by source kind (note, code).
         source_name: Filter by source name (e.g., obsidian, netsuite_repo).
+        content_type: Filter by metadata type (e.g., generated_wiki).
+        include_archived: Include archived generated Wiki pages.
         top_k: Number of results to return.
     """
     return search_netsuite_knowledge_tool(
@@ -338,6 +371,8 @@ def search_netsuite_knowledge(
         source_kind,
         source_name,
         top_k,
+        content_type,
+        include_archived,
     )
 
 
@@ -354,6 +389,8 @@ def ask_netsuite_rag(
     source_kind: str | None = None,
     source_name: str | None = None,
     top_k: int = 5,
+    content_type: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     """Return RAG context, sources, and answer policy for the Copilot model.
 
@@ -368,6 +405,8 @@ def ask_netsuite_rag(
         status: Filter by status.
         source_kind: Filter by source kind (note, code).
         source_name: Filter by source name (e.g., obsidian, netsuite_repo).
+        content_type: Filter by metadata type (e.g., generated_wiki).
+        include_archived: Include archived generated Wiki pages.
         top_k: Number of chunks to retrieve.
     """
     return ask_netsuite_rag_tool(
@@ -382,6 +421,8 @@ def ask_netsuite_rag(
         source_kind,
         source_name,
         top_k,
+        content_type,
+        include_archived,
     )
 
 
@@ -436,6 +477,29 @@ def save_obsidian_note(
         overwrite=overwrite,
         auto_index=auto_index,
         vault_root=vault_root,
+    )
+
+
+@mcp.tool()
+def generate_suitecloud_wiki(
+    project: str,
+    source_name: str,
+    vault_root: str | None = None,
+    auto_index: bool = True,
+) -> dict[str, Any]:
+    """Generate code-fact Obsidian Wiki pages for a SuiteCloud code source.
+
+    Args:
+        project: Project directory name under projects/<project>/wiki.
+        source_name: Code source name from rag/sources.yaml.
+        vault_root: Root path of the Obsidian vault.
+        auto_index: Whether to incrementally index the obsidian source after writing pages.
+    """
+    return generate_suitecloud_wiki_tool(
+        project=project,
+        source_name=source_name,
+        vault_root=vault_root,
+        auto_index=auto_index,
     )
 
 

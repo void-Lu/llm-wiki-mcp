@@ -9,12 +9,22 @@ from netsuite_rag_mcp.models import ARRAY_METADATA_FIELDS
 
 INT_METADATA_FIELDS = {"line_start", "line_end"}
 
+BOOL_METADATA_FIELDS = {"generated", "do_not_edit", "archived"}
+
+GENERATED_WIKI_STRING_METADATA_FIELDS = {"archived_at", "archived_reason", "former_source_path"}
+
 NEW_STRING_METADATA_FIELDS = {
     "source_kind", "source_name", "file_hash", "git_commit",
     "function_name", "repo_root", "repo_relative_path", "language",
 }
 
-KNOWN_METADATA_FIELDS = ARRAY_METADATA_FIELDS | INT_METADATA_FIELDS | NEW_STRING_METADATA_FIELDS
+KNOWN_METADATA_FIELDS = (
+    ARRAY_METADATA_FIELDS
+    | INT_METADATA_FIELDS
+    | NEW_STRING_METADATA_FIELDS
+    | BOOL_METADATA_FIELDS
+    | GENERATED_WIKI_STRING_METADATA_FIELDS
+)
 
 WILDCARD_FILTER_FIELDS = {"function_name"}
 
@@ -63,6 +73,10 @@ def from_chroma_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     for field in INT_METADATA_FIELDS:
         restored.setdefault(field, 0)
     for field in NEW_STRING_METADATA_FIELDS:
+        restored.setdefault(field, "")
+    for field in BOOL_METADATA_FIELDS:
+        restored.setdefault(field, False)
+    for field in GENERATED_WIKI_STRING_METADATA_FIELDS:
         restored.setdefault(field, "")
     return restored
 

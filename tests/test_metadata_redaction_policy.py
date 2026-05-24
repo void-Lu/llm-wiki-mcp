@@ -246,3 +246,14 @@ def test_redact_sensitive_text_masks_private_values():
     redacted = redact_sensitive_text(text)
 
     assert "13812345678" not in redacted
+
+
+def test_from_chroma_metadata_defaults_generated_wiki_fields():
+    restored = from_chroma_metadata({})
+
+    assert restored["generated"] is False
+    assert restored["do_not_edit"] is False
+    assert restored["archived"] is False
+    assert restored["archived_at"] == ""
+    assert restored["archived_reason"] == ""
+    assert restored["former_source_path"] == ""

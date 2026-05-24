@@ -24,12 +24,39 @@ env/
 # Local embedding model cache (preloaded/regenerated locally)
 .models/
 
+# Local environment and secrets
+.env
+.env/
+.env.*
+!.env.example
+.envrc
+config.local.json
+config.local.yml
+config.local.yaml
+settings.local.json
+settings.local.yml
+settings.local.yaml
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials*.json
+*credentials*.json
+secrets*.json
+*secret*.json
+service-account*.json
+*-credentials.json
+*-secrets.json
+
 # IDE / local editor config
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.omc/
 
 # OS
 .DS_Store

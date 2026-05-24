@@ -13,6 +13,7 @@
 - 🔒 **安全脱敏** — 自动检测并脱敏手机号、邮箱、API Key 等敏感信息
 - 📋 **元数据过滤** — 支持按项目、脚本类型、关联对象、关联脚本、来源类型等维度过滤
 - 🏷 **增强引用** — 引用格式包含 `source_kind`、函数名、行号、`git_commit` 等定位信息
+- 📚 **代码事实 Wiki** — 可从 SuiteCloud 代码仓库生成 `projects/<project>/wiki/` 下的 Obsidian Wiki 页面
 
 ## 🛠 MCP 工具一览
 
@@ -24,6 +25,7 @@
 | `ask_netsuite_rag` | 搜索 → 路由 → 冲突检测 → 组装上下文 → 返回结构化答案 |
 | `get_index_status` | 返回索引状态：每个数据源的文件数、最后索引时间、git 信息 |
 | `save_obsidian_note` | 将结构化 Obsidian 笔记保存到 Vault，并可选触发增量索引 |
+| `generate_suitecloud_wiki` | 从 SuiteCloud code source 生成 `projects/<project>/wiki/` 下的代码事实 Wiki，并可选增量索引生成页 |
 
 ## 📦 快速部署
 
@@ -104,6 +106,11 @@ sources:
   #   parser: suitescript_code_and_config
   #   collection: netsuite_knowledge
   #   authority: implementation_source_of_truth
+  #   library_exclude_patterns:
+  #     - src/FileCabinet/SuiteScripts/tools/crypto-js.js
+  #     - src/FileCabinet/SuiteScripts/tools/moment.js
+  #   utility_allowlist:
+  #     - src/FileCabinet/SuiteScripts/tools/common_api.js
 ```
 
 ### 步骤 3：初始化全局 MCP 配置
@@ -202,6 +209,31 @@ netsuite-rag-mcp-preload-model
 请调用 save_obsidian_note，note_type 设为 "knowledge"，domain 设为 "suitescript-patterns"，title 设为 "RESTlet 提交流程经验"，content 设为 "## 适用场景\n..."
 ```
 
+## 📚 SuiteCloud 代码事实 Wiki
+
+当项目以 SuiteCloud/SuiteScript 代码为主时，可以调用 `generate_suitecloud_wiki` 从 `rag/sources.yaml` 中的 `source_kind: code` 数据源生成代码事实 Wiki：
+
+```text
+请调用 generate_suitecloud_wiki，project 设为 "huideng"，source_name 设为 "huideng"，auto_index 设为 true
+```
+
+生成内容位于 Vault：
+
+```text
+projects/<project>/wiki/
+  index.md
+  scripts/
+  objects/
+  flows/
+  archive/scripts/
+```
+
+生成页的 frontmatter 会包含 `type: generated_wiki`、`generated: true`、`do_not_edit: true`、`source_kind: code`、`source_repo`、`source_path`、`archived: false` 等字段。生成页是可覆盖的代码事实页，不建议手工编辑；业务背景、决策原因和排坑过程仍应写入人工维护的 `requirements/`、`decisions/`、`troubleshooting/` 或 `knowledge/<domain>/`。
+
+`tools/` 目录通常混有第三方库和项目工具模块。生成器默认排除常见第三方库：`crypto-js.js`、`moment.js`、`papaparse.js`、`ramda.min.js`；也可以用 `library_exclude_patterns` 显式排除更多文件，用 `utility_allowlist` 显式保留项目工具模块。
+
+当源脚本文件被移除时，对应生成页不会直接删除，而会移动到 `projects/<project>/wiki/archive/scripts/`，并写入 `archived: true`、`archived_at`、`archived_reason: source_removed`、`former_source_path`。搜索默认排除已归档页；如需查历史内容，可在搜索或问答工具中设置 `include_archived: true`，也可用 `content_type: generated_wiki` 只检索生成 Wiki。
+
 ## 📝 Obsidian 笔记模板
 
 项目提供 NetSuite 相关笔记模板，按类别存放在 `templates/` 子目录中，复制到你的 Vault 中使用。
@@ -259,7 +291,7 @@ pytest
 .
 ├── src/netsuite_rag_mcp/
 │   ├── __init__.py
-│   ├── server.py                          # FastMCP 服务器入口（6 个 MCP 工具）
+│   ├── server.py                          # FastMCP 服务器入口（7 个 MCP 工具）
 │   ├── config.py                          # 配置加载（v1/v2 自动迁移）
 │   ├── models.py                          # 数据模型（SourceConfig, RoutingResult 等）
 │   ├── parser.py                          # Markdown/SuiteScript 解析器
@@ -274,6 +306,7 @@ pytest
 │   ├── manifest.py                        # 索引清单管理（v2 schema + SHA-256 哈希）
 │   ├── git_utils.py                       # Git commit/dirty 提取
 │   ├── retriever.py                       # 检索器 + 路由 + 冲突检测 + 问答上下文组装
+│   ├── wiki_generator.py                  # SuiteCloud 代码事实 Wiki 生成器
 │   ├── cli.py                             # init/status/server 全局配置 CLI
 │   ├── platform_paths.py                  # 用户级 config/data 目录解析
 │   ├── runtime_config.py                  # Vault 与用户本地存储解析
