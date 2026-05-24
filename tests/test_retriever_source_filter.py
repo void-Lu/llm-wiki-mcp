@@ -365,6 +365,7 @@ def test_search_excludes_archived_results_by_default(tmp_path: Path):
         vault,
         "wiki",
         top_k=5,
+        embedder=FakeEmbedder(),
         store=StubStore([archived, active]),
         include_archived=False,
     )
@@ -392,6 +393,7 @@ def test_search_can_include_archived_results(tmp_path: Path):
         vault,
         "wiki",
         top_k=5,
+        embedder=FakeEmbedder(),
         store=StubStore([archived]),
         include_archived=True,
     )

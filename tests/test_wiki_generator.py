@@ -4,7 +4,10 @@ from pathlib import Path
 import yaml
 
 from netsuite_rag_mcp.config import load_config
+from netsuite_rag_mcp.indexer import index_sources
+from netsuite_rag_mcp.retriever import search_netsuite_knowledge
 from netsuite_rag_mcp.runtime_config import resolve_runtime_config
+from netsuite_rag_mcp.vector_store import FakeEmbedder
 from netsuite_rag_mcp.wiki_generator import (
     _collect_wiki_source_files,
     _is_library_file,
@@ -279,3 +282,56 @@ def test_removed_script_page_is_archived_not_deleted(tmp_path: Path):
 
     index_text = (vault / "projects" / "huideng" / "wiki" / "index.md").read_text(encoding="utf-8")
     assert "rl_order_sync.js" not in index_text
+
+
+def test_generated_wiki_pages_can_be_indexed_and_searched(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    result = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert result["ok"] is True
+
+    index_result = index_sources(vault, source_names=["obsidian"], mode="full", embedder=FakeEmbedder())
+    assert index_result["total_indexed"] >= 1
+
+    search_result = search_netsuite_knowledge(
+        vault,
+        "Order Sync RESTlet",
+        filters={"type": "generated_wiki"},
+        top_k=5,
+        embedder=FakeEmbedder(),
+        content_type="generated_wiki",
+    )
+
+    assert search_result["results"]
+    assert all(row["metadata"].get("type") == "generated_wiki" for row in search_result["results"])
+
+
+def test_archived_wiki_pages_are_excluded_from_current_search_by_default(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    first = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert first["ok"] is True
+    (repo / "src" / "FileCabinet" / "SuiteScripts" / "SuiteScripts_GL" / "rl_order_sync.js").unlink()
+    second = generate_suitecloud_wiki(vault, "huideng", "huideng", auto_index=False)
+    assert second["ok"] is True
+
+    index_sources(vault, source_names=["obsidian"], mode="full", embedder=FakeEmbedder())
+
+    current = search_netsuite_knowledge(
+        vault,
+        "Order Sync RESTlet",
+        filters={"type": "generated_wiki"},
+        top_k=10,
+        embedder=FakeEmbedder(),
+        content_type="generated_wiki",
+    )
+    historical = search_netsuite_knowledge(
+        vault,
+        "Order Sync RESTlet",
+        filters={"type": "generated_wiki"},
+        top_k=10,
+        embedder=FakeEmbedder(),
+        content_type="generated_wiki",
+        include_archived=True,
+    )
+
+    assert all(row["metadata"].get("archived") is not True for row in current["results"])
+    assert any(row["metadata"].get("archived") is True for row in historical["results"])
