@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fnmatch
 import re
 import string
 from dataclasses import dataclass
@@ -17,6 +16,13 @@ from netsuite_rag_mcp.parser import parse_code_file
 from netsuite_rag_mcp.parser_xml_json import parse_json_config, parse_xml_file
 from netsuite_rag_mcp.redaction import redact_sensitive_text
 from netsuite_rag_mcp.runtime_config import RuntimeConfigError, resolve_runtime_config
+from netsuite_rag_mcp.source_filters import (
+    DEFAULT_FILE_EXCLUDE_PATTERNS,
+    matches_path_pattern,
+    normalized_path,
+    should_exclude_by_component,
+    should_exclude_by_file_pattern,
+)
 
 DEFAULT_LIBRARY_EXCLUDE_PATTERNS = (
     "src/FileCabinet/SuiteScripts/tools/crypto-js.js",
@@ -127,7 +133,7 @@ def _try_source_relative_path(file_path: Path, source: SourceConfig) -> str | No
 
 
 def _normalized_path(value: str) -> str:
-    return value.replace("\\", "/").casefold()
+    return normalized_path(value)
 
 
 def _is_utility_allowlisted(relative_path: str, source: SourceConfig) -> bool:
@@ -136,13 +142,7 @@ def _is_utility_allowlisted(relative_path: str, source: SourceConfig) -> bool:
 
 
 def _matches_pattern(relative_path: str, patterns: list[str] | tuple[str, ...]) -> bool:
-    normalized = _normalized_path(relative_path)
-    name = Path(relative_path).name.casefold()
-    for pattern in patterns:
-        pattern_text = _normalized_path(pattern)
-        if fnmatch.fnmatch(normalized, pattern_text) or fnmatch.fnmatch(name, pattern_text):
-            return True
-    return False
+    return matches_path_pattern(relative_path, patterns)
 
 
 def _is_utility_file(file_path: Path, source: SourceConfig) -> bool:
@@ -168,12 +168,7 @@ def _is_library_file(file_path: Path, source: SourceConfig) -> bool:
 
 
 def _should_exclude_by_component(file_path: Path, base_path: Path, exclude_names: set[str]) -> bool:
-    try:
-        relative = file_path.relative_to(base_path)
-    except ValueError:
-        return True
-    normalized_exclude_names = {name.casefold() for name in exclude_names}
-    return any(part.casefold() in normalized_exclude_names for part in relative.parts)
+    return should_exclude_by_component(file_path, base_path, exclude_names)
 
 
 def _collect_wiki_source_files(source: SourceConfig) -> list[Path]:
@@ -197,6 +192,12 @@ def _collect_wiki_source_files(source: SourceConfig) -> list[Path]:
         for extension in extensions:
             for candidate in include_dir.rglob(f"*{extension}"):
                 if _should_exclude_by_component(candidate, include_dir, exclude_names):
+                    continue
+                if should_exclude_by_file_pattern(
+                    candidate,
+                    source.root,
+                    list(DEFAULT_FILE_EXCLUDE_PATTERNS) + list(source.file_exclude_patterns),
+                ):
                     continue
                 if _is_library_file(candidate, source):
                     continue

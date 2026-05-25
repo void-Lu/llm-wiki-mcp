@@ -138,6 +138,21 @@ def test_collect_wiki_source_files_excludes_third_party_libraries(tmp_path: Path
     assert "src/FileCabinet/SuiteScripts/tools/extra-lib.js" not in relative_paths
 
 
+def test_collect_wiki_source_files_excludes_global_suitecloud_project_xmls(tmp_path: Path):
+    vault, repo = make_repo(tmp_path)
+    (repo / "src" / "deploy.xml").write_text("<deploy></deploy>", encoding="utf-8")
+    (repo / "src" / "manifest.xml").write_text("<manifest></manifest>", encoding="utf-8")
+    source = replace(load_huideng_source(vault), include=["src"])
+
+    files = _collect_wiki_source_files(source)
+    relative_paths = [path.relative_to(repo).as_posix() for path in files]
+
+    assert "src/FileCabinet/SuiteScripts/SuiteScripts_GL/rl_order_sync.js" in relative_paths
+    assert "src/Objects/Objects_GL/customscript_order_sync_restlet.xml" in relative_paths
+    assert "src/deploy.xml" not in relative_paths
+    assert "src/manifest.xml" not in relative_paths
+
+
 def test_is_utility_file_detects_tools_allowlist(tmp_path: Path):
     vault, repo = make_repo(tmp_path)
     source = load_huideng_source(vault)

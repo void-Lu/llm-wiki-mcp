@@ -48,6 +48,9 @@ def test_source_config_stores_all_fields():
         parser="suitescript_code_and_config",
         collection="netsuite_code",
         authority="implementation_source_of_truth",
+        file_exclude_patterns=["src/deploy.xml"],
+        library_exclude_patterns=["src/FileCabinet/SuiteScripts/tools/moment.js"],
+        utility_allowlist=["src/FileCabinet/SuiteScripts/tools/common_api.js"],
     )
 
     assert cfg.source_name == "netsuite_repo"
@@ -59,6 +62,9 @@ def test_source_config_stores_all_fields():
     assert cfg.parser == "suitescript_code_and_config"
     assert cfg.collection == "netsuite_code"
     assert cfg.authority == "implementation_source_of_truth"
+    assert cfg.file_exclude_patterns == ["src/deploy.xml"]
+    assert cfg.library_exclude_patterns == ["src/FileCabinet/SuiteScripts/tools/moment.js"]
+    assert cfg.utility_allowlist == ["src/FileCabinet/SuiteScripts/tools/common_api.js"]
 
 
 # --- Extended SourceDocument ---

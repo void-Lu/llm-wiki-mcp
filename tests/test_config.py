@@ -325,6 +325,9 @@ def test_load_config_parses_wiki_library_rules(tmp_path: Path):
                 "    parser: suitescript_code_and_config",
                 "    collection: netsuite_knowledge",
                 "    authority: implementation_source_of_truth",
+                "    file_exclude_patterns:",
+                "      - src/deploy.xml",
+                "      - src/manifest.xml",
                 "    library_exclude_patterns:",
                 "      - src/FileCabinet/SuiteScripts/tools/moment.js",
                 "      - src/FileCabinet/SuiteScripts/tools/crypto-js.js",
@@ -339,6 +342,10 @@ def test_load_config_parses_wiki_library_rules(tmp_path: Path):
     config = load_config(vault, runtime_config=runtime)
 
     source = config.sources[0]
+    assert source.file_exclude_patterns == [
+        "src/deploy.xml",
+        "src/manifest.xml",
+    ]
     assert source.library_exclude_patterns == [
         "src/FileCabinet/SuiteScripts/tools/moment.js",
         "src/FileCabinet/SuiteScripts/tools/crypto-js.js",

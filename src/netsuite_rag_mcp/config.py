@@ -70,6 +70,7 @@ def _parse_sources(sources: list[dict[str, Any]], resolved_root: Path) -> list[S
                 parser=src.get("parser", "markdown_frontmatter_h2"),
                 collection=src["collection"],
                 authority=src.get("authority", "curated_note_source"),
+                file_exclude_patterns=list(src.get("file_exclude_patterns", [])),
                 library_exclude_patterns=list(src.get("library_exclude_patterns", [])),
                 utility_allowlist=list(src.get("utility_allowlist", [])),
             )

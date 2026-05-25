@@ -28,6 +28,7 @@ class SourceConfig:
     parser: str
     collection: str
     authority: str
+    file_exclude_patterns: list[str] = field(default_factory=list)
     library_exclude_patterns: list[str] = field(default_factory=list)
     utility_allowlist: list[str] = field(default_factory=list)
 

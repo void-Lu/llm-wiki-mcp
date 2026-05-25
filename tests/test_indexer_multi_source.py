@@ -200,6 +200,31 @@ class TestCollectSourceFiles:
         paths = [f.name for f in files]
         assert "test.js" not in paths
 
+    def test_excludes_global_suitecloud_project_xmls(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        (repo / "src" / "Objects").mkdir(parents=True)
+        (repo / "src" / "deploy.xml").write_text("<deploy></deploy>", encoding="utf-8")
+        (repo / "src" / "manifest.xml").write_text("<manifest></manifest>", encoding="utf-8")
+        (repo / "src" / "Objects" / "customrecord_keep.xml").write_text(XML_CONTENT, encoding="utf-8")
+        source = SourceConfig(
+            source_name="suitecloud",
+            source_kind="code",
+            root=repo,
+            include=["src"],
+            exclude=[],
+            file_types=["xml"],
+            parser="suitescript_code_and_config",
+            collection="netsuite_notes",
+            authority="curated_code_source",
+        )
+
+        files = _collect_source_files(source, repo)
+        relative_paths = [path.relative_to(repo).as_posix() for path in files]
+
+        assert "src/Objects/customrecord_keep.xml" in relative_paths
+        assert "src/deploy.xml" not in relative_paths
+        assert "src/manifest.xml" not in relative_paths
+
     def test_collects_multiple_file_types(self, tmp_path: Path):
         vault = tmp_path / "vault"
         vault.mkdir()

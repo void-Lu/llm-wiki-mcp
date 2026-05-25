@@ -26,6 +26,7 @@
 | `get_index_status` | 返回索引状态：每个数据源的文件数、最后索引时间、git 信息 |
 | `save_obsidian_note` | 将结构化 Obsidian 笔记保存到 Vault，并可选触发增量索引 |
 | `generate_suitecloud_wiki` | 从 SuiteCloud code source 生成 `projects/<project>/wiki/` 下的代码事实 Wiki，并可选增量索引生成页 |
+| `write_wiki_summaries` | 将调用模型生成的业务摘要写回已有 Wiki 页面 |
 
 ## 📦 快速部署
 
@@ -106,6 +107,9 @@ sources:
   #   parser: suitescript_code_and_config
   #   collection: netsuite_knowledge
   #   authority: implementation_source_of_truth
+  #   file_exclude_patterns:
+  #     - src/deploy.xml
+  #     - src/manifest.xml
   #   library_exclude_patterns:
   #     - src/FileCabinet/SuiteScripts/tools/crypto-js.js
   #     - src/FileCabinet/SuiteScripts/tools/moment.js
@@ -217,6 +221,8 @@ netsuite-rag-mcp-preload-model
 请调用 generate_suitecloud_wiki，project 设为 "huideng"，source_name 设为 "huideng"，auto_index 设为 true
 ```
 
+如果希望让调用模型补充业务摘要，可将 `llm_summary` 设为 true，先根据返回的 `summary_prompts` 生成摘要，再调用 `write_wiki_summaries` 将 `{wiki_path, summary}` 写回对应 Wiki 页面。
+
 生成内容位于 Vault：
 
 ```text
@@ -229,6 +235,8 @@ projects/<project>/wiki/
 ```
 
 生成页的 frontmatter 会包含 `type: generated_wiki`、`generated: true`、`do_not_edit: true`、`source_kind: code`、`source_repo`、`source_path`、`archived: false` 等字段。生成页是可覆盖的代码事实页，不建议手工编辑；业务背景、决策原因和排坑过程仍应写入人工维护的 `requirements/`、`decisions/`、`troubleshooting/` 或 `knowledge/<domain>/`。
+
+SuiteCloud 项目级 `src/deploy.xml` 与 `src/manifest.xml` 是部署/项目清单，不应作为业务 Object Wiki 页或代码源文件索引；MCP 默认将它们作为全局文件级排除约束。也可以用 `file_exclude_patterns` 为单个 source 显式追加更多文件级排除。
 
 `tools/` 目录通常混有第三方库和项目工具模块。生成器默认排除常见第三方库：`crypto-js.js`、`moment.js`、`papaparse.js`、`ramda.min.js`；也可以用 `library_exclude_patterns` 显式排除更多文件，用 `utility_allowlist` 显式保留项目工具模块。
 
@@ -291,7 +299,7 @@ pytest
 .
 ├── src/netsuite_rag_mcp/
 │   ├── __init__.py
-│   ├── server.py                          # FastMCP 服务器入口（7 个 MCP 工具）
+│   ├── server.py                          # FastMCP 服务器入口（8 个 MCP 工具）
 │   ├── config.py                          # 配置加载（v1/v2 自动迁移）
 │   ├── models.py                          # 数据模型（SourceConfig, RoutingResult 等）
 │   ├── parser.py                          # Markdown/SuiteScript 解析器

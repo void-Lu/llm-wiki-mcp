@@ -17,6 +17,11 @@ from netsuite_rag_mcp.manifest import (
 from netsuite_rag_mcp.models import Chunk, RagConfig, SourceConfig
 from netsuite_rag_mcp.parser import parse_code_file, parse_markdown_file
 from netsuite_rag_mcp.parser_xml_json import parse_json_config, parse_xml_file
+from netsuite_rag_mcp.source_filters import (
+    DEFAULT_FILE_EXCLUDE_PATTERNS,
+    should_exclude_by_component,
+    should_exclude_by_file_pattern,
+)
 from netsuite_rag_mcp.vector_store import ChromaVectorStore, Embedder, SentenceTransformerEmbedder
 
 # ── Parser/chunker routing table ─────────────────────────────────────────────
@@ -70,6 +75,7 @@ def _collect_source_files(source: SourceConfig, vault_root: Path) -> list[Path]:
 
     # Build exclude set
     exclude_names = set(source.exclude)
+    file_exclude_patterns = list(DEFAULT_FILE_EXCLUDE_PATTERNS) + list(source.file_exclude_patterns)
 
     collected: list[Path] = []
     extensions = {f".{ft.lstrip('.')}" for ft in source.file_types}
@@ -78,6 +84,8 @@ def _collect_source_files(source: SourceConfig, vault_root: Path) -> list[Path]:
         for ext in extensions:
             for f in inc_dir.rglob(f"*{ext}"):
                 if _should_exclude(f, inc_dir, exclude_names):
+                    continue
+                if should_exclude_by_file_pattern(f, source_root, file_exclude_patterns):
                     continue
                 collected.append(f)
 
@@ -177,14 +185,7 @@ def _inject_chunk_metadata(chunk: Chunk, source: SourceConfig, file_hash: str) -
 
 def _should_exclude(file_path: Path, base_path: Path, exclude_names: set[str]) -> bool:
     """Check if a file should be excluded based on path components."""
-    try:
-        relative = file_path.relative_to(base_path)
-    except ValueError:
-        return True
-    for part in relative.parts:
-        if part in exclude_names:
-            return True
-    return False
+    return should_exclude_by_component(file_path, base_path, exclude_names)
 
 
 def _index_source(
