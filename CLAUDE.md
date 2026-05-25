@@ -6,52 +6,49 @@
 
 - 安装开发依赖：`python -m pip install -e ".[dev]"`
 - 运行测试：`pytest`
-- 初始化 Vault 配置：`netsuite-rag-mcp init --vault <name> --root <absolute-vault-path> --default`
-- 诊断运行时配置：`netsuite-rag-mcp status`
 - 启动 MCP server：`netsuite-rag-mcp-server` 或 `python -m netsuite_rag_mcp.server`
-- 预下载 embedding 模型：`netsuite-rag-mcp-preload-model`
+- 初始化外部 Wiki：调用 MCP 工具 `wiki_init`
+- 摄入 CodeGraph source：调用 MCP 工具 `wiki_ingest(source_type="codegraph")`
+- 查询 Wiki：调用 MCP 工具 `wiki_query`
+- 检查 Wiki：调用 MCP 工具 `wiki_lint`
 
 ## 项目地图
 
 - [src/netsuite_rag_mcp/server.py](src/netsuite_rag_mcp/server.py)：MCP 工具入口。
-- [src/netsuite_rag_mcp/cli.py](src/netsuite_rag_mcp/cli.py)：`init`、`status`、server CLI。
-- [src/netsuite_rag_mcp/runtime_config.py](src/netsuite_rag_mcp/runtime_config.py)：Vault 根目录、用户级配置、运行时存储路径解析。
-- [src/netsuite_rag_mcp/config.py](src/netsuite_rag_mcp/config.py)：`rag/sources.yaml` 加载，v1 到 v2 兼容迁移。
-- [src/netsuite_rag_mcp/indexer.py](src/netsuite_rag_mcp/indexer.py)：多 source 文件收集、解析/分块路由、增量索引、删除检测。
-- [src/netsuite_rag_mcp/manifest.py](src/netsuite_rag_mcp/manifest.py)：索引 manifest v2 与文件哈希。
-- [src/netsuite_rag_mcp/vector_store.py](src/netsuite_rag_mcp/vector_store.py)：ChromaDB 封装与 embedder 协议。
-- [src/netsuite_rag_mcp/retriever.py](src/netsuite_rag_mcp/retriever.py)：语义搜索、source 过滤、路由、冲突检测、引用格式。
-- [src/netsuite_rag_mcp/note_writer.py](src/netsuite_rag_mcp/note_writer.py)：Obsidian 笔记保存与模板路由。
-- [templates/](templates/)：笔记模板库；修改模板行为时同步相关测试。
+- [src/netsuite_rag_mcp/wiki_paths.py](src/netsuite_rag_mcp/wiki_paths.py)：外部 Obsidian LLM Wiki 目录结构与路径安全。
+- [src/netsuite_rag_mcp/wiki_io.py](src/netsuite_rag_mcp/wiki_io.py)：Markdown + YAML frontmatter 读写、覆盖保护、脱敏。
+- [src/netsuite_rag_mcp/wiki_log.py](src/netsuite_rag_mcp/wiki_log.py)：`wiki/log.md` append-only 操作记录。
+- [src/netsuite_rag_mcp/wiki_index.py](src/netsuite_rag_mcp/wiki_index.py)：`wiki/index.md` 与项目 index 维护。
+- [src/netsuite_rag_mcp/wiki_overview.py](src/netsuite_rag_mcp/wiki_overview.py)：`wiki/overview.md` 确定性汇总。
+- [src/netsuite_rag_mcp/codegraph_client.py](src/netsuite_rag_mcp/codegraph_client.py)：CodeGraph CLI 只读封装。
+- [src/netsuite_rag_mcp/wiki_ingest.py](src/netsuite_rag_mcp/wiki_ingest.py)：CodeGraph source snapshot 和 Wiki 页面生成。
+- [src/netsuite_rag_mcp/wiki_query.py](src/netsuite_rag_mcp/wiki_query.py)：无向量 Wiki 查询。
+- [src/netsuite_rag_mcp/wiki_lint.py](src/netsuite_rag_mcp/wiki_lint.py)：Wiki 健康检查。
+- [src/netsuite_rag_mcp/note_writer.py](src/netsuite_rag_mcp/note_writer.py)：人工 note 写入。
 - [tests/](tests/)：pytest 测试套件；新增行为优先补对应单元测试。
 
 ## 核心数据流
 
-`<Vault>/rag/sources.yaml` → `load_config()` → `indexer` 收集 source 文件 → parser/chunker 路由 → 注入 `source_name`/`source_kind`/hash/git 元数据 → `ChromaVectorStore` upsert → `retriever` 检索、过滤、路由、冲突检测 → MCP 工具返回结构化结果。
+CodeGraph CLI → `raw/sources/codegraph/<project>/<source_name>/` snapshot → `wiki/sources/` source 摘要 → `wiki/projects/<project>/code/` 代码事实页 → `wiki/index.md` / `wiki/projects/<project>/index.md` / `wiki/overview.md` / `wiki/log.md`。
+
+`wiki_query` 只读取持久 Markdown Wiki：先读 index，再做关键词匹配和 `[[wikilink]]` 一跳扩展；不做 embedding 或 Chroma 检索。
 
 ## 必守约定
 
-- `sources.yaml` 是 Vault 本地文件，位置固定为 `<Vault>/rag/sources.yaml`；不要把根目录 `rag/sources.yaml` 或 workspace `.vscode/mcp.json` 加入仓库。
-- v2 source 字段名是 `source_name`，不是 `name`；`include` 是 source root 下的相对目录列表，不是任意 glob。
-- 默认 collection 名保持 `netsuite_knowledge`，确保 README、indexer、retriever 和测试一致。
-- Manifest v2 key 格式为 `{source_name}:{source_kind}:{relative_path}`；source-scoped full reindex 只能清理目标 source，不能 reset 共享 collection。
-- source 过滤依赖 chunk metadata 中实际写入 `source_name` 和 `source_kind`；只设置在 document/dataclass 顶层不会被 Chroma `where` 命中。
-- Runtime 路径默认是 Vault-local：`<Vault>/.rag-index/chroma/`、`<Vault>/.rag-index/index-manifest.json`、`<Vault>/.models/`。
-- 保持库函数 `load_config()` 对测试/默认值的向后兼容；MCP/server 运行时应显式解析 `RuntimeConfig`，并要求 `sources.yaml` 存在。
-- 测试会通过 [tests/conftest.py](tests/conftest.py) 设置 `NETSUITE_RAG_CONFIG_DIR` 和 `NETSUITE_RAG_USER_DATA_DIR` 隔离运行时目录；不要让测试写入真实用户配置或 Vault。
-- 保存笔记路由：knowledge 笔记要求 `domain` 且禁止 `project`；script 笔记要求 `project` + `script_type`；模板字段使用 `related_objects` / `related_scripts`。
-- 代码事实与笔记事实冲突时，实现细节以 code source 为准，业务背景以 note source 为准；相关策略集中在 [src/netsuite_rag_mcp/policy.py](src/netsuite_rag_mcp/policy.py)。
+- 外部 Obsidian Wiki root 结构固定为：`purpose.md`、`schema.md`、`raw/sources/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/sources/`、`wiki/queries/`、`wiki/synthesis/`、`wiki/comparisons/`、`.obsidian/`、`.llm-wiki/`。
+- 项目目录固定为 `wiki/projects/<project>/{index.md,code/,decisions/,troubleshooting/,requirements/}`。
+- 代码事实首版来自 CodeGraph；不要重新引入本项目代码扫描 + embedding 的 RAG 主路径。
+- 不再保存 `script` / `object` 人工事实页；对象、部署、字段和脚本参数折叠到 CodeGraph 派生页或 source 摘要。
+- `knowledge` 写入 `wiki/concepts/<domain>/`，并禁止 `project`。
+- 生成页只能覆盖 `generated: true` 页面；人工页不能被静默覆盖。
+- 旧 RAG 工具仅保留 deprecated 响应，不应调用 Chroma、indexer 或 embedding。
+- 不要在代码、测试或文档中硬编码个人 Vault 路径、API key、token、邮箱、手机号等敏感信息；脱敏逻辑在 [src/netsuite_rag_mcp/redaction.py](src/netsuite_rag_mcp/redaction.py)。
+- Windows 路径相关逻辑要覆盖非法字符、冒号 ADS、保留设备名、控制字符、尾随点/空格等边界。
 
 ## 开发注意事项
 
 - 本项目是 Python 3.11+，源码在 `src/` 布局下；依赖和 entry points 见 [pyproject.toml](pyproject.toml)。
-- 修改 parser/chunker/indexer/retriever 时，优先运行相关测试文件，再运行 `pytest`。
-- 需要 embedding 或 Chroma 的测试应使用 fake/test embedder 模式，避免下载模型或依赖真实用户数据。
-- 不要在代码、测试或文档中硬编码个人 Vault 路径、API key、token、邮箱、手机号等敏感信息；脱敏逻辑在 [src/netsuite_rag_mcp/redaction.py](src/netsuite_rag_mcp/redaction.py)。
-- Windows 路径相关逻辑要覆盖非法字符、冒号 ADS、保留设备名、控制字符、尾随点/空格等边界。
-
-## 现有文档
-
-- [README.md](README.md)：功能、部署、MCP 工具、`sources.yaml` 示例、模板说明。
-- [pyproject.toml](pyproject.toml)：依赖、console scripts、pytest 配置。
-- [templates/](templates/)：Obsidian 笔记模板。
+- 修改 Wiki primitives 时优先运行 `tests/test_wiki_*.py`。
+- 修改 MCP 工具面时运行 [tests/test_server_tools.py](tests/test_server_tools.py)。
+- 修改人工 note 写入时运行 [tests/test_save_obsidian_note.py](tests/test_save_obsidian_note.py)。
+- 完成前运行 `pytest`。

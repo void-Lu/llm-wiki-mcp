@@ -173,9 +173,9 @@ def test_server_subcommand_delegates_to_server_main(monkeypatch: pytest.MonkeyPa
     assert calls == ["server"]
 
 
-def test_pyproject_exposes_cli_and_preserves_preload_script():
+def test_pyproject_exposes_cli_without_preload_script():
     text = Path("pyproject.toml").read_text(encoding="utf-8")
 
     assert 'netsuite-rag-mcp = "netsuite_rag_mcp.cli:main"' in text
     assert 'netsuite-rag-mcp-server = "netsuite_rag_mcp.server:main"' in text
-    assert 'netsuite-rag-mcp-preload-model = "netsuite_rag_mcp.preload:main"' in text
+    assert "netsuite-rag-mcp-preload-model" not in text
