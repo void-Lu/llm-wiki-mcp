@@ -54,9 +54,12 @@ service-account*.json
 # IDE / local editor config
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
+.claude/
+.codegraph/
 .omc/
 .omx/
 
