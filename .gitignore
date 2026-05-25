@@ -58,6 +58,7 @@ service-account*.json
 *.swo
 *~
 .omc/
+.omx/
 
 # OS
 .DS_Store
