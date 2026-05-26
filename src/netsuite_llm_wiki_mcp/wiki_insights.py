@@ -1,20 +1,21 @@
-"""Knowledge graph insights: orphans, bridges, surprising connections.
+"""Knowledge graph insights: orphans, bridges, surprising connections, communities.
 
 Analyzes the wikilink graph structure to surface:
 - Isolated pages (no or very few connections)
 - Bridge pages (connect multiple clusters)
 - Surprising cross-type connections
-- Sparse areas (weakly connected subgraphs)
+- Louvain communities with cohesion scoring
+- Sparse communities (low internal density)
 """
 
 from __future__ import annotations
 
-import math
 import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from netsuite_llm_wiki_mcp.louvain import LouvainResult, community_cohesion, louvain
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
@@ -36,15 +37,23 @@ def wiki_insights(
     if len(nodes) < 3:
         return {"ok": True, "insights": [], "message": "too few pages for analysis"}
 
+    edge_tuples = [(e["source"], e["target"]) for e in edges]
+    louvain_result = louvain(set(nodes.keys()), edge_tuples)
+
     insights: list[dict[str, Any]] = []
     insights.extend(_find_orphans(nodes, edges, limit=limit))
-    insights.extend(_find_bridges(nodes, edges, limit=3))
-    insights.extend(_find_surprising_connections(nodes, edges, limit=3))
+    insights.extend(_find_bridges_louvain(nodes, edges, louvain_result, limit=3))
+    insights.extend(_find_surprising_connections_louvain(nodes, edges, louvain_result, limit=3))
+    insights.extend(_find_sparse_communities(nodes, edge_tuples, louvain_result, limit=3))
+
+    community_info = _community_summary(nodes, edge_tuples, louvain_result)
 
     return {
         "ok": True,
         "node_count": len(nodes),
         "edge_count": len(edges),
+        "modularity": louvain_result.modularity,
+        "communities": community_info,
         "insights": insights[:limit],
     }
 
@@ -118,9 +127,10 @@ def _find_orphans(
     }]
 
 
-def _find_bridges(
+def _find_bridges_louvain(
     nodes: dict[str, dict[str, Any]],
     edges: list[dict[str, str]],
+    louvain_result: LouvainResult,
     limit: int,
 ) -> list[dict[str, Any]]:
     neighbors: dict[str, set[str]] = defaultdict(set)
@@ -128,20 +138,20 @@ def _find_bridges(
         neighbors[edge["source"]].add(edge["target"])
         neighbors[edge["target"]].add(edge["source"])
 
-    communities = _detect_communities(nodes, neighbors)
-    community_map = {}
-    for comm_id, members in enumerate(communities):
-        for member in members:
-            community_map[member] = comm_id
-
     bridge_scores: list[tuple[str, int]] = []
     for rel in nodes:
         if rel not in neighbors:
             continue
-        neighbor_comms = {community_map.get(n) for n in neighbors[rel] if n in community_map}
+        neighbor_comms = {
+            louvain_result.community_map.get(n)
+            for n in neighbors[rel]
+            if n in louvain_result.community_map
+        }
         neighbor_comms.discard(None)
-        if len(neighbor_comms) >= 2:
-            bridge_scores.append((rel, len(neighbor_comms)))
+        own_comm = louvain_result.community_map.get(rel)
+        neighbor_comms.discard(own_comm)
+        if neighbor_comms:
+            bridge_scores.append((rel, len(neighbor_comms) + 1))
 
     bridge_scores.sort(key=lambda x: -x[1])
     results: list[dict[str, Any]] = []
@@ -158,17 +168,12 @@ def _find_bridges(
     return results
 
 
-def _find_surprising_connections(
+def _find_surprising_connections_louvain(
     nodes: dict[str, dict[str, Any]],
     edges: list[dict[str, str]],
+    louvain_result: LouvainResult,
     limit: int,
 ) -> list[dict[str, Any]]:
-    communities = _detect_communities(nodes, _build_neighbors(edges))
-    community_map = {}
-    for comm_id, members in enumerate(communities):
-        for member in members:
-            community_map[member] = comm_id
-
     scored: list[tuple[dict[str, str], float, list[str]]] = []
     for edge in edges:
         src = nodes.get(edge["source"])
@@ -177,7 +182,9 @@ def _find_surprising_connections(
             continue
         score = 0.0
         reasons: list[str] = []
-        if community_map.get(edge["source"]) != community_map.get(edge["target"]):
+        src_comm = louvain_result.community_map.get(edge["source"])
+        tgt_comm = louvain_result.community_map.get(edge["target"])
+        if src_comm is not None and tgt_comm is not None and src_comm != tgt_comm:
             score += 3.0
             reasons.append("crosses community boundary")
         if src["type"] != tgt["type"]:
@@ -203,38 +210,56 @@ def _find_surprising_connections(
     return results
 
 
-def _detect_communities(
+def _find_sparse_communities(
     nodes: dict[str, dict[str, Any]],
-    neighbors: dict[str, set[str]],
-) -> list[set[str]]:
-    """Simple connected-components community detection."""
-    visited: set[str] = set()
-    communities: list[set[str]] = []
-    for rel in nodes:
-        if rel in visited:
+    edge_tuples: list[tuple[str, str]],
+    louvain_result: LouvainResult,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Find communities with low internal cohesion (< 0.15)."""
+    results: list[dict[str, Any]] = []
+    for comm_id, members in enumerate(louvain_result.communities):
+        if len(members) < 3:
             continue
-        community: set[str] = set()
-        stack = [rel]
-        while stack:
-            current = stack.pop()
-            if current in visited:
-                continue
-            visited.add(current)
-            community.add(current)
-            for neighbor in neighbors.get(current, set()):
-                if neighbor not in visited and neighbor in nodes:
-                    stack.append(neighbor)
-        if community:
-            communities.append(community)
-    return communities
+        cohesion = community_cohesion(members, edge_tuples)
+        if cohesion < 0.15:
+            member_titles = sorted(
+                nodes[m]["title"] for m in members if m in nodes
+            )[:5]
+            results.append({
+                "type": "sparse_community",
+                "severity": "warning",
+                "title": f"Sparse cluster ({len(members)} pages, cohesion {cohesion:.2f})",
+                "community_id": comm_id,
+                "size": len(members),
+                "cohesion": cohesion,
+                "sample_members": member_titles,
+                "suggestion": "This cluster has few internal links. Add [[wikilinks]] between related pages or split into separate topics.",
+            })
+    results.sort(key=lambda x: x["cohesion"])
+    return results[:limit]
 
 
-def _build_neighbors(edges: list[dict[str, str]]) -> dict[str, set[str]]:
-    neighbors: dict[str, set[str]] = defaultdict(set)
-    for edge in edges:
-        neighbors[edge["source"]].add(edge["target"])
-        neighbors[edge["target"]].add(edge["source"])
-    return neighbors
+def _community_summary(
+    nodes: dict[str, dict[str, Any]],
+    edge_tuples: list[tuple[str, str]],
+    louvain_result: LouvainResult,
+) -> list[dict[str, Any]]:
+    """Build summary info for each community."""
+    summaries: list[dict[str, Any]] = []
+    for comm_id, members in enumerate(louvain_result.communities):
+        cohesion = community_cohesion(members, edge_tuples)
+        member_titles = sorted(nodes[m]["title"] for m in members if m in nodes)
+        summaries.append({
+            "id": comm_id,
+            "size": len(members),
+            "cohesion": round(cohesion, 3),
+            "members": member_titles[:10],
+        })
+    summaries.sort(key=lambda x: -x["size"])
+    return summaries
+
+
 
 
 def _resolve_target(

@@ -74,3 +74,62 @@ def test_insights_empty_wiki(tmp_path: Path):
     result = wiki_insights(str(root))
     assert result["ok"] is True
     assert result["insights"] == []
+
+
+def test_insights_returns_communities(insights_root: Path):
+    result = wiki_insights(str(insights_root))
+    assert "communities" in result
+    assert "modularity" in result
+    assert isinstance(result["communities"], list)
+    assert isinstance(result["modularity"], float)
+    total_members = sum(c["size"] for c in result["communities"])
+    assert total_members == result["node_count"]
+    for comm in result["communities"]:
+        assert "id" in comm
+        assert "size" in comm
+        assert "cohesion" in comm
+        assert 0.0 <= comm["cohesion"] <= 1.0
+
+
+def test_insights_louvain_detects_clusters(tmp_path: Path):
+    """Two dense clusters connected by a single bridge should yield multiple communities."""
+    root = tmp_path / "vault"
+    wiki = root / "wiki" / "concepts" / "domain"
+    wiki.mkdir(parents=True)
+
+    # Cluster A: fully connected triangle
+    (wiki / "a1.md").write_text(
+        "---\ntype: concept\ntitle: A1\n---\n\nLinks [[a2]] and [[a3]].\n",
+        encoding="utf-8",
+    )
+    (wiki / "a2.md").write_text(
+        "---\ntype: concept\ntitle: A2\n---\n\nLinks [[a1]] and [[a3]].\n",
+        encoding="utf-8",
+    )
+    (wiki / "a3.md").write_text(
+        "---\ntype: concept\ntitle: A3\n---\n\nLinks [[a1]] and [[a2]].\n",
+        encoding="utf-8",
+    )
+    # Cluster B: fully connected triangle
+    (wiki / "b1.md").write_text(
+        "---\ntype: concept\ntitle: B1\n---\n\nLinks [[b2]] and [[b3]].\n",
+        encoding="utf-8",
+    )
+    (wiki / "b2.md").write_text(
+        "---\ntype: concept\ntitle: B2\n---\n\nLinks [[b1]] and [[b3]].\n",
+        encoding="utf-8",
+    )
+    (wiki / "b3.md").write_text(
+        "---\ntype: concept\ntitle: B3\n---\n\nLinks [[b1]] and [[b2]].\n",
+        encoding="utf-8",
+    )
+    # Single bridge between clusters
+    (wiki / "bridge.md").write_text(
+        "---\ntype: concept\ntitle: Bridge\n---\n\nLinks [[a1]] and [[b1]].\n",
+        encoding="utf-8",
+    )
+
+    result = wiki_insights(str(root))
+    assert result["ok"] is True
+    assert result["modularity"] > 0
+    assert len(result["communities"]) >= 2
