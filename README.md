@@ -60,6 +60,14 @@ wiki/projects/<project>/
 | `wiki_query` | 基于关键词、`[[wikilink]]`、shared source、type graph 和上下文预算查询 Wiki |
 | `wiki_query_debug` | 返回查询分数和 graph expansion 原因，帮助诊断召回 |
 | `wiki_lint` | 检查结构、frontmatter、断链、source traceability 和 ingest cache |
+| `wiki_enrich` | 两阶段 wikilink 自动富化：prepare 返回 prompt，apply 写入链接 |
+| `wiki_page_merge` | 页面合并：frontmatter union + locked fields 保护 + 可选 LLM body merge |
+| `wiki_dedup` | 重复实体检测与合并：detect → confirm → merge 三阶段 |
+| `wiki_insights` | 知识图谱洞察：孤立页面、桥接页面、意外跨类型连接 |
+| `wiki_delete_source` | Source 删除级联清理：删除派生页、重写交叉引用、清理缓存 |
+| `wiki_research` | 深度研究综合：搜索结果 → LLM 综合 → wiki/queries/ 页面 |
+| `wiki_ingest_batch` | 持久化 ingest 队列：enqueue/next/complete/fail/retry/cancel |
+| `wiki_changelog` | 返回最近 wiki log 条目 |
 | `save_obsidian_note` | 保存人工策展笔记：decision、troubleshooting、requirement、knowledge |
 
 旧 RAG 工具 `index_vault`、`index_sources`、`search_netsuite_knowledge`、`ask_netsuite_rag`、`get_index_status` 仅保留兼容入口，并返回 deprecated 提示。

@@ -6,14 +6,22 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from netsuite_rag_mcp.note_writer import save_obsidian_note as run_save_obsidian_note
+from netsuite_rag_mcp.page_merge import apply_page_merge as run_apply_page_merge
+from netsuite_rag_mcp.page_merge import prepare_body_merge as run_prepare_body_merge
+from netsuite_rag_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
+from netsuite_rag_mcp.wiki_dedup import wiki_dedup as run_wiki_dedup
+from netsuite_rag_mcp.wiki_delete import wiki_delete_source as run_wiki_delete_source
+from netsuite_rag_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
 from netsuite_rag_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
 from netsuite_rag_mcp.wiki_ingest import rescan_source as run_rescan_source
 from netsuite_rag_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
+from netsuite_rag_mcp.wiki_insights import wiki_insights as run_wiki_insights
 from netsuite_rag_mcp.wiki_lint import wiki_lint as run_wiki_lint
 from netsuite_rag_mcp.wiki_log import parse_log_entries as run_parse_log_entries
 from netsuite_rag_mcp.wiki_paths import create_wiki_root
 from netsuite_rag_mcp.wiki_query import wiki_query as run_wiki_query
 from netsuite_rag_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
+from netsuite_rag_mcp.wiki_research import wiki_research as run_wiki_research
 
 mcp = FastMCP("netsuite-llm-wiki-mcp")
 
@@ -481,6 +489,97 @@ def generate_suitecloud_wiki(
 def write_wiki_summaries(project: str, summaries: list[dict[str, str]], vault_root: str | None = None) -> dict[str, Any]:
     """Deprecated: generated wiki summaries are handled through wiki_ingest."""
     return write_wiki_summaries_tool(project=project, summaries=summaries, vault_root=vault_root)
+
+
+@mcp.tool()
+def wiki_enrich(
+    vault_root: str,
+    page_path: str,
+    stage: str = "prepare",
+    links: list[dict[str, str]] | str | None = None,
+) -> dict[str, Any]:
+    """Enrich a wiki page with [[wikilinks]] to existing pages. Two stages: prepare returns a prompt, apply writes links."""
+    return run_wiki_enrich(vault_root=vault_root, page_path=page_path, stage=stage, links=links)
+
+
+@mcp.tool()
+def wiki_page_merge(
+    vault_root: str,
+    page_path: str,
+    incoming_frontmatter: dict[str, Any] | None = None,
+    incoming_body: str = "",
+    merged_body: str | None = None,
+) -> dict[str, Any]:
+    """Merge incoming content into an existing generated wiki page, preserving locked fields and unioning array fields."""
+    return run_apply_page_merge(
+        vault_root=vault_root,
+        page_path=page_path,
+        incoming_frontmatter=incoming_frontmatter or {},
+        incoming_body=incoming_body,
+        merged_body=merged_body,
+    )
+
+
+@mcp.tool()
+def wiki_dedup(
+    vault_root: str,
+    stage: str = "detect",
+    groups: list[dict[str, Any]] | str | None = None,
+    not_duplicates: list[list[str]] | None = None,
+) -> dict[str, Any]:
+    """Detect and merge duplicate wiki pages. Stages: detect → confirm → merge."""
+    return run_wiki_dedup(vault_root=vault_root, stage=stage, groups=groups, not_duplicates=not_duplicates)
+
+
+@mcp.tool()
+def wiki_insights(
+    vault_root: str,
+    project: str | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Analyze wiki graph structure: find orphans, bridges, and surprising connections."""
+    return run_wiki_insights(vault_root=vault_root, project=project, limit=limit)
+
+
+@mcp.tool()
+def wiki_delete_source(
+    vault_root: str,
+    project: str,
+    source_name: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Delete a source and cascade-clean derived wiki pages and cross-references."""
+    return run_wiki_delete_source(vault_root=vault_root, project=project, source_name=source_name, dry_run=dry_run)
+
+
+@mcp.tool()
+def wiki_research(
+    vault_root: str,
+    topic: str,
+    stage: str = "prepare",
+    search_results: list[dict[str, str]] | None = None,
+    synthesis: str | None = None,
+    language: str = "zh-CN",
+    project: str | None = None,
+) -> dict[str, Any]:
+    """Deep research: synthesize web search results into a wiki page. Stages: prepare → apply."""
+    return run_wiki_research(
+        vault_root=vault_root, topic=topic, stage=stage,
+        search_results=search_results, synthesis=synthesis,
+        language=language, project=project,
+    )
+
+
+@mcp.tool()
+def wiki_ingest_batch(
+    vault_root: str,
+    action: str = "status",
+    tasks: list[dict[str, str]] | None = None,
+    task_id: str | None = None,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Manage persistent ingest queue: enqueue, next, complete, fail, retry, status, cancel, clear_done."""
+    return run_wiki_ingest_batch(vault_root=vault_root, action=action, tasks=tasks, task_id=task_id, result=result)
 
 
 def main() -> None:

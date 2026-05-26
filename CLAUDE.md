@@ -21,16 +21,24 @@ Python 3.11+，`src/` 布局，依赖仅 `mcp` + `PyYAML`。通过 FastMCP 暴�
 ### 层次结构
 
 ```
-server.py          ← MCP 工具入口（FastMCP @mcp.tool 注册）
-├── wiki_ingest.py ← CodeGraph/LLM 分阶段摄入
-├── wiki_query.py  ← 无向量关键词 + wikilink 图查询
-├── wiki_lint.py   ← 结构健康检查
-├── note_writer.py ← 人工笔记写入
-├── wiki_io.py     ← Markdown + YAML frontmatter 读写、覆盖保护、脱敏
-├── wiki_paths.py  ← 外部 Wiki 目录结构与路径安全校验
-├── wiki_index.py  ← wiki/index.md 与项目 index 维护
-├── wiki_overview.py ← wiki/overview.md 确定性汇总
-├── wiki_log.py    ← wiki/log.md append-only 操作记录
+server.py              ← MCP 工具入口（FastMCP @mcp.tool 注册）
+├── wiki_ingest.py     ← CodeGraph/LLM 分阶段摄入
+├── wiki_query.py      ← 无向量关键词 + wikilink 图查询
+├── wiki_lint.py       ← 结构健康检查
+├── wiki_enrich.py     ← 两阶段 wikilink 自动富化
+├── wiki_dedup.py      ← 重复实体检测与合并（三阶段）
+├── wiki_insights.py   ← 知识图谱洞察（孤立页、桥接页、意外连接）
+├── wiki_delete.py     ← Source 删除级联清理
+├── wiki_research.py   ← 深度研究综合（搜索结果 → wiki 页面）
+├── wiki_batch.py      ← 持久化 ingest 队列
+├── page_merge.py      ← 页面合并（frontmatter union + body merge）
+├── context_budget.py  ← 上下文预算分配器
+├── note_writer.py     ← 人工笔记写入
+├── wiki_io.py         ← Markdown + YAML frontmatter 读写、覆盖保护、脱敏
+├── wiki_paths.py      ← 外部 Wiki 目录结构与路径安全校验
+├── wiki_index.py      ← wiki/index.md 与项目 index 维护
+├── wiki_overview.py   ← wiki/overview.md 确定性汇总
+├── wiki_log.py        ← wiki/log.md append-only 操作记录
 ├── codegraph_client.py ← CodeGraph CLI 只读封装（subprocess）
 ├── runtime_config.py   ← vault 解析：参数 > 环境变量 > global config.yaml
 ├── platform_paths.py   ← 跨平台 config/data 目录
@@ -54,6 +62,16 @@ server.py          ← MCP 工具入口（FastMCP @mcp.tool 注册）
 
 **查询**（`wiki_query`）：关键词/CJK bigram 命中 → 可选 vector 阶段（默认关闭）→ `[[wikilink]]` + shared source + common neighbor 图扩展 → 按 token 预算裁剪输出 context pack。
 
+**页面合并**（`wiki_page_merge`）：re-ingest 时对已存在的 generated 页面做 frontmatter union（sources/tags/related）+ locked fields 保护（type/title/created）+ 可选 LLM body merge。
+
+**Wikilink 富化**（`wiki_enrich`）：prepare 阶段返回 prompt → LLM 返回 `{term, target}` JSON → apply 阶段做精确字符串替换插入 `[[]]`。
+
+**重复检测**（`wiki_dedup`）：detect 阶段扫描页面返回 prompt → LLM 返回重复组 → confirm 阶段校验 → merge 阶段重写交叉引用并删除冗余页。
+
+**深度研究**（`wiki_research`）：prepare 阶段接收搜索结果返回综合 prompt → apply 阶段写入 `wiki/queries/`。
+
+**批量摄入**（`wiki_ingest_batch`）：持久化队列 `.llm-wiki/ingest-queue.json`，支持 enqueue/next/complete/fail/retry/cancel。
+
 ## 测试对应关系
 
 - Wiki primitives（paths/io/index/overview/log）→ `tests/test_wiki_*.py`
@@ -62,6 +80,14 @@ server.py          ← MCP 工具入口（FastMCP @mcp.tool 注册）
 - CodeGraph 摄入 → `tests/test_wiki_ingest_codegraph.py`
 - 查询 → `tests/test_wiki_query.py`
 - Lint → `tests/test_wiki_lint.py`
+- Wikilink 富化 → `tests/test_wiki_enrich.py`
+- 页面合并 → `tests/test_page_merge.py`
+- 重复检测 → `tests/test_wiki_dedup.py`
+- 图谱洞察 → `tests/test_wiki_insights.py`
+- Source 删除 → `tests/test_wiki_delete.py`
+- 深度研究 → `tests/test_wiki_research.py`
+- 批量摄入队列 → `tests/test_wiki_batch.py`
+- 上下文预算 → `tests/test_context_budget.py`
 
 ## 必守约定
 
