@@ -94,6 +94,8 @@ class TestLlmWikiServerTools:
             "vector_config": None,
             "max_graph_hops": 2,
             "include_raw_sources": False,
+            "filter_type": None,
+            "filter_tags": None,
         }]
 
     def test_wiki_ingest_llm_tool_delegates_staged_ingest(self, monkeypatch, tmp_path: Path):

@@ -171,6 +171,21 @@ def ingest_codegraph(
     if not context.get("ok"):
         return context
 
+    context_json = json.dumps(context.get("data", {}), ensure_ascii=False, sort_keys=True)
+    context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
+    cache_path = _cache_path(root, project_value, source_value)
+    if cache_path.exists():
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        if cache.get("codegraph_context_hash") == context_hash:
+            return {
+                "ok": True,
+                "status": "unchanged",
+                "project": project_value,
+                "source_name": source_value,
+                "context_hash": context_hash,
+                "message": "codegraph context unchanged; skipping rewrite",
+            }
+
     snapshot_dir = root / "raw" / "sources" / "codegraph" / project_value / source_value
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshots = {
@@ -232,6 +247,7 @@ def ingest_codegraph(
             status="ok",
         ),
     )
+    _write_cache(root, project_value, source_value, {"codegraph_context_hash": context_hash, "status": "ingested"})
     return {
         "ok": True,
         "project": project_value,

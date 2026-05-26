@@ -209,6 +209,28 @@ def test_rescan_source_reuses_source_validation(tmp_path: Path):
 
 
 
+def test_ingest_codegraph_skips_unchanged_context(tmp_path: Path):
+    import time
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    client = FakeCodeGraphClient()
+
+    first = ingest_codegraph(root, project="alpha", source_name="main", query="Suitelet entry", client=client)
+    code_page = root / "wiki/projects/alpha/code/onrequest.md"
+    first_mtime = code_page.stat().st_mtime
+
+    time.sleep(0.05)
+
+    second = ingest_codegraph(root, project="alpha", source_name="main", query="Suitelet entry", client=client)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second.get("status") == "unchanged"
+    assert code_page.stat().st_mtime == first_mtime
+
+
+
 def test_staged_wiki_ingest_requires_analysis_and_generation(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

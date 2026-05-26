@@ -137,3 +137,22 @@ def test_wiki_lint_reports_cache_manifest_hash_mismatch(tmp_path: Path):
 
     assert result["ok"] is False
     assert any(issue["code"] == "cache_manifest_hash_mismatch" and issue["severity"] == "warning" for issue in result["issues"])
+
+
+def test_wiki_lint_reports_orphan_pages(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/concepts/orphan.md"),
+            {"title": "Orphan", "type": "concept", "generated": True, "sources": []},
+            "Orphan",
+            "Nobody links here and index does not reference it.",
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root)
+
+    assert any(issue["code"] == "orphan_page" and issue["path"] == "wiki/concepts/orphan.md" for issue in result["issues"])

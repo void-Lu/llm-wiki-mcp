@@ -200,3 +200,37 @@ def test_wiki_query_vector_stage_is_optional_warning(tmp_path: Path):
 
     assert result["pipeline"]["stage_1_5_vector_enabled"] is True
     assert result["pipeline"]["stage_1_5_vector_warnings"][0]["code"] == "vector_config_missing"
+
+
+def test_wiki_query_idf_weights_rare_terms_higher(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/common1.md", "Common One", "common word appears here", type="concept")
+    _write(root, "wiki/concepts/common2.md", "Common Two", "common word appears here too", type="concept")
+    _write(root, "wiki/concepts/common3.md", "Common Three", "common word appears here also", type="concept")
+    _write(root, "wiki/concepts/rare.md", "Rare Page", "common word and unique_rare_term here", type="concept")
+    refresh_indexes(root)
+
+    common_result = wiki_query(root, "common", top_k=4)
+    rare_result = wiki_query(root, "unique_rare_term", top_k=4)
+
+    rare_scores = {item["path"]: item["scores"]["keyword"] for item in rare_result["results"]}
+    assert rare_scores.get("wiki/concepts/rare.md", 0) > 0
+    common_scores = {item["path"]: item["scores"]["keyword"] for item in common_result["results"]}
+    rare_keyword = rare_scores.get("wiki/concepts/rare.md", 0)
+    common_keyword = common_scores.get("wiki/concepts/rare.md", 0)
+    assert rare_keyword > common_keyword
+
+
+def test_wiki_query_frontmatter_filter_by_type(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/projects/alpha/code/script.md", "Script", "shared keyword alpha", type="code_fact")
+    _write(root, "wiki/projects/alpha/decisions/choice.md", "Choice", "shared keyword alpha", type="decision", generated=False)
+    refresh_indexes(root)
+
+    result = wiki_query(root, "shared keyword", project="alpha", top_k=5, filter_type="decision")
+
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/projects/alpha/decisions/choice.md" in paths
+    assert "wiki/projects/alpha/code/script.md" not in paths

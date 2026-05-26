@@ -10,6 +10,7 @@ from netsuite_rag_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegrap
 from netsuite_rag_mcp.wiki_ingest import rescan_source as run_rescan_source
 from netsuite_rag_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_rag_mcp.wiki_lint import wiki_lint as run_wiki_lint
+from netsuite_rag_mcp.wiki_log import parse_log_entries as run_parse_log_entries
 from netsuite_rag_mcp.wiki_paths import create_wiki_root
 from netsuite_rag_mcp.wiki_query import wiki_query as run_wiki_query
 from netsuite_rag_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
@@ -88,6 +89,8 @@ def wiki_query_tool(
     vector_config: dict[str, Any] | None = None,
     max_graph_hops: int = 2,
     include_raw_sources: bool = False,
+    filter_type: str | None = None,
+    filter_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     return run_wiki_query(
         vault_root=vault_root,
@@ -103,6 +106,8 @@ def wiki_query_tool(
         vector_config=vector_config,
         max_graph_hops=max_graph_hops,
         include_raw_sources=include_raw_sources,
+        filter_type=filter_type,
+        filter_tags=filter_tags,
     )
 
 
@@ -170,6 +175,11 @@ def wiki_rescan_tool(
 
 def wiki_lint_tool(vault_root: str) -> dict[str, Any]:
     return run_wiki_lint(vault_root)
+
+
+def wiki_changelog_tool(vault_root: str, limit: int = 10) -> dict[str, Any]:
+    entries = run_parse_log_entries(vault_root, limit=limit)
+    return {"ok": True, "entries": entries, "count": len(entries)}
 
 
 def save_obsidian_note_tool(
@@ -297,6 +307,8 @@ def wiki_query(
     vector_config: dict[str, Any] | None = None,
     max_graph_hops: int = 2,
     include_raw_sources: bool = False,
+    filter_type: str | None = None,
+    filter_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Query persisted wiki pages and return a budgeted context pack."""
     return wiki_query_tool(
@@ -313,6 +325,8 @@ def wiki_query(
         vector_config,
         max_graph_hops,
         include_raw_sources,
+        filter_type,
+        filter_tags,
     )
 
 
@@ -364,6 +378,12 @@ def wiki_rescan(
 def wiki_lint(vault_root: str) -> dict[str, Any]:
     """Check LLM Wiki structure, frontmatter, wikilinks, and stale directories."""
     return wiki_lint_tool(vault_root)
+
+
+@mcp.tool()
+def wiki_changelog(vault_root: str, limit: int = 10) -> dict[str, Any]:
+    """Return recent wiki log entries as structured data."""
+    return wiki_changelog_tool(vault_root, limit)
 
 
 @mcp.tool()

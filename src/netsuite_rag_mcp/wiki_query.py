@@ -79,12 +79,19 @@ def wiki_query(
     vector_config: dict[str, Any] | None = None,
     max_graph_hops: int = 2,
     include_raw_sources: bool = False,
+    filter_type: str | None = None,
+    filter_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
     tokens = _tokens(question)
     candidates = _candidate_pages(root, include_raw_sources=include_raw_sources)
     if project:
         candidates = [candidate for candidate in candidates if _in_project_scope(candidate.rel, project)]
+    if filter_type:
+        candidates = [candidate for candidate in candidates if str(candidate.frontmatter.get("type") or "") == filter_type]
+    if filter_tags:
+        tag_set = set(filter_tags)
+        candidates = [candidate for candidate in candidates if tag_set & set(_as_list(candidate.frontmatter.get("tags")))]
     graph = _build_graph(root)
 
     scored: dict[str, QueryCandidate] = {}

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from netsuite_rag_mcp.redaction import redact_sensitive_text
 from netsuite_rag_mcp.wiki_models import WikiLogEntry
+
+_LOG_HEADING_RE = re.compile(r"^## \[([^\]]+)\] (\S+) \| (.+)$")
 
 
 def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, object]:
@@ -40,6 +44,52 @@ def read_recent_log_entries(vault_root: str | Path, limit: int = 5) -> list[str]
         return []
     headings = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.startswith("## [")]
     return list(reversed(headings[-limit:]))
+
+
+def parse_log_entries(vault_root: str | Path, limit: int = 10) -> list[dict[str, Any]]:
+    log_path = Path(vault_root) / "wiki" / "log.md"
+    if not log_path.exists():
+        return []
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    entries: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    current_field: str = ""
+    for line in lines:
+        match = _LOG_HEADING_RE.match(line)
+        if match:
+            if current is not None:
+                entries.append(current)
+            current = {
+                "timestamp": match.group(1),
+                "operation": match.group(2),
+                "title": match.group(3),
+                "project": "",
+                "status": "",
+                "paths": [],
+                "sources": [],
+            }
+            current_field = ""
+            continue
+        if current is None:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("- project:"):
+            current["project"] = stripped[len("- project:"):].strip()
+            current_field = ""
+        elif stripped.startswith("- status:"):
+            current["status"] = stripped[len("- status:"):].strip()
+            current_field = ""
+        elif stripped == "- paths:":
+            current_field = "paths"
+        elif stripped == "- sources:":
+            current_field = "sources"
+        elif stripped.startswith("- ") and current_field:
+            value = stripped[2:].strip()
+            if value != "none":
+                current[current_field].append(value)
+    if current is not None:
+        entries.append(current)
+    return list(reversed(entries[-limit:]))
 
 
 def _indented_items(items: list[str]) -> list[str]:

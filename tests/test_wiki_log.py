@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from netsuite_rag_mcp.wiki_log import append_log_entry, read_recent_log_entries
+from netsuite_rag_mcp.wiki_log import append_log_entry, parse_log_entries, read_recent_log_entries
 from netsuite_rag_mcp.wiki_models import WikiLogEntry
 from netsuite_rag_mcp.wiki_paths import create_wiki_root
 
@@ -80,3 +80,45 @@ def test_read_recent_log_entries_returns_latest_headings(tmp_path: Path):
         "## [2026-05-26T10:20:32Z] query | Question 2",
         "## [2026-05-26T10:20:31Z] query | Question 1",
     ]
+
+
+def test_parse_log_entries_returns_structured_entries(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    append_log_entry(
+        root,
+        WikiLogEntry(
+            operation="ingest",
+            title="CodeGraph alpha",
+            paths=["wiki/projects/alpha/code/script.md", "wiki/sources/codegraph-alpha-main.md"],
+            sources=["raw/sources/codegraph/alpha/main/context.json"],
+            project="alpha",
+            status="ok",
+            timestamp="2026-05-26T10:20:30Z",
+        ),
+    )
+    append_log_entry(
+        root,
+        WikiLogEntry(
+            operation="llm_ingest",
+            title="alpha/docs",
+            paths=["wiki/sources/alpha-docs.md"],
+            sources=["raw/sources/file/alpha/docs/notes.md"],
+            project="alpha",
+            status="ok",
+            timestamp="2026-05-26T11:00:00Z",
+        ),
+    )
+
+    entries = parse_log_entries(root, limit=5)
+
+    assert len(entries) == 2
+    assert entries[0]["timestamp"] == "2026-05-26T11:00:00Z"
+    assert entries[0]["operation"] == "llm_ingest"
+    assert entries[0]["title"] == "alpha/docs"
+    assert entries[0]["project"] == "alpha"
+    assert entries[0]["status"] == "ok"
+    assert entries[0]["paths"] == ["wiki/sources/alpha-docs.md"]
+    assert entries[0]["sources"] == ["raw/sources/file/alpha/docs/notes.md"]
+    assert entries[1]["timestamp"] == "2026-05-26T10:20:30Z"
+    assert entries[1]["operation"] == "ingest"

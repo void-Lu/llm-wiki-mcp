@@ -89,6 +89,37 @@ def wiki_lint(vault_root: str | Path, max_page_bytes: int = 200_000) -> dict[str
                 resolved = (root / "wiki" / target_path).resolve()
                 if resolved.is_relative_to(root) and not resolved.exists():
                     issues.append(_issue("index_target_missing", f"index target does not exist: {target}", Path("wiki/index.md")))
+        structural_pages = {"wiki/index.md", "wiki/log.md", "wiki/overview.md"}
+        referenced: set[str] = set()
+        by_rel = {page.relative_to(root).as_posix(): page for page in pages}
+        by_stem: dict[str, list[str]] = {}
+        for rel in by_rel:
+            by_stem.setdefault(Path(rel).stem.casefold(), []).append(rel)
+        for page in pages:
+            text = page.read_text(encoding="utf-8")
+            for target in _WIKILINK_RE.findall(text):
+                target_path = Path(target)
+                if target_path.suffix != ".md":
+                    target_path = target_path.with_suffix(".md")
+                for candidate in [(page.parent / target_path).resolve(), (root / "wiki" / target_path).resolve(), (root / target_path).resolve()]:
+                    try:
+                        rel_candidate = candidate.relative_to(root).as_posix()
+                    except ValueError:
+                        continue
+                    if rel_candidate in by_rel:
+                        referenced.add(rel_candidate)
+                        break
+                else:
+                    stem_matches = by_stem.get(Path(target).stem.casefold(), [])
+                    if len(stem_matches) == 1:
+                        referenced.add(stem_matches[0])
+        for rel in by_rel:
+            if rel in structural_pages:
+                continue
+            if rel.endswith("/index.md"):
+                continue
+            if rel not in referenced:
+                issues.append(_issue("orphan_page", f"page is not referenced by any wikilink or index: {rel}", Path(rel), severity="warning"))
     cache_root = root / ".llm-wiki" / "ingest-cache"
     if cache_root.exists():
         for cache_file in sorted(cache_root.rglob("*.json")):
