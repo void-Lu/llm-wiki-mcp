@@ -10,6 +10,7 @@ from netsuite_rag_mcp.server import (
     index_vault_tool,
     wiki_init_tool,
     wiki_ingest_tool,
+    wiki_ingest_llm_tool,
     wiki_lint_tool,
     wiki_query_tool,
 )
@@ -74,17 +75,50 @@ class TestLlmWikiServerTools:
 
         monkeypatch.setattr("netsuite_rag_mcp.server.run_wiki_query", fake_query)
 
-        result = wiki_query_tool(str(vault), question="invoice", project="alpha", top_k=3, include_content=False)
+        result = wiki_query_tool(str(vault), question="invoice", project="alpha", top_k=3, include_content=False, context_window_tokens=8000)
 
         assert result == payload
-        assert calls == [{"vault_root": str(vault), "question": "invoice", "project": "alpha", "top_k": 3, "include_content": False}]
+        assert calls == [{
+            "vault_root": str(vault),
+            "question": "invoice",
+            "project": "alpha",
+            "top_k": 3,
+            "include_content": False,
+            "context_window_tokens": 8000,
+            "include_context_pack": True,
+            "chat_history": None,
+            "language": "zh-CN",
+            "enable_vector": False,
+            "vector_config": None,
+            "max_graph_hops": 2,
+            "include_raw_sources": False,
+        }]
 
-    def test_wiki_lint_tool_delegates_to_lint(self, monkeypatch, tmp_path: Path):
+    def test_wiki_ingest_llm_tool_delegates_staged_ingest(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"
-        payload = {"ok": True, "issues": []}
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_wiki_lint", lambda vault_root: payload)
+        payload = {"ok": True, "stage": "prepare_analysis"}
+        calls: list[dict[str, object]] = []
 
-        assert wiki_lint_tool(str(vault)) == payload
+        def fake_staged(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_rag_mcp.server.run_staged_wiki_ingest", fake_staged)
+
+        result = wiki_ingest_llm_tool(str(vault), stage="prepare_analysis", project="alpha", source_name="docs", source_path="src")
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "stage": "prepare_analysis",
+            "project": "alpha",
+            "source_name": "docs",
+            "source_path": "src",
+            "source_type": "file",
+            "language": "zh-CN",
+            "analysis": None,
+            "generation": None,
+        }]
 
     def test_wiki_ingest_rejects_unsupported_source_type(self, tmp_path: Path):
         vault = tmp_path / "wiki-root"

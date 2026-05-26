@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from netsuite_rag_mcp.note_writer import save_obsidian_note as run_save_obsidian_note
 from netsuite_rag_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
+from netsuite_rag_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_rag_mcp.wiki_lint import wiki_lint as run_wiki_lint
 from netsuite_rag_mcp.wiki_paths import create_wiki_root
 from netsuite_rag_mcp.wiki_query import wiki_query as run_wiki_query
@@ -77,6 +78,14 @@ def wiki_query_tool(
     project: str | None = None,
     top_k: int = 8,
     include_content: bool = True,
+    context_window_tokens: int = 16_000,
+    include_context_pack: bool = True,
+    chat_history: list[dict[str, str]] | None = None,
+    language: str = "zh-CN",
+    enable_vector: bool = False,
+    vector_config: dict[str, Any] | None = None,
+    max_graph_hops: int = 2,
+    include_raw_sources: bool = False,
 ) -> dict[str, Any]:
     return run_wiki_query(
         vault_root=vault_root,
@@ -84,6 +93,38 @@ def wiki_query_tool(
         project=project,
         top_k=top_k,
         include_content=include_content,
+        context_window_tokens=context_window_tokens,
+        include_context_pack=include_context_pack,
+        chat_history=chat_history,
+        language=language,
+        enable_vector=enable_vector,
+        vector_config=vector_config,
+        max_graph_hops=max_graph_hops,
+        include_raw_sources=include_raw_sources,
+    )
+
+
+def wiki_ingest_llm_tool(
+    vault_root: str,
+    stage: str,
+    project: str,
+    source_name: str,
+    source_path: str | None = None,
+    source_type: str = "file",
+    language: str = "zh-CN",
+    analysis: dict[str, Any] | str | None = None,
+    generation: dict[str, Any] | str | None = None,
+) -> dict[str, Any]:
+    return run_staged_wiki_ingest(
+        vault_root=vault_root,
+        stage=stage,
+        project=project,
+        source_name=source_name,
+        source_path=source_path,
+        source_type=source_type,
+        language=language,
+        analysis=analysis,
+        generation=generation,
     )
 
 
@@ -208,9 +249,47 @@ def wiki_query(
     project: str | None = None,
     top_k: int = 8,
     include_content: bool = True,
+    context_window_tokens: int = 16_000,
+    include_context_pack: bool = True,
+    chat_history: list[dict[str, str]] | None = None,
+    language: str = "zh-CN",
+    enable_vector: bool = False,
+    vector_config: dict[str, Any] | None = None,
+    max_graph_hops: int = 2,
+    include_raw_sources: bool = False,
 ) -> dict[str, Any]:
-    """Query persisted wiki pages without vector embeddings."""
-    return wiki_query_tool(vault_root, question, project, top_k, include_content)
+    """Query persisted wiki pages and return a budgeted context pack."""
+    return wiki_query_tool(
+        vault_root,
+        question,
+        project,
+        top_k,
+        include_content,
+        context_window_tokens,
+        include_context_pack,
+        chat_history,
+        language,
+        enable_vector,
+        vector_config,
+        max_graph_hops,
+        include_raw_sources,
+    )
+
+
+@mcp.tool()
+def wiki_ingest_llm(
+    vault_root: str,
+    stage: str,
+    project: str,
+    source_name: str,
+    source_path: str | None = None,
+    source_type: str = "file",
+    language: str = "zh-CN",
+    analysis: dict[str, Any] | str | None = None,
+    generation: dict[str, Any] | str | None = None,
+) -> dict[str, Any]:
+    """Run staged LLM-assisted ingest by returning prompts and applying model output."""
+    return wiki_ingest_llm_tool(vault_root, stage, project, source_name, source_path, source_type, language, analysis, generation)
 
 
 @mcp.tool()

@@ -109,6 +109,8 @@ def _validate_relative_path(path: Path) -> Path:
         raise WikiWriteError("invalid_wiki_path", f"objects directories are not part of the confirmed wiki structure: {normalized.as_posix()}")
     if not any(_starts_with(normalized, prefix) for prefix in _ALLOWED_PREFIXES):
         raise WikiWriteError("invalid_wiki_path", f"page path is outside the confirmed wiki structure: {normalized.as_posix()}")
+    if _starts_with(normalized, Path("wiki/projects")) and not _is_valid_project_path(normalized):
+        raise WikiWriteError("invalid_wiki_path", f"project page path is outside the confirmed project structure: {normalized.as_posix()}")
     for part in normalized.parts:
         if part in {"wiki", "projects", "concepts", "sources", "queries", "synthesis", "comparisons", "code", "decisions", "troubleshooting", "requirements"}:
             continue
@@ -119,6 +121,13 @@ def _validate_relative_path(path: Path) -> Path:
             code = getattr(exc, "code", "invalid_path_component")
             raise WikiWriteError(code, str(exc)) from exc
     return normalized
+
+
+def _is_valid_project_path(path: Path) -> bool:
+    parts = path.parts
+    if len(parts) == 4 and parts[3] == "index.md":
+        return True
+    return len(parts) >= 5 and parts[3] in {"code", "decisions", "troubleshooting", "requirements"}
 
 
 def _redact_value(value: Any) -> Any:
