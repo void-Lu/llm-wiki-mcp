@@ -16,7 +16,7 @@ def test_readme_documents_llm_wiki_workflow():
     assert "CodeGraph" in text
     assert "不引入 Chroma、sentence-transformers 或 embedding 模型" in text
     assert "不创建" in text
-    assert "NETSUITE_RAG_VAULT_ROOT" not in text
+    assert "NETSUITE_LLM_WIKI_VAULT_ROOT" in text
 
 
 def test_repository_mcp_config_has_no_absolute_paths():
@@ -26,7 +26,7 @@ def test_repository_mcp_config_has_no_absolute_paths():
 
     text = mcp_json.read_text(encoding="utf-8")
     assert "C:\\" not in text and "D:\\" not in text and "F:\\" not in text
-    assert "NETSUITE_RAG_VAULT_ROOT" not in text
+    assert "NETSUITE_LLM_WIKI_VAULT_ROOT" not in text
 
 
 def test_repository_does_not_ship_vault_sources_yaml():

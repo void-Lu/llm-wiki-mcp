@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from netsuite_rag_mcp.server import (
+from netsuite_llm_wiki_mcp.server import (
     _build_filters,
     generate_suitecloud_wiki_tool,
     get_index_status_tool,
@@ -38,14 +38,14 @@ class TestDeprecatedRagTools:
         assert "wiki_lint" in result["replacement"]
 
     def test_search_netsuite_knowledge_is_deprecated(self):
-        from netsuite_rag_mcp.server import search_netsuite_knowledge_tool
+        from netsuite_llm_wiki_mcp.server import search_netsuite_knowledge_tool
         result = search_netsuite_knowledge_tool(question="test")
         assert result["ok"] is False
         assert result["code"] == "deprecated_rag_tool"
         assert "wiki_query" in result["replacement"]
 
     def test_ask_netsuite_rag_is_deprecated(self):
-        from netsuite_rag_mcp.server import ask_netsuite_rag_tool
+        from netsuite_llm_wiki_mcp.server import ask_netsuite_rag_tool
         result = ask_netsuite_rag_tool(question="test")
         assert result["ok"] is False
         assert result["code"] == "deprecated_rag_tool"
@@ -75,7 +75,7 @@ class TestLlmWikiServerTools:
             calls.append(kwargs)
             return payload
 
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_wiki_query", fake_query)
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_query", fake_query)
 
         result = wiki_query_tool(str(vault), question="invoice", project="alpha", top_k=3, include_content=False, context_window_tokens=8000)
 
@@ -107,7 +107,7 @@ class TestLlmWikiServerTools:
             calls.append(kwargs)
             return payload
 
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_staged_wiki_ingest", fake_staged)
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_staged_wiki_ingest", fake_staged)
 
         result = wiki_ingest_llm_tool(str(vault), stage="prepare_analysis", project="alpha", source_name="docs", source_path="src")
 
@@ -133,7 +133,7 @@ class TestLlmWikiServerTools:
             calls.append(kwargs)
             return payload
 
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_rescan_source", fake_rescan)
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_rescan_source", fake_rescan)
 
         result = wiki_rescan_tool(str(vault), project="alpha", source_name="docs", source_path="src", source_type="file", language="zh-CN")
 
@@ -156,7 +156,7 @@ class TestLlmWikiServerTools:
             calls.append(kwargs)
             return payload
 
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_wiki_query_debug", fake_debug)
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_query_debug", fake_debug)
 
         result = wiki_query_debug_tool(str(vault), question="invoice", project="alpha", top_k=3, max_graph_hops=1, include_raw_sources=True)
 
@@ -203,7 +203,7 @@ class TestLlmWikiServerTools:
             calls.append(kwargs)
             return payload
 
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_ingest_codegraph", fake_ingest)
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_ingest_codegraph", fake_ingest)
 
         result = wiki_ingest_tool(str(vault), source_type="codegraph", project="alpha", source_name="main", query="entry", codegraph_project_path="repo")
 
@@ -225,7 +225,7 @@ class TestLlmWikiServerTools:
             calls.append(kwargs)
             return payload
 
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_ingest_codegraph", fake_ingest)
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_ingest_codegraph", fake_ingest)
 
         result = generate_suitecloud_wiki_tool(project="alpha", source_name="main", vault_root=str(vault))
 

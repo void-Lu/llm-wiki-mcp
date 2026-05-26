@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from netsuite_rag_mcp.wiki_index import refresh_indexes
-from netsuite_rag_mcp.wiki_io import write_wiki_page
-from netsuite_rag_mcp.wiki_models import WikiPage
-from netsuite_rag_mcp.wiki_paths import create_wiki_root
-from netsuite_rag_mcp.wiki_query import wiki_query, wiki_query_debug
+from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
+from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
+from netsuite_llm_wiki_mcp.wiki_models import WikiPage
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wiki_query import wiki_query, wiki_query_debug
 
 
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:

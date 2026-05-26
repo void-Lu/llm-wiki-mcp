@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from netsuite_rag_mcp.context_budget import compute_context_budget
+from netsuite_llm_wiki_mcp.context_budget import compute_context_budget
 
 
 def test_default_budget():

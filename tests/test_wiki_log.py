@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from netsuite_rag_mcp.wiki_log import append_log_entry, parse_log_entries, read_recent_log_entries
-from netsuite_rag_mcp.wiki_models import WikiLogEntry
-from netsuite_rag_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wiki_log import append_log_entry, parse_log_entries, read_recent_log_entries
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
 
 def test_append_log_entry_uses_parseable_heading_and_fields(tmp_path: Path):

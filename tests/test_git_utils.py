@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netsuite_rag_mcp.git_utils import (
+from netsuite_llm_wiki_mcp.git_utils import (
     GitInfo,
     format_git_commit,
     get_git_branch,
@@ -50,7 +50,7 @@ def _failed_run(returncode: int = 128, stderr: str = "fatal: not a git repositor
 
 class TestGetGitCommit:
     def test_returns_short_sha_on_success(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.return_value = _successful_run("abc1234\n")
             result = get_git_commit(SAMPLE_DIR)
             assert result == "abc1234"
@@ -61,19 +61,19 @@ class TestGetGitCommit:
             assert "HEAD" in args[0][0]
 
     def test_returns_empty_on_failure(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(128, "git")
             result = get_git_commit(SAMPLE_DIR)
             assert result == ""
 
     def test_returns_empty_when_git_not_found(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("git not found")
             result = get_git_commit(SAMPLE_DIR)
             assert result == ""
 
     def test_returns_empty_on_subprocess_error(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.SubprocessError("timeout")
             result = get_git_commit(SAMPLE_DIR)
             assert result == ""
@@ -86,25 +86,25 @@ class TestGetGitCommit:
 
 class TestIsGitDirty:
     def test_returns_true_when_changes_exist(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.return_value = _successful_run(" M src/main.py\n?? new_file.py\n")
             result = is_git_dirty(SAMPLE_DIR)
             assert result is True
 
     def test_returns_false_when_clean(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.return_value = _successful_run("")
             result = is_git_dirty(SAMPLE_DIR)
             assert result is False
 
     def test_returns_false_on_failure(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(128, "git")
             result = is_git_dirty(SAMPLE_DIR)
             assert result is False
 
     def test_returns_false_when_git_not_found(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("git not found")
             result = is_git_dirty(SAMPLE_DIR)
             assert result is False
@@ -117,26 +117,26 @@ class TestIsGitDirty:
 
 class TestGetGitBranch:
     def test_returns_branch_name_on_success(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.return_value = _successful_run("main\n")
             result = get_git_branch(SAMPLE_DIR)
             assert result == "main"
 
     def test_returns_empty_on_failure(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(128, "git")
             result = get_git_branch(SAMPLE_DIR)
             assert result == ""
 
     def test_returns_empty_when_git_not_found(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("git not found")
             result = get_git_branch(SAMPLE_DIR)
             assert result == ""
 
     def test_returns_detached_head_hash(self) -> None:
         """In detached HEAD, rev-parse --abbrev-ref HEAD returns 'HEAD'."""
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.return_value = _successful_run("HEAD\n")
             result = get_git_branch(SAMPLE_DIR)
             assert result == "HEAD"
@@ -149,7 +149,7 @@ class TestGetGitBranch:
 
 class TestGetGitInfo:
     def test_returns_full_info_for_git_repo(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = [
                 _successful_run("abc1234\n"),      # get_git_commit
                 _successful_run("feature/x\n"),     # get_git_branch
@@ -159,15 +159,15 @@ class TestGetGitInfo:
             assert info == GitInfo(commit="abc1234", branch="feature/x", dirty=True)
 
     def test_returns_defaults_for_non_git_dir(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(128, "git")
             info = get_git_info(SAMPLE_DIR)
             assert info == GitInfo(commit="", branch="", dirty=False)
 
     def test_works_with_file_path(self) -> None:
         """get_git_info should work when given a file path (uses parent dir)."""
-        with patch("netsuite_rag_mcp.git_utils._resolve_git_dir", return_value=SAMPLE_DIR), \
-             patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils._resolve_git_dir", return_value=SAMPLE_DIR), \
+             patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = [
                 _successful_run("deadbeef\n"),   # get_git_commit
                 _successful_run("main\n"),        # get_git_branch
@@ -179,7 +179,7 @@ class TestGetGitInfo:
             assert info.dirty is False
 
     def test_returns_defaults_when_git_not_available(self) -> None:
-        with patch("netsuite_rag_mcp.git_utils.subprocess.run") as mock_run:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("git not found")
             info = get_git_info(SAMPLE_DIR)
             assert info == GitInfo(commit="", branch="", dirty=False)

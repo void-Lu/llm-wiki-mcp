@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from netsuite_rag_mcp.codegraph_client import CodeGraphClient
+from netsuite_llm_wiki_mcp.codegraph_client import CodeGraphClient
 
 
 def test_status_returns_parsed_json(tmp_path: Path):

@@ -5,23 +5,23 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from netsuite_rag_mcp.note_writer import save_obsidian_note as run_save_obsidian_note
-from netsuite_rag_mcp.page_merge import apply_page_merge as run_apply_page_merge
-from netsuite_rag_mcp.page_merge import prepare_body_merge as run_prepare_body_merge
-from netsuite_rag_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
-from netsuite_rag_mcp.wiki_dedup import wiki_dedup as run_wiki_dedup
-from netsuite_rag_mcp.wiki_delete import wiki_delete_source as run_wiki_delete_source
-from netsuite_rag_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
-from netsuite_rag_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
-from netsuite_rag_mcp.wiki_ingest import rescan_source as run_rescan_source
-from netsuite_rag_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
-from netsuite_rag_mcp.wiki_insights import wiki_insights as run_wiki_insights
-from netsuite_rag_mcp.wiki_lint import wiki_lint as run_wiki_lint
-from netsuite_rag_mcp.wiki_log import parse_log_entries as run_parse_log_entries
-from netsuite_rag_mcp.wiki_paths import create_wiki_root
-from netsuite_rag_mcp.wiki_query import wiki_query as run_wiki_query
-from netsuite_rag_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
-from netsuite_rag_mcp.wiki_research import wiki_research as run_wiki_research
+from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note as run_save_obsidian_note
+from netsuite_llm_wiki_mcp.page_merge import apply_page_merge as run_apply_page_merge
+from netsuite_llm_wiki_mcp.page_merge import prepare_body_merge as run_prepare_body_merge
+from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
+from netsuite_llm_wiki_mcp.wiki_dedup import wiki_dedup as run_wiki_dedup
+from netsuite_llm_wiki_mcp.wiki_delete import wiki_delete_source as run_wiki_delete_source
+from netsuite_llm_wiki_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
+from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
+from netsuite_llm_wiki_mcp.wiki_ingest import rescan_source as run_rescan_source
+from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
+from netsuite_llm_wiki_mcp.wiki_insights import wiki_insights as run_wiki_insights
+from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint as run_wiki_lint
+from netsuite_llm_wiki_mcp.wiki_log import parse_log_entries as run_parse_log_entries
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wiki_query import wiki_query as run_wiki_query
+from netsuite_llm_wiki_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
+from netsuite_llm_wiki_mcp.wiki_research import wiki_research as run_wiki_research
 
 mcp = FastMCP("netsuite-llm-wiki-mcp")
 

@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from netsuite_rag_mcp.wiki_io import WikiWriteError, read_markdown_page, write_wiki_page
-from netsuite_rag_mcp.wiki_models import WikiPage
-from netsuite_rag_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wiki_io import WikiWriteError, read_markdown_page, write_wiki_page
+from netsuite_llm_wiki_mcp.wiki_models import WikiPage
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
 
 def test_write_and_read_markdown_page_with_frontmatter(tmp_path: Path):

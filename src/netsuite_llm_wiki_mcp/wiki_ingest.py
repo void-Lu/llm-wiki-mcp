@@ -6,14 +6,14 @@ import shutil
 from pathlib import Path
 from typing import Any, Protocol
 
-from netsuite_rag_mcp.codegraph_client import CodeGraphClient
-from netsuite_rag_mcp.redaction import redact_sensitive_text
-from netsuite_rag_mcp.wiki_index import refresh_indexes
-from netsuite_rag_mcp.wiki_io import write_wiki_page
-from netsuite_rag_mcp.wiki_log import append_log_entry
-from netsuite_rag_mcp.wiki_models import WikiLogEntry, WikiPage
-from netsuite_rag_mcp.wiki_overview import refresh_overview
-from netsuite_rag_mcp.wiki_paths import create_wiki_root, safe_segment, slug
+from netsuite_llm_wiki_mcp.codegraph_client import CodeGraphClient
+from netsuite_llm_wiki_mcp.redaction import redact_sensitive_text
+from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
+from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
+from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry, WikiPage
+from netsuite_llm_wiki_mcp.wiki_overview import refresh_overview
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root, safe_segment, slug
 
 
 _MAX_SOURCE_FILES = 200

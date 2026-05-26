@@ -6,8 +6,8 @@ from typing import Any
 
 import yaml
 
-from netsuite_rag_mcp.wiki_ingest import ingest_codegraph, rescan_source, staged_wiki_ingest
-from netsuite_rag_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph, rescan_source, staged_wiki_ingest
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
 
 class FakeCodeGraphClient:

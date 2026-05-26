@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from netsuite_rag_mcp.wiki_insights import wiki_insights
+from netsuite_llm_wiki_mcp.wiki_insights import wiki_insights
 
 
 @pytest.fixture

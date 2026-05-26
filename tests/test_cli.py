@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from netsuite_rag_mcp.cli import main
+from netsuite_llm_wiki_mcp.cli import main
 
 
 def _make_vault(path: Path) -> Path:
@@ -21,7 +21,7 @@ def _make_vault(path: Path) -> Path:
 def test_init_writes_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     vault = _make_vault(tmp_path / "Homework Vault")
     config_dir = tmp_path / "config"
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(config_dir))
 
     exit_code = main(["init", "--vault", "homework", "--root", str(vault), "--default"])
 
@@ -45,8 +45,8 @@ def test_init_writes_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 def test_status_reads_same_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     vault = _make_vault(tmp_path / "Homework Vault")
     config_dir = tmp_path / "config"
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(config_dir))
 
     assert main(["init", "--vault", "homework", "--root", str(vault), "--default"]) == 0
     capsys.readouterr()
@@ -73,8 +73,8 @@ def test_status_reports_full_diagnostics_when_sources_config_is_missing(
     vault = tmp_path / "Homework Vault"
     vault.mkdir()
     config_dir = tmp_path / "config"
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(config_dir))
 
     assert main(["init", "--vault", "homework", "--root", str(vault), "--default"]) == 0
     init_output = json.loads(capsys.readouterr().out)
@@ -108,9 +108,9 @@ def test_status_returns_nonzero_with_actionable_message_when_config_missing(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ):
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(tmp_path / "missing-config"))
-    monkeypatch.setenv("NETSUITE_RAG_USER_DATA_DIR", str(tmp_path / "user-data"))
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(tmp_path / "missing-config"))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
 
     exit_code = main(["status"])
 
@@ -118,8 +118,8 @@ def test_status_returns_nonzero_with_actionable_message_when_config_missing(
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is False
     assert output["code"] == "missing_vault_root"
-    assert "netsuite-rag-mcp init --vault" in output["error"]
-    assert "NETSUITE_RAG_VAULT_ROOT" in output["error"]
+    assert "netsuite-llm-wiki-mcp init --vault" in output["error"]
+    assert "NETSUITE_LLM_WIKI_VAULT_ROOT" in output["error"]
 
 
 def test_init_returns_nonzero_when_vault_root_is_missing(
@@ -129,8 +129,8 @@ def test_init_returns_nonzero_when_vault_root_is_missing(
 ):
     config_dir = tmp_path / "config"
     missing_root = tmp_path / "missing-vault"
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("NETSUITE_RAG_USER_DATA_DIR", str(tmp_path / "user-data"))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
 
     exit_code = main(["init", "--vault", "homework", "--root", str(missing_root), "--default"])
 
@@ -149,8 +149,8 @@ def test_init_reports_missing_sources_without_creating_starter_file(
 ):
     vault = tmp_path / "Homework Vault"
     vault.mkdir()
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.setenv("NETSUITE_RAG_USER_DATA_DIR", str(tmp_path / "user-data"))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
 
     exit_code = main(["init", "--vault", "homework", "--root", str(vault), "--default"])
 
@@ -167,7 +167,7 @@ def test_server_subcommand_delegates_to_server_main(monkeypatch: pytest.MonkeyPa
     def fake_server_main() -> None:
         calls.append("server")
 
-    monkeypatch.setattr("netsuite_rag_mcp.server.main", fake_server_main)
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.server.main", fake_server_main)
 
     assert main(["server"]) == 0
     assert calls == ["server"]
@@ -176,6 +176,6 @@ def test_server_subcommand_delegates_to_server_main(monkeypatch: pytest.MonkeyPa
 def test_pyproject_exposes_cli_without_preload_script():
     text = Path("pyproject.toml").read_text(encoding="utf-8")
 
-    assert 'netsuite-rag-mcp = "netsuite_rag_mcp.cli:main"' in text
-    assert 'netsuite-rag-mcp-server = "netsuite_rag_mcp.server:main"' in text
-    assert "netsuite-rag-mcp-preload-model" not in text
+    assert 'netsuite-llm-wiki-mcp = "netsuite_llm_wiki_mcp.cli:main"' in text
+    assert 'netsuite-llm-wiki-mcp-server = "netsuite_llm_wiki_mcp.server:main"' in text
+    assert "netsuite-llm-wiki-mcp-preload-model" not in text

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from netsuite_rag_mcp.runtime_config import (
+from netsuite_llm_wiki_mcp.runtime_config import (
     RuntimeConfigError,
     _normalize_storage_hash_path,
     resolve_runtime_config,
@@ -46,7 +46,7 @@ def test_explicit_argument_wins_over_env_and_global_config(monkeypatch: pytest.M
     data_root = tmp_path / "data"
 
     write_global_config(config_path, vault_name="saved", vault_root=config_vault, make_default=True)
-    monkeypatch.setenv("NETSUITE_RAG_VAULT_ROOT", str(env_vault))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_VAULT_ROOT", str(env_vault))
 
     runtime = resolve_runtime_config(
         vault_root_arg=arg_vault,
@@ -66,7 +66,7 @@ def test_env_wins_over_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     config_path = tmp_path / "config" / "config.yaml"
 
     write_global_config(config_path, vault_name="saved", vault_root=config_vault, make_default=True)
-    monkeypatch.setenv("NETSUITE_RAG_VAULT_ROOT", str(env_vault))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_VAULT_ROOT", str(env_vault))
 
     runtime = resolve_runtime_config(config_path=config_path, data_root=tmp_path / "data")
 
@@ -79,13 +79,13 @@ def test_relative_env_vault_root_is_rejected(monkeypatch: pytest.MonkeyPatch, tm
     config_path = tmp_path / "config" / "config.yaml"
 
     write_global_config(config_path, vault_name="saved", vault_root=config_vault, make_default=True)
-    monkeypatch.setenv("NETSUITE_RAG_VAULT_ROOT", "relative-vault")
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_VAULT_ROOT", "relative-vault")
 
     with pytest.raises(RuntimeConfigError) as exc_info:
         resolve_runtime_config(config_path=config_path, data_root=tmp_path / "data")
 
     message = str(exc_info.value)
-    assert "NETSUITE_RAG_VAULT_ROOT" in message
+    assert "NETSUITE_LLM_WIKI_VAULT_ROOT" in message
     assert "absolute path" in message
 
 
@@ -94,7 +94,7 @@ def test_global_config_resolves_default_vault(monkeypatch: pytest.MonkeyPatch, t
     config_path = tmp_path / "config" / "config.yaml"
 
     write_global_config(config_path, vault_name="homework", vault_root=vault, make_default=True)
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
 
     runtime = resolve_runtime_config(config_path=config_path, data_root=tmp_path / "data")
 
@@ -120,7 +120,7 @@ def test_relative_global_config_vault_root_is_rejected(monkeypatch: pytest.Monke
         ),
         encoding="utf-8",
     )
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
 
     with pytest.raises(RuntimeConfigError) as exc_info:
         resolve_runtime_config(config_path=config_path, data_root=tmp_path / "data")
@@ -132,41 +132,41 @@ def test_relative_global_config_vault_root_is_rejected(monkeypatch: pytest.Monke
 
 
 def test_relative_config_dir_env_override_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", "relative-config")
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", "relative-config")
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
 
     with pytest.raises(ValueError) as exc_info:
         resolve_runtime_config(data_root=tmp_path / "data")
 
     message = str(exc_info.value)
-    assert "NETSUITE_RAG_CONFIG_DIR" in message
+    assert "NETSUITE_LLM_WIKI_CONFIG_DIR" in message
     assert "absolute path" in message
 
 
 def test_relative_user_data_dir_env_override_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     vault = _make_vault(tmp_path / "Env Data Vault")
     config_path = tmp_path / "config" / "config.yaml"
-    monkeypatch.setenv("NETSUITE_RAG_USER_DATA_DIR", "relative-data")
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", "relative-data")
 
     with pytest.raises(ValueError) as exc_info:
         resolve_runtime_config(vault_root_arg=vault, config_path=config_path)
 
     message = str(exc_info.value)
-    assert "NETSUITE_RAG_USER_DATA_DIR" in message
+    assert "NETSUITE_LLM_WIKI_USER_DATA_DIR" in message
     assert "absolute path" in message
 
 
 def test_missing_config_does_not_use_current_working_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     cwd_vault = _make_vault(tmp_path / "cwd-vault")
     monkeypatch.chdir(cwd_vault)
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
 
     with pytest.raises(RuntimeConfigError) as exc_info:
         resolve_runtime_config(config_path=tmp_path / "missing" / "config.yaml", data_root=tmp_path / "data")
 
     message = str(exc_info.value)
-    assert "netsuite-rag-mcp init --vault" in message
-    assert "NETSUITE_RAG_VAULT_ROOT" in message
+    assert "netsuite-llm-wiki-mcp init --vault" in message
+    assert "NETSUITE_LLM_WIKI_VAULT_ROOT" in message
     assert str(cwd_vault) not in message
 
 

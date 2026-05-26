@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
-from netsuite_rag_mcp.platform_paths import global_config_path
-from netsuite_rag_mcp.runtime_config import RuntimeConfig, RuntimeConfigError, resolve_runtime_config, write_global_config
+from netsuite_llm_wiki_mcp.platform_paths import global_config_path
+from netsuite_llm_wiki_mcp.runtime_config import RuntimeConfig, RuntimeConfigError, resolve_runtime_config, write_global_config
 
 
 def _runtime_payload(runtime: RuntimeConfig) -> dict[str, Any]:
@@ -43,7 +43,7 @@ def _print_json(payload: dict[str, Any]) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="netsuite-rag-mcp")
+    parser = argparse.ArgumentParser(prog="netsuite-llm-wiki-mcp")
     subparsers = parser.add_subparsers(dest="command")
 
     init_parser = subparsers.add_parser("init", help="Create or update the user-level vault config.")
@@ -86,7 +86,7 @@ def _run_status(args: argparse.Namespace) -> int:
                 "error": (
                     f"Vault root {runtime.vault_root} does not contain rag/sources.yaml. "
                     f"Create {runtime.sources_config_path} before indexing, or run "
-                    "`netsuite-rag-mcp init --vault <name> --root <vault-path> --default` "
+                    "`netsuite-llm-wiki-mcp init --vault <name> --root <vault-path> --default` "
                     "after creating it."
                 ),
             }
@@ -103,7 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command in {None, "server"}:
-        from netsuite_rag_mcp.server import main as server_main
+        from netsuite_llm_wiki_mcp.server import main as server_main
 
         server_main()
         return 0

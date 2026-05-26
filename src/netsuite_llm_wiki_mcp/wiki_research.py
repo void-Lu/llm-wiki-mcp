@@ -18,10 +18,10 @@ from typing import Any
 
 import yaml
 
-from netsuite_rag_mcp.wiki_index import refresh_indexes
-from netsuite_rag_mcp.wiki_log import append_log_entry
-from netsuite_rag_mcp.wiki_models import WikiLogEntry
-from netsuite_rag_mcp.wiki_paths import safe_segment
+from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
+from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
+from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
 
 
 def wiki_research(

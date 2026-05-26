@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from netsuite_rag_mcp.wiki_delete import wiki_delete_source
+from netsuite_llm_wiki_mcp.wiki_delete import wiki_delete_source
 
 
 @pytest.fixture

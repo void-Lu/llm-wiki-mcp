@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from netsuite_rag_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 
 _REQUIRED_FILES = (
     Path("purpose.md"),

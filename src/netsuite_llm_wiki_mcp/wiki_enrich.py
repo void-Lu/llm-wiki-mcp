@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from netsuite_rag_mcp.wiki_io import read_markdown_page, split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 

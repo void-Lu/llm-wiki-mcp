@@ -5,9 +5,9 @@ from typing import Any
 
 import yaml
 
-from netsuite_rag_mcp.redaction import count_redactions, redact_sensitive_text
-from netsuite_rag_mcp.wiki_models import WikiPage
-from netsuite_rag_mcp.wiki_paths import safe_segment
+from netsuite_llm_wiki_mcp.redaction import count_redactions, redact_sensitive_text
+from netsuite_llm_wiki_mcp.wiki_models import WikiPage
+from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
 
 
 class WikiWriteError(ValueError):

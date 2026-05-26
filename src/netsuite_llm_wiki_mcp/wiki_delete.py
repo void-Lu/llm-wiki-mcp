@@ -14,10 +14,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from netsuite_rag_mcp.wiki_io import split_frontmatter
-from netsuite_rag_mcp.wiki_index import refresh_indexes
-from netsuite_rag_mcp.wiki_log import append_log_entry
-from netsuite_rag_mcp.wiki_models import WikiLogEntry
+from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
+from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from netsuite_rag_mcp.page_merge import (
+from netsuite_llm_wiki_mcp.page_merge import (
     apply_page_merge,
     merge_frontmatter,
     prepare_body_merge,

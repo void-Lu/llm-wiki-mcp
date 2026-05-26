@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from netsuite_rag_mcp.wiki_dedup import extract_page_summaries, wiki_dedup
+from netsuite_llm_wiki_mcp.wiki_dedup import extract_page_summaries, wiki_dedup
 
 
 @pytest.fixture

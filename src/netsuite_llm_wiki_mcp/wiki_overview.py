@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from netsuite_rag_mcp.wiki_io import split_frontmatter
-from netsuite_rag_mcp.wiki_log import read_recent_log_entries
+from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_log import read_recent_log_entries
 
 
 def refresh_overview(vault_root: str | Path) -> dict[str, Any]:

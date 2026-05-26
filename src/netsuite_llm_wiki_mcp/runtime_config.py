@@ -9,9 +9,9 @@ from typing import Any
 
 import yaml
 
-from netsuite_rag_mcp.platform_paths import global_config_path, user_data_dir
+from netsuite_llm_wiki_mcp.platform_paths import global_config_path, user_data_dir
 
-VAULT_ROOT_ENV = "NETSUITE_RAG_VAULT_ROOT"
+VAULT_ROOT_ENV = "NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 
 class RuntimeConfigError(RuntimeError):
@@ -133,7 +133,7 @@ def _vault_from_global_config(raw: dict[str, Any], config_path: Path) -> tuple[s
 def _missing_config_error(config_path: Path) -> RuntimeConfigError:
     message = (
         "No Obsidian vault root is configured. Run "
-        "`netsuite-rag-mcp init --vault <name> --root <vault-path> --default` "
+        "`netsuite-llm-wiki-mcp init --vault <name> --root <vault-path> --default` "
         f"to write {config_path}, or set {VAULT_ROOT_ENV} for development and automation."
     )
     return RuntimeConfigError(message, code="missing_vault_root", config_path=config_path)
@@ -142,7 +142,7 @@ def _missing_config_error(config_path: Path) -> RuntimeConfigError:
 def _missing_sources_error(vault_root: Path, sources_config_path: Path) -> RuntimeConfigError:
     message = (
         f"Vault root {vault_root} does not contain rag/sources.yaml. "
-        "Run `netsuite-rag-mcp init --vault <name> --root <vault-path> --default` "
+        "Run `netsuite-llm-wiki-mcp init --vault <name> --root <vault-path> --default` "
         f"after creating {sources_config_path}, or set {VAULT_ROOT_ENV} to a vault with rag/sources.yaml."
     )
     return RuntimeConfigError(message, code="missing_sources_config")

@@ -8,13 +8,13 @@ from typing import Any
 
 import yaml
 
-from netsuite_rag_mcp.redaction import count_redactions, redact_sensitive_text
-from netsuite_rag_mcp.runtime_config import RuntimeConfigError, resolve_runtime_config
-from netsuite_rag_mcp.wiki_index import refresh_indexes
-from netsuite_rag_mcp.wiki_log import append_log_entry
-from netsuite_rag_mcp.wiki_models import WikiLogEntry
-from netsuite_rag_mcp.wiki_overview import refresh_overview
-from netsuite_rag_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.redaction import count_redactions, redact_sensitive_text
+from netsuite_llm_wiki_mcp.runtime_config import RuntimeConfigError, resolve_runtime_config
+from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
+from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
+from netsuite_llm_wiki_mcp.wiki_overview import refresh_overview
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
 NOTE_TYPES = {"decision", "troubleshooting", "requirement", "knowledge"}
 PROJECT_NOTE_TYPES = {"decision", "troubleshooting", "requirement"}

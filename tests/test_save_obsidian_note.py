@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from netsuite_rag_mcp.note_writer import save_obsidian_note
+from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note
 
 
 @pytest.fixture
@@ -177,7 +177,7 @@ def test_auto_index_is_ignored_and_returns_null_indexed(vault: Path, monkeypatch
     def fail_index(*args: object, **kwargs: object) -> None:
         raise AssertionError("RAG index must not run")
 
-    monkeypatch.setattr("netsuite_rag_mcp.note_writer.run_index_sources", fail_index, raising=False)
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.note_writer.run_index_sources", fail_index, raising=False)
 
     result = _save(vault, note_type="decision", project="project-a", auto_index=True)
 
@@ -296,16 +296,16 @@ def test_no_sensitive_body_returns_zero_redactions(vault: Path):
 
 
 def test_save_note_uses_global_config_without_cwd_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    from netsuite_rag_mcp.runtime_config import write_global_config
+    from netsuite_llm_wiki_mcp.runtime_config import write_global_config
 
     configured_vault = tmp_path / "configured-vault"
     configured_vault.mkdir()
     cwd_vault = tmp_path / "cwd-vault"
     cwd_vault.mkdir()
     monkeypatch.chdir(cwd_vault)
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.setenv("NETSUITE_RAG_USER_DATA_DIR", str(tmp_path / "user-data"))
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
     write_global_config(tmp_path / "config" / "config.yaml", vault_name="homework", vault_root=configured_vault, make_default=True)
 
     result = save_obsidian_note(note_type="knowledge", title="Runtime Config Note", content="Body", domain="common-errors", auto_index=False)
@@ -319,9 +319,9 @@ def test_save_note_missing_config_does_not_use_cwd(monkeypatch: pytest.MonkeyPat
     cwd_vault = tmp_path / "cwd-vault"
     cwd_vault.mkdir()
     monkeypatch.chdir(cwd_vault)
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(tmp_path / "missing-config"))
-    monkeypatch.setenv("NETSUITE_RAG_USER_DATA_DIR", str(tmp_path / "user-data"))
+    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(tmp_path / "missing-config"))
+    monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
 
     result = save_obsidian_note(note_type="decision", title="No config", content="Body", project="project-a", auto_index=False)
 

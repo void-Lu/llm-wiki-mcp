@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from netsuite_rag_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 
 _TOP_LEVEL_GROUPS = (
     ("Projects", Path("wiki/projects")),

@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from netsuite_rag_mcp.redaction import redact_sensitive_text
-from netsuite_rag_mcp.wiki_models import WikiLogEntry
+from netsuite_llm_wiki_mcp.redaction import redact_sensitive_text
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 
 _LOG_HEADING_RE = re.compile(r"^## \[([^\]]+)\] (\S+) \| (.+)$")
 

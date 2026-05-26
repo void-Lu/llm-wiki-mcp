@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from netsuite_rag_mcp.wiki_paths import WikiPathError, WikiPaths, create_wiki_root, safe_segment
+from netsuite_llm_wiki_mcp.wiki_paths import WikiPathError, WikiPaths, create_wiki_root, safe_segment
 
 
 EXPECTED_DIRS = [

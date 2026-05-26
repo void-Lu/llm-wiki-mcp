@@ -4,9 +4,9 @@ import os
 import sys
 from pathlib import Path
 
-APP_NAME = "netsuite-rag-mcp"
-CONFIG_DIR_ENV = "NETSUITE_RAG_CONFIG_DIR"
-USER_DATA_DIR_ENV = "NETSUITE_RAG_USER_DATA_DIR"
+APP_NAME = "netsuite-llm-wiki-mcp"
+CONFIG_DIR_ENV = "NETSUITE_LLM_WIKI_CONFIG_DIR"
+USER_DATA_DIR_ENV = "NETSUITE_LLM_WIKI_USER_DATA_DIR"
 
 
 def _env_override_path(env_var: str) -> Path | None:

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from netsuite_rag_mcp.wiki_io import write_wiki_page
-from netsuite_rag_mcp.wiki_log import append_log_entry
-from netsuite_rag_mcp.wiki_models import WikiLogEntry, WikiPage
-from netsuite_rag_mcp.wiki_overview import refresh_overview
-from netsuite_rag_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
+from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry, WikiPage
+from netsuite_llm_wiki_mcp.wiki_overview import refresh_overview
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
 
 def test_refresh_overview_writes_deterministic_counts_and_recent_log(tmp_path: Path):

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from netsuite_rag_mcp.wiki_index import refresh_indexes
-from netsuite_rag_mcp.wiki_io import write_wiki_page
-from netsuite_rag_mcp.wiki_models import WikiPage
-from netsuite_rag_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
+from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
+from netsuite_llm_wiki_mcp.wiki_models import WikiPage
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
 
 def _page(path: str, title: str, summary: str = "") -> WikiPage:

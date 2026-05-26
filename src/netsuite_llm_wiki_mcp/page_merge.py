@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from netsuite_rag_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 
 UNION_FIELDS = ("sources", "tags", "related")
 LOCKED_FIELDS = ("type", "title", "created")
