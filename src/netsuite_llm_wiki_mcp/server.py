@@ -26,35 +26,6 @@ from netsuite_llm_wiki_mcp.wiki_research import wiki_research as run_wiki_resear
 mcp = FastMCP("netsuite-llm-wiki-mcp")
 
 
-def _deprecated_rag_tool(replacement: str) -> dict[str, Any]:
-    return {
-        "ok": False,
-        "code": "deprecated_rag_tool",
-        "error": "RAG/vector indexing has been removed from the main workflow; use the LLM Wiki tools instead.",
-        "replacement": replacement,
-    }
-
-
-def index_vault_tool(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-    return _deprecated_rag_tool("wiki_ingest")
-
-
-def index_sources_tool(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-    return _deprecated_rag_tool("wiki_ingest")
-
-
-def search_netsuite_knowledge_tool(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-    return _deprecated_rag_tool("wiki_query")
-
-
-def ask_netsuite_rag_tool(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-    return _deprecated_rag_tool("wiki_query")
-
-
-def get_index_status_tool(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-    return _deprecated_rag_tool("wiki_lint")
-
-
 def wiki_init_tool(vault_root: str) -> dict[str, Any]:
     paths = create_wiki_root(vault_root)
     return {"ok": True, "vault_root": str(paths.root)}
@@ -232,27 +203,6 @@ def save_obsidian_note_tool(
     )
 
 
-def generate_suitecloud_wiki_tool(
-    project: str,
-    source_name: str,
-    vault_root: str | None = None,
-    auto_index: bool = True,
-    llm_summary: bool = False,
-) -> dict[str, Any]:
-    if vault_root is None:
-        return {"ok": False, "code": "missing_vault_root", "error": "vault_root is required"}
-    return wiki_ingest_tool(
-        vault_root=vault_root,
-        source_type="codegraph",
-        source_name=source_name,
-        project=project,
-    )
-
-
-def write_wiki_summaries_tool(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-    return _deprecated_rag_tool("wiki_ingest")
-
-
 def _build_filters(
     project: str | None,
     script_type: str | None,
@@ -395,41 +345,6 @@ def wiki_changelog(vault_root: str, limit: int = 10) -> dict[str, Any]:
 
 
 @mcp.tool()
-def index_vault(vault_root: str | None = None, mode: str = "incremental") -> dict[str, Any]:
-    """Deprecated: use wiki_ingest."""
-    return index_vault_tool(vault_root=vault_root, mode=mode)
-
-
-@mcp.tool()
-def index_sources(
-    vault_root: str | None = None,
-    source_names: list[str] | None = None,
-    source_kind: str | None = None,
-    mode: str = "incremental",
-) -> dict[str, Any]:
-    """Deprecated: use wiki_ingest."""
-    return index_sources_tool(vault_root=vault_root, source_names=source_names, source_kind=source_kind, mode=mode)
-
-
-@mcp.tool()
-def search_netsuite_knowledge(question: str, vault_root: str | None = None, **kwargs: Any) -> dict[str, Any]:
-    """Deprecated: use wiki_query."""
-    return search_netsuite_knowledge_tool(question=question, vault_root=vault_root, **kwargs)
-
-
-@mcp.tool()
-def ask_netsuite_rag(question: str, vault_root: str | None = None, **kwargs: Any) -> dict[str, Any]:
-    """Deprecated: use wiki_query."""
-    return ask_netsuite_rag_tool(question=question, vault_root=vault_root, **kwargs)
-
-
-@mcp.tool()
-def get_index_status(vault_root: str | None = None) -> dict[str, Any]:
-    """Deprecated: use wiki_lint."""
-    return get_index_status_tool(vault_root)
-
-
-@mcp.tool()
 def save_obsidian_note(
     note_type: str,
     title: str,
@@ -471,24 +386,6 @@ def save_obsidian_note(
         auto_index=auto_index,
         vault_root=vault_root,
     )
-
-
-@mcp.tool()
-def generate_suitecloud_wiki(
-    project: str,
-    source_name: str,
-    vault_root: str | None = None,
-    auto_index: bool = True,
-    llm_summary: bool = False,
-) -> dict[str, Any]:
-    """Deprecated compatibility wrapper around wiki_ingest source_type=codegraph."""
-    return generate_suitecloud_wiki_tool(project, source_name, vault_root, auto_index, llm_summary)
-
-
-@mcp.tool()
-def write_wiki_summaries(project: str, summaries: list[dict[str, str]], vault_root: str | None = None) -> dict[str, Any]:
-    """Deprecated: generated wiki summaries are handled through wiki_ingest."""
-    return write_wiki_summaries_tool(project=project, summaries=summaries, vault_root=vault_root)
 
 
 @mcp.tool()

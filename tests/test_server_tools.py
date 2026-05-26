@@ -4,10 +4,7 @@ import pytest
 
 from netsuite_llm_wiki_mcp.server import (
     _build_filters,
-    generate_suitecloud_wiki_tool,
-    get_index_status_tool,
-    index_sources_tool,
-    index_vault_tool,
+    mcp,
     wiki_init_tool,
     wiki_ingest_tool,
     wiki_ingest_llm_tool,
@@ -18,41 +15,22 @@ from netsuite_llm_wiki_mcp.server import (
 )
 
 
-class TestDeprecatedRagTools:
-    def test_index_vault_is_deprecated(self):
-        result = index_vault_tool()
-        assert result["ok"] is False
-        assert result["code"] == "deprecated_rag_tool"
-        assert "wiki_ingest" in result["replacement"]
-
-    def test_index_sources_is_deprecated(self):
-        result = index_sources_tool()
-        assert result["ok"] is False
-        assert result["code"] == "deprecated_rag_tool"
-        assert "wiki_ingest" in result["replacement"]
-
-    def test_get_index_status_is_deprecated(self):
-        result = get_index_status_tool()
-        assert result["ok"] is False
-        assert result["code"] == "deprecated_rag_tool"
-        assert "wiki_lint" in result["replacement"]
-
-    def test_search_netsuite_knowledge_is_deprecated(self):
-        from netsuite_llm_wiki_mcp.server import search_netsuite_knowledge_tool
-        result = search_netsuite_knowledge_tool(question="test")
-        assert result["ok"] is False
-        assert result["code"] == "deprecated_rag_tool"
-        assert "wiki_query" in result["replacement"]
-
-    def test_ask_netsuite_rag_is_deprecated(self):
-        from netsuite_llm_wiki_mcp.server import ask_netsuite_rag_tool
-        result = ask_netsuite_rag_tool(question="test")
-        assert result["ok"] is False
-        assert result["code"] == "deprecated_rag_tool"
-        assert "wiki_query" in result["replacement"]
-
-
 class TestLlmWikiServerTools:
+    def test_registered_tools_exclude_deprecated_tools(self):
+        deprecated = {
+            "index_vault",
+            "index_sources",
+            "search_netsuite_knowledge",
+            "ask_netsuite_rag",
+            "get_index_status",
+            "generate_suitecloud_wiki",
+            "write_wiki_summaries",
+        }
+
+        registered = {tool.name for tool in mcp._tool_manager.list_tools()}
+
+        assert registered.isdisjoint(deprecated)
+
     def test_wiki_init_tool_creates_confirmed_structure(self, tmp_path: Path):
         vault = tmp_path / "wiki-root"
 
@@ -209,28 +187,6 @@ class TestLlmWikiServerTools:
 
         assert result == payload
         assert calls == [{"vault_root": str(vault), "project": "alpha", "source_name": "main", "query": "entry", "codegraph_project_path": "repo"}]
-
-    def test_generate_suitecloud_wiki_requires_vault_root(self):
-        result = generate_suitecloud_wiki_tool(project="alpha", source_name="main")
-
-        assert result["ok"] is False
-        assert result["code"] == "missing_vault_root"
-
-    def test_generate_suitecloud_wiki_delegates_to_ingest(self, monkeypatch, tmp_path: Path):
-        vault = tmp_path / "wiki-root"
-        payload = {"ok": True, "written": 2}
-        calls: list[dict[str, object]] = []
-
-        def fake_ingest(**kwargs: object) -> dict[str, object]:
-            calls.append(kwargs)
-            return payload
-
-        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_ingest_codegraph", fake_ingest)
-
-        result = generate_suitecloud_wiki_tool(project="alpha", source_name="main", vault_root=str(vault))
-
-        assert result == payload
-        assert calls == [{"vault_root": str(vault), "project": "alpha", "source_name": "main", "query": "project code overview", "codegraph_project_path": None}]
 
 
 class TestBuildFilters:
