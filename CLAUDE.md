@@ -1,37 +1,67 @@
-# AGENTS.md
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 本文件给 AI 编码代理提供项目级工作约定。安装、部署和 MCP 使用细节优先查看 [README.md](README.md)，不要在这里重复维护。
 
 ## 快速命令
 
 - 安装开发依赖：`python -m pip install -e ".[dev]"`
-- 运行测试：`pytest`
+- 运行全部测试：`pytest`
+- 运行单个测试文件：`pytest tests/test_wiki_query.py`
+- 运行单个测试函数：`pytest tests/test_wiki_query.py::test_function_name -v`
 - 启动 MCP server：`netsuite-rag-mcp-server` 或 `python -m netsuite_rag_mcp.server`
-- 初始化外部 Wiki：调用 MCP 工具 `wiki_init`
-- 摄入 CodeGraph source：调用 MCP 工具 `wiki_ingest(source_type="codegraph")`
-- 查询 Wiki：调用 MCP 工具 `wiki_query`
-- 检查 Wiki：调用 MCP 工具 `wiki_lint`
+- CLI 初始化 vault：`netsuite-rag-mcp init --vault <name> --root <path> --default`
+- CLI 查看状态：`netsuite-rag-mcp status`
 
-## 项目地图
+## 架构
 
-- [src/netsuite_rag_mcp/server.py](src/netsuite_rag_mcp/server.py)：MCP 工具入口。
-- [src/netsuite_rag_mcp/wiki_paths.py](src/netsuite_rag_mcp/wiki_paths.py)：外部 Obsidian LLM Wiki 目录结构与路径安全。
-- [src/netsuite_rag_mcp/wiki_io.py](src/netsuite_rag_mcp/wiki_io.py)：Markdown + YAML frontmatter 读写、覆盖保护、脱敏。
-- [src/netsuite_rag_mcp/wiki_log.py](src/netsuite_rag_mcp/wiki_log.py)：`wiki/log.md` append-only 操作记录。
-- [src/netsuite_rag_mcp/wiki_index.py](src/netsuite_rag_mcp/wiki_index.py)：`wiki/index.md` 与项目 index 维护。
-- [src/netsuite_rag_mcp/wiki_overview.py](src/netsuite_rag_mcp/wiki_overview.py)：`wiki/overview.md` 确定性汇总。
-- [src/netsuite_rag_mcp/codegraph_client.py](src/netsuite_rag_mcp/codegraph_client.py)：CodeGraph CLI 只读封装。
-- [src/netsuite_rag_mcp/wiki_ingest.py](src/netsuite_rag_mcp/wiki_ingest.py)：CodeGraph source snapshot 和 Wiki 页面生成。
-- [src/netsuite_rag_mcp/wiki_query.py](src/netsuite_rag_mcp/wiki_query.py)：无向量 Wiki 查询。
-- [src/netsuite_rag_mcp/wiki_lint.py](src/netsuite_rag_mcp/wiki_lint.py)：Wiki 健康检查。
-- [src/netsuite_rag_mcp/note_writer.py](src/netsuite_rag_mcp/note_writer.py)：人工 note 写入。
-- [tests/](tests/)：pytest 测试套件；新增行为优先补对应单元测试。
+Python 3.11+，`src/` 布局，依赖仅 `mcp` + `PyYAML`。通过 FastMCP 暴露工具，所有 MCP 工具定义在 `server.py` 中用 `@mcp.tool()` 注册。
+
+### 层次结构
+
+```
+server.py          ← MCP 工具入口（FastMCP @mcp.tool 注册）
+├── wiki_ingest.py ← CodeGraph/LLM 分阶段摄入
+├── wiki_query.py  ← 无向量关键词 + wikilink 图查询
+├── wiki_lint.py   ← 结构健康检查
+├── note_writer.py ← 人工笔记写入
+├── wiki_io.py     ← Markdown + YAML frontmatter 读写、覆盖保护、脱敏
+├── wiki_paths.py  ← 外部 Wiki 目录结构与路径安全校验
+├── wiki_index.py  ← wiki/index.md 与项目 index 维护
+├── wiki_overview.py ← wiki/overview.md 确定性汇总
+├── wiki_log.py    ← wiki/log.md append-only 操作记录
+├── codegraph_client.py ← CodeGraph CLI 只读封装（subprocess）
+├── runtime_config.py   ← vault 解析：参数 > 环境变量 > global config.yaml
+├── platform_paths.py   ← 跨平台 config/data 目录
+├── redaction.py        ← 敏感信息脱敏
+└── cli.py              ← CLI entry point（init / status / server）
+```
+
+### 运行时配置解析优先级
+
+1. 函数参数 `vault_root`
+2. 环境变量 `NETSUITE_RAG_VAULT_ROOT`
+3. 全局 config.yaml 中的 `default_vault`
+
+测试通过 `conftest.py` 的 `isolated_runtime_dirs` fixture 自动隔离环境变量和临时目录。
 
 ## 核心数据流
 
-CodeGraph CLI → `raw/sources/codegraph/<project>/<source_name>/` snapshot → `wiki/sources/` source 摘要 → `wiki/projects/<project>/code/` 代码事实页 → `wiki/index.md` / `wiki/projects/<project>/index.md` / `wiki/overview.md` / `wiki/log.md`。
+**CodeGraph 摄入**：CodeGraph CLI → `raw/sources/codegraph/<project>/<source_name>/` snapshot → `wiki/sources/` source 摘要 → `wiki/projects/<project>/code/` 代码事实页 → index/overview/log 更新。
 
-`wiki_query` 只读取持久 Markdown Wiki：先读 index，再做关键词匹配和 `[[wikilink]]` 一跳扩展；不做 embedding 或 Chroma 检索。
+**LLM 分阶段摄入**（`wiki_ingest_llm`）：`prepare_analysis` → 返回分析 prompt → `prepare_generation` → 返回生成 prompt → `apply_generation` → 写入 Wiki 页面。缓存在 `.llm-wiki/ingest-cache/`。
+
+**查询**（`wiki_query`）：关键词/CJK bigram 命中 → 可选 vector 阶段（默认关闭）→ `[[wikilink]]` + shared source + common neighbor 图扩展 → 按 token 预算裁剪输出 context pack。
+
+## 测试对应关系
+
+- Wiki primitives（paths/io/index/overview/log）→ `tests/test_wiki_*.py`
+- MCP 工具注册和调用 → `tests/test_server_tools.py`
+- 人工 note 写入 → `tests/test_save_obsidian_note.py`
+- CodeGraph 摄入 → `tests/test_wiki_ingest_codegraph.py`
+- 查询 → `tests/test_wiki_query.py`
+- Lint → `tests/test_wiki_lint.py`
 
 ## 必守约定
 
@@ -48,7 +78,5 @@ CodeGraph CLI → `raw/sources/codegraph/<project>/<source_name>/` snapshot → 
 ## 开发注意事项
 
 - 本项目是 Python 3.11+，源码在 `src/` 布局下；依赖和 entry points 见 [pyproject.toml](pyproject.toml)。
-- 修改 Wiki primitives 时优先运行 `tests/test_wiki_*.py`。
-- 修改 MCP 工具面时运行 [tests/test_server_tools.py](tests/test_server_tools.py)。
-- 修改人工 note 写入时运行 [tests/test_save_obsidian_note.py](tests/test_save_obsidian_note.py)。
+- 新增行为优先补对应单元测试。
 - 完成前运行 `pytest`。
