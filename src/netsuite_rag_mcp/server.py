@@ -7,10 +7,12 @@ from mcp.server.fastmcp import FastMCP
 
 from netsuite_rag_mcp.note_writer import save_obsidian_note as run_save_obsidian_note
 from netsuite_rag_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
+from netsuite_rag_mcp.wiki_ingest import rescan_source as run_rescan_source
 from netsuite_rag_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_rag_mcp.wiki_lint import wiki_lint as run_wiki_lint
 from netsuite_rag_mcp.wiki_paths import create_wiki_root
 from netsuite_rag_mcp.wiki_query import wiki_query as run_wiki_query
+from netsuite_rag_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
 
 mcp = FastMCP("netsuite-llm-wiki-mcp")
 
@@ -104,6 +106,24 @@ def wiki_query_tool(
     )
 
 
+def wiki_query_debug_tool(
+    vault_root: str,
+    question: str,
+    project: str | None = None,
+    top_k: int = 8,
+    max_graph_hops: int = 2,
+    include_raw_sources: bool = False,
+) -> dict[str, Any]:
+    return run_wiki_query_debug(
+        vault_root=vault_root,
+        question=question,
+        project=project,
+        top_k=top_k,
+        max_graph_hops=max_graph_hops,
+        include_raw_sources=include_raw_sources,
+    )
+
+
 def wiki_ingest_llm_tool(
     vault_root: str,
     stage: str,
@@ -126,6 +146,26 @@ def wiki_ingest_llm_tool(
         analysis=analysis,
         generation=generation,
     )
+
+
+
+def wiki_rescan_tool(
+    vault_root: str,
+    project: str,
+    source_name: str,
+    source_path: str,
+    source_type: str = "file",
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    return run_rescan_source(
+        vault_root=vault_root,
+        project=project,
+        source_name=source_name,
+        source_path=source_path,
+        source_type=source_type,
+        language=language,
+    )
+
 
 
 def wiki_lint_tool(vault_root: str) -> dict[str, Any]:
@@ -277,6 +317,19 @@ def wiki_query(
 
 
 @mcp.tool()
+def wiki_query_debug(
+    vault_root: str,
+    question: str,
+    project: str | None = None,
+    top_k: int = 8,
+    max_graph_hops: int = 2,
+    include_raw_sources: bool = False,
+) -> dict[str, Any]:
+    """Explain wiki query scoring and graph-expansion reasons."""
+    return wiki_query_debug_tool(vault_root, question, project, top_k, max_graph_hops, include_raw_sources)
+
+
+@mcp.tool()
 def wiki_ingest_llm(
     vault_root: str,
     stage: str,
@@ -290,6 +343,21 @@ def wiki_ingest_llm(
 ) -> dict[str, Any]:
     """Run staged LLM-assisted ingest by returning prompts and applying model output."""
     return wiki_ingest_llm_tool(vault_root, stage, project, source_name, source_path, source_type, language, analysis, generation)
+
+
+
+@mcp.tool()
+def wiki_rescan(
+    vault_root: str,
+    project: str,
+    source_name: str,
+    source_path: str,
+    source_type: str = "file",
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    """Rescan a local source, persist snapshots/cache, and report whether it changed."""
+    return wiki_rescan_tool(vault_root, project, source_name, source_path, source_type, language)
+
 
 
 @mcp.tool()

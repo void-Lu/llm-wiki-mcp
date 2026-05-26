@@ -127,6 +127,57 @@ def wiki_query(
     }
 
 
+def wiki_query_debug(
+    vault_root: str | Path,
+    question: str,
+    project: str | None = None,
+    top_k: int = 8,
+    max_graph_hops: int = 2,
+    include_raw_sources: bool = False,
+) -> dict[str, Any]:
+    result = wiki_query(
+        vault_root=vault_root,
+        question=question,
+        project=project,
+        top_k=top_k,
+        include_content=False,
+        include_context_pack=False,
+        max_graph_hops=max_graph_hops,
+        include_raw_sources=include_raw_sources,
+    )
+    root = Path(vault_root).expanduser().resolve()
+    graph = _build_graph(root)
+    graph_reasons: dict[str, list[dict[str, Any]]] = {}
+    selected_paths = [item["path"] for item in result["results"]]
+    seed_paths = [item["path"] for item in result["results"] if item["scores"]["keyword"] > 0]
+    for path in selected_paths:
+        reasons: list[dict[str, Any]] = []
+        for seed in seed_paths:
+            if seed == path:
+                continue
+            reasons.extend(_relationship_reasons(seed, path, graph))
+        if reasons:
+            graph_reasons[path] = reasons
+    return {**result, "graph_reasons": graph_reasons}
+
+
+def _relationship_reasons(left: str, right: str, graph: Graph) -> list[dict[str, Any]]:
+    reasons: list[dict[str, Any]] = []
+    if right in graph.neighbors.get(left, set()):
+        reasons.append({"kind": "direct_wikilink", "source": left, "target": right, "score": 3.0})
+    shared_sources = sorted(graph.sources.get(left, set()) & graph.sources.get(right, set()))
+    for source in shared_sources:
+        reasons.append({"kind": "shared_source", "source": left, "target": right, "value": source, "score": 4.0})
+    common = sorted(graph.neighbors.get(left, set()) & graph.neighbors.get(right, set()))
+    for neighbor in common:
+        degree = len(graph.neighbors.get(neighbor, set()))
+        if degree > 1:
+            reasons.append({"kind": "common_neighbor", "source": left, "target": right, "value": neighbor, "score": 1.5 / math.log(degree + 1)})
+    if graph.types.get(left) and graph.types.get(left) == graph.types.get(right):
+        reasons.append({"kind": "same_type", "source": left, "target": right, "value": graph.types[left], "score": 1.0})
+    return reasons
+
+
 def _candidate_pages(root: Path, include_raw_sources: bool = False) -> list[QueryCandidate]:
     candidates: list[QueryCandidate] = []
     wiki = root / "wiki"

@@ -54,9 +54,12 @@ wiki/projects/<project>/
 | 工具 | 功能 |
 | --- | --- |
 | `wiki_init` | 初始化外部 Obsidian LLM Wiki 目录结构 |
-| `wiki_ingest` | 摄入 source；首版支持 `source_type="codegraph"` |
-| `wiki_query` | 基于 `index.md`、关键词和 `[[wikilink]]` 查询 Wiki，不使用向量检索 |
-| `wiki_lint` | 检查结构、frontmatter、断链、旧目录残留和 source traceability |
+| `wiki_ingest` | 摄入 CodeGraph source；首版支持 `source_type="codegraph"` |
+| `wiki_ingest_llm` | 分阶段摄入文本 source：prepare_analysis → prepare_generation → apply_generation |
+| `wiki_rescan` | 重扫文本 source，基于 `source_hash` 判断 changed/unchanged 并刷新 raw snapshot |
+| `wiki_query` | 基于关键词、`[[wikilink]]`、shared source、type graph 和上下文预算查询 Wiki |
+| `wiki_query_debug` | 返回查询分数和 graph expansion 原因，帮助诊断召回 |
+| `wiki_lint` | 检查结构、frontmatter、断链、source traceability 和 ingest cache |
 | `save_obsidian_note` | 保存人工策展笔记：decision、troubleshooting、requirement、knowledge |
 
 旧 RAG 工具 `index_vault`、`index_sources`、`search_netsuite_knowledge`、`ask_netsuite_rag`、`get_index_status` 仅保留兼容入口，并返回 deprecated 提示。
@@ -99,11 +102,36 @@ codegraph init -i
 调用 wiki_query，question 设为你的问题；如需限定项目，传 project。
 ```
 
+### 分阶段文本摄入
+
+`wiki_ingest_llm` 用于把 Markdown、文本、JSON、YAML、CSV 等 source 转成可追踪 Wiki 页面。流程分三步：
+
+1. `stage="prepare_analysis"`：收集 source，写入 `raw/sources/<source_type>/<project>/<source_name>/`，计算 `source_hash`，返回分析 prompt。
+2. `stage="prepare_generation"`：传入上一步的 `analysis`，结合 `purpose.md`、`schema.md` 和 `wiki/index.md`，返回生成 prompt。
+3. `stage="apply_generation"`：传入模型生成的 JSON，写入 `wiki/sources/`、`wiki/projects/` 或 `wiki/concepts/`，刷新 index、overview 和 log。
+
+相同 source hash 会跳过重复准备，缓存位于 `.llm-wiki/ingest-cache/<project>/<source_name>.json`。
+
+`wiki_rescan` 可单独重扫 source：未变化返回 `status="unchanged"`，变化后刷新 raw snapshot 并返回新的分析 prompt。
+
+### 查询 Pipeline
+
+`wiki_query` 默认不使用向量库，流程为：
+
+1. 关键词/CJK bigram 命中 Wiki 页面，可选包含 `raw/sources`。
+2. 可选 vector 阶段只返回配置告警，不会启用 embedding 主路径。
+3. 根据 `[[wikilink]]`、shared source、common neighbor、same type 做图扩展。
+4. 按 `context_window_tokens` 生成带编号引用的 context pack。
+
+`wiki_query_debug` 用于查看每个结果的 keyword/vector/graph 分数和 graph reason，例如 direct wikilink、shared source、common neighbor、same type。
+
 检查 Wiki：
 
 ```text
 调用 wiki_lint，确认结构、链接和来源追踪健康。
 ```
+
+`wiki_lint` 还会检查生成页和 source summary 的 `sources` 是否存在，以及 `.llm-wiki/ingest-cache/` 中 manifest 的路径和 `stored_sha256` 是否与 raw snapshot 一致。
 
 ## 人工笔记路径
 

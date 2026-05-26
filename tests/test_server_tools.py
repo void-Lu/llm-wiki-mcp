@@ -12,7 +12,9 @@ from netsuite_rag_mcp.server import (
     wiki_ingest_tool,
     wiki_ingest_llm_tool,
     wiki_lint_tool,
+    wiki_query_debug_tool,
     wiki_query_tool,
+    wiki_rescan_tool,
 )
 
 
@@ -118,6 +120,52 @@ class TestLlmWikiServerTools:
             "language": "zh-CN",
             "analysis": None,
             "generation": None,
+        }]
+
+    def test_wiki_rescan_tool_delegates_rescan(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "status": "changed"}
+        calls: list[dict[str, object]] = []
+
+        def fake_rescan(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_rag_mcp.server.run_rescan_source", fake_rescan)
+
+        result = wiki_rescan_tool(str(vault), project="alpha", source_name="docs", source_path="src", source_type="file", language="zh-CN")
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "project": "alpha",
+            "source_name": "docs",
+            "source_path": "src",
+            "source_type": "file",
+            "language": "zh-CN",
+        }]
+
+    def test_wiki_query_debug_tool_delegates_debug_query(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "graph_reasons": {}}
+        calls: list[dict[str, object]] = []
+
+        def fake_debug(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_rag_mcp.server.run_wiki_query_debug", fake_debug)
+
+        result = wiki_query_debug_tool(str(vault), question="invoice", project="alpha", top_k=3, max_graph_hops=1, include_raw_sources=True)
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "question": "invoice",
+            "project": "alpha",
+            "top_k": 3,
+            "max_graph_hops": 1,
+            "include_raw_sources": True,
         }]
 
     def test_wiki_ingest_rejects_unsupported_source_type(self, tmp_path: Path):

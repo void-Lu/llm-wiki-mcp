@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -60,6 +62,15 @@ def wiki_lint(vault_root: str | Path, max_page_bytes: int = 200_000) -> dict[str
                 issues.append(_issue("missing_frontmatter", "page is missing YAML frontmatter", rel))
             if frontmatter.get("generated") is True and not frontmatter.get("sources") and page.name not in {"index.md", "overview.md"}:
                 issues.append(_issue("generated_missing_sources", "generated page must cite sources", rel))
+            if frontmatter.get("generated") is True or rel.as_posix().startswith("wiki/sources/"):
+                source_values = frontmatter.get("sources")
+                if isinstance(source_values, str):
+                    source_values = [source_values]
+                elif not isinstance(source_values, list):
+                    source_values = []
+                for source in source_values:
+                    if str(source).startswith("raw/") and not (root / str(source)).is_file():
+                        issues.append(_issue("source_missing", f"source path does not exist: {source}", rel))
             if len(text.encode("utf-8")) > max_page_bytes:
                 issues.append(_issue("oversized_page", "page exceeds configured size threshold", rel))
             for target in _WIKILINK_RE.findall(text):
@@ -78,8 +89,35 @@ def wiki_lint(vault_root: str | Path, max_page_bytes: int = 200_000) -> dict[str
                 resolved = (root / "wiki" / target_path).resolve()
                 if resolved.is_relative_to(root) and not resolved.exists():
                     issues.append(_issue("index_target_missing", f"index target does not exist: {target}", Path("wiki/index.md")))
+    cache_root = root / ".llm-wiki" / "ingest-cache"
+    if cache_root.exists():
+        for cache_file in sorted(cache_root.rglob("*.json")):
+            cache_rel = cache_file.relative_to(root)
+            try:
+                cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                issues.append(_issue("cache_invalid_json", "ingest cache file is not valid JSON", cache_rel))
+                continue
+            manifest = cache_data.get("manifest", [])
+            if not isinstance(manifest, list):
+                continue
+            for item in manifest:
+                if not isinstance(item, dict):
+                    continue
+                source_path = str(item.get("path") or "")
+                if not source_path:
+                    continue
+                target = root / source_path
+                if not target.is_file():
+                    issues.append(_issue("cache_manifest_path_missing", f"cache manifest path does not exist: {source_path}", cache_rel))
+                    continue
+                expected_hash = str(item.get("stored_sha256") or "")
+                if expected_hash:
+                    actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+                    if actual_hash != expected_hash:
+                        issues.append(_issue("cache_manifest_hash_mismatch", f"cache manifest hash mismatch: {source_path}", cache_rel, severity="warning"))
     return {"ok": not issues, "issues": issues}
 
 
-def _issue(code: str, message: str, path: Path) -> dict[str, str]:
-    return {"code": code, "message": message, "path": path.as_posix()}
+def _issue(code: str, message: str, path: Path, severity: str = "error") -> dict[str, str]:
+    return {"code": code, "message": message, "path": path.as_posix(), "severity": severity}

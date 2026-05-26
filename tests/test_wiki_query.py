@@ -6,7 +6,7 @@ from netsuite_rag_mcp.wiki_index import refresh_indexes
 from netsuite_rag_mcp.wiki_io import write_wiki_page
 from netsuite_rag_mcp.wiki_models import WikiPage
 from netsuite_rag_mcp.wiki_paths import create_wiki_root
-from netsuite_rag_mcp.wiki_query import wiki_query
+from netsuite_rag_mcp.wiki_query import wiki_query, wiki_query_debug
 
 
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
@@ -149,6 +149,30 @@ def test_wiki_query_graph_expands_by_sources_and_wikilinks(tmp_path: Path):
     assert "wiki/concepts/second-hop.md" in paths
     neighbor = result["results"][paths.index("wiki/concepts/neighbor.md")]
     assert neighbor["scores"]["graph"] > 0
+
+
+def test_wiki_query_debug_explains_graph_reasons(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/seed.md",
+        "Seed Page",
+        "unique needle links to [[neighbor.md]].",
+        type="concept",
+        sources=["raw/sources/a.md"],
+    )
+    _write(root, "wiki/concepts/neighbor.md", "Neighbor Page", "related content", type="concept", sources=["raw/sources/a.md"])
+    refresh_indexes(root)
+
+    result = wiki_query_debug(root, "needle", top_k=3)
+
+    assert result["ok"] is True
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/neighbor.md" in paths
+    reasons = result["graph_reasons"]["wiki/concepts/neighbor.md"]
+    assert {reason["kind"] for reason in reasons} >= {"direct_wikilink", "shared_source", "same_type"}
+    assert all("score" in reason for reason in reasons)
 
 
 def test_wiki_query_returns_budgeted_context_pack(tmp_path: Path):

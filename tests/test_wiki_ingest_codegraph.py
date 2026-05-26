@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from netsuite_rag_mcp.wiki_ingest import ingest_codegraph, staged_wiki_ingest
+from netsuite_rag_mcp.wiki_ingest import ingest_codegraph, rescan_source, staged_wiki_ingest
 from netsuite_rag_mcp.wiki_paths import create_wiki_root
 
 
@@ -114,6 +115,98 @@ def test_staged_wiki_ingest_returns_analysis_prompt_and_cache_hit(tmp_path: Path
 
     assert second["status"] == "skipped"
     assert second["code"] == "source_unchanged"
+
+
+
+def test_rescan_source_writes_snapshot_cache_and_reports_changed(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notes.md").write_text("# Notes\n\nAlpha content", encoding="utf-8")
+
+    result = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+
+    assert result["ok"] is True
+    assert result["status"] == "changed"
+    assert result["stage"] == "rescan"
+    assert result["source_hash"]
+    assert result["classification_context"] == ["notes.md"]
+    assert result["paths"] == ["raw/sources/file/alpha/docs/notes.md", "raw/sources/file/alpha/docs/manifest.json"]
+    assert (root / ".llm-wiki/ingest-cache/alpha/docs.json").is_file()
+    assert (root / "raw/sources/file/alpha/docs/notes.md").read_text(encoding="utf-8").startswith("# Notes")
+
+
+
+def test_rescan_source_reports_unchanged_for_same_hash(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notes.md").write_text("# Notes\n\nAlpha content", encoding="utf-8")
+
+    first = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+    second = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+
+    assert first["status"] == "changed"
+    assert second["ok"] is True
+    assert second["status"] == "unchanged"
+    assert second["source_hash"] == first["source_hash"]
+    assert second["paths"] == []
+
+
+
+def test_rescan_source_removes_stale_snapshots_after_source_deletion(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.md").write_text("# A\n\nFirst", encoding="utf-8")
+    (source / "b.md").write_text("# B\n\nRemove me", encoding="utf-8")
+
+    first = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+    (source / "b.md").unlink()
+    (source / "a.md").write_text("# A\n\nChanged", encoding="utf-8")
+    second = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+
+    assert first["status"] == "changed"
+    assert second["status"] == "changed"
+    assert not (root / "raw/sources/file/alpha/docs/b.md").exists()
+    manifest = json.loads((root / "raw/sources/file/alpha/docs/manifest.json").read_text(encoding="utf-8"))
+    assert [item["relative_path"] for item in manifest] == ["a.md"]
+
+
+
+def test_rescan_source_cache_is_source_type_aware(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notes.md").write_text("# Notes\n\nAlpha content", encoding="utf-8")
+
+    file_result = rescan_source(root, project="alpha", source_name="docs", source_path=source, source_type="file")
+    manual_result = rescan_source(root, project="alpha", source_name="docs", source_path=source, source_type="manual")
+
+    assert file_result["status"] == "changed"
+    assert manual_result["status"] == "changed"
+    assert manual_result["source_hash"] == file_result["source_hash"]
+    assert manual_result["paths"] == ["raw/sources/manual/alpha/docs/notes.md", "raw/sources/manual/alpha/docs/manifest.json"]
+    assert (root / "raw/sources/manual/alpha/docs/notes.md").is_file()
+
+
+
+def test_rescan_source_reuses_source_validation(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".env").write_text("TOKEN=secret", encoding="utf-8")
+
+    result = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+
+    assert result["ok"] is False
+    assert result["code"] == "no_supported_sources"
+
 
 
 def test_staged_wiki_ingest_requires_analysis_and_generation(tmp_path: Path):

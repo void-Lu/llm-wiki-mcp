@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -64,6 +65,86 @@ def staged_wiki_ingest(
             return {"ok": False, "code": "missing_generation", "error": "generation is required for apply_generation"}
         return _apply_generation(root, project_value, source_value, language, generation)
     return {"ok": False, "code": "unsupported_stage", "error": f"unsupported staged ingest stage: {stage}"}
+
+
+
+def rescan_source(
+    vault_root: str | Path,
+    project: str,
+    source_name: str,
+    source_path: str | Path,
+    source_type: str = "file",
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    root = Path(vault_root).expanduser().resolve()
+    create_wiki_root(root)
+    try:
+        project_value = safe_segment(project)
+        source_value = safe_segment(source_name)
+        source_type_value = safe_segment(source_type)
+    except ValueError as exc:
+        return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": str(exc)}
+
+    source_root = Path(source_path).expanduser().resolve()
+    if not source_root.exists():
+        return {"ok": False, "code": "source_not_found", "error": f"source_path does not exist: {source_path}"}
+
+    sources = _collect_sources(source_root)
+    source_error = _source_limit_error(sources)
+    if source_error is not None:
+        return source_error
+
+    source_hash = _sources_hash(sources, source_root)
+    cache_path = _cache_path(root, project_value, source_value)
+    if cache_path.exists():
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        if cache.get("source_type") == source_type_value and cache.get("source_hash") == source_hash:
+            return {
+                "ok": True,
+                "stage": "rescan",
+                "status": "unchanged",
+                "project": project_value,
+                "source_name": source_value,
+                "source_hash": source_hash,
+                "paths": [],
+                "message": "source hash unchanged; reuse previous generated wiki pages",
+            }
+
+    raw_dir = root / "raw" / "sources" / source_type_value / project_value / source_value
+    if raw_dir.exists():
+        shutil.rmtree(raw_dir)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    manifest = _write_source_snapshots(raw_dir, root, sources, source_root)
+    _write_cache(
+        root,
+        project_value,
+        source_value,
+        {"source_hash": source_hash, "source_type": source_type_value, "manifest": manifest, "status": "prepared"},
+    )
+
+    paths = [item["path"] for item in manifest]
+    paths.append((raw_dir / "manifest.json").relative_to(root).as_posix())
+    classification_context = [item["relative_path"] for item in manifest]
+    return {
+        "ok": True,
+        "stage": "rescan",
+        "status": "changed",
+        "project": project_value,
+        "source_name": source_value,
+        "source_hash": source_hash,
+        "classification_context": classification_context,
+        "context": {"sources": manifest, "language": language},
+        "paths": paths,
+        "prompt": _analysis_prompt(project_value, source_value, language, manifest),
+        "expected_response_schema": {
+            "key_entities": ["string"],
+            "concepts": ["string"],
+            "tensions": ["string"],
+            "suggested_pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string"}],
+        },
+        "next_call": {"tool": "wiki_ingest_llm", "stage": "prepare_generation", "required": ["analysis"]},
+    }
+
 
 
 def ingest_codegraph(

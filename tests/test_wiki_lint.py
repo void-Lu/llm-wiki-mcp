@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 from netsuite_rag_mcp.wiki_io import write_wiki_page
@@ -86,3 +88,52 @@ def test_wiki_lint_reports_index_entry_missing_target(tmp_path: Path):
     result = wiki_lint(root)
 
     assert "index_target_missing" in _issue_codes(result)
+
+
+def test_wiki_lint_reports_missing_generated_raw_source(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/projects/alpha/code/script.md"),
+            {"title": "Script", "type": "code_fact", "generated": True, "sources": ["raw/sources/file/alpha/docs/missing.md"]},
+            "Script",
+            "Body",
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root)
+
+    assert result["ok"] is False
+    assert any(issue["code"] == "source_missing" and issue["path"] == "wiki/projects/alpha/code/script.md" for issue in result["issues"])
+
+
+def test_wiki_lint_reports_cache_manifest_missing_path(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    cache = root / ".llm-wiki/ingest-cache/alpha/docs.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"manifest": [{"path": "raw/sources/file/alpha/docs/missing.md", "stored_sha256": "abc"}]}), encoding="utf-8")
+
+    result = wiki_lint(root)
+
+    assert result["ok"] is False
+    assert any(issue["code"] == "cache_manifest_path_missing" and issue["path"] == ".llm-wiki/ingest-cache/alpha/docs.json" for issue in result["issues"])
+
+
+def test_wiki_lint_reports_cache_manifest_hash_mismatch(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/file/alpha/docs/notes.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("current", encoding="utf-8")
+    cache = root / ".llm-wiki/ingest-cache/alpha/docs.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"manifest": [{"path": "raw/sources/file/alpha/docs/notes.md", "stored_sha256": hashlib.sha256(b"old").hexdigest()}]}), encoding="utf-8")
+
+    result = wiki_lint(root)
+
+    assert result["ok"] is False
+    assert any(issue["code"] == "cache_manifest_hash_mismatch" and issue["severity"] == "warning" for issue in result["issues"])
