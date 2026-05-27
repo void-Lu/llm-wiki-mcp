@@ -108,6 +108,7 @@ def test_staged_wiki_ingest_returns_analysis_prompt_and_cache_hit(tmp_path: Path
     assert result["status"] == "needs_model"
     assert result["source_hash"]
     assert result["classification_context"] == ["notes.md"]
+    assert result["next_call"]["tool"] == "wiki_ingest_llm"
     assert "prompt" in result
     assert (root / "raw/sources/file/alpha/docs/notes.md").is_file()
 
@@ -240,6 +241,19 @@ def test_staged_wiki_ingest_requires_analysis_and_generation(tmp_path: Path):
 
     assert missing_analysis["code"] == "missing_analysis"
     assert missing_generation["code"] == "missing_generation"
+
+
+def test_staged_wiki_ingest_prepare_generation_points_back_to_llm_tool(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nAlpha content", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
+
+    result = staged_wiki_ingest(root, "prepare_generation", project="alpha", source_name="docs", analysis={"concepts": ["Alpha"]})
+
+    assert result["ok"] is True
+    assert result["next_call"]["tool"] == "wiki_ingest_llm"
 
 
 

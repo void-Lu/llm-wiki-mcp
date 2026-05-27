@@ -311,7 +311,7 @@ def _prepare_analysis(
             "tensions": ["string"],
             "suggested_pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string"}],
         },
-        "next_call": {"tool": "wiki_ingest", "stage": "prepare_generation", "required": ["analysis"]},
+        "next_call": {"tool": "wiki_ingest_llm", "stage": "prepare_generation", "required": ["analysis"]},
     }
 
 
@@ -337,7 +337,7 @@ def _prepare_generation(root: Path, project: str, source_name: str, language: st
             "source_summary": {"title": "string", "summary": "string", "body": "markdown"},
             "pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string", "body": "markdown", "sources": ["raw/..."]}],
         },
-        "next_call": {"tool": "wiki_ingest", "stage": "apply_generation", "required": ["generation"]},
+        "next_call": {"tool": "wiki_ingest_llm", "stage": "apply_generation", "required": ["generation"]},
     }
 
 

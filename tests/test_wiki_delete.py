@@ -82,3 +82,29 @@ def test_delete_cascades(delete_root: Path):
     related = (delete_root / "wiki" / "concepts" / "domain" / "related.md").read_text(encoding="utf-8")
     assert "[[derived-page]]" not in related
     assert "derived-page" in related  # text preserved, just not as link
+
+
+def test_delete_source_preserves_generated_pages_with_other_sources(delete_root: Path):
+    shared_page = delete_root / "wiki" / "projects" / "proj" / "code" / "shared-page.md"
+    shared_page.write_text(
+        "---\n"
+        "type: code\n"
+        "title: Shared Page\n"
+        "generated: true\n"
+        "project: proj\n"
+        "sources:\n"
+        "- raw/sources/codegraph/proj/my-source/context.json\n"
+        "- raw/sources/codegraph/proj/other-source/context.json\n"
+        "---\n\n"
+        "# Shared Page\n\nContent from multiple sources.\n",
+        encoding="utf-8",
+    )
+
+    result = wiki_delete_source(str(delete_root), "proj", "my-source")
+
+    assert result["ok"] is True
+    assert shared_page.exists()
+    text = shared_page.read_text(encoding="utf-8")
+    assert "my-source" not in text
+    assert "other-source" in text
+    assert shared_page.relative_to(delete_root).as_posix() not in result["pages_deleted"]

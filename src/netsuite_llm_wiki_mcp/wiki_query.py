@@ -9,6 +9,8 @@ from typing import Any
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_STRUCTURAL_PAGE_NAMES = {"index.md", "log.md", "overview.md"}
 _STOPWORDS = {
     "a",
     "an",
@@ -93,10 +95,11 @@ def wiki_query(
         tag_set = set(filter_tags)
         candidates = [candidate for candidate in candidates if tag_set & set(_as_list(candidate.frontmatter.get("tags")))]
     graph = _build_graph(root)
+    token_weights = _token_weights(candidates, tokens)
 
     scored: dict[str, QueryCandidate] = {}
     for candidate in candidates:
-        score = _keyword_score(candidate, tokens)
+        score = _keyword_score(candidate, tokens, question, token_weights)
         if project and candidate.rel.startswith(f"wiki/projects/{project}/"):
             score += 5
         if score > 0:
@@ -190,7 +193,7 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False) -> list[Quer
     wiki = root / "wiki"
     if wiki.exists():
         for path in sorted(wiki.rglob("*.md")):
-            if path.name == "log.md":
+            if path.name in _STRUCTURAL_PAGE_NAMES:
                 continue
             candidates.append(_wiki_candidate(path, root))
     raw_sources = root / "raw" / "sources"
@@ -256,15 +259,49 @@ def _tokens(text: str) -> list[str]:
     return [token for token in words + cjk_tokens if token]
 
 
-def _keyword_score(candidate: QueryCandidate, tokens: list[str]) -> float:
+def _keyword_score(candidate: QueryCandidate, tokens: list[str], query: str = "", token_weights: dict[str, float] | None = None) -> float:
     if not tokens:
         return 0.0
-    text = _search_text(candidate)
+    weights = token_weights or {token: 1.0 for token in tokens}
+    body = candidate.body.casefold()
+    frontmatter = str(candidate.frontmatter).casefold()
+    rel = candidate.rel.casefold()
     title = candidate.title.casefold()
-    score = float(sum(text.count(token) for token in tokens))
-    if any(token in title for token in tokens):
-        score += 10
+    stem = candidate.path.stem.casefold().replace("-", " ").replace("_", " ")
+    score = 0.0
+    for token in tokens:
+        weight = weights.get(token, 1.0)
+        score += body.count(token) * weight
+        score += rel.count(token) * weight
+        score += frontmatter.count(token) * 0.5 * weight
+        if token in title:
+            score += 15 * weight
+        if token in stem:
+            score += 8 * weight
+    phrase = query.casefold().strip()
+    phrase_weight = sum(weights.get(token, 1.0) for token in tokens) / len(tokens)
+    if phrase:
+        if title == phrase:
+            score += 120 * phrase_weight
+        elif phrase in title:
+            score += 50 * phrase_weight
+        if stem == phrase:
+            score += 80 * phrase_weight
+        elif phrase in stem:
+            score += 25 * phrase_weight
+        score += min(body.count(phrase), 5) * 4 * phrase_weight
     return score
+
+
+def _token_weights(candidates: list[QueryCandidate], tokens: list[str]) -> dict[str, float]:
+    if not tokens or not candidates:
+        return {}
+    total = len(candidates)
+    weights: dict[str, float] = {}
+    for token in tokens:
+        document_frequency = sum(1 for candidate in candidates if token in _search_text(candidate))
+        weights[token] = 1.0 + math.log((total + 1) / (document_frequency + 1))
+    return weights
 
 
 def _search_text(candidate: QueryCandidate) -> str:
@@ -281,7 +318,7 @@ def _apply_optional_vector_stage(scored: dict[str, QueryCandidate], enable_vecto
 
 def _build_graph(root: Path) -> Graph:
     wiki = root / "wiki"
-    pages = [path for path in sorted(wiki.rglob("*.md")) if path.name != "log.md"] if wiki.exists() else []
+    pages = [path for path in sorted(wiki.rglob("*.md")) if path.name not in _STRUCTURAL_PAGE_NAMES] if wiki.exists() else []
     by_rel = {path.relative_to(root).as_posix(): path for path in pages}
     by_stem: dict[str, list[str]] = {}
     for rel, path in by_rel.items():
@@ -371,15 +408,33 @@ def _result_item(candidate: QueryCandidate, tokens: list[str]) -> dict[str, Any]
         "path": candidate.rel,
         "title": candidate.title,
         "snippet": _snippet(candidate.body, tokens),
+        "title_match": _title_match(candidate, tokens),
         "score": candidate.total_score,
         "scores": {
             "keyword": candidate.keyword_score,
             "vector": candidate.vector_score,
             "graph": candidate.graph_score,
         },
+        "images": _images(candidate.body),
         "frontmatter": candidate.frontmatter,
         "source_kind": candidate.source_kind,
     }
+
+
+def _title_match(candidate: QueryCandidate, tokens: list[str]) -> bool:
+    title = candidate.title.casefold()
+    return any(token in title for token in tokens)
+
+
+def _images(body: str) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    images: list[dict[str, str]] = []
+    for alt, url in _IMAGE_RE.findall(body):
+        if url in seen:
+            continue
+        seen.add(url)
+        images.append({"url": url, "alt": alt})
+    return images
 
 
 def _legacy_context(candidates: list[QueryCandidate], tokens: list[str], include_content: bool) -> list[dict[str, Any]]:

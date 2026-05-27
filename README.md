@@ -74,7 +74,7 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 
 | Tool | Description |
 |------|-------------|
-| `wiki_query` | Keyword + CJK bigram search → graph expansion → context-budgeted output |
+| `wiki_query` | Keyword + CJK bigram search → graph expansion → context-budgeted output; results include title-match and embedded-image metadata |
 | `wiki_query_debug` | Same as query but returns per-result scores and graph expansion reasons |
 
 ### Maintenance
@@ -86,7 +86,7 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 | `wiki_page_merge` | Merge pages: frontmatter union + locked field protection + optional LLM body merge |
 | `wiki_dedup` | Duplicate detection and merge: detect → confirm → merge (three stages) |
 | `wiki_insights` | Graph insights: orphan pages, bridge nodes, surprising cross-type connections, Louvain communities |
-| `wiki_delete_source` | Delete a source with cascade cleanup: derived pages, cross-references, cache |
+| `wiki_delete_source` | Delete a source with cascade cleanup: derived pages, cross-references, cache; multi-source generated pages are preserved with the deleted source pruned |
 | `wiki_changelog` | Recent wiki log entries |
 
 ### Research & Notes
@@ -148,7 +148,7 @@ Cache: `.llm-wiki/ingest-cache/<project>/<source_name>.json` (skips unchanged so
 ### Query Pipeline
 
 ```
-Keywords / CJK bigrams → candidate pages
+Keywords / CJK bigrams with title/phrase/rare-term weighting → candidate pages
   → graph expansion (wikilink, shared source, common neighbor, same type)
   → context budget allocation
   → numbered-reference context pack

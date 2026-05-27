@@ -234,3 +234,50 @@ def test_wiki_query_frontmatter_filter_by_type(tmp_path: Path):
     paths = [item["path"] for item in result["results"]]
     assert "wiki/projects/alpha/decisions/choice.md" in paths
     assert "wiki/projects/alpha/code/script.md" not in paths
+
+
+def test_wiki_query_returns_title_match_and_images(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/diagram.md",
+        "Architecture Diagram",
+        "The system includes this diagram: ![Suitelet flow](../media/suitelet-flow.png) and another ![Suitelet flow](../media/suitelet-flow.png).",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = wiki_query(root, "architecture", top_k=1)
+
+    item = result["results"][0]
+    assert item["path"] == "wiki/concepts/diagram.md"
+    assert item["title_match"] is True
+    assert item["images"] == [{"url": "../media/suitelet-flow.png", "alt": "Suitelet flow"}]
+
+
+def test_wiki_query_prioritizes_exact_title_phrase_over_body_repetition(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice-approval.md", "Invoice Approval", "short body", type="concept")
+    _write(root, "wiki/concepts/noisy.md", "Noisy Page", "invoice approval " * 20, type="concept")
+    refresh_indexes(root)
+
+    result = wiki_query(root, "invoice approval", top_k=2)
+
+    assert result["results"][0]["path"] == "wiki/concepts/invoice-approval.md"
+    assert result["results"][0]["scores"]["keyword"] > result["results"][1]["scores"]["keyword"]
+
+
+def test_wiki_query_excludes_structural_pages_from_results(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/needle.md", "Needle", "needle content", type="concept")
+    refresh_indexes(root)
+
+    result = wiki_query(root, "needle", top_k=5)
+
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/needle.md" in paths
+    assert "wiki/index.md" not in paths
+    assert "wiki/overview.md" not in paths
