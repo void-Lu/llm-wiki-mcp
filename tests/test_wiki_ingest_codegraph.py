@@ -342,10 +342,117 @@ def test_staged_wiki_ingest_applies_generation_with_summary_fallback(tmp_path: P
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    assert "wiki/sources/alpha-docs.md" in result["paths"]
+    assert "wiki/sources/alpha/docs.md" in result["paths"]
     assert "wiki/concepts/alpha/generated.md" in result["paths"]
     generated = root / "wiki/concepts/alpha/generated.md"
     frontmatter = yaml.safe_load(generated.read_text(encoding="utf-8").split("---", 2)[1])
     assert frontmatter["sources"] == ["raw/sources/file/alpha/docs/source.md"]
     assert (root / "wiki/overview.md").is_file()
     assert "llm_ingest" in (root / "wiki/log.md").read_text(encoding="utf-8")
+
+
+def test_prepare_analysis_resolves_relative_source_path_against_vault_root(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw_dir = root / "raw" / "sources" / "suitescript-modules"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "n-action.md").write_text("# N/action\n\nContent", encoding="utf-8")
+
+    result = staged_wiki_ingest(
+        root,
+        "prepare_analysis",
+        project="suitescript-modules",
+        source_name="n-action",
+        source_path="raw/sources/suitescript-modules/n-action.md",
+    )
+
+    assert result["ok"] is True
+    assert result["stage"] == "prepare_analysis"
+
+
+def test_apply_generation_writes_source_summary_in_hierarchical_directory(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nContent", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
+
+    generation = {"source_summary": {"title": "Title", "summary": "Summary", "body": "Body"}, "pages": []}
+    result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
+
+    assert result["ok"] is True
+    assert "wiki/sources/alpha/docs.md" in result["paths"]
+    assert (root / "wiki/sources/alpha/docs.md").is_file()
+
+
+def test_apply_generation_accepts_string_source_summary(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nContent", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
+
+    generation = {"source_summary": "This is a plain string summary", "pages": []}
+    result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
+
+    assert result["ok"] is True
+    written = (root / "wiki/sources/alpha/docs.md").read_text(encoding="utf-8")
+    assert "plain string summary" in written
+
+
+def test_apply_generation_collects_top_level_concept_key(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nContent", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
+
+    generation = {
+        "source_summary": {"title": "T", "summary": "S", "body": "B"},
+        "concept": {"path": "wiki/concepts/alpha/my-concept.md", "title": "My Concept", "type": "concept", "summary": "CS", "body": "CB"},
+    }
+    result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
+
+    assert result["ok"] is True
+    assert "wiki/concepts/alpha/my-concept.md" in result["paths"]
+    assert (root / "wiki/concepts/alpha/my-concept.md").is_file()
+
+
+def test_two_stage_prepare_and_apply(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Module\n\nSome content about N/action", encoding="utf-8")
+
+    prepared = staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+    assert prepared["ok"] is True
+    assert prepared["stage"] == "prepare"
+    assert prepared["status"] == "needs_model"
+    assert "prompt" in prepared
+    assert "expected_response_schema" in prepared
+    assert prepared["next_call"]["stage"] == "apply"
+
+    generation = {
+        "source_summary": {"title": "Alpha Docs", "summary": "Summary of alpha docs", "body": "Body content"},
+        "pages": [{"path": "wiki/concepts/alpha/my-concept.md", "title": "My Concept", "type": "concept", "summary": "CS", "body": "CB"}],
+    }
+    result = staged_wiki_ingest(root, "apply", project="alpha", source_name="docs", generation=generation)
+    assert result["ok"] is True
+    assert "wiki/sources/alpha/docs.md" in result["paths"]
+    assert "wiki/concepts/alpha/my-concept.md" in result["paths"]
+
+
+def test_two_stage_prepare_skips_unchanged_source(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Module\n\nContent", encoding="utf-8")
+
+    r1 = staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+    assert r1["ok"] is True
+    assert r1["status"] == "needs_model"
+
+    r2 = staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+    assert r2["ok"] is True
+    assert r2["status"] == "skipped"
+    assert r2["code"] == "source_unchanged"

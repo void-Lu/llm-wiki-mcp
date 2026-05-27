@@ -23,6 +23,15 @@ _DENIED_SOURCE_NAMES = {".env", "credentials.json", "token.json", "secrets.json"
 _DENIED_SOURCE_PARTS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 
 
+def _resolve_source_path(root: Path, source_path: str | Path) -> Path:
+    p = Path(source_path).expanduser()
+    if not p.is_absolute():
+        candidate = (root / p).resolve()
+        if candidate.exists():
+            return candidate
+    return p.resolve()
+
+
 class CodeGraphLike(Protocol):
     def status(self) -> dict[str, Any]: ...
     def files(self) -> dict[str, Any]: ...
@@ -54,13 +63,15 @@ def staged_wiki_ingest(
     except ValueError as exc:
         return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": str(exc)}
 
+    if stage == "prepare":
+        return _prepare_combined(root, project_value, source_value, source_path, source_type_value, language)
     if stage == "prepare_analysis":
         return _prepare_analysis(root, project_value, source_value, source_path, source_type_value, language)
     if stage == "prepare_generation":
         if analysis is None:
             return {"ok": False, "code": "missing_analysis", "error": "analysis is required for prepare_generation"}
         return _prepare_generation(root, project_value, source_value, language, analysis)
-    if stage == "apply_generation":
+    if stage == "apply_generation" or stage == "apply":
         if generation is None:
             return {"ok": False, "code": "missing_generation", "error": "generation is required for apply_generation"}
         return _apply_generation(root, project_value, source_value, language, generation)
@@ -85,7 +96,7 @@ def rescan_source(
     except ValueError as exc:
         return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": str(exc)}
 
-    source_root = Path(source_path).expanduser().resolve()
+    source_root = _resolve_source_path(root, source_path)
     if not source_root.exists():
         return {"ok": False, "code": "source_not_found", "error": f"source_path does not exist: {source_path}"}
 
@@ -257,6 +268,66 @@ def ingest_codegraph(
     }
 
 
+def _prepare_combined(
+    root: Path,
+    project: str,
+    source_name: str,
+    source_path: str | Path | None,
+    source_type: str,
+    language: str,
+) -> dict[str, Any]:
+    if source_path is None:
+        return {"ok": False, "code": "missing_source_path", "error": "source_path is required for prepare"}
+    source_root = _resolve_source_path(root, source_path)
+    if not source_root.exists():
+        return {"ok": False, "code": "source_not_found", "error": f"source_path does not exist: {source_path}"}
+    sources = _collect_sources(source_root)
+    source_error = _source_limit_error(sources)
+    if source_error is not None:
+        return source_error
+    source_hash = _sources_hash(sources, source_root)
+    cache_path = _cache_path(root, project, source_name)
+    if cache_path.exists():
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        if cache.get("source_hash") == source_hash:
+            return {
+                "ok": True,
+                "stage": "prepare",
+                "status": "skipped",
+                "code": "source_unchanged",
+                "project": project,
+                "source_name": source_name,
+                "source_hash": source_hash,
+                "message": "source hash unchanged; reuse previous generated wiki pages",
+            }
+
+    raw_dir = root / "raw" / "sources" / source_type / project / source_name
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    manifest = _write_source_snapshots(raw_dir, root, sources, source_root)
+    _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared"})
+
+    wiki_context = {
+        "purpose": _read_optional(root / "purpose.md"),
+        "schema": _read_optional(root / "schema.md"),
+        "index": _read_optional(root / "wiki" / "index.md"),
+    }
+    prompt = _combined_prompt(project, source_name, language, manifest, wiki_context)
+    return {
+        "ok": True,
+        "stage": "prepare",
+        "status": "needs_model",
+        "project": project,
+        "source_name": source_name,
+        "source_hash": source_hash,
+        "prompt": prompt,
+        "expected_response_schema": {
+            "source_summary": {"title": "string", "summary": "string", "body": "markdown"},
+            "pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string", "body": "markdown", "sources": ["raw/..."]}],
+        },
+        "next_call": {"tool": "wiki_ingest_llm", "stage": "apply", "required": ["generation"]},
+    }
+
+
 def _prepare_analysis(
     root: Path,
     project: str,
@@ -267,7 +338,7 @@ def _prepare_analysis(
 ) -> dict[str, Any]:
     if source_path is None:
         return {"ok": False, "code": "missing_source_path", "error": "source_path is required for prepare_analysis"}
-    source_root = Path(source_path).expanduser().resolve()
+    source_root = _resolve_source_path(root, source_path)
     if not source_root.exists():
         return {"ok": False, "code": "source_not_found", "error": f"source_path does not exist: {source_path}"}
     sources = _collect_sources(source_root)
@@ -351,9 +422,15 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
     manifest_sources = [item["path"] for item in cache.get("manifest", []) if isinstance(item, dict) and item.get("path")]
     written_paths: list[str] = []
 
-    summary = payload.get("source_summary") if isinstance(payload.get("source_summary"), dict) else {}
+    raw_summary = payload.get("source_summary")
+    if isinstance(raw_summary, dict):
+        summary = raw_summary
+    elif isinstance(raw_summary, str) and raw_summary.strip():
+        summary = {"summary": raw_summary, "body": raw_summary}
+    else:
+        summary = {}
     source_page = WikiPage(
-        relative_path=Path("wiki") / "sources" / f"{project}-{source_name}.md",
+        relative_path=Path("wiki") / "sources" / project / f"{source_name}.md",
         frontmatter={
             "type": "source_summary",
             "generated": True,
@@ -370,7 +447,15 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
     write_wiki_page(root, source_page)
     written_paths.append(source_page.relative_path.as_posix())
 
-    for item in payload.get("pages", []):
+    pages = list(payload.get("pages") or [])
+    for key in ("concept", "concepts"):
+        extra = payload.get(key)
+        if isinstance(extra, dict):
+            pages.append(extra)
+        elif isinstance(extra, list):
+            pages.extend(item for item in extra if isinstance(item, dict))
+
+    for item in pages:
         if not isinstance(item, dict):
             continue
         try:
@@ -515,6 +600,33 @@ def _generation_prompt(project: str, source_name: str, language: str, analysis: 
         json.dumps(analysis, ensure_ascii=False, indent=2) if not isinstance(analysis, str) else analysis,
         "Existing wiki context:",
         json.dumps(wiki_context, ensure_ascii=False, indent=2),
+    ])
+
+
+def _combined_prompt(project: str, source_name: str, language: str, manifest: list[dict[str, Any]], wiki_context: dict[str, str]) -> str:
+    source_listing = "\n".join(f"- {item.get('relative_path', item.get('path', ''))}" for item in manifest)
+    index_summary = wiki_context.get("index", "")[:2000]
+    return "\n".join([
+        f"Analyze source '{source_name}' for project '{project}' and generate LLM Wiki pages.",
+        f"Respond in {language}. Return JSON matching expected_response_schema.",
+        "",
+        "## Source files",
+        source_listing,
+        "",
+        "## Wiki purpose",
+        wiki_context.get("purpose", "") or "(not set)",
+        "",
+        "## Wiki schema",
+        wiki_context.get("schema", "") or "(not set)",
+        "",
+        "## Existing wiki index (truncated)",
+        index_summary or "(empty)",
+        "",
+        "## Instructions",
+        "1. Analyze the source files: extract key entities, concepts, and relationships.",
+        "2. Generate a source_summary with title, summary, and body (markdown).",
+        "3. Generate additional wiki pages (concepts, decisions, etc.) as needed.",
+        "4. Every page must include source traceability via sources[] referencing raw/ paths.",
     ])
 
 
