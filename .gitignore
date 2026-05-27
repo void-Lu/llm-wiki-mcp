@@ -62,6 +62,7 @@ service-account*.json
 .codegraph/
 .omc/
 .omx/
+archive/
 
 # OS
 .DS_Store
