@@ -12,6 +12,7 @@ from netsuite_llm_wiki_mcp.server import (
     wiki_query_debug_tool,
     wiki_query_tool,
     wiki_rescan_tool,
+    wiki_synthesis_tool,
     wiki_write_note_tool,
 )
 
@@ -37,6 +38,7 @@ class TestLlmWikiServerTools:
         registered = {tool.name for tool in mcp._tool_manager.list_tools()}
 
         assert "wiki_write_note" in registered
+        assert "wiki_synthesis" in registered
 
     def test_wiki_write_note_tool_delegates_to_note_writer(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"
@@ -248,6 +250,56 @@ class TestLlmWikiServerTools:
 
         assert result == payload
         assert calls == [{"vault_root": str(vault), "project": "alpha", "source_name": "main", "query": "entry", "codegraph_project_path": "repo"}]
+
+    def test_wiki_lint_tool_delegates_semantic_stage(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "stage": "prepare_semantic_review"}
+        calls: list[dict[str, object]] = []
+
+        def fake_lint(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_lint", fake_lint)
+
+        result = wiki_lint_tool(str(vault), stage="prepare_semantic_review", project="alpha", semantic_review="review", language="zh-CN")
+
+        assert result == payload
+        assert calls == [{"vault_root": str(vault), "stage": "prepare_semantic_review", "project": "alpha", "semantic_review": "review", "language": "zh-CN"}]
+
+    def test_wiki_synthesis_tool_delegates_to_synthesis_module(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "stage": "prepare"}
+        calls: list[dict[str, object]] = []
+
+        def fake_synthesis(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_synthesis", fake_synthesis)
+
+        result = wiki_synthesis_tool(
+            str(vault),
+            question="invoice sync",
+            stage="prepare",
+            context_pages=[{"path": "wiki/a.md"}],
+            synthesis="body",
+            title="Invoice Sync",
+            project="alpha",
+            language="zh-CN",
+        )
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "question": "invoice sync",
+            "stage": "prepare",
+            "context_pages": [{"path": "wiki/a.md"}],
+            "synthesis": "body",
+            "title": "Invoice Sync",
+            "project": "alpha",
+            "language": "zh-CN",
+        }]
 
 
 class TestBuildFilters:

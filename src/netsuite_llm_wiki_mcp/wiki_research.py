@@ -61,8 +61,16 @@ def _prepare(
     index_path = root / "wiki" / "index.md"
     if index_path.exists():
         index_content = index_path.read_text(encoding="utf-8")
+    purpose_content = ""
+    purpose_path = root / "purpose.md"
+    if purpose_path.exists():
+        purpose_content = purpose_path.read_text(encoding="utf-8")
+    overview_content = ""
+    overview_path = root / "wiki" / "overview.md"
+    if overview_path.exists():
+        overview_content = overview_path.read_text(encoding="utf-8")
 
-    prompt = _build_synthesis_prompt(topic, search_results, index_content, language)
+    prompt = _build_synthesis_prompt(topic, search_results, index_content, purpose_content, overview_content, language)
 
     return {
         "ok": True,
@@ -131,6 +139,8 @@ def _build_synthesis_prompt(
     topic: str,
     search_results: list[dict[str, str]],
     index_content: str,
+    purpose_content: str,
+    overview_content: str,
     language: str,
 ) -> str:
     results_text = "\n\n".join(
@@ -138,6 +148,8 @@ def _build_synthesis_prompt(
         for i, r in enumerate(search_results)
     )
 
+    purpose_section = f"\n\n## purpose.md\n{purpose_content}" if purpose_content else ""
+    overview_section = f"\n\n## wiki/overview.md\n{overview_content}" if overview_content else ""
     index_section = f"\n\n## Existing Wiki Index (link to these pages with [[wikilink]])\n{index_content}" if index_content else ""
 
     return (
@@ -151,6 +163,8 @@ def _build_synthesis_prompt(
         "- Note contradictions or gaps\n"
         "- Neutral, encyclopedic tone\n"
         "- Output ONLY the body content (no frontmatter)\n"
+        f"{purpose_section}"
+        f"{overview_section}"
         f"{index_section}\n\n"
         f"## Research Topic: {topic}\n\n"
         f"## Search Results\n\n{results_text}\n\n"

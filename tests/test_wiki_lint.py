@@ -156,3 +156,48 @@ def test_wiki_lint_reports_orphan_pages(tmp_path: Path):
     result = wiki_lint(root)
 
     assert any(issue["code"] == "orphan_page" and issue["path"] == "wiki/concepts/orphan.md" for issue in result["issues"])
+
+
+def test_wiki_lint_prepare_semantic_review_returns_llm_prompt(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/concepts/invoice.md"),
+            {"title": "Invoice", "type": "concept", "generated": True, "sources": ["raw/sources/a.md"]},
+            "Invoice",
+            "Invoices are always synced synchronously.",
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root, stage="prepare_semantic_review", project="alpha")
+
+    assert result["ok"] is True
+    assert result["stage"] == "prepare_semantic_review"
+    assert "contradictions" in result["prompt"]
+    assert "stale claims" in result["prompt"]
+    assert "Invoices are always synced synchronously" in result["prompt"]
+    assert result["next_call"]["stage"] == "apply_semantic_review"
+
+
+def test_wiki_lint_apply_semantic_review_writes_report(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    result = wiki_lint(
+        root,
+        stage="apply_semantic_review",
+        semantic_review="<think>hidden</think>\n\n## Findings\n\n- Missing concept: retry policy.",
+        project="alpha",
+    )
+
+    assert result["ok"] is True
+    assert result["stage"] == "apply_semantic_review"
+    assert result["path"].startswith("wiki/synthesis/")
+    text = (root / result["path"]).read_text(encoding="utf-8")
+    assert "semantic-lint" in text
+    assert "<think>" not in text
+    assert "retry policy" in text
+    assert "semantic_lint" in (root / "wiki/log.md").read_text(encoding="utf-8")

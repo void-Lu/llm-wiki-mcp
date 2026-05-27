@@ -3,9 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
+from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 
 _REQUIRED_FILES = (
@@ -35,8 +41,21 @@ _OLD_PATHS = (
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 
 
-def wiki_lint(vault_root: str | Path, max_page_bytes: int = 200_000) -> dict[str, Any]:
+def wiki_lint(
+    vault_root: str | Path,
+    max_page_bytes: int = 200_000,
+    stage: str = "structure",
+    project: str | None = None,
+    semantic_review: str | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
+    if stage == "prepare_semantic_review":
+        return _prepare_semantic_review(root, project, language)
+    if stage == "apply_semantic_review":
+        return _apply_semantic_review(root, semantic_review, project, language)
+    if stage != "structure":
+        return {"ok": False, "code": "invalid_stage", "error": "stage must be 'structure', 'prepare_semantic_review', or 'apply_semantic_review'"}
     issues: list[dict[str, str]] = []
     for relative in _REQUIRED_FILES:
         if not (root / relative).is_file():
@@ -148,6 +167,85 @@ def wiki_lint(vault_root: str | Path, max_page_bytes: int = 200_000) -> dict[str
                     if actual_hash != expected_hash:
                         issues.append(_issue("cache_manifest_hash_mismatch", f"cache manifest hash mismatch: {source_path}", cache_rel, severity="warning"))
     return {"ok": not issues, "issues": issues}
+
+
+def _prepare_semantic_review(root: Path, project: str | None, language: str) -> dict[str, Any]:
+    context = _semantic_review_context(root, project)
+    prompt = "\n".join([
+        "You are reviewing an LLM Wiki for semantic health.",
+        f"Language: {language}",
+        f"Project filter: {project or ''}",
+        "Look for contradictions, stale claims, missing important concepts, weak source traceability, duplicated concepts, and data gaps.",
+        "Return markdown with sections: contradictions, stale claims, missing concepts, source gaps, recommended follow-up sources, and safe edits.",
+        "Do not modify files. Output only the review body; no frontmatter.",
+        "",
+        "## Wiki Context",
+        context,
+    ])
+    return {
+        "ok": True,
+        "stage": "prepare_semantic_review",
+        "project": project or "",
+        "prompt": prompt,
+        "expected_response_schema": {"body": "markdown semantic review body only, no frontmatter"},
+        "next_call": {"tool": "wiki_lint", "stage": "apply_semantic_review", "required": ["semantic_review"]},
+    }
+
+
+def _apply_semantic_review(root: Path, semantic_review: str | None, project: str | None, language: str) -> dict[str, Any]:
+    if not semantic_review or not semantic_review.strip():
+        return {"ok": False, "code": "empty_semantic_review", "error": "semantic_review content is empty"}
+    today = date.today().isoformat()
+    filename = f"semantic-lint-{project + '-' if project else ''}{today}.md"
+    rel_path = Path("wiki") / "synthesis" / filename
+    target = root / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frontmatter: dict[str, Any] = {
+        "type": "synthesis",
+        "title": f"Semantic Lint: {project or 'vault'}",
+        "generated": True,
+        "origin": "semantic-lint",
+        "created": today,
+        "language": language,
+        "summary": "LLM semantic health review for the wiki",
+    }
+    if project:
+        frontmatter["project"] = project
+    yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
+    cleaned = _strip_thinking_blocks(semantic_review).strip()
+    target.write_text(f"---\n{yaml_text}\n---\n\n# Semantic Lint: {project or 'vault'}\n\n{cleaned}\n", encoding="utf-8")
+    refresh_indexes(root)
+    append_log_entry(root, WikiLogEntry(operation="semantic_lint", title=f"Semantic Lint: {project or 'vault'}", paths=[rel_path.as_posix()], project=project or "", status="ok"))
+    return {"ok": True, "stage": "apply_semantic_review", "path": rel_path.as_posix()}
+
+
+def _semantic_review_context(root: Path, project: str | None) -> str:
+    parts = []
+    for rel in [Path("purpose.md"), Path("schema.md"), Path("wiki/index.md"), Path("wiki/overview.md")]:
+        path = root / rel
+        if path.exists():
+            parts.append(f"# {rel.as_posix()}\n{path.read_text(encoding='utf-8', errors='ignore')}")
+    wiki_root = root / "wiki"
+    if wiki_root.exists():
+        pages = sorted(path for path in wiki_root.rglob("*.md") if path.name not in {"index.md", "log.md", "overview.md"})
+        if project:
+            pages = [path for path in pages if _page_in_project_scope(path, root, project)]
+        for path in pages[:40]:
+            rel = path.relative_to(root).as_posix()
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            parts.append(f"# {rel}\n{text[:4000]}")
+    return "\n\n".join(parts)
+
+
+def _page_in_project_scope(path: Path, root: Path, project: str) -> bool:
+    rel = path.relative_to(root).as_posix()
+    return rel.startswith(f"wiki/projects/{project}/") or rel.startswith(("wiki/concepts/", "wiki/sources/", "wiki/synthesis/", "wiki/comparisons/"))
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    text = re.sub(r"<think(?:ing)?>\s*[\s\S]*?</think(?:ing)?>\s*", "", text)
+    text = re.sub(r"<think(?:ing)?>\s*[\s\S]*$", "", text)
+    return text.lstrip()
 
 
 def _issue(code: str, message: str, path: Path, severity: str = "error") -> dict[str, str]:

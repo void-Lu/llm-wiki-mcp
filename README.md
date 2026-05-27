@@ -1,22 +1,22 @@
 # NetSuite LLM Wiki MCP
 
-A local MCP (Model Context Protocol) server that gives LLM coding agents full read/write access to an Obsidian-based knowledge wiki. Code facts come from CodeGraph; everything else is ingested, queried, and maintained through MCP tools.
+一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。代码事实来自 CodeGraph；其他内容都通过 MCP 工具进行摄入、查询和维护。
 
-No embeddings, no vector DB, no Chroma. Just Markdown, YAML frontmatter, and `[[wikilinks]]`.
+不使用 embedding，不使用向量数据库，不使用 Chroma。只有 Markdown、YAML frontmatter 和 `[[wikilinks]]`。
 
-## Install
+## 安装
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-## Run
+## 运行
 
 ```bash
-# Start the MCP server
+# 启动 MCP server
 netsuite-llm-wiki-mcp-server
 
-# Or via the CLI / module
+# 或通过 CLI / module 启动
 netsuite-llm-wiki-mcp server
 python -m netsuite_llm_wiki_mcp.server
 ```
@@ -28,25 +28,25 @@ netsuite-llm-wiki-mcp init --vault <name> --root <path> --default
 netsuite-llm-wiki-mcp status
 ```
 
-## Configuration
+## 配置
 
-The server resolves the wiki root (vault) in this order:
+server 按以下顺序解析 wiki 根目录（vault）：
 
-1. Tool parameter `vault_root`
-2. Environment variable `NETSUITE_LLM_WIKI_VAULT_ROOT`
-3. Global config `config.yaml` → `default_vault`
+1. 工具参数 `vault_root`
+2. 环境变量 `NETSUITE_LLM_WIKI_VAULT_ROOT`
+3. 全局配置 `config.yaml` → `default_vault`
 
-`config.yaml` lives in the platform user config directory for `netsuite-llm-wiki-mcp`:
+`config.yaml` 位于 `netsuite-llm-wiki-mcp` 的平台用户配置目录：
 
 - Windows: `%APPDATA%\\netsuite-llm-wiki-mcp\\config.yaml`
 - macOS: `~/Library/Application Support/netsuite-llm-wiki-mcp/config.yaml`
 - Linux: `${XDG_CONFIG_HOME:-~/.config}/netsuite-llm-wiki-mcp/config.yaml`
 
-For development and tests, `NETSUITE_LLM_WIKI_CONFIG_DIR` and `NETSUITE_LLM_WIKI_USER_DATA_DIR` can override config/data directories.
+开发和测试时，可以用 `NETSUITE_LLM_WIKI_CONFIG_DIR` 和 `NETSUITE_LLM_WIKI_USER_DATA_DIR` 覆盖配置/数据目录。
 
-### MCP Client Setup
+### MCP 客户端配置
 
-Add to your MCP client config (e.g. Claude Code `settings.json`):
+添加到你的 MCP 客户端配置中（例如 Claude Code 的 `settings.json`）：
 
 ```json
 {
@@ -58,126 +58,141 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 }
 ```
 
-## Tools
+## 工具
 
-### Ingest
+### 摄入
 
-| Tool | Description |
-|------|-------------|
-| `wiki_init` | Create the wiki directory structure in an Obsidian vault |
-| `wiki_ingest` | Ingest a CodeGraph source into wiki pages |
-| `wiki_ingest_llm` | Three-stage LLM ingest: `prepare_analysis` → `prepare_generation` → `apply_generation` |
-| `wiki_rescan` | Re-scan a source; skip if unchanged (SHA256), refresh raw snapshot if changed |
-| `wiki_ingest_batch` | Persistent ingest queue: enqueue / next / complete / fail / retry / cancel / clear_done |
+| 工具 | 说明 |
+|------|------|
+| `wiki_init` | 在 Obsidian vault 中创建 wiki 目录结构 |
+| `wiki_ingest` | 将一个 CodeGraph source 摄入为 wiki 页面 |
+| `wiki_ingest_llm` | 三阶段 LLM 摄入：`prepare_analysis` → `prepare_generation` → `apply_generation` |
+| `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot |
+| `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done |
 
-### Query
+### 查询
 
-| Tool | Description |
-|------|-------------|
-| `wiki_query` | Keyword + CJK bigram search → graph expansion → context-budgeted output; results include title-match and embedded-image metadata |
-| `wiki_query_debug` | Same as query but returns per-result scores and graph expansion reasons |
+| 工具 | 说明 |
+|------|------|
+| `wiki_query` | 关键词 + CJK bigram 搜索 → 图扩展 → 按上下文预算输出；结果包含标题匹配和嵌入图片元数据 |
+| `wiki_query_debug` | 与查询相同，但返回每个结果的分数和图扩展原因 |
 
-### Maintenance
+### 维护
 
-| Tool | Description |
-|------|-------------|
-| `wiki_lint` | Structural health check: frontmatter, broken links, source traceability, cache integrity, orphan pages |
-| `wiki_enrich` | Two-stage wikilink enrichment: prepare (returns LLM prompt) → apply (inserts links) |
-| `wiki_page_merge` | Merge pages: frontmatter union + locked field protection + optional LLM body merge |
-| `wiki_dedup` | Duplicate detection and merge: detect → confirm → merge (three stages) |
-| `wiki_insights` | Graph insights: orphan pages, bridge nodes, surprising cross-type connections, Louvain communities |
-| `wiki_delete_source` | Delete a source with cascade cleanup: derived pages, cross-references, cache; multi-source generated pages are preserved with the deleted source pruned |
-| `wiki_changelog` | Recent wiki log entries |
+| 工具 | 说明 |
+|------|------|
+| `wiki_lint` | 结构健康检查和分阶段语义审查：frontmatter、断链、source 可追溯性、cache 完整性、孤立页面、矛盾、过期声明、缺失概念 |
+| `wiki_enrich` | 两阶段 wikilink 富化：prepare（返回 LLM prompt）→ apply（插入链接） |
+| `wiki_page_merge` | 合并页面：frontmatter union + 锁定字段保护 + 可选 LLM 正文合并 |
+| `wiki_dedup` | 重复页检测和合并：detect → confirm → merge（三阶段） |
+| `wiki_insights` | 图谱洞察：孤立页面、桥接节点、意外跨类型连接、Louvain 社区 |
+| `wiki_delete_source` | 删除 source 并级联清理：派生页面、交叉引用、cache；多 source 生成页会被保留，并移除被删除的 source |
+| `wiki_changelog` | 最近的 wiki log 条目 |
 
-### Research & Notes
+### 研究与笔记
 
-| Tool | Description |
-|------|-------------|
-| `wiki_research` | Deep research synthesis: search results → LLM synthesis → `wiki/queries/` page |
-| `wiki_write_note` | Write a human-curated wiki note; replaces the old `save_obsidian_note` public tool name |
+| 工具 | 说明 |
+|------|------|
+| `wiki_research` | 深度研究综合：搜索结果 + `purpose.md` / `wiki/overview.md` / `wiki/index.md` → LLM 综合 → `wiki/queries/` 页面 |
+| `wiki_synthesis` | 将有价值的查询答案或分析保存为持久的 `wiki/synthesis/` 页面：`prepare` → `apply` |
+| `wiki_write_note` | 写入人工整理的 wiki note；替代旧的 `save_obsidian_note` 公开工具名 |
 
-## Wiki Structure
+## Wiki 结构
 
 ```
 vault_root/
-├── purpose.md              # Research scope and key questions
-├── schema.md               # Page types, frontmatter spec, maintenance rules
+├── purpose.md              # 研究范围和关键问题
+├── schema.md               # 页面类型、frontmatter 规范、维护规则
 ├── raw/
-│   ├── sources/            # Immutable source snapshots (LLM read-only)
-│   └── assets/             # Binary assets
+│   ├── sources/            # 不可变 source snapshot（LLM 只读）
+│   └── assets/             # 二进制资产
 ├── wiki/
-│   ├── index.md            # Content directory, LLM navigation entry
-│   ├── log.md              # Append-only operation log
-│   ├── overview.md         # Auto-generated summary
-│   ├── projects/<project>/ # Project-scoped pages
+│   ├── index.md            # 内容目录，LLM 导航入口
+│   ├── log.md              # 仅追加操作日志
+│   ├── overview.md         # 自动生成摘要
+│   ├── projects/<project>/ # 项目范围页面
 │   │   ├── index.md
-│   │   ├── code/           # CodeGraph-derived facts
+│   │   ├── code/           # CodeGraph 派生事实
 │   │   ├── decisions/
 │   │   ├── troubleshooting/
 │   │   └── requirements/
-│   ├── concepts/           # Domain knowledge (by domain subdirectory)
-│   ├── sources/            # Source summary pages
-│   ├── queries/            # Research synthesis pages
-│   ├── synthesis/          # Cross-cutting analysis
-│   └── comparisons/        # Side-by-side comparisons
-├── .obsidian/              # Obsidian app config
-└── .llm-wiki/              # Runtime state (ingest cache, queue)
+│   ├── concepts/           # 领域知识（按 domain 子目录组织）
+│   ├── sources/            # source 摘要页面
+│   ├── queries/            # 研究综合页面
+│   ├── synthesis/          # 跨页面分析
+│   └── comparisons/        # 并排对比
+├── .obsidian/              # Obsidian 应用配置
+└── .llm-wiki/              # 运行时状态（ingest cache、queue）
 ```
 
-## Data Flow
+## LLM Wiki 工作流
 
-### CodeGraph Ingest
+本项目遵循 LLM Wiki 模式：raw sources 保持为事实源 snapshot，而由 LLM 维护的 Markdown 页面会随着时间沉淀成可导航的 wiki。
+
+推荐循环：
+
+1. 用 `wiki_init` 初始化 vault，然后根据领域定制 `purpose.md` 和 `schema.md`。
+2. 用 `wiki_ingest` 或分阶段的 `wiki_ingest_llm` 一次摄入一个 source，并在应用前审查生成摘要。
+3. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。
+4. 通过 `wiki_research` / `wiki_synthesis` / `wiki_write_note`，把有价值的研究、对比、查询答案和人工决策写回 `wiki/queries/`、`wiki/synthesis/` 或项目笔记目录。
+5. 用 `wiki_lint`、`wiki_enrich`、`wiki_dedup`、`wiki_insights` 和 `wiki_changelog` 保持图谱健康；使用 `wiki_lint(stage="prepare_semantic_review")` → `wiki_lint(stage="apply_semantic_review")` 进行 LLM 辅助的矛盾、过期声明和缺失概念审查。
+
+对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
+
+## 数据流
+
+### CodeGraph 摄入
 
 ```
 CodeGraph CLI → raw/sources/codegraph/<project>/<source_name>/
-             → wiki/sources/ (source summary)
-             → wiki/projects/<project>/code/ (code fact pages)
-             → index + overview + log update
+             → wiki/sources/ (source 摘要)
+             → wiki/projects/<project>/code/ (代码事实页面)
+             → index + overview + log 更新
 ```
 
-### LLM Staged Ingest
+### LLM 分阶段摄入
 
 ```
-prepare_analysis  → returns analysis prompt (agent sends to LLM)
-prepare_generation → returns generation prompt (agent sends to LLM)
-apply_generation  → writes wiki pages from LLM JSON output
+prepare_analysis  → 返回 analysis prompt（agent 发送给 LLM）
+prepare_generation → 返回 generation prompt（agent 发送给 LLM）
+apply_generation  → 从 LLM JSON 输出写入 wiki 页面
 ```
 
-Cache: `.llm-wiki/ingest-cache/<project>/<source_name>.json` (skips unchanged sources by SHA256).
+Cache：`.llm-wiki/ingest-cache/<project>/<source_name>.json`（通过 SHA256 跳过未变化 sources）。
 
-### Query Pipeline
+### 查询流水线
 
 ```
-Keywords / CJK bigrams with title/phrase/rare-term weighting → candidate pages
-  → graph expansion (wikilink, shared source, common neighbor, same type)
-  → context budget allocation
-  → numbered-reference context pack
+关键词 / CJK bigrams，带标题/短语/稀有词加权 → 候选页面
+  → 图扩展（wikilink、shared source、common neighbor、same type）
+  → 上下文预算分配
+  → 编号引用 context pack
 ```
 
-## Development
+## 开发
 
 ```bash
-# Run all tests
+# 运行全部测试
 pytest
 
-# Single test file
+# 运行单个测试文件
 pytest tests/test_wiki_query.py
 
-# Single test function
+# 运行单个测试函数
 pytest tests/test_wiki_query.py::test_function_name -v
 ```
 
-### Conventions
+### 约定
 
-- Python 3.11+, `src/` layout, minimal dependencies (`mcp` + `PyYAML`)
-- Generated pages may only overwrite pages with `generated: true` in frontmatter
-- Human-authored pages are never silently overwritten
-- All writes are confined to the vault root; paths under `wiki/concepts/` and `wiki/projects/` follow fixed structure
-- Sensitive data (phone, email, tokens) is redacted before writing
-- Windows path safety: illegal chars, ADS colons, reserved device names, control chars, trailing dots/spaces
+- Python 3.11+，`src/` layout，最小依赖（`mcp` + `PyYAML`）
+- 生成页只能覆盖 frontmatter 中带 `generated: true` 的页面
+- 人工编写页面绝不静默覆盖
+- 所有写入都限制在 vault root 内；`wiki/concepts/` 和 `wiki/projects/` 下的路径遵循固定结构
+- 敏感数据（手机号、邮箱、token）写入前会被脱敏
+- Windows 路径安全：非法字符、ADS 冒号、保留设备名、控制字符、尾随点/空格
 - 不引入 Chroma、sentence-transformers 或 embedding 模型
 - 不创建 `.rag-index/` 或 `.models/`
 
-## License
+## 许可证
 
 MIT

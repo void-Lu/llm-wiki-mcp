@@ -22,6 +22,7 @@ from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
 from netsuite_llm_wiki_mcp.wiki_research import wiki_research as run_wiki_research
+from netsuite_llm_wiki_mcp.wiki_synthesis import wiki_synthesis as run_wiki_synthesis
 
 mcp = FastMCP("netsuite-llm-wiki-mcp")
 
@@ -152,8 +153,42 @@ def wiki_rescan_tool(
 
 
 
-def wiki_lint_tool(vault_root: str) -> dict[str, Any]:
-    return run_wiki_lint(vault_root)
+def wiki_lint_tool(
+    vault_root: str,
+    stage: str = "structure",
+    project: str | None = None,
+    semantic_review: str | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    return run_wiki_lint(
+        vault_root=vault_root,
+        stage=stage,
+        project=project,
+        semantic_review=semantic_review,
+        language=language,
+    )
+
+
+def wiki_synthesis_tool(
+    vault_root: str,
+    question: str,
+    stage: str = "prepare",
+    context_pages: list[dict[str, Any]] | None = None,
+    synthesis: str | None = None,
+    title: str | None = None,
+    project: str | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    return run_wiki_synthesis(
+        vault_root=vault_root,
+        question=question,
+        stage=stage,
+        context_pages=context_pages,
+        synthesis=synthesis,
+        title=title,
+        project=project,
+        language=language,
+    )
 
 
 def wiki_changelog_tool(vault_root: str, limit: int = 10) -> dict[str, Any]:
@@ -333,9 +368,15 @@ def wiki_rescan(
 
 
 @mcp.tool()
-def wiki_lint(vault_root: str) -> dict[str, Any]:
-    """Check LLM Wiki structure, frontmatter, wikilinks, and stale directories."""
-    return wiki_lint_tool(vault_root)
+def wiki_lint(
+    vault_root: str,
+    stage: str = "structure",
+    project: str | None = None,
+    semantic_review: str | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    """Check LLM Wiki structure and run staged semantic health reviews."""
+    return wiki_lint_tool(vault_root, stage, project, semantic_review, language)
 
 
 @mcp.tool()
@@ -465,6 +506,21 @@ def wiki_research(
         search_results=search_results, synthesis=synthesis,
         language=language, project=project,
     )
+
+
+@mcp.tool()
+def wiki_synthesis(
+    vault_root: str,
+    question: str,
+    stage: str = "prepare",
+    context_pages: list[dict[str, Any]] | None = None,
+    synthesis: str | None = None,
+    title: str | None = None,
+    project: str | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    """Persist a valuable query answer or analysis as a wiki synthesis page. Stages: prepare → apply."""
+    return wiki_synthesis_tool(vault_root, question, stage, context_pages, synthesis, title, project, language)
 
 
 @mcp.tool()

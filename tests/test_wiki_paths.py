@@ -52,6 +52,19 @@ def test_create_wiki_root_preserves_existing_core_files(tmp_path: Path):
     assert (root / "purpose.md").read_text(encoding="utf-8") == "custom purpose"
 
 
+def test_create_wiki_root_writes_actionable_schema_template(tmp_path: Path):
+    root = tmp_path / "vault"
+
+    create_wiki_root(root)
+
+    schema = (root / "schema.md").read_text(encoding="utf-8")
+    assert "LLM Wiki 维护原则" in schema
+    assert "raw/sources/" in schema
+    assert "wiki/index.md" in schema
+    assert "wiki_lint" in schema
+    assert "generated: false" in schema
+
+
 def test_project_helpers_return_confirmed_project_substructure(tmp_path: Path):
     paths = create_wiki_root(tmp_path / "vault")
 

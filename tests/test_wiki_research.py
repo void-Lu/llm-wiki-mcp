@@ -12,8 +12,13 @@ def research_root(tmp_path: Path) -> Path:
     root = tmp_path / "vault"
     wiki = root / "wiki"
     wiki.mkdir(parents=True)
+    (root / "purpose.md").write_text("# Purpose\n\nVault purpose marker: SuiteCloud research scope.", encoding="utf-8")
     (wiki / "index.md").write_text(
         "---\ntype: index\ngenerated: true\n---\n\n# Index\n\n- [[concepts/suiteql|SuiteQL]]\n",
+        encoding="utf-8",
+    )
+    (wiki / "overview.md").write_text(
+        "---\ntype: overview\ngenerated: true\n---\n\n# Overview\n\nOverview marker: recent SuiteQL work.",
         encoding="utf-8",
     )
     (wiki / "log.md").write_text("", encoding="utf-8")
@@ -31,6 +36,17 @@ def test_prepare_returns_prompt(research_root: Path):
     assert "SuiteQL" in result["prompt"]
     assert "[1]" in result["prompt"]
     assert "[2]" in result["prompt"]
+
+
+def test_prepare_includes_purpose_overview_and_index(research_root: Path):
+    results = [{"title": "SuiteQL Guide", "url": "https://example.com/1", "snippet": "SuiteQL is a query language."}]
+
+    result = wiki_research(str(research_root), "SuiteQL best practices", stage="prepare", search_results=results)
+
+    assert result["ok"] is True
+    assert "Vault purpose marker" in result["prompt"]
+    assert "Overview marker" in result["prompt"]
+    assert "Existing Wiki Index" in result["prompt"]
 
 
 def test_prepare_empty_results(research_root: Path):
