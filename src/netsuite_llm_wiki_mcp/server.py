@@ -5,7 +5,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note as run_save_obsidian_note
+from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note as run_write_note
 from netsuite_llm_wiki_mcp.page_merge import apply_page_merge as run_apply_page_merge
 from netsuite_llm_wiki_mcp.page_merge import prepare_body_merge as run_prepare_body_merge
 from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
@@ -161,7 +161,7 @@ def wiki_changelog_tool(vault_root: str, limit: int = 10) -> dict[str, Any]:
     return {"ok": True, "entries": entries, "count": len(entries)}
 
 
-def save_obsidian_note_tool(
+def wiki_write_note_tool(
     note_type: str,
     title: str,
     content: str,
@@ -181,7 +181,7 @@ def save_obsidian_note_tool(
     auto_index: bool = True,
     vault_root: str | None = None,
 ) -> dict[str, Any]:
-    return run_save_obsidian_note(
+    return run_write_note(
         note_type=note_type,
         title=title,
         content=content,
@@ -345,7 +345,7 @@ def wiki_changelog(vault_root: str, limit: int = 10) -> dict[str, Any]:
 
 
 @mcp.tool()
-def save_obsidian_note(
+def wiki_write_note(
     note_type: str,
     title: str,
     content: str,
@@ -365,8 +365,8 @@ def save_obsidian_note(
     auto_index: bool = True,
     vault_root: str | None = None,
 ) -> dict[str, Any]:
-    """Save a curated wiki note."""
-    return save_obsidian_note_tool(
+    """Write a human-curated note into the wiki. Supports decision, troubleshooting, requirement, and knowledge note types."""
+    return wiki_write_note_tool(
         note_type=note_type,
         title=title,
         content=content,

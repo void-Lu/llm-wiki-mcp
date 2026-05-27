@@ -12,6 +12,7 @@ from netsuite_llm_wiki_mcp.server import (
     wiki_query_debug_tool,
     wiki_query_tool,
     wiki_rescan_tool,
+    wiki_write_note_tool,
 )
 
 
@@ -25,11 +26,71 @@ class TestLlmWikiServerTools:
             "get_index_status",
             "generate_suitecloud_wiki",
             "write_wiki_summaries",
+            "save_obsidian_note",
         }
 
         registered = {tool.name for tool in mcp._tool_manager.list_tools()}
 
         assert registered.isdisjoint(deprecated)
+
+    def test_registered_tools_include_wiki_write_note(self):
+        registered = {tool.name for tool in mcp._tool_manager.list_tools()}
+
+        assert "wiki_write_note" in registered
+
+    def test_wiki_write_note_tool_delegates_to_note_writer(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "path": "wiki/projects/alpha/decisions/note.md"}
+        calls: list[dict[str, object]] = []
+
+        def fake_save_note(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_write_note", fake_save_note)
+
+        result = wiki_write_note_tool(
+            note_type="decision",
+            title="Decision note",
+            content="Body",
+            project="alpha",
+            domain="common-errors",
+            related_script_types=["user-event"],
+            script_type="restlet",
+            object_type="salesorder",
+            related_objects=["invoice"],
+            related_scripts=["customscript_sync"],
+            tags=["custom"],
+            zentao_urls=["https://zentao.example/ticket/1"],
+            decision_status="accepted",
+            status="open",
+            filename="note",
+            overwrite=True,
+            auto_index=False,
+            vault_root=str(vault),
+        )
+
+        assert result == payload
+        assert calls == [{
+            "note_type": "decision",
+            "title": "Decision note",
+            "content": "Body",
+            "project": "alpha",
+            "domain": "common-errors",
+            "related_script_types": ["user-event"],
+            "script_type": "restlet",
+            "object_type": "salesorder",
+            "related_objects": ["invoice"],
+            "related_scripts": ["customscript_sync"],
+            "tags": ["custom"],
+            "zentao_urls": ["https://zentao.example/ticket/1"],
+            "decision_status": "accepted",
+            "status": "open",
+            "filename": "note",
+            "overwrite": True,
+            "auto_index": False,
+            "vault_root": str(vault),
+        }]
 
     def test_wiki_init_tool_creates_confirmed_structure(self, tmp_path: Path):
         vault = tmp_path / "wiki-root"

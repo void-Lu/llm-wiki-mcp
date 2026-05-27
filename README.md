@@ -16,7 +16,8 @@ python -m pip install -e ".[dev]"
 # Start the MCP server
 netsuite-llm-wiki-mcp-server
 
-# Or via module
+# Or via the CLI / module
+netsuite-llm-wiki-mcp server
 python -m netsuite_llm_wiki_mcp.server
 ```
 
@@ -33,7 +34,15 @@ The server resolves the wiki root (vault) in this order:
 
 1. Tool parameter `vault_root`
 2. Environment variable `NETSUITE_LLM_WIKI_VAULT_ROOT`
-3. Global config `~/.config/netsuite-llm-wiki-mcp/config.yaml` → `default_vault`
+3. Global config `config.yaml` → `default_vault`
+
+`config.yaml` lives in the platform user config directory for `netsuite-llm-wiki-mcp`:
+
+- Windows: `%APPDATA%\\netsuite-llm-wiki-mcp\\config.yaml`
+- macOS: `~/Library/Application Support/netsuite-llm-wiki-mcp/config.yaml`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/netsuite-llm-wiki-mcp/config.yaml`
+
+For development and tests, `NETSUITE_LLM_WIKI_CONFIG_DIR` and `NETSUITE_LLM_WIKI_USER_DATA_DIR` can override config/data directories.
 
 ### MCP Client Setup
 
@@ -59,7 +68,7 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 | `wiki_ingest` | Ingest a CodeGraph source into wiki pages |
 | `wiki_ingest_llm` | Three-stage LLM ingest: `prepare_analysis` → `prepare_generation` → `apply_generation` |
 | `wiki_rescan` | Re-scan a source; skip if unchanged (SHA256), refresh raw snapshot if changed |
-| `wiki_ingest_batch` | Persistent ingest queue: enqueue / next / complete / fail / retry / cancel |
+| `wiki_ingest_batch` | Persistent ingest queue: enqueue / next / complete / fail / retry / cancel / clear_done |
 
 ### Query
 
@@ -72,11 +81,11 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 
 | Tool | Description |
 |------|-------------|
-| `wiki_lint` | Structural health check: frontmatter, broken links, source traceability, cache integrity |
+| `wiki_lint` | Structural health check: frontmatter, broken links, source traceability, cache integrity, orphan pages |
 | `wiki_enrich` | Two-stage wikilink enrichment: prepare (returns LLM prompt) → apply (inserts links) |
 | `wiki_page_merge` | Merge pages: frontmatter union + locked field protection + optional LLM body merge |
 | `wiki_dedup` | Duplicate detection and merge: detect → confirm → merge (three stages) |
-| `wiki_insights` | Graph insights: orphan pages, bridge nodes, unexpected cross-type connections |
+| `wiki_insights` | Graph insights: orphan pages, bridge nodes, surprising cross-type connections, Louvain communities |
 | `wiki_delete_source` | Delete a source with cascade cleanup: derived pages, cross-references, cache |
 | `wiki_changelog` | Recent wiki log entries |
 
@@ -85,7 +94,7 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 | Tool | Description |
 |------|-------------|
 | `wiki_research` | Deep research synthesis: search results → LLM synthesis → `wiki/queries/` page |
-| `save_obsidian_note` | Save a human-curated note: decision, troubleshooting, requirement, or knowledge |
+| `wiki_write_note` | Write a human-curated wiki note; replaces the old `save_obsidian_note` public tool name |
 
 ## Wiki Structure
 
@@ -120,7 +129,7 @@ vault_root/
 ### CodeGraph Ingest
 
 ```
-CodeGraph CLI → raw/sources/codegraph/<project>/<source>/
+CodeGraph CLI → raw/sources/codegraph/<project>/<source_name>/
              → wiki/sources/ (source summary)
              → wiki/projects/<project>/code/ (code fact pages)
              → index + overview + log update
