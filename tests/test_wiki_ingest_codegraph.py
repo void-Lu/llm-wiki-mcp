@@ -60,7 +60,7 @@ def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_
     assert result["ok"] is True
     snapshot = root / "raw/sources/codegraph/alpha/main/context.json"
     assert snapshot.is_file()
-    source_page = root / "wiki/sources/codegraph-alpha-main.md"
+    source_page = root / "wiki/sources/projects/alpha/main.md"
     assert source_page.is_file()
     code_page = root / "wiki/projects/alpha/code/onrequest.md"
     assert code_page.is_file()
@@ -134,7 +134,7 @@ def test_rescan_source_writes_snapshot_cache_and_reports_changed(tmp_path: Path)
     assert result["source_hash"]
     assert result["classification_context"] == ["notes.md"]
     assert result["paths"] == ["raw/sources/file/alpha/docs/notes.md", "raw/sources/file/alpha/docs/manifest.json"]
-    assert (root / ".llm-wiki/ingest-cache/alpha/docs.json").is_file()
+    assert (root / ".llm-wiki/ingest-cache/file/alpha/docs.json").is_file()
     assert (root / "raw/sources/file/alpha/docs/notes.md").read_text(encoding="utf-8").startswith("# Notes")
 
 
@@ -342,7 +342,7 @@ def test_staged_wiki_ingest_applies_generation_with_summary_fallback(tmp_path: P
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    assert "wiki/sources/alpha/docs.md" in result["paths"]
+    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
     assert "wiki/concepts/alpha/generated.md" in result["paths"]
     generated = root / "wiki/concepts/alpha/generated.md"
     frontmatter = yaml.safe_load(generated.read_text(encoding="utf-8").split("---", 2)[1])
@@ -381,8 +381,8 @@ def test_apply_generation_writes_source_summary_in_hierarchical_directory(tmp_pa
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    assert "wiki/sources/alpha/docs.md" in result["paths"]
-    assert (root / "wiki/sources/alpha/docs.md").is_file()
+    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
+    assert (root / "wiki/sources/concepts/alpha/docs.md").is_file()
 
 
 def test_apply_generation_accepts_string_source_summary(tmp_path: Path):
@@ -396,7 +396,7 @@ def test_apply_generation_accepts_string_source_summary(tmp_path: Path):
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    written = (root / "wiki/sources/alpha/docs.md").read_text(encoding="utf-8")
+    written = (root / "wiki/sources/concepts/alpha/docs.md").read_text(encoding="utf-8")
     assert "plain string summary" in written
 
 
@@ -438,7 +438,7 @@ def test_two_stage_prepare_and_apply(tmp_path: Path):
     }
     result = staged_wiki_ingest(root, "apply", project="alpha", source_name="docs", generation=generation)
     assert result["ok"] is True
-    assert "wiki/sources/alpha/docs.md" in result["paths"]
+    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
     assert "wiki/concepts/alpha/my-concept.md" in result["paths"]
 
 

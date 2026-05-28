@@ -14,7 +14,8 @@ TOP_LEVEL_DIRS = (
     Path("raw/assets"),
     Path("wiki/projects"),
     Path("wiki/concepts"),
-    Path("wiki/sources"),
+    Path("wiki/sources/concepts"),
+    Path("wiki/sources/projects"),
     Path("wiki/queries"),
     Path("wiki/synthesis"),
     Path("wiki/comparisons"),
@@ -39,7 +40,7 @@ DEFAULT_SCHEMA_TEXT = """# Schema
 
 | frontmatter `type` | 位置 | 说明 | generated |
 | --- | --- | --- | --- |
-| `source_summary` | `wiki/sources/` | 原始来源或 CodeGraph snapshot 的摘要页 | `true` |
+| `source_index` | `wiki/sources/{target_dir}/<project>/` | 索引溯源页：frontmatter + 一句话摘要 + raw source 路径 + wikilinks，不承载知识内容 | `true` |
 | `code_fact` | `wiki/projects/<project>/code/` | CodeGraph 派生的代码事实页 | `true` |
 | `decision` | `wiki/projects/<project>/decisions/` | 人工决策记录 | `false` |
 | `troubleshooting` | `wiki/projects/<project>/troubleshooting/` | 人工排障经验 | `false` |
@@ -95,10 +96,10 @@ tags:
 ### CodeGraph ingest
 
 ```text
-CodeGraph status/files/context
+wiki_ingest_codegraph
     -> raw/sources/codegraph/<project>/<source_name>/
-    -> wiki/sources/codegraph-<project>-<source_name>.md
     -> wiki/projects/<project>/code/*.md
+    -> wiki/sources/projects/<project>/<source_name>.md (索引页)
     -> refresh wiki/index.md + wiki/overview.md
     -> append wiki/log.md
 ```
@@ -106,14 +107,23 @@ CodeGraph status/files/context
 ### LLM staged ingest
 
 ```text
-wiki_ingest_llm(stage="prepare_analysis")
-    -> 复制并脱敏 source 到 raw/sources/<source_type>/<project>/<source_name>/
-    -> 返回分析 prompt
-wiki_ingest_llm(stage="prepare_generation")
-    -> 结合 analysis + purpose.md + schema.md + wiki/index.md 返回生成 prompt
-wiki_ingest_llm(stage="apply_generation")
-    -> 写 source summary 和 wiki pages
+wiki_ingest_llm(stage="prepare")
+    -> raw/sources/file/<project>/<source_name>/
+    -> 返回合并 prompt
+wiki_ingest_llm(stage="apply")
+    -> wiki/concepts/ 或 wiki/projects/ 下的知识页面
+    -> wiki/sources/{target_dir}/<project>/<source_name>.md (索引页)
     -> refresh index/overview/log/cache
+```
+
+### URL ingest
+
+```text
+wiki_ingest_url(urls=[...])
+    -> raw/sources/url/<project>/<source_name>/
+    -> 返回合并 prompt
+wiki_ingest_llm(stage="apply", source_type="url")
+    -> 同 LLM staged ingest 的 apply
 ```
 
 ## Query 与归档规则

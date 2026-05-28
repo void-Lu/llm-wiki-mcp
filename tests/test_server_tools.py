@@ -6,7 +6,7 @@ from netsuite_llm_wiki_mcp.server import (
     _build_filters,
     mcp,
     wiki_init_tool,
-    wiki_ingest_tool,
+    wiki_ingest_codegraph_tool,
     wiki_ingest_llm_tool,
     wiki_lint_tool,
     wiki_query_debug_tool,
@@ -211,31 +211,7 @@ class TestLlmWikiServerTools:
             "include_raw_sources": True,
         }]
 
-    def test_wiki_ingest_rejects_unsupported_source_type(self, tmp_path: Path):
-        vault = tmp_path / "wiki-root"
-
-        result = wiki_ingest_tool(str(vault), source_type="pdf", project="alpha", source_name="main")
-
-        assert result["ok"] is False
-        assert result["code"] == "unsupported_source_type"
-
-    def test_wiki_ingest_requires_project(self, tmp_path: Path):
-        vault = tmp_path / "wiki-root"
-
-        result = wiki_ingest_tool(str(vault), source_type="codegraph")
-
-        assert result["ok"] is False
-        assert result["code"] == "missing_project"
-
-    def test_wiki_ingest_requires_source_name(self, tmp_path: Path):
-        vault = tmp_path / "wiki-root"
-
-        result = wiki_ingest_tool(str(vault), source_type="codegraph", project="alpha")
-
-        assert result["ok"] is False
-        assert result["code"] == "missing_source_name"
-
-    def test_wiki_ingest_tool_delegates_codegraph_ingest(self, monkeypatch, tmp_path: Path):
+    def test_wiki_ingest_codegraph_tool_delegates_codegraph_ingest(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"
         payload = {"ok": True, "written": 2}
         calls: list[dict[str, object]] = []
@@ -246,7 +222,7 @@ class TestLlmWikiServerTools:
 
         monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_ingest_codegraph", fake_ingest)
 
-        result = wiki_ingest_tool(str(vault), source_type="codegraph", project="alpha", source_name="main", query="entry", codegraph_project_path="repo")
+        result = wiki_ingest_codegraph_tool(str(vault), project="alpha", source_name="main", query="entry", codegraph_project_path="repo")
 
         assert result == payload
         assert calls == [{"vault_root": str(vault), "project": "alpha", "source_name": "main", "query": "entry", "codegraph_project_path": "repo"}]

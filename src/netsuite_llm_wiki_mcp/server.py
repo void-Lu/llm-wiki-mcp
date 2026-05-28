@@ -15,6 +15,7 @@ from netsuite_llm_wiki_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
 from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
 from netsuite_llm_wiki_mcp.wiki_ingest import rescan_source as run_rescan_source
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
+from netsuite_llm_wiki_mcp.wiki_ingest_url import wiki_ingest_url as run_wiki_ingest_url
 from netsuite_llm_wiki_mcp.wiki_insights import wiki_insights as run_wiki_insights
 from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint as run_wiki_lint
 from netsuite_llm_wiki_mcp.wiki_log import parse_log_entries as run_parse_log_entries
@@ -23,6 +24,7 @@ from netsuite_llm_wiki_mcp.wiki_query import wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
 from netsuite_llm_wiki_mcp.wiki_research import wiki_research as run_wiki_research
 from netsuite_llm_wiki_mcp.wiki_synthesis import wiki_synthesis as run_wiki_synthesis
+from netsuite_llm_wiki_mcp.wiki_verify import wiki_verify as run_wiki_verify
 
 mcp = FastMCP("netsuite-llm-wiki-mcp")
 
@@ -32,25 +34,18 @@ def wiki_init_tool(vault_root: str) -> dict[str, Any]:
     return {"ok": True, "vault_root": str(paths.root)}
 
 
-def wiki_ingest_tool(
+def wiki_ingest_codegraph_tool(
     vault_root: str,
-    source_type: str,
-    source_name: str | None = None,
-    query: str | None = None,
-    project: str | None = None,
+    project: str,
+    source_name: str,
+    query: str = "project code overview",
     codegraph_project_path: str | None = None,
 ) -> dict[str, Any]:
-    if source_type != "codegraph":
-        return {"ok": False, "code": "unsupported_source_type", "error": "only codegraph ingest is implemented"}
-    if not project:
-        return {"ok": False, "code": "missing_project", "error": "project is required for codegraph ingest"}
-    if not source_name:
-        return {"ok": False, "code": "missing_source_name", "error": "source_name is required for codegraph ingest"}
     return run_ingest_codegraph(
         vault_root=vault_root,
         project=project,
         source_name=source_name,
-        query=query or "project code overview",
+        query=query,
         codegraph_project_path=codegraph_project_path,
     )
 
@@ -273,16 +268,15 @@ def wiki_init(vault_root: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def wiki_ingest(
+def wiki_ingest_codegraph(
     vault_root: str,
-    source_type: str,
-    source_name: str | None = None,
-    query: str | None = None,
-    project: str | None = None,
+    project: str,
+    source_name: str,
+    query: str = "project code overview",
     codegraph_project_path: str | None = None,
 ) -> dict[str, Any]:
-    """Ingest a source into the LLM Wiki. The first supported source_type is codegraph."""
-    return wiki_ingest_tool(vault_root, source_type, source_name, query, project, codegraph_project_path)
+    """Ingest CodeGraph symbols and code facts into the LLM Wiki (synchronous, no LLM needed)."""
+    return wiki_ingest_codegraph_tool(vault_root, project, source_name, query, codegraph_project_path)
 
 
 @mcp.tool()
@@ -364,6 +358,28 @@ def wiki_rescan(
 ) -> dict[str, Any]:
     """Rescan a local source, persist snapshots/cache, and report whether it changed."""
     return wiki_rescan_tool(vault_root, project, source_name, source_path, source_type, language)
+
+
+def wiki_ingest_url_tool(
+    vault_root: str,
+    urls: list[str],
+    project: str,
+    source_name: str,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    return run_wiki_ingest_url(vault_root=vault_root, urls=urls, project=project, source_name=source_name, language=language)
+
+
+@mcp.tool()
+def wiki_ingest_url(
+    vault_root: str,
+    urls: list[str],
+    project: str,
+    source_name: str,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    """Fetch URLs, convert HTML to Markdown, snapshot and redact, return LLM prompt. Follow up with wiki_ingest_llm stage='apply'."""
+    return wiki_ingest_url_tool(vault_root, urls, project, source_name, language)
 
 
 
@@ -533,6 +549,30 @@ def wiki_ingest_batch(
 ) -> dict[str, Any]:
     """Manage persistent ingest queue: enqueue, next, complete, fail, retry, status, cancel, clear_done."""
     return run_wiki_ingest_batch(vault_root=vault_root, action=action, tasks=tasks, task_id=task_id, result=result)
+
+
+def wiki_verify_tool(
+    vault_root: str,
+    stage: str,
+    project: str | None = None,
+    page_path: str | None = None,
+    verification_result: dict[str, Any] | str | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    return run_wiki_verify(vault_root=vault_root, stage=stage, project=project, page_path=page_path, verification_result=verification_result, language=language)
+
+
+@mcp.tool()
+def wiki_verify(
+    vault_root: str,
+    stage: str,
+    project: str | None = None,
+    page_path: str | None = None,
+    verification_result: dict[str, Any] | str | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    """Verify generated wiki pages against raw sources for faithfulness. Two-stage: prepare (returns LLM prompt) then apply (records results)."""
+    return wiki_verify_tool(vault_root, stage, project, page_path, verification_result, language)
 
 
 def main() -> None:

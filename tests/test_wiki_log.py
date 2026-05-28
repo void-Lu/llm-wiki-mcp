@@ -90,7 +90,7 @@ def test_parse_log_entries_returns_structured_entries(tmp_path: Path):
         WikiLogEntry(
             operation="ingest",
             title="CodeGraph alpha",
-            paths=["wiki/projects/alpha/code/script.md", "wiki/sources/codegraph-alpha-main.md"],
+            paths=["wiki/projects/alpha/code/script.md", "wiki/sources/alpha/main.md"],
             sources=["raw/sources/codegraph/alpha/main/context.json"],
             project="alpha",
             status="ok",

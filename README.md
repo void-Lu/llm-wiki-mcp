@@ -65,8 +65,9 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | 工具 | 说明 |
 |------|------|
 | `wiki_init` | 在 Obsidian vault 中创建 wiki 目录结构 |
-| `wiki_ingest` | 将一个 CodeGraph source 摄入为 wiki 页面 |
-| `wiki_ingest_llm` | 三阶段 LLM 摄入：`prepare_analysis` → `prepare_generation` → `apply_generation` |
+| `wiki_ingest_codegraph` | 将 CodeGraph 符号和代码事实同步摄入 wiki（不需要 LLM） |
+| `wiki_ingest_llm` | 两阶段 LLM 摄入（推荐）：`prepare`（返回合并 prompt）→ `apply`（写入页面）。旧三阶段 `prepare_analysis` → `prepare_generation` → `apply_generation` 仍兼容 |
+| `wiki_ingest_url` | 抓取 URL 列表 → HTML 转 Markdown → 脱敏写 raw snapshot → 返回 LLM prompt；apply 阶段复用 `wiki_ingest_llm stage='apply'` |
 | `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot |
 | `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done |
 
@@ -87,6 +88,7 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | `wiki_dedup` | 重复页检测和合并：detect → confirm → merge（三阶段） |
 | `wiki_insights` | 图谱洞察：孤立页面、桥接节点、意外跨类型连接、Louvain 社区 |
 | `wiki_delete_source` | 删除 source 并级联清理：派生页面、交叉引用、cache；多 source 生成页会被保留，并移除被删除的 source |
+| `wiki_verify` | 两阶段 grounding check：从 `wiki/sources/` 索引页出发，读取关联的 raw source 和生成页，返回 faithfulness 校验 prompt → `apply` 记录结果 |
 | `wiki_changelog` | 最近的 wiki log 条目 |
 
 ### 研究与笔记
@@ -105,6 +107,9 @@ vault_root/
 ├── schema.md               # 页面类型、frontmatter 规范、维护规则
 ├── raw/
 │   ├── sources/            # 不可变 source snapshot（LLM 只读）
+│   │   ├── codegraph/     # CodeGraph 摄入的原始数据
+│   │   ├── file/          # 本地文件摄入的脱敏副本
+│   │   └── url/           # URL 抓取转换的 Markdown
 │   └── assets/             # 二进制资产
 ├── wiki/
 │   ├── index.md            # 内容目录，LLM 导航入口
@@ -117,12 +122,19 @@ vault_root/
 │   │   ├── troubleshooting/
 │   │   └── requirements/
 │   ├── concepts/           # 领域知识（按 domain 子目录组织）
-│   ├── sources/            # source 摘要页面
+│   ├── sources/            # 索引溯源页（不承载知识内容）
+│   │   ├── concepts/      # 关联 wiki/concepts/ 生成页的索引
+│   │   └── projects/      # 关联 wiki/projects/ 生成页的索引
 │   ├── queries/            # 研究综合页面
 │   ├── synthesis/          # 跨页面分析
 │   └── comparisons/        # 并排对比
 ├── .obsidian/              # Obsidian 应用配置
-└── .llm-wiki/              # 运行时状态（ingest cache、queue）
+└── .llm-wiki/              # 运行时状态
+    ├── ingest-cache/       # 按 source_type 分级的摄入缓存
+    │   ├── codegraph/
+    │   ├── file/
+    │   └── url/
+    └── ingest-queue.json   # 批量摄入队列
 ```
 
 ## LLM Wiki 工作流
@@ -132,10 +144,14 @@ vault_root/
 推荐循环：
 
 1. 用 `wiki_init` 初始化 vault，然后根据领域定制 `purpose.md` 和 `schema.md`。
-2. 用 `wiki_ingest` 或分阶段的 `wiki_ingest_llm` 一次摄入一个 source，并在应用前审查生成摘要。
-3. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。
-4. 通过 `wiki_research` / `wiki_synthesis` / `wiki_write_note`，把有价值的研究、对比、查询答案和人工决策写回 `wiki/queries/`、`wiki/synthesis/` 或项目笔记目录。
-5. 用 `wiki_lint`、`wiki_enrich`、`wiki_dedup`、`wiki_insights` 和 `wiki_changelog` 保持图谱健康；使用 `wiki_lint(stage="prepare_semantic_review")` → `wiki_lint(stage="apply_semantic_review")` 进行 LLM 辅助的矛盾、过期声明和缺失概念审查。
+2. 摄入 source：
+   - 代码仓库 → `wiki_ingest_codegraph`（同步，不需要 LLM）
+   - 本地文件 → `wiki_ingest_llm(stage="prepare")` → LLM 生成 → `wiki_ingest_llm(stage="apply")`
+   - URL 文档 → `wiki_ingest_url(urls=[...])` → LLM 生成 → `wiki_ingest_llm(stage="apply", source_type="url")`
+3. 用 `wiki_verify` 校验生成页面是否忠实于原始来源。
+4. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。
+5. 通过 `wiki_research` / `wiki_synthesis` / `wiki_write_note`，把有价值的研究、对比、查询答案和人工决策写回 `wiki/queries/`、`wiki/synthesis/` 或项目笔记目录。
+6. 用 `wiki_lint`、`wiki_enrich`、`wiki_dedup`、`wiki_insights` 和 `wiki_changelog` 保持图谱健康；使用 `wiki_lint(stage="prepare_semantic_review")` → `wiki_lint(stage="apply_semantic_review")` 进行 LLM 辅助的矛盾、过期声明和缺失概念审查。
 
 对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
 
@@ -144,21 +160,35 @@ vault_root/
 ### CodeGraph 摄入
 
 ```
-CodeGraph CLI → raw/sources/codegraph/<project>/<source_name>/
-             → wiki/sources/ (source 摘要)
-             → wiki/projects/<project>/code/ (代码事实页面)
-             → index + overview + log 更新
+wiki_ingest_codegraph → raw/sources/codegraph/<project>/<source_name>/
+                      → wiki/projects/<project>/code/ (代码事实页面)
+                      → wiki/sources/projects/<project>/<source_name>.md (索引页)
+                      → index + overview + log 更新
 ```
 
 ### LLM 分阶段摄入
 
 ```
-prepare_analysis  → 返回 analysis prompt（agent 发送给 LLM）
-prepare_generation → 返回 generation prompt（agent 发送给 LLM）
-apply_generation  → 从 LLM JSON 输出写入 wiki 页面
+推荐两阶段流程：
+prepare → 读源文件 + 写 raw/sources/file/ snapshot + 返回合并 prompt（agent 发送给 LLM）
+apply   → 写 wiki/concepts/ 或 wiki/projects/ 下的知识页面
+        → 写 wiki/sources/{target_dir}/<project>/<source_name>.md 索引溯源页
+
+旧三阶段（仍兼容）：
+prepare_analysis   → 返回 analysis prompt
+prepare_generation → 返回 generation prompt
+apply_generation   → 写入 wiki 页面
 ```
 
-Cache：`.llm-wiki/ingest-cache/<project>/<source_name>.json`（通过 SHA256 跳过未变化 sources）。
+### URL 摄入
+
+```
+wiki_ingest_url → 抓取 URL → HTML 转 Markdown → raw/sources/url/<project>/<source_name>/
+              → 返回 prompt（agent 发送给 LLM）
+wiki_ingest_llm(stage="apply", source_type="url") → 写入 wiki 页面 + 索引页
+```
+
+Cache：`.llm-wiki/ingest-cache/{source_type}/<project>/<source_name>.json`（通过 SHA256 跳过未变化 sources）。
 
 ### 查询流水线
 

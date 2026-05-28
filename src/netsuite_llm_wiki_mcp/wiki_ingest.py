@@ -70,11 +70,11 @@ def staged_wiki_ingest(
     if stage == "prepare_generation":
         if analysis is None:
             return {"ok": False, "code": "missing_analysis", "error": "analysis is required for prepare_generation"}
-        return _prepare_generation(root, project_value, source_value, language, analysis)
+        return _prepare_generation(root, project_value, source_value, language, analysis, source_type_value)
     if stage == "apply_generation" or stage == "apply":
         if generation is None:
             return {"ok": False, "code": "missing_generation", "error": "generation is required for apply_generation"}
-        return _apply_generation(root, project_value, source_value, language, generation)
+        return _apply_generation(root, project_value, source_value, language, generation, source_type_value)
     return {"ok": False, "code": "unsupported_stage", "error": f"unsupported staged ingest stage: {stage}"}
 
 
@@ -106,7 +106,7 @@ def rescan_source(
         return source_error
 
     source_hash = _sources_hash(sources, source_root)
-    cache_path = _cache_path(root, project_value, source_value)
+    cache_path = _cache_path(root, project_value, source_value, source_type_value)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
         if cache.get("source_type") == source_type_value and cache.get("source_hash") == source_hash:
@@ -131,6 +131,7 @@ def rescan_source(
         project_value,
         source_value,
         {"source_hash": source_hash, "source_type": source_type_value, "manifest": manifest, "status": "prepared"},
+        source_type=source_type_value,
     )
 
     paths = [item["path"] for item in manifest]
@@ -184,7 +185,7 @@ def ingest_codegraph(
 
     context_json = json.dumps(context.get("data", {}), ensure_ascii=False, sort_keys=True)
     context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
-    cache_path = _cache_path(root, project_value, source_value)
+    cache_path = _cache_path(root, project_value, source_value, "codegraph")
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
         if cache.get("codegraph_context_hash") == context_hash:
@@ -210,33 +211,14 @@ def ingest_codegraph(
         target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         written_paths.append(target.relative_to(root).as_posix())
 
-    source_page_path = Path("wiki") / "sources" / f"codegraph-{project_value}-{source_value}.md"
-    source_page = WikiPage(
-        relative_path=source_page_path,
-        frontmatter={
-            "type": "source_summary",
-            "generated": True,
-            "project": project_value,
-            "source_name": source_value,
-            "sources": written_paths,
-            "summary": f"CodeGraph snapshot for {project_value}/{source_value}",
-        },
-        title=f"CodeGraph {project_value}/{source_value}",
-        body="\n".join([
-            "## Source Snapshot",
-            f"- Project: `{project_value}`",
-            f"- Source: `{source_value}`",
-            f"- Query: `{query}`",
-            "- Snapshot: `raw/sources/codegraph/{}/{}/context.json`".format(project_value, source_value),
-        ]),
-    )
-    write_wiki_page(root, source_page)
-    written_paths.append(source_page_path.as_posix())
+    source_page_path = Path("wiki") / "sources" / "projects" / project_value / f"{source_value}.md"
+    code_page_paths: list[str] = []
 
-    code_pages = _code_pages_from_context(context.get("data", {}), project_value, source_value, written_paths[2])
+    code_pages = _code_pages_from_context(context.get("data", {}), project_value, source_value, written_paths[2] if len(written_paths) > 2 else "")
     for page in code_pages:
         write_wiki_page(root, page)
         written_paths.append(page.relative_path.as_posix())
+        code_page_paths.append(page.relative_path.as_posix())
         symbol = str(page.frontmatter.get("symbol", ""))
         if symbol:
             impact = cg.impact(symbol)
@@ -244,6 +226,27 @@ def ingest_codegraph(
                 impact_path = snapshot_dir / f"impact-{slug(symbol)}.json"
                 impact_path.write_text(json.dumps(impact.get("data", {}), ensure_ascii=False, indent=2), encoding="utf-8")
                 written_paths.append(impact_path.relative_to(root).as_posix())
+
+    wikilinks = "\n".join(f"- [[{Path(p).stem}]]" for p in code_page_paths) if code_page_paths else "(no code pages)"
+    raw_sources = [p for p in written_paths if p.startswith("raw/")]
+    source_page = WikiPage(
+        relative_path=source_page_path,
+        frontmatter={
+            "type": "source_index",
+            "generated": True,
+            "project": project_value,
+            "source_name": source_value,
+            "source_type": "codegraph",
+            "sources": raw_sources,
+            "summary": f"CodeGraph snapshot for {project_value}/{source_value}",
+        },
+        title=f"CodeGraph {project_value}/{source_value}",
+        body=f"CodeGraph snapshot for {project_value}/{source_value}\n\n## Raw sources\n\n"
+             + "\n".join(f"- `{s}`" for s in raw_sources)
+             + f"\n\n## Generated pages\n\n{wikilinks}",
+    )
+    write_wiki_page(root, source_page)
+    written_paths.append(source_page_path.as_posix())
 
     refresh_indexes(root)
     refresh_overview(root)
@@ -258,7 +261,7 @@ def ingest_codegraph(
             status="ok",
         ),
     )
-    _write_cache(root, project_value, source_value, {"codegraph_context_hash": context_hash, "status": "ingested"})
+    _write_cache(root, project_value, source_value, {"codegraph_context_hash": context_hash, "status": "ingested"}, source_type="codegraph")
     return {
         "ok": True,
         "project": project_value,
@@ -286,7 +289,7 @@ def _prepare_combined(
     if source_error is not None:
         return source_error
     source_hash = _sources_hash(sources, source_root)
-    cache_path = _cache_path(root, project, source_name)
+    cache_path = _cache_path(root, project, source_name, source_type)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
         if cache.get("source_hash") == source_hash:
@@ -304,7 +307,7 @@ def _prepare_combined(
     raw_dir = root / "raw" / "sources" / source_type / project / source_name
     raw_dir.mkdir(parents=True, exist_ok=True)
     manifest = _write_source_snapshots(raw_dir, root, sources, source_root)
-    _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared"})
+    _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared"}, source_type=source_type)
 
     wiki_context = {
         "purpose": _read_optional(root / "purpose.md"),
@@ -346,7 +349,7 @@ def _prepare_analysis(
     if source_error is not None:
         return source_error
     source_hash = _sources_hash(sources, source_root)
-    cache_path = _cache_path(root, project, source_name)
+    cache_path = _cache_path(root, project, source_name, source_type)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
         if cache.get("source_hash") == source_hash:
@@ -364,7 +367,7 @@ def _prepare_analysis(
     raw_dir = root / "raw" / "sources" / source_type / project / source_name
     raw_dir.mkdir(parents=True, exist_ok=True)
     manifest = _write_source_snapshots(raw_dir, root, sources, source_root)
-    _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared"})
+    _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared"}, source_type=source_type)
     classification_context = [item["relative_path"] for item in manifest]
     return {
         "ok": True,
@@ -386,8 +389,8 @@ def _prepare_analysis(
     }
 
 
-def _prepare_generation(root: Path, project: str, source_name: str, language: str, analysis: dict[str, Any] | str) -> dict[str, Any]:
-    cache = _read_cache(root, project, source_name)
+def _prepare_generation(root: Path, project: str, source_name: str, language: str, analysis: dict[str, Any] | str, source_type: str = "file") -> dict[str, Any]:
+    cache = _read_cache(root, project, source_name, source_type)
     if not cache:
         return {"ok": False, "code": "missing_prepared_source", "error": "run prepare_analysis before prepare_generation"}
     wiki_context = {
@@ -412,8 +415,8 @@ def _prepare_generation(root: Path, project: str, source_name: str, language: st
     }
 
 
-def _apply_generation(root: Path, project: str, source_name: str, language: str, generation: dict[str, Any] | str) -> dict[str, Any]:
-    cache = _read_cache(root, project, source_name)
+def _apply_generation(root: Path, project: str, source_name: str, language: str, generation: dict[str, Any] | str, source_type: str = "file") -> dict[str, Any]:
+    cache = _read_cache(root, project, source_name, source_type)
     if not cache:
         return {"ok": False, "code": "missing_prepared_source", "error": "run prepare_analysis before apply_generation"}
     payload = _generation_payload(generation)
@@ -426,26 +429,10 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
     if isinstance(raw_summary, dict):
         summary = raw_summary
     elif isinstance(raw_summary, str) and raw_summary.strip():
-        summary = {"summary": raw_summary, "body": raw_summary}
+        summary = {"summary": raw_summary}
     else:
         summary = {}
-    source_page = WikiPage(
-        relative_path=Path("wiki") / "sources" / project / f"{source_name}.md",
-        frontmatter={
-            "type": "source_summary",
-            "generated": True,
-            "project": project,
-            "source_name": source_name,
-            "source_hash": cache.get("source_hash", ""),
-            "language": language,
-            "sources": manifest_sources,
-            "summary": str(summary.get("summary") or f"Source summary for {project}/{source_name}"),
-        },
-        title=str(summary.get("title") or f"{project}/{source_name}"),
-        body=str(summary.get("body") or summary.get("summary") or "资料摘要由 apply 阶段兜底生成。"),
-    )
-    write_wiki_page(root, source_page)
-    written_paths.append(source_page.relative_path.as_posix())
+    one_line_summary = str(summary.get("summary") or f"Source index for {project}/{source_name}")
 
     pages = list(payload.get("pages") or [])
     for key in ("concept", "concepts"):
@@ -481,6 +468,12 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
         write_wiki_page(root, page)
         written_paths.append(path.as_posix())
 
+    index_paths = _write_source_index_pages(
+        root, project, source_name, source_type, language,
+        cache.get("source_hash", ""), manifest_sources, one_line_summary, written_paths,
+    )
+    written_paths.extend(index_paths)
+
     refresh_indexes(root)
     refresh_overview(root)
     append_log_entry(
@@ -494,7 +487,7 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
             status="ok",
         ),
     )
-    _write_cache(root, project, source_name, {**cache, "status": "applied", "written_paths": written_paths})
+    _write_cache(root, project, source_name, {**cache, "status": "applied", "written_paths": written_paths}, source_type=source_type)
     return {"ok": True, "stage": "apply_generation", "project": project, "source_name": source_name, "written": len(written_paths), "paths": written_paths}
 
 
@@ -504,6 +497,55 @@ def _collect_sources(source_root: Path) -> list[Path]:
     return [path for path in sorted(source_root.rglob("*")) if path.is_file() and _is_allowed_source_file(path)]
 
 
+def _write_source_index_pages(
+    root: Path,
+    project: str,
+    source_name: str,
+    source_type: str,
+    language: str,
+    source_hash: str,
+    manifest_sources: list[str],
+    summary: str,
+    page_paths: list[str],
+) -> list[str]:
+    groups: dict[str, list[str]] = {}
+    for p in page_paths:
+        parts = p.split("/")
+        if len(parts) >= 2 and parts[0] == "wiki":
+            target_dir = parts[1]
+        else:
+            target_dir = "other"
+        groups.setdefault(target_dir, []).append(p)
+
+    if not groups:
+        groups["concepts"] = []
+
+    written: list[str] = []
+    for target_dir, linked_pages in groups.items():
+        index_path = Path("wiki") / "sources" / target_dir / project / f"{source_name}.md"
+        wikilinks = "\n".join(f"- [[{Path(p).stem}]]" for p in linked_pages) if linked_pages else "(no pages generated)"
+        body = f"{summary}\n\n## Raw sources\n\n"
+        body += "\n".join(f"- `{s}`" for s in manifest_sources)
+        body += f"\n\n## Generated pages\n\n{wikilinks}"
+        index_page = WikiPage(
+            relative_path=index_path,
+            frontmatter={
+                "type": "source_index",
+                "generated": True,
+                "project": project,
+                "source_name": source_name,
+                "source_type": source_type,
+                "source_hash": source_hash,
+                "language": language,
+                "sources": manifest_sources,
+                "summary": summary,
+            },
+            title=f"{project}/{source_name}",
+            body=body,
+        )
+        write_wiki_page(root, index_page)
+        written.append(index_path.as_posix())
+    return written
 def _is_allowed_source_file(path: Path) -> bool:
     lowered_parts = {part.casefold() for part in path.parts}
     if lowered_parts & _DENIED_SOURCE_PARTS:
@@ -562,19 +604,19 @@ def _write_source_snapshots(raw_dir: Path, root: Path, sources: list[Path], sour
     return manifest
 
 
-def _cache_path(root: Path, project: str, source_name: str) -> Path:
-    return root / ".llm-wiki" / "ingest-cache" / project / f"{source_name}.json"
+def _cache_path(root: Path, project: str, source_name: str, source_type: str = "file") -> Path:
+    return root / ".llm-wiki" / "ingest-cache" / source_type / project / f"{source_name}.json"
 
 
-def _read_cache(root: Path, project: str, source_name: str) -> dict[str, Any]:
-    path = _cache_path(root, project, source_name)
+def _read_cache(root: Path, project: str, source_name: str, source_type: str = "file") -> dict[str, Any]:
+    path = _cache_path(root, project, source_name, source_type)
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _write_cache(root: Path, project: str, source_name: str, data: dict[str, Any]) -> None:
-    path = _cache_path(root, project, source_name)
+def _write_cache(root: Path, project: str, source_name: str, data: dict[str, Any], source_type: str = "file") -> None:
+    path = _cache_path(root, project, source_name, source_type)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -624,8 +666,8 @@ def _combined_prompt(project: str, source_name: str, language: str, manifest: li
         "",
         "## Instructions",
         "1. Analyze the source files: extract key entities, concepts, and relationships.",
-        "2. Generate a source_summary with title, summary, and body (markdown).",
-        "3. Generate additional wiki pages (concepts, decisions, etc.) as needed.",
+        "2. Generate a source_summary with a short title and a ONE-LINE summary (no body needed — index pages are auto-generated).",
+        "3. Generate additional wiki pages (concepts, decisions, etc.) with full body content.",
         "4. Every page must include source traceability via sources[] referencing raw/ paths.",
     ])
 
