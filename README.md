@@ -89,6 +89,7 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | `wiki_insights` | 图谱洞察：孤立页面、桥接节点、意外跨类型连接、Louvain 社区 |
 | `wiki_delete_source` | 删除 source 并级联清理：派生页面、交叉引用、cache；多 source 生成页会被保留，并移除被删除的 source |
 | `wiki_verify` | 两阶段 grounding check：从 `wiki/sources/` 索引页出发，读取关联的 raw source 和生成页，返回 faithfulness 校验 prompt → `apply` 记录结果 |
+| `wiki_gap` | 覆盖缺口分析：`analyze`（扫描浅页面、悬空链接、未摄入源、分类法缺失）→ `suggest`（推荐具体补充动作和工具） |
 | `wiki_changelog` | 最近的 wiki log 条目 |
 
 ### 研究与笔记

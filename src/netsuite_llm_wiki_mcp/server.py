@@ -12,6 +12,7 @@ from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_inges
 from netsuite_llm_wiki_mcp.wiki_dedup import wiki_dedup as run_wiki_dedup
 from netsuite_llm_wiki_mcp.wiki_delete import wiki_delete_source as run_wiki_delete_source
 from netsuite_llm_wiki_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
+from netsuite_llm_wiki_mcp.wiki_gap import wiki_gap as run_wiki_gap
 from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
 from netsuite_llm_wiki_mcp.wiki_ingest import rescan_source as run_rescan_source
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
@@ -573,6 +574,18 @@ def wiki_verify(
 ) -> dict[str, Any]:
     """Verify generated wiki pages against raw sources for faithfulness. Two-stage: prepare (returns LLM prompt) then apply (records results)."""
     return wiki_verify_tool(vault_root, stage, project, page_path, verification_result, language)
+
+
+@mcp.tool()
+def wiki_gap(
+    vault_root: str,
+    stage: str = "analyze",
+    project: str | None = None,
+    taxonomy: list[str] | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any]:
+    """Analyze wiki coverage gaps: find missing concepts, shallow pages, dangling links, and uningested sources. Stages: analyze (report gaps), suggest (recommend actions)."""
+    return run_wiki_gap(vault_root=vault_root, stage=stage, project=project, taxonomy=taxonomy, language=language)
 
 
 def main() -> None:

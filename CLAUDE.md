@@ -61,6 +61,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - [wiki_delete.py](src/netsuite_llm_wiki_mcp/wiki_delete.py)：source 删除及派生页/交叉引用/cache 级联清理。
 - [wiki_research.py](src/netsuite_llm_wiki_mcp/wiki_research.py)：prepare/apply 研究综合，写入 `wiki/queries/`。
 - [wiki_synthesis.py](src/netsuite_llm_wiki_mcp/wiki_synthesis.py)：prepare/apply 持久化有价值的查询答案或跨页分析，写入 `wiki/synthesis/`。
+- [wiki_gap.py](src/netsuite_llm_wiki_mcp/wiki_gap.py)：覆盖缺口分析 analyze/suggest 两阶段，扫描浅页面、悬空链接、未摄入源、分类法缺失，推荐补充动作。
 - [wiki_batch.py](src/netsuite_llm_wiki_mcp/wiki_batch.py)：持久化 ingest 队列 `.llm-wiki/ingest-queue.json`。
 
 ## 必守约定
@@ -84,3 +85,4 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 校验：`tests/test_wiki_verify.py`
 - 查询和上下文预算：`tests/test_wiki_query.py`、`tests/test_context_budget.py`
 - 维护工具：`tests/test_wiki_lint.py`、`tests/test_wiki_enrich.py`、`tests/test_page_merge.py`、`tests/test_wiki_dedup.py`、`tests/test_wiki_insights.py`、`tests/test_louvain.py`、`tests/test_wiki_delete.py`、`tests/test_wiki_research.py`、`tests/test_wiki_synthesis.py`、`tests/test_wiki_batch.py`
+- 缺口分析：`tests/test_wiki_gap.py`
