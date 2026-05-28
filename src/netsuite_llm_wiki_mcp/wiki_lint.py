@@ -97,6 +97,8 @@ def wiki_lint(
                 if target_path.suffix != ".md":
                     target_path = target_path.with_suffix(".md")
                 resolved = (page.parent / target_path).resolve()
+                if not resolved.exists():
+                    resolved = (root / "wiki" / target_path).resolve()
                 if resolved.is_relative_to(root) and not resolved.exists():
                     issues.append(_issue("broken_wikilink", f"wikilink target does not exist: {target}", rel))
         index_path = root / "wiki" / "index.md"

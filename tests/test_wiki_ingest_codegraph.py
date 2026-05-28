@@ -49,6 +49,10 @@ class FakeCodeGraphClient:
         self.calls.append(("impact", symbol))
         return self.responses.get("impact", {"ok": True, "data": {"symbol": symbol, "affected": []}})
 
+    def graph_snapshot(self) -> dict[str, Any]:
+        self.calls.append(("graph_snapshot", ""))
+        return self.responses.get("graph_snapshot", {"ok": False, "code": "unsupported", "error": "unsupported"})
+
 
 def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_path: Path):
     root = tmp_path / "vault"
@@ -58,7 +62,7 @@ def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_
     result = ingest_codegraph(root, project="alpha", source_name="main", query="Suitelet entry", client=client)
 
     assert result["ok"] is True
-    snapshot = root / "raw/sources/codegraph/alpha/main/context.json"
+    snapshot = root / "raw/sources/codegraph/alpha/context.json"
     assert snapshot.is_file()
     source_page = root / "wiki/sources/projects/alpha/main.md"
     assert source_page.is_file()
@@ -75,7 +79,7 @@ def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_
     frontmatter = yaml.safe_load(code_page.read_text(encoding="utf-8").split("---", 2)[1])
     assert frontmatter["type"] == "code_fact"
     assert frontmatter["generated"] is True
-    assert frontmatter["sources"] == ["raw/sources/codegraph/alpha/main/context.json"]
+    assert frontmatter["sources"] == ["raw/sources/codegraph/alpha/context.json"]
     assert frontmatter["codegraph_tool"] == "context"
     assert frontmatter["source_path"] == "src/FileCabinet/SuiteScripts/sl.js"
     assert frontmatter["symbol"] == "onRequest"
@@ -90,6 +94,162 @@ def test_ingest_codegraph_returns_unavailable_error(tmp_path: Path):
 
     assert result["ok"] is False
     assert result["code"] == "codegraph_unavailable"
+
+
+def test_ingest_codegraph_extracts_camelcase_fields(tmp_path: Path):
+    """CodeGraph returns filePath/startLine/endLine/signature in camelCase."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    client = FakeCodeGraphClient({
+        "context": {
+            "ok": True,
+            "data": {
+                "nodes": [
+                    {
+                        "name": "save_obsidian_note",
+                        "qualifiedName": "save_obsidian_note",
+                        "kind": "function",
+                        "filePath": "src/netsuite_llm_wiki_mcp/note_writer.py",
+                        "startLine": 142,
+                        "endLine": 229,
+                        "signature": "(note_type: str, title: str, content: str) -> dict[str, Any]",
+                    }
+                ]
+            },
+        }
+    })
+
+    result = ingest_codegraph(root, project="mywiki", source_name="cg", client=client)
+    assert result["ok"] is True
+
+    code_page = root / "wiki/projects/mywiki/code/save_obsidian_note.md"
+    assert code_page.is_file()
+    content = code_page.read_text(encoding="utf-8")
+    fm = yaml.safe_load(content.split("---", 2)[1])
+    assert fm["source_path"] == "src/netsuite_llm_wiki_mcp/note_writer.py"
+    assert fm["line_start"] == 142
+    assert fm["line_end"] == 229
+    assert fm["symbol"] == "save_obsidian_note"
+    assert "Kind: `function`" in content
+    assert "## Signature" in content
+    assert "(note_type: str, title: str, content: str)" in content
+
+
+def test_ingest_codegraph_uses_codeblocks_and_edges_for_code_facts(tmp_path: Path):
+    """Code fact pages should include CodeGraph source code blocks and call relationships."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    client = FakeCodeGraphClient({
+        "context": {
+            "ok": True,
+            "data": {
+                "nodes": [
+                    {
+                        "id": "function:save",
+                        "name": "save_obsidian_note",
+                        "qualifiedName": "save_obsidian_note",
+                        "kind": "function",
+                        "filePath": "src/netsuite_llm_wiki_mcp/note_writer.py",
+                        "startLine": 142,
+                        "endLine": 229,
+                        "signature": "(note_type: str, title: str) -> dict[str, Any]",
+                    },
+                    {
+                        "id": "function:overview",
+                        "name": "refresh_overview",
+                        "qualifiedName": "refresh_overview",
+                        "kind": "function",
+                        "filePath": "src/netsuite_llm_wiki_mcp/wiki_overview.py",
+                        "startLine": 10,
+                        "endLine": 54,
+                    },
+                ],
+                "edges": [
+                    {"source": "function:save", "target": "function:overview", "kind": "calls", "line": 217},
+                ],
+                "codeBlocks": [
+                    {
+                        "filePath": "src/netsuite_llm_wiki_mcp/note_writer.py",
+                        "startLine": 142,
+                        "endLine": 229,
+                        "language": "python",
+                        "content": "def save_obsidian_note(...):\n    refresh_overview(root)\n    return {'ok': True}",
+                        "nodeName": "save_obsidian_note",
+                        "nodeKind": "function",
+                    }
+                ],
+            },
+        }
+    })
+
+    result = ingest_codegraph(root, project="mywiki", source_name="cg", client=client)
+    assert result["ok"] is True
+
+    content = (root / "wiki/projects/mywiki/code/save_obsidian_note.md").read_text(encoding="utf-8")
+    assert "## Source Code" in content
+    assert "def save_obsidian_note" in content
+    assert "refresh_overview(root)" in content
+    assert "## Relationships" in content
+    assert "calls → `refresh_overview`" in content
+
+
+def test_ingest_codegraph_prefers_full_graph_snapshot_for_project_structure(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    client = FakeCodeGraphClient({
+        "graph_snapshot": {
+            "ok": True,
+            "data": {
+                "files": [
+                    {"path": "src/pkg/a.py", "language": "python", "nodeCount": 2, "size": 80},
+                    {"path": "src/pkg/b.py", "language": "python", "nodeCount": 1, "size": 50},
+                ],
+                "nodes": [
+                    {
+                        "id": "function:a",
+                        "kind": "function",
+                        "name": "a",
+                        "qualifiedName": "a",
+                        "filePath": "src/pkg/a.py",
+                        "language": "python",
+                        "startLine": 1,
+                        "endLine": 3,
+                        "signature": "() -> None",
+                    },
+                    {
+                        "id": "function:b",
+                        "kind": "function",
+                        "name": "b",
+                        "qualifiedName": "b",
+                        "filePath": "src/pkg/b.py",
+                        "language": "python",
+                        "startLine": 1,
+                        "endLine": 2,
+                    },
+                ],
+                "edges": [
+                    {"source": "function:a", "target": "function:b", "kind": "calls", "line": 2},
+                ],
+            },
+        }
+    })
+
+    result = ingest_codegraph(root, project="alpha", source_name="main", client=client)
+
+    assert result["ok"] is True
+    assert (root / "raw/sources/codegraph/alpha/graph.json").is_file()
+    overview_page = root / "wiki/projects/alpha/code/overview.md"
+    assert overview_page.is_file()
+    overview = overview_page.read_text(encoding="utf-8")
+    assert "## Global Logic Chain" in overview
+    assert "`a` calls → `b`" in overview
+    a_page = root / "wiki/projects/alpha/code/src/pkg/a.md"
+    assert a_page.is_file()
+    content = a_page.read_text(encoding="utf-8")
+    assert "## Symbols" in content
+    assert "`a`" in content
+    assert "## Outgoing Relationships" in content
+    assert "calls → `b`" in content
 
 
 

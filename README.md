@@ -160,7 +160,7 @@ vault_root/
 ### CodeGraph 摄入
 
 ```
-wiki_ingest_codegraph → raw/sources/codegraph/<project>/<source_name>/
+wiki_ingest_codegraph → raw/sources/codegraph/<project>/
                       → wiki/projects/<project>/code/ (代码事实页面)
                       → wiki/sources/projects/<project>/<source_name>.md (索引页)
                       → index + overview + log 更新

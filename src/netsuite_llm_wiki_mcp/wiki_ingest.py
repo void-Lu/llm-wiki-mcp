@@ -37,6 +37,7 @@ class CodeGraphLike(Protocol):
     def files(self) -> dict[str, Any]: ...
     def context(self, query: str) -> dict[str, Any]: ...
     def impact(self, symbol: str) -> dict[str, Any]: ...
+    def graph_snapshot(self) -> dict[str, Any]: ...
 
 
 def ingest_source(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -182,8 +183,12 @@ def ingest_codegraph(
     context = cg.context(query)
     if not context.get("ok"):
         return context
+    graph = cg.graph_snapshot()
+    has_full_graph = bool(graph.get("ok"))
+    if not graph.get("ok"):
+        graph = {"ok": True, "data": _context_to_graph_snapshot(context.get("data", {}), files.get("data", {}))}
 
-    context_json = json.dumps(context.get("data", {}), ensure_ascii=False, sort_keys=True)
+    context_json = json.dumps({"context": context.get("data", {}), "graph": graph.get("data", {})}, ensure_ascii=False, sort_keys=True)
     context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
     cache_path = _cache_path(root, project_value, source_value, "codegraph")
     if cache_path.exists():
@@ -198,12 +203,16 @@ def ingest_codegraph(
                 "message": "codegraph context unchanged; skipping rewrite",
             }
 
-    snapshot_dir = root / "raw" / "sources" / "codegraph" / project_value / source_value
+    # 清理旧 code 页面，确保删除的源文件不会残留
+    _clean_code_pages(root, project_value)
+
+    snapshot_dir = root / "raw" / "sources" / "codegraph" / project_value
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshots = {
         "status.json": status.get("data", {}),
         "files.json": files.get("data", {}),
         "context.json": context.get("data", {}),
+        "graph.json": graph.get("data", {}),
     }
     written_paths: list[str] = []
     for name, data in snapshots.items():
@@ -214,20 +223,25 @@ def ingest_codegraph(
     source_page_path = Path("wiki") / "sources" / "projects" / project_value / f"{source_value}.md"
     code_page_paths: list[str] = []
 
-    code_pages = _code_pages_from_context(context.get("data", {}), project_value, source_value, written_paths[2] if len(written_paths) > 2 else "")
+    graph_snapshot_path = next((p for p in written_paths if p.endswith("/graph.json")), written_paths[2] if len(written_paths) > 2 else "")
+    if has_full_graph:
+        code_pages = _code_pages_from_graph(graph.get("data", {}), project_value, source_value, graph_snapshot_path)
+    else:
+        code_pages = _code_pages_from_context(context.get("data", {}), project_value, source_value, written_paths[2] if len(written_paths) > 2 else "")
     for page in code_pages:
         write_wiki_page(root, page)
         written_paths.append(page.relative_path.as_posix())
         code_page_paths.append(page.relative_path.as_posix())
-        symbol = str(page.frontmatter.get("symbol", ""))
-        if symbol:
-            impact = cg.impact(symbol)
-            if impact.get("ok"):
-                impact_path = snapshot_dir / f"impact-{slug(symbol)}.json"
-                impact_path.write_text(json.dumps(impact.get("data", {}), ensure_ascii=False, indent=2), encoding="utf-8")
-                written_paths.append(impact_path.relative_to(root).as_posix())
+        if not has_full_graph:
+            symbol = str(page.frontmatter.get("symbol", ""))
+            if symbol:
+                impact = cg.impact(symbol)
+                if impact.get("ok"):
+                    impact_path = snapshot_dir / f"impact-{slug(symbol)}.json"
+                    impact_path.write_text(json.dumps(impact.get("data", {}), ensure_ascii=False, indent=2), encoding="utf-8")
+                    written_paths.append(impact_path.relative_to(root).as_posix())
 
-    wikilinks = "\n".join(f"- [[{Path(p).stem}]]" for p in code_page_paths) if code_page_paths else "(no code pages)"
+    wikilinks = "\n".join(f"- [[{p[5:-3]}]]" for p in code_page_paths) if code_page_paths else "(no code pages)"
     raw_sources = [p for p in written_paths if p.startswith("raw/")]
     source_page = WikiPage(
         relative_path=source_page_path,
@@ -256,7 +270,7 @@ def ingest_codegraph(
             operation="ingest",
             title=f"CodeGraph {project_value}/{source_value}",
             paths=written_paths,
-            sources=[f"raw/sources/codegraph/{project_value}/{source_value}/context.json"],
+            sources=[f"raw/sources/codegraph/{project_value}/graph.json"],
             project=project_value,
             status="ok",
         ),
@@ -712,15 +726,227 @@ def _read_optional(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
+def _context_to_graph_snapshot(context_data: dict[str, Any], files_data: Any) -> dict[str, Any]:
+    files = files_data.get("files", files_data) if isinstance(files_data, dict) else files_data
+    return {
+        "files": files if isinstance(files, list) else [],
+        "nodes": _extract_nodes(context_data),
+        "edges": _extract_edges(context_data),
+    }
+
+
+def _code_pages_from_graph(data: dict[str, Any], project: str, source_name: str, graph_snapshot: str) -> list[WikiPage]:
+    files = _extract_graph_files(data)
+    nodes = _extract_nodes(data)
+    edges = _extract_edges(data)
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id")}
+    pages = [_project_overview_page(files, nodes, edges, node_by_id, project, source_name, graph_snapshot)]
+
+    nodes_by_file: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        file_path = str(node.get("filePath") or node.get("source_path") or node.get("path") or node.get("file") or "")
+        if file_path.startswith("src/"):
+            nodes_by_file.setdefault(file_path, []).append(node)
+
+    file_paths = [str(item.get("path")) for item in files if isinstance(item, dict) and str(item.get("path", "")).startswith("src/")]
+    for file_path in sorted(set(file_paths) | set(nodes_by_file)):
+        file_info = next((item for item in files if isinstance(item, dict) and item.get("path") == file_path), {"path": file_path})
+        pages.append(_file_code_fact_page(file_info, nodes_by_file.get(file_path, []), edges, node_by_id, project, source_name, graph_snapshot))
+    return pages or _code_pages_from_context(data, project, source_name, graph_snapshot)
+
+
+def _extract_graph_files(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    value = data.get("files") or []
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _project_overview_page(
+    files: list[dict[str, Any]],
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_by_id: dict[str, dict[str, Any]],
+    project: str,
+    source_name: str,
+    graph_snapshot: str,
+) -> WikiPage:
+    src_files = [item for item in files if str(item.get("path", "")).startswith("src/")]
+    node_kinds: dict[str, int] = {}
+    for node in nodes:
+        kind = str(node.get("kind") or "unknown")
+        node_kinds[kind] = node_kinds.get(kind, 0) + 1
+    file_lines = [f"- `{item.get('path')}` ({item.get('language', 'unknown')}, nodes: {item.get('nodeCount', item.get('node_count', 0))})" for item in src_files]
+    kind_lines = [f"- {kind}: {count}" for kind, count in sorted(node_kinds.items())]
+    logic_lines = _global_logic_lines(edges, node_by_id)
+    module_lines = _module_summary_lines(src_files, nodes)
+    return WikiPage(
+        relative_path=Path("wiki") / "projects" / project / "code" / "overview.md",
+        frontmatter={
+            "type": "code_fact",
+            "generated": True,
+            "project": project,
+            "source_name": source_name,
+            "sources": [graph_snapshot],
+            "codegraph_tool": "graph_snapshot",
+            "symbol": "code-overview",
+            "summary": f"Full CodeGraph project overview and logic chain for {project}",
+        },
+        title="Code Overview",
+        body="\n".join([
+            "## Global Code Framework",
+            f"- Source files: {len(src_files)}",
+            f"- Symbols: {len(nodes)}",
+            f"- Relationships: {len(edges)}",
+            "",
+            "## Module Layout",
+            *(module_lines or ["(no modules)"]),
+            "",
+            "## Global Logic Chain",
+            *(logic_lines or ["(no call relationships)"]),
+            "",
+            "## Symbol Kinds",
+            *(kind_lines or ["(no symbols)"]),
+            "",
+            "## Source Files",
+            *(file_lines or ["(no src files)"]),
+        ]),
+    )
+
+
+def _file_code_fact_page(
+    file_info: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_by_id: dict[str, dict[str, Any]],
+    project: str,
+    source_name: str,
+    graph_snapshot: str,
+) -> WikiPage:
+    file_path = str(file_info.get("path") or "unknown")
+    relative_path = _code_fact_relative_path(project, file_path)
+    symbols = [_symbol_line(node) for node in sorted(nodes, key=lambda item: (item.get("startLine") or 0, str(item.get("name") or "")))]
+    outgoing = _file_relationships(nodes, edges, node_by_id, direction="outgoing")
+    incoming = _file_relationships(nodes, edges, node_by_id, direction="incoming")
+    return WikiPage(
+        relative_path=relative_path,
+        frontmatter={
+            "type": "code_fact",
+            "generated": True,
+            "project": project,
+            "source_name": source_name,
+            "sources": [graph_snapshot],
+            "codegraph_tool": "graph_snapshot",
+            "source_path": file_path,
+            "symbol": file_path,
+            "summary": f"CodeGraph file structure and relationships for {file_path}",
+        },
+        title=file_path,
+        body="\n".join([
+            "## File Fact",
+            f"- Source path: `{file_path}`",
+            f"- Language: `{file_info.get('language', 'unknown')}`",
+            f"- Symbols: {len(nodes)}",
+            "",
+            "## Symbols",
+            *(symbols or ["(no symbols)"]),
+            "",
+            "## Outgoing Relationships",
+            *(outgoing or ["(no outgoing relationships)"]),
+            "",
+            "## Incoming Relationships",
+            *(incoming or ["(no incoming relationships)"]),
+        ]),
+    )
+
+
+def _code_fact_relative_path(project: str, file_path: str) -> Path:
+    raw_parts = Path(file_path.replace("\\", "/")).parts
+    if raw_parts and raw_parts[-1].endswith(".py"):
+        raw_parts = (*raw_parts[:-1], Path(raw_parts[-1]).stem + ".md")
+    safe_parts = [safe_segment(Path(part).stem) + Path(part).suffix if part.endswith(".md") else safe_segment(part) for part in raw_parts]
+    return Path("wiki") / "projects" / project / "code" / Path(*safe_parts)
+
+
+def _module_summary_lines(src_files: list[dict[str, Any]], nodes: list[dict[str, Any]]) -> list[str]:
+    counts: dict[str, int] = {}
+    for item in src_files:
+        parts = Path(str(item.get("path", ""))).parts
+        module = "/".join(parts[:2]) if len(parts) >= 2 else str(item.get("path", "unknown"))
+        counts[module] = counts.get(module, 0) + 1
+    node_counts: dict[str, int] = {}
+    for node in nodes:
+        file_path = str(node.get("filePath") or "")
+        parts = Path(file_path).parts
+        module = "/".join(parts[:2]) if len(parts) >= 2 else file_path
+        node_counts[module] = node_counts.get(module, 0) + 1
+    return [f"- `{module}`: {count} files, {node_counts.get(module, 0)} symbols" for module, count in sorted(counts.items())]
+
+
+def _global_logic_lines(edges: list[dict[str, Any]], node_by_id: dict[str, dict[str, Any]], limit: int = 80) -> list[str]:
+    lines: list[str] = []
+    for edge in edges:
+        if edge.get("kind") not in {"calls", "imports"}:
+            continue
+        source_node = node_by_id.get(str(edge.get("source") or ""), {})
+        target_node = node_by_id.get(str(edge.get("target") or ""), {})
+        source_name = str(source_node.get("name") or source_node.get("qualifiedName") or edge.get("source") or "unknown")
+        target_name = str(target_node.get("name") or target_node.get("qualifiedName") or edge.get("target") or "unknown")
+        source_file = str(source_node.get("filePath") or "")
+        target_file = str(target_node.get("filePath") or "")
+        line = edge.get("line")
+        suffix = f" at line {line}" if line else ""
+        files = f" ({source_file} → {target_file})" if source_file or target_file else ""
+        lines.append(f"- `{source_name}` {edge.get('kind')} → `{target_name}`{suffix}{files}")
+        if len(lines) >= limit:
+            lines.append(f"- ... truncated after {limit} relationships; see raw graph snapshot for full graph")
+            break
+    return lines
+
+
+def _symbol_line(node: dict[str, Any]) -> str:
+    name = str(node.get("name") or node.get("symbol") or node.get("qualifiedName") or "unknown")
+    kind = str(node.get("kind") or "unknown")
+    start = node.get("startLine") or node.get("line_start") or node.get("start_line") or "?"
+    end = node.get("endLine") or node.get("line_end") or node.get("end_line") or "?"
+    signature = str(node.get("signature") or "")
+    return f"- `{name}` ({kind}, lines {start}-{end})" + (f": `{signature}`" if signature else "")
+
+
+def _file_relationships(nodes: list[dict[str, Any]], edges: list[dict[str, Any]], node_by_id: dict[str, dict[str, Any]], direction: str) -> list[str]:
+    local_ids = {str(node.get("id")) for node in nodes if node.get("id")}
+    lines: list[str] = []
+    for edge in edges:
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        if direction == "outgoing" and source in local_ids:
+            source_name = str(node_by_id.get(source, {}).get("name") or source)
+            target_name = str(node_by_id.get(target, {}).get("name") or target)
+            lines.append(f"- `{source_name}` {edge.get('kind', 'related')} → `{target_name}`" + (f" at line {edge.get('line')}" if edge.get("line") else ""))
+        elif direction == "incoming" and target in local_ids:
+            source_name = str(node_by_id.get(source, {}).get("name") or source)
+            target_name = str(node_by_id.get(target, {}).get("name") or target)
+            lines.append(f"- `{source_name}` {edge.get('kind', 'related')} → `{target_name}`" + (f" at line {edge.get('line')}" if edge.get("line") else ""))
+    return lines
+
+
 def _code_pages_from_context(data: dict[str, Any], project: str, source_name: str, context_snapshot: str) -> list[WikiPage]:
     nodes = _extract_nodes(data)
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id")}
+    code_blocks = _extract_code_blocks(data)
+    edges = _extract_edges(data)
     pages = []
     for index, node in enumerate(nodes):
-        symbol = str(node.get("symbol") or node.get("name") or node.get("title") or f"node-{index + 1}")
-        source_path = str(node.get("source_path") or node.get("path") or node.get("file") or "")
-        line_start = node.get("line_start") or node.get("start_line") or ""
-        line_end = node.get("line_end") or node.get("end_line") or ""
-        snippet = str(node.get("snippet") or node.get("code") or node.get("text") or "")
+        symbol = str(node.get("symbol") or node.get("name") or node.get("qualifiedName") or node.get("title") or f"node-{index + 1}")
+        source_path = str(node.get("source_path") or node.get("filePath") or node.get("path") or node.get("file") or "")
+        line_start = node.get("line_start") or node.get("startLine") or node.get("start_line") or ""
+        line_end = node.get("line_end") or node.get("endLine") or node.get("end_line") or ""
+        code_block = _match_code_block(node, code_blocks)
+        source_code = str(code_block.get("content") or "") if code_block else ""
+        signature = str(node.get("signature") or "")
+        snippet = str(node.get("snippet") or node.get("code") or node.get("text") or signature or source_code)
+        language = str(code_block.get("language") or node.get("language") or "") if code_block else str(node.get("language") or "")
+        relationships = _relationships_for_node(node, edges, node_by_id)
         page_slug = slug(symbol)
         pages.append(
             WikiPage(
@@ -739,21 +965,37 @@ def _code_pages_from_context(data: dict[str, Any], project: str, source_name: st
                     "summary": f"CodeGraph context for {symbol}",
                 },
                 title=symbol,
-                body="\n".join([
+                body="\n".join(line for line in [
                     "## CodeGraph Fact",
                     f"- Symbol: `{symbol}`",
+                    f"- Kind: `{node.get('kind', '')}`" if node.get("kind") else None,
                     f"- Source path: `{source_path}`" if source_path else "- Source path: 未识别",
                     f"- Lines: `{line_start}-{line_end}`" if line_start or line_end else "- Lines: 未识别",
                     "",
-                    "## Snippet",
-                    "```",
+                    "## Signature" if node.get("signature") else "## Snippet",
+                    f"```python",
                     snippet,
                     "```",
-                ]),
+                    "",
+                    "## Source Code",
+                    f"```{language or 'text'}",
+                    source_code,
+                    "```",
+                    "",
+                    "## Relationships",
+                    *(relationships or ["(no direct relationships in context)"]),
+                ] if line is not None),
             )
         )
     if pages:
         return pages
+    # Fallback: no structured nodes found; write a summary page with truncated content
+    raw_json = json.dumps(data, ensure_ascii=False, indent=2)
+    _MAX_FALLBACK_BODY = 4000
+    if len(raw_json) > _MAX_FALLBACK_BODY:
+        truncated_body = raw_json[:_MAX_FALLBACK_BODY] + "\n\n... (truncated, see raw snapshot)"
+    else:
+        truncated_body = raw_json
     return [
         WikiPage(
             relative_path=Path("wiki") / "projects" / project / "code" / "codegraph-context.md",
@@ -764,10 +1006,10 @@ def _code_pages_from_context(data: dict[str, Any], project: str, source_name: st
                 "source_name": source_name,
                 "sources": [context_snapshot],
                 "codegraph_tool": "context",
-                "summary": "CodeGraph context result",
+                "summary": "CodeGraph context result (no structured nodes extracted)",
             },
             title="CodeGraph Context",
-            body=json.dumps(data, ensure_ascii=False, indent=2),
+            body=f"No structured symbol nodes extracted from CodeGraph context.\n\nRaw snapshot: `{context_snapshot}`\n\n```json\n{truncated_body}\n```",
         )
     ]
 
@@ -783,3 +1025,75 @@ def _extract_nodes(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
     return []
+
+
+def _extract_code_blocks(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    value = data.get("codeBlocks") or data.get("code_blocks") or []
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _extract_edges(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    value = data.get("edges") or data.get("relationships") or []
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _match_code_block(node: dict[str, Any], code_blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    node_name = str(node.get("name") or node.get("symbol") or node.get("qualifiedName") or "")
+    node_path = str(node.get("filePath") or node.get("source_path") or node.get("path") or node.get("file") or "")
+    node_start = node.get("startLine") or node.get("line_start") or node.get("start_line")
+    for block in code_blocks:
+        block_name = str(block.get("nodeName") or block.get("name") or block.get("symbol") or "")
+        block_path = str(block.get("filePath") or block.get("source_path") or block.get("path") or block.get("file") or "")
+        block_start = block.get("startLine") or block.get("line_start") or block.get("start_line")
+        if node_name and block_name == node_name and (not node_path or not block_path or block_path == node_path):
+            return block
+        if node_path and block_path == node_path and node_start and block_start == node_start:
+            return block
+    return None
+
+
+def _relationships_for_node(node: dict[str, Any], edges: list[dict[str, Any]], node_by_id: dict[str, dict[str, Any]]) -> list[str]:
+    node_id = str(node.get("id") or "")
+    if not node_id:
+        return []
+    relationships: list[str] = []
+    for edge in edges:
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        kind = str(edge.get("kind") or "related")
+        if source == node_id:
+            target_node = node_by_id.get(target, {})
+            target_name = str(target_node.get("name") or target_node.get("symbol") or target_node.get("qualifiedName") or target)
+            line = edge.get("line")
+            suffix = f" at line {line}" if line else ""
+            relationships.append(f"- {kind} → `{target_name}`{suffix}")
+        elif target == node_id:
+            source_node = node_by_id.get(source, {})
+            source_name = str(source_node.get("name") or source_node.get("symbol") or source_node.get("qualifiedName") or source)
+            line = edge.get("line")
+            suffix = f" at line {line}" if line else ""
+            relationships.append(f"- `{source_name}` → {kind}{suffix}")
+    return relationships
+
+
+def _clean_code_pages(root: Path, project: str) -> None:
+    """删除项目的所有旧 code 页面，确保同步时不会残留已删除源码的页面。"""
+    code_dir = root / "wiki" / "projects" / project / "code"
+    if not code_dir.is_dir():
+        return
+    for path in sorted(code_dir.rglob("*.md"), reverse=True):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    # 清理因文件删除而残留的空目录
+    for path in sorted(code_dir.rglob("*"), reverse=True):
+        if path.is_dir() and not any(path.iterdir()):
+            try:
+                path.rmdir()
+            except OSError:
+                pass
