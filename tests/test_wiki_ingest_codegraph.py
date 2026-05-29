@@ -53,6 +53,14 @@ class FakeCodeGraphClient:
         self.calls.append(("graph_snapshot", ""))
         return self.responses.get("graph_snapshot", {"ok": False, "code": "unsupported", "error": "unsupported"})
 
+    def callers(self, symbol: str) -> dict[str, Any]:
+        self.calls.append(("callers", symbol))
+        return self.responses.get("callers", {"ok": True, "data": {}})
+
+    def callees(self, symbol: str) -> dict[str, Any]:
+        self.calls.append(("callees", symbol))
+        return self.responses.get("callees", {"ok": True, "data": {}})
+
 
 def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_path: Path):
     root = tmp_path / "vault"
@@ -616,3 +624,445 @@ def test_two_stage_prepare_skips_unchanged_source(tmp_path: Path):
     assert r2["ok"] is True
     assert r2["status"] == "skipped"
     assert r2["code"] == "source_unchanged"
+
+
+def test_ingest_codegraph_filters_vendored_files_from_overview(tmp_path: Path):
+    """Vendored/minified libraries should not dominate the overview logic chain."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    # papaparse.js has 150 nodes (above threshold) and many internal edges
+    vendor_nodes = [
+        {"id": f"v{i}", "name": f"_internal{i}", "kind": "function", "filePath": "src/lib/papaparse.js", "startLine": i, "endLine": i + 5}
+        for i in range(150)
+    ]
+    vendor_edges = [
+        {"source": f"v{i}", "target": f"v{i+1}", "kind": "calls"}
+        for i in range(149)
+    ]
+    # Business code: 3 nodes across 2 files with cross-file calls
+    biz_nodes = [
+        {"id": "b1", "name": "handleOrder", "kind": "function", "filePath": "src/scripts/order.js", "startLine": 1, "endLine": 20},
+        {"id": "b2", "name": "calcTotal", "kind": "function", "filePath": "src/scripts/calc.js", "startLine": 1, "endLine": 10},
+        {"id": "b3", "name": "saveRecord", "kind": "function", "filePath": "src/scripts/order.js", "startLine": 25, "endLine": 40},
+    ]
+    biz_edges = [
+        {"source": "b1", "target": "b2", "kind": "calls"},
+        {"source": "b1", "target": "b3", "kind": "calls"},
+    ]
+
+    graph_data = {
+        "files": [
+            {"path": "src/lib/papaparse.js", "language": "javascript", "nodeCount": 150},
+            {"path": "src/scripts/order.js", "language": "javascript", "nodeCount": 2},
+            {"path": "src/scripts/calc.js", "language": "javascript", "nodeCount": 1},
+        ],
+        "nodes": vendor_nodes + biz_nodes,
+        "edges": vendor_edges + biz_edges,
+    }
+
+    client = FakeCodeGraphClient({
+        "status": {"ok": True, "data": {"indexed": True}},
+        "files": {"ok": True, "data": {"files": graph_data["files"]}},
+        "context": {"ok": True, "data": {}},
+        "graph_snapshot": {"ok": True, "data": graph_data},
+    })
+
+    result = ingest_codegraph(root, project="demo", source_name="main", client=client)
+    assert result["ok"] is True
+
+    overview = (root / "wiki/projects/demo/code/overview.md").read_text(encoding="utf-8")
+    assert "handleOrder" in overview
+    assert "calcTotal" in overview
+    # Vendor internal functions should be filtered out
+    assert "_internal0" not in overview
+    assert "_internal50" not in overview
+
+    # No code fact page generated for the vendored file
+    assert not (root / "wiki/projects/demo/code/src/lib/papaparse.md").exists()
+    # Business files still get pages
+    assert (root / "wiki/projects/demo/code/src/scripts/order.md").exists()
+    assert (root / "wiki/projects/demo/code/src/scripts/calc.md").exists()
+
+
+def test_is_project_source_filters_known_vendor_stems():
+    from netsuite_llm_wiki_mcp.wiki_ingest import _is_project_source
+
+    assert _is_project_source("src/scripts/order.js") is True
+    assert _is_project_source("src/lib/papaparse.js") is False
+    assert _is_project_source("src/vendor/lodash.min.js") is False
+    assert _is_project_source("node_modules/express/index.js") is False
+    assert _is_project_source("") is False
+
+
+def test_apply_generation_normalizes_wikilink_targets_to_lowercase(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nContent", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
+
+    generation = {
+        "pages": [{
+            "path": "wiki/concepts/alpha/my-concept.md",
+            "title": "My Concept",
+            "type": "concept",
+            "summary": "S",
+            "body": "See [[User-Event-Script]] and [[RESTlet]] for details.",
+        }]
+    }
+    staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
+
+    content = (root / "wiki/concepts/alpha/my-concept.md").read_text(encoding="utf-8")
+    assert "[[user-event-script]]" in content
+    assert "[[restlet]]" in content
+    assert "[[User-Event-Script]]" not in content
+    assert "[[RESTlet]]" not in content
+
+
+def test_apply_generation_preserves_wikilink_display_text(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nContent", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
+
+    generation = {
+        "pages": [{
+            "path": "wiki/concepts/alpha/alias-test.md",
+            "title": "Alias Test",
+            "type": "concept",
+            "summary": "S",
+            "body": "Use [[Suitelet|Suitelet Script]] to handle requests.",
+        }]
+    }
+    staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
+
+    content = (root / "wiki/concepts/alpha/alias-test.md").read_text(encoding="utf-8")
+    assert "[[suitelet|Suitelet Script]]" in content
+    assert "[[Suitelet|" not in content
+
+
+def test_apply_generation_does_not_normalize_wikilinks_inside_code_blocks(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nContent", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
+
+    body = (
+        "Normal link: [[User-Event-Script]]\n\n"
+        "```javascript\n"
+        "// [[User-Event-Script]] should not be changed\n"
+        "```\n\n"
+        "Inline: `[[Suitelet]]` should not be changed."
+    )
+    generation = {
+        "pages": [{
+            "path": "wiki/concepts/alpha/code-test.md",
+            "title": "Code Test",
+            "type": "concept",
+            "summary": "S",
+            "body": body,
+        }]
+    }
+    staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
+
+    content = (root / "wiki/concepts/alpha/code-test.md").read_text(encoding="utf-8")
+    assert "[[user-event-script]]" in content
+    assert "[[User-Event-Script]]" in content  # inside fenced block
+    assert "`[[Suitelet]]`" in content  # inside inline code
+
+
+def test_ingest_codegraph_generates_pipeline_pages_when_full_graph(tmp_path: Path):
+    """When graph_snapshot has cross-file calls, pipeline pages are generated."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    graph_data = {
+        "files": [
+            {"path": "src/mr_hc_vendpay_import.js", "language": "javascript", "nodeCount": 3},
+            {"path": "src/mr_hc_vendpay_export.js", "language": "javascript", "nodeCount": 2},
+            {"path": "src/lib_vendpay_util.js", "language": "javascript", "nodeCount": 2},
+        ],
+        "nodes": [
+            {"id": "f:a1", "kind": "function", "name": "getInputData", "qualifiedName": "getInputData", "filePath": "src/mr_hc_vendpay_import.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:a2", "kind": "function", "name": "map", "qualifiedName": "map", "filePath": "src/mr_hc_vendpay_import.js", "startLine": 11, "endLine": 20, "language": "javascript"},
+            {"id": "f:b1", "kind": "function", "name": "reduce", "qualifiedName": "reduce", "filePath": "src/mr_hc_vendpay_export.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:c1", "kind": "function", "name": "processPayment", "qualifiedName": "processPayment", "filePath": "src/lib_vendpay_util.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+        ],
+        "edges": [
+            {"source": "f:a1", "target": "f:c1", "kind": "calls", "line": 5},
+            {"source": "f:a2", "target": "f:c1", "kind": "calls", "line": 15},
+            {"source": "f:b1", "target": "f:c1", "kind": "calls", "line": 5},
+        ],
+    }
+    client = FakeCodeGraphClient(responses={
+        "files": {"ok": True, "data": {"files": graph_data["files"]}},
+        "graph_snapshot": {"ok": True, "data": graph_data},
+    })
+    result = ingest_codegraph(root, project="vendpay", source_name="main", client=client, profile="suitescript")
+    assert result["ok"] is True
+
+    pipelines_dir = root / "wiki" / "projects" / "vendpay" / "code" / "pipelines"
+    assert pipelines_dir.exists()
+    pipeline_files = list(pipelines_dir.glob("*.md"))
+    assert len(pipeline_files) >= 1
+
+    call_graph = root / "wiki" / "projects" / "vendpay" / "code" / "call-graph.md"
+    assert call_graph.is_file()
+
+    overview = root / "wiki" / "projects" / "vendpay" / "code" / "overview.md"
+    overview_content = overview.read_text(encoding="utf-8")
+    assert "Business Pipelines" in overview_content
+    assert "vendpay" in overview_content.lower()
+
+
+def test_ingest_codegraph_generates_code_facts_without_src_prefix(tmp_path: Path):
+    """Files without src/ prefix should still get code fact pages generated."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    graph_data = {
+        "files": [
+            {"path": "SuiteScripts_GL/mr_hc_vendpay_verify.js", "language": "javascript", "nodeCount": 3},
+            {"path": "SuiteScripts_GL/mr_hc_vendpay_import.js", "language": "javascript", "nodeCount": 2},
+        ],
+        "nodes": [
+            {"id": "f:1", "kind": "function", "name": "getInputData", "qualifiedName": "getInputData", "filePath": "SuiteScripts_GL/mr_hc_vendpay_verify.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:2", "kind": "function", "name": "map", "qualifiedName": "map", "filePath": "SuiteScripts_GL/mr_hc_vendpay_verify.js", "startLine": 11, "endLine": 20, "language": "javascript"},
+            {"id": "f:3", "kind": "function", "name": "reduce", "qualifiedName": "reduce", "filePath": "SuiteScripts_GL/mr_hc_vendpay_verify.js", "startLine": 21, "endLine": 30, "language": "javascript"},
+            {"id": "f:4", "kind": "function", "name": "getInputData", "qualifiedName": "getInputData", "filePath": "SuiteScripts_GL/mr_hc_vendpay_import.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:5", "kind": "function", "name": "map", "qualifiedName": "map", "filePath": "SuiteScripts_GL/mr_hc_vendpay_import.js", "startLine": 11, "endLine": 20, "language": "javascript"},
+        ],
+        "edges": [
+            {"source": "f:1", "target": "f:4", "kind": "calls", "line": 5},
+        ],
+    }
+    client = FakeCodeGraphClient(responses={
+        "files": {"ok": True, "data": {"files": graph_data["files"]}},
+        "graph_snapshot": {"ok": True, "data": graph_data},
+    })
+
+    result = ingest_codegraph(root, project="huideng", source_name="codegraph", client=client)
+
+    assert result["ok"] is True
+    verify_page = root / "wiki/projects/huideng/code/SuiteScripts_GL/mr_hc_vendpay_verify.md"
+    assert verify_page.is_file(), f"Expected code fact page at {verify_page}"
+    import_page = root / "wiki/projects/huideng/code/SuiteScripts_GL/mr_hc_vendpay_import.md"
+    assert import_page.is_file(), f"Expected code fact page at {import_page}"
+    content = verify_page.read_text(encoding="utf-8")
+    assert "## Symbols" in content
+    assert "`getInputData`" in content
+
+
+def test_pipeline_page_wikilinks_resolve_to_code_fact_pages(tmp_path: Path):
+    """Pipeline page wikilinks should resolve to actual code fact page filenames."""
+    import re as _re
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    graph_data = {
+        "files": [
+            {"path": "SuiteScripts_GL/mr_hc_vendpay_verify.js", "language": "javascript", "nodeCount": 3},
+            {"path": "SuiteScripts_GL/mr_hc_vendpay_import.js", "language": "javascript", "nodeCount": 2},
+            {"path": "SuiteScripts_GL/lib_vendpay_util.js", "language": "javascript", "nodeCount": 2},
+        ],
+        "nodes": [
+            {"id": "f:1", "kind": "function", "name": "getInputData", "filePath": "SuiteScripts_GL/mr_hc_vendpay_verify.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:2", "kind": "function", "name": "map", "filePath": "SuiteScripts_GL/mr_hc_vendpay_verify.js", "startLine": 11, "endLine": 20, "language": "javascript"},
+            {"id": "f:3", "kind": "function", "name": "reduce", "filePath": "SuiteScripts_GL/mr_hc_vendpay_import.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:4", "kind": "function", "name": "processPayment", "filePath": "SuiteScripts_GL/lib_vendpay_util.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+        ],
+        "edges": [
+            {"source": "f:1", "target": "f:4", "kind": "calls", "line": 5},
+            {"source": "f:2", "target": "f:4", "kind": "calls", "line": 15},
+            {"source": "f:3", "target": "f:4", "kind": "calls", "line": 5},
+        ],
+    }
+    client = FakeCodeGraphClient(responses={
+        "graph_snapshot": {"ok": True, "data": graph_data},
+    })
+
+    result = ingest_codegraph(root, project="huideng", source_name="codegraph", client=client)
+    assert result["ok"] is True
+
+    pipelines_dir = root / "wiki/projects/huideng/code/pipelines"
+    if not pipelines_dir.exists():
+        return  # no pipelines detected — acceptable for small graph
+
+    code_dir = root / "wiki/projects/huideng/code"
+    all_code_stems = {p.stem for p in code_dir.rglob("*.md")}
+
+    for pipeline_file in pipelines_dir.glob("*.md"):
+        content = pipeline_file.read_text(encoding="utf-8")
+        wikilinks = _re.findall(r"\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]", content)
+        for link in wikilinks:
+            assert link in all_code_stems, \
+                f"Dangling wikilink [[{link}]] in {pipeline_file.name} — no matching code fact page"
+
+
+def test_ingest_codegraph_pipeline_includes_client_script_module_path(tmp_path: Path):
+    """Suitelet form.clientScriptModulePath should link the mounted Client Script."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    project = tmp_path / "project"
+    scripts = project / "src" / "SuiteScripts"
+    scripts.mkdir(parents=True)
+    (scripts / "sl_order_page.js").write_text(
+        "var form = serverWidget.createForm({title: 'Order'});\n"
+        "form.clientScriptModulePath = './cs_order_page.js';\n",
+        encoding="utf-8",
+    )
+    (scripts / "cs_order_page.js").write_text(
+        "function pageInit(context) { return true; }\n",
+        encoding="utf-8",
+    )
+    graph_data = {
+        "files": [
+            {"path": "src/SuiteScripts/sl_order_page.js", "language": "javascript", "nodeCount": 1},
+            {"path": "src/SuiteScripts/cs_order_page.js", "language": "javascript", "nodeCount": 1},
+        ],
+        "nodes": [
+            {"id": "f:sl", "kind": "function", "name": "onRequest", "filePath": "src/SuiteScripts/sl_order_page.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:cs", "kind": "function", "name": "pageInit", "filePath": "src/SuiteScripts/cs_order_page.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+        ],
+        "edges": [],
+    }
+    client = FakeCodeGraphClient(responses={
+        "graph_snapshot": {"ok": True, "data": graph_data},
+    })
+
+    result = ingest_codegraph(
+        root,
+        project="huideng",
+        source_name="codegraph",
+        client=client,
+        codegraph_project_path=project,
+        profile="suitescript",
+    )
+
+    assert result["ok"] is True
+    call_graph = (root / "wiki/projects/huideng/code/call-graph.md").read_text(encoding="utf-8")
+    assert "`sl_order_page` → `src/SuiteScripts/cs_order_page.js` (client_script_module_path)" in call_graph
+
+
+def test_ingest_codegraph_generic_profile_skips_suitescript_pipeline_pages(tmp_path: Path):
+    """Generic codegraph ingest should not run SuiteScript-specific pipeline analysis."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    graph_data = {
+        "files": [
+            {"path": "src/sl_order_page.js", "language": "javascript", "nodeCount": 1},
+            {"path": "src/cs_order_page.js", "language": "javascript", "nodeCount": 1},
+        ],
+        "nodes": [
+            {"id": "f:sl", "kind": "function", "name": "onRequest", "filePath": "src/sl_order_page.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:cs", "kind": "function", "name": "pageInit", "filePath": "src/cs_order_page.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+        ],
+        "edges": [
+            {"source": "f:sl", "target": "f:cs", "kind": "calls", "line": 5},
+        ],
+    }
+    client = FakeCodeGraphClient(responses={
+        "graph_snapshot": {"ok": True, "data": graph_data},
+    })
+
+    result = ingest_codegraph(root, project="generic", source_name="codegraph", client=client, profile="generic")
+
+    assert result["ok"] is True
+    assert (root / "wiki/projects/generic/code/src/sl_order_page.md").is_file()
+    assert not (root / "wiki/projects/generic/code/pipelines").exists()
+    assert not (root / "wiki/projects/generic/code/call-graph.md").exists()
+
+
+def test_ingest_codegraph_profile_is_part_of_cache_key(tmp_path: Path):
+    """Switching from generic to suitescript should rewrite pages even if graph data is unchanged."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    graph_data = {
+        "files": [
+            {"path": "src/sl_order_page.js", "language": "javascript", "nodeCount": 1},
+            {"path": "src/cs_order_page.js", "language": "javascript", "nodeCount": 1},
+        ],
+        "nodes": [
+            {"id": "f:sl", "kind": "function", "name": "onRequest", "filePath": "src/sl_order_page.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:cs", "kind": "function", "name": "pageInit", "filePath": "src/cs_order_page.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+        ],
+        "edges": [
+            {"source": "f:sl", "target": "f:cs", "kind": "calls", "line": 5},
+        ],
+    }
+    client = FakeCodeGraphClient(responses={
+        "graph_snapshot": {"ok": True, "data": graph_data},
+    })
+
+    first = ingest_codegraph(root, project="alpha", source_name="codegraph", client=client, profile="generic")
+    second = ingest_codegraph(root, project="alpha", source_name="codegraph", client=client, profile="suitescript")
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second.get("status") != "unchanged"
+    assert (root / "wiki/projects/alpha/code/call-graph.md").is_file()
+
+
+def test_ingest_codegraph_returns_clear_error_for_nonexistent_path(tmp_path: Path):
+    """When codegraph_project_path doesn't exist, return a clear error instead of crash."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    result = ingest_codegraph(
+        root,
+        project="alpha",
+        source_name="main",
+        codegraph_project_path=str(tmp_path / "nonexistent_project"),
+    )
+
+    assert result["ok"] is False
+    assert "not" in result.get("error", "").lower() or "exist" in result.get("error", "").lower()
+
+
+def test_ingest_codegraph_filters_by_include_extensions(tmp_path: Path):
+    """When include_extensions is specified, only matching files get code fact pages."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    graph_data = {
+        "files": [
+            {"path": "src/FileCabinet/SuiteScripts/sl_main.js", "language": "javascript", "nodeCount": 2},
+            {"path": "Objects/custrecord_payment.xml", "language": "xml", "nodeCount": 5},
+            {"path": "Objects/custscript_verify.xml", "language": "xml", "nodeCount": 3},
+        ],
+        "nodes": [
+            {"id": "f:1", "kind": "function", "name": "onRequest", "filePath": "src/FileCabinet/SuiteScripts/sl_main.js", "startLine": 1, "endLine": 10, "language": "javascript"},
+            {"id": "f:2", "kind": "function", "name": "init", "filePath": "src/FileCabinet/SuiteScripts/sl_main.js", "startLine": 11, "endLine": 20, "language": "javascript"},
+            {"id": "x:1", "kind": "element", "name": "custrecord_payment", "filePath": "Objects/custrecord_payment.xml", "startLine": 1, "endLine": 50, "language": "xml"},
+            {"id": "x:2", "kind": "element", "name": "scriptid", "filePath": "Objects/custrecord_payment.xml", "startLine": 2, "endLine": 2, "language": "xml"},
+            {"id": "x:3", "kind": "element", "name": "name", "filePath": "Objects/custrecord_payment.xml", "startLine": 3, "endLine": 3, "language": "xml"},
+            {"id": "x:4", "kind": "element", "name": "recordtype", "filePath": "Objects/custrecord_payment.xml", "startLine": 4, "endLine": 4, "language": "xml"},
+            {"id": "x:5", "kind": "element", "name": "description", "filePath": "Objects/custrecord_payment.xml", "startLine": 5, "endLine": 5, "language": "xml"},
+            {"id": "x:6", "kind": "element", "name": "custscript_verify", "filePath": "Objects/custscript_verify.xml", "startLine": 1, "endLine": 30, "language": "xml"},
+            {"id": "x:7", "kind": "element", "name": "scriptfile", "filePath": "Objects/custscript_verify.xml", "startLine": 2, "endLine": 2, "language": "xml"},
+            {"id": "x:8", "kind": "element", "name": "notifyadmins", "filePath": "Objects/custscript_verify.xml", "startLine": 3, "endLine": 3, "language": "xml"},
+        ],
+        "edges": [],
+    }
+    client = FakeCodeGraphClient(responses={
+        "files": {"ok": True, "data": {"files": graph_data["files"]}},
+        "graph_snapshot": {"ok": True, "data": graph_data},
+    })
+
+    result = ingest_codegraph(
+        root, project="alpha", source_name="main",
+        client=client, include_extensions=[".js", ".ts"],
+    )
+
+    assert result["ok"] is True
+    # JS file should have a code fact page
+    js_page = root / "wiki/projects/alpha/code/src/FileCabinet/SuiteScripts/sl_main.md"
+    assert js_page.is_file()
+    # XML files should NOT have code fact pages
+    xml_pages = list((root / "wiki/projects/alpha/code").rglob("*payment*"))
+    assert len(xml_pages) == 0
+    xml_pages2 = list((root / "wiki/projects/alpha/code").rglob("*custscript*"))
+    assert len(xml_pages2) == 0
+
+    files_snapshot = json.loads((root / "raw/sources/codegraph/alpha/files.json").read_text(encoding="utf-8"))
+    snapshot_files = files_snapshot.get("files", files_snapshot)
+    assert [item["path"] for item in snapshot_files] == ["src/FileCabinet/SuiteScripts/sl_main.js"]

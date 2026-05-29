@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Protocol
@@ -15,6 +16,13 @@ from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry, WikiPage
 from netsuite_llm_wiki_mcp.wiki_overview import refresh_overview
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root, safe_segment, slug
 
+
+_CODE_OR_WIKILINK_RE = re.compile(
+    r"```.*?```"
+    r"|`[^`]+`"
+    r"|\[\[([^\]|]+?)(\|[^\]]*?)?\]\]",
+    re.DOTALL,
+)
 
 _MAX_SOURCE_FILES = 200
 _MAX_SOURCE_BYTES = 5_000_000
@@ -38,6 +46,8 @@ class CodeGraphLike(Protocol):
     def context(self, query: str) -> dict[str, Any]: ...
     def impact(self, symbol: str) -> dict[str, Any]: ...
     def graph_snapshot(self) -> dict[str, Any]: ...
+    def callers(self, symbol: str) -> dict[str, Any]: ...
+    def callees(self, symbol: str) -> dict[str, Any]: ...
 
 
 def ingest_source(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -167,12 +177,26 @@ def ingest_codegraph(
     query: str = "project code overview",
     codegraph_project_path: str | Path | None = None,
     client: CodeGraphLike | None = None,
+    include_extensions: list[str] | None = None,
+    profile: str = "generic",
 ) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
     create_wiki_root(root)
     project_value = safe_segment(project)
     source_value = safe_segment(source_name)
-    cg = client or CodeGraphClient(codegraph_project_path or Path.cwd())
+    profile_value = safe_segment(profile or "generic")
+
+    if client is None:
+        cg_path = Path(codegraph_project_path).expanduser().resolve() if codegraph_project_path else Path.cwd()
+        if not cg_path.is_dir():
+            return {
+                "ok": False,
+                "code": "codegraph_path_not_found",
+                "error": f"codegraph_project_path does not exist or is not a directory: {cg_path}",
+            }
+        cg = CodeGraphClient(cg_path)
+    else:
+        cg = client
 
     status = cg.status()
     if not status.get("ok"):
@@ -188,7 +212,17 @@ def ingest_codegraph(
     if not graph.get("ok"):
         graph = {"ok": True, "data": _context_to_graph_snapshot(context.get("data", {}), files.get("data", {}))}
 
-    context_json = json.dumps({"context": context.get("data", {}), "graph": graph.get("data", {})}, ensure_ascii=False, sort_keys=True)
+    if include_extensions:
+        files["data"] = _filter_files_by_extensions(files.get("data", {}), include_extensions)
+        if has_full_graph:
+            graph["data"] = _filter_graph_by_extensions(graph["data"], include_extensions)
+
+    context_json = json.dumps({
+        "context": context.get("data", {}),
+        "graph": graph.get("data", {}),
+        "include_extensions": include_extensions or [],
+        "profile": profile_value,
+    }, ensure_ascii=False, sort_keys=True)
     context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
     cache_path = _cache_path(root, project_value, source_value, "codegraph")
     if cache_path.exists():
@@ -199,6 +233,7 @@ def ingest_codegraph(
                 "status": "unchanged",
                 "project": project_value,
                 "source_name": source_value,
+                "profile": profile_value,
                 "context_hash": context_hash,
                 "message": "codegraph context unchanged; skipping rewrite",
             }
@@ -241,6 +276,34 @@ def ingest_codegraph(
                     impact_path.write_text(json.dumps(impact.get("data", {}), ensure_ascii=False, indent=2), encoding="utf-8")
                     written_paths.append(impact_path.relative_to(root).as_posix())
 
+    # SuiteScript pipeline detection is profile-specific and only runs when full graph is available.
+    if has_full_graph and profile_value == "suitescript":
+        from netsuite_llm_wiki_mcp.pipeline_detector import PipelineDetector
+        cg_project_path = Path(codegraph_project_path) if codegraph_project_path else None
+        detector = PipelineDetector(graph.get("data", {}), cg_project_path)
+        pipelines = detector.detect()
+        for pipeline in pipelines:
+            page = _pipeline_page(pipeline, project_value, source_value, graph_snapshot_path)
+            write_wiki_page(root, page)
+            written_paths.append(page.relative_path.as_posix())
+            code_page_paths.append(page.relative_path.as_posix())
+        if pipelines:
+            cg_page = _call_graph_page(pipelines, project_value, source_value, graph_snapshot_path)
+            write_wiki_page(root, cg_page)
+            written_paths.append(cg_page.relative_path.as_posix())
+            code_page_paths.append(cg_page.relative_path.as_posix())
+            # Regenerate overview with pipeline grouping
+            data = graph.get("data", {})
+            overview = _project_overview_page(
+                _extract_graph_files(data),
+                _extract_nodes(data),
+                _extract_edges(data),
+                {str(n.get("id")): n for n in _extract_nodes(data) if n.get("id")},
+                project_value, source_value, graph_snapshot_path,
+                pipelines=pipelines,
+            )
+            write_wiki_page(root, overview)
+
     wikilinks = "\n".join(f"- [[{p[5:-3]}]]" for p in code_page_paths) if code_page_paths else "(no code pages)"
     raw_sources = [p for p in written_paths if p.startswith("raw/")]
     source_page = WikiPage(
@@ -252,6 +315,7 @@ def ingest_codegraph(
             "source_name": source_value,
             "source_type": "codegraph",
             "sources": raw_sources,
+            "profile": profile_value,
             "summary": f"CodeGraph snapshot for {project_value}/{source_value}",
         },
         title=f"CodeGraph {project_value}/{source_value}",
@@ -275,11 +339,12 @@ def ingest_codegraph(
             status="ok",
         ),
     )
-    _write_cache(root, project_value, source_value, {"codegraph_context_hash": context_hash, "status": "ingested"}, source_type="codegraph")
+    _write_cache(root, project_value, source_value, {"codegraph_context_hash": context_hash, "status": "ingested", "profile": profile_value}, source_type="codegraph")
     return {
         "ok": True,
         "project": project_value,
         "source_name": source_value,
+        "profile": profile_value,
         "written": len(written_paths),
         "paths": written_paths,
     }
@@ -429,6 +494,15 @@ def _prepare_generation(root: Path, project: str, source_name: str, language: st
     }
 
 
+def normalize_wikilink_targets(text: str) -> str:
+    """Lowercase the target portion of [[wikilinks]] outside code spans."""
+    def _replace(m: re.Match) -> str:
+        if m.group(1) is not None:
+            return f"[[{m.group(1).lower()}{m.group(2) or ''}]]"
+        return m.group(0)
+    return _CODE_OR_WIKILINK_RE.sub(_replace, text)
+
+
 def _apply_generation(root: Path, project: str, source_name: str, language: str, generation: dict[str, Any] | str, source_type: str = "file") -> dict[str, Any]:
     cache = _read_cache(root, project, source_name, source_type)
     if not cache:
@@ -477,7 +551,7 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
                 "summary": str(item.get("summary") or ""),
             },
             title=str(item.get("title") or path.stem),
-            body=str(item.get("body") or item.get("summary") or ""),
+            body=normalize_wikilink_targets(str(item.get("body") or item.get("summary") or "")),
         )
         write_wiki_page(root, page)
         written_paths.append(path.as_posix())
@@ -652,6 +726,7 @@ def _generation_prompt(project: str, source_name: str, language: str, analysis: 
         f"Respond in {language}.",
         "Use the analysis and existing wiki context. Return JSON matching expected_response_schema.",
         "Every page must include source traceability via sources[].",
+        "All [[wikilink]] targets must be all-lowercase kebab-case (e.g. [[user-event-script]], not [[User-Event-Script]]).",
         "Analysis:",
         json.dumps(analysis, ensure_ascii=False, indent=2) if not isinstance(analysis, str) else analysis,
         "Existing wiki context:",
@@ -683,6 +758,7 @@ def _combined_prompt(project: str, source_name: str, language: str, manifest: li
         "2. Generate a source_summary with a short title and a ONE-LINE summary (no body needed — index pages are auto-generated).",
         "3. Generate additional wiki pages (concepts, decisions, etc.) with full body content.",
         "4. Every page must include source traceability via sources[] referencing raw/ paths.",
+        "5. All [[wikilink]] targets must be all-lowercase kebab-case (e.g. [[user-event-script]], not [[User-Event-Script]]).",
     ])
 
 
@@ -735,6 +811,42 @@ def _context_to_graph_snapshot(context_data: dict[str, Any], files_data: Any) ->
     }
 
 
+def _filter_graph_by_extensions(data: dict[str, Any], extensions: list[str]) -> dict[str, Any]:
+    """Filter graph snapshot to only include files matching the given extensions."""
+    ext_set = {ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in extensions}
+
+    def _matches(file_path: str) -> bool:
+        return Path(file_path).suffix.lower() in ext_set
+
+    files = [f for f in (data.get("files") or []) if _matches(str(f.get("path", "")))]
+    kept_paths = {str(f.get("path", "")) for f in files}
+    nodes = [n for n in (data.get("nodes") or []) if str(n.get("filePath") or n.get("file_path") or "") in kept_paths]
+    kept_ids = {str(n.get("id")) for n in nodes if n.get("id")}
+    edges = [e for e in (data.get("edges") or []) if str(e.get("source", "")) in kept_ids or str(e.get("target", "")) in kept_ids]
+    return {"files": files, "nodes": nodes, "edges": edges}
+
+
+def _filter_files_by_extensions(data: Any, extensions: list[str]) -> Any:
+    """Filter CodeGraph files() output to only include files matching extensions."""
+    ext_set = {ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in extensions}
+
+    def _matches(item: Any) -> bool:
+        if isinstance(item, dict):
+            file_path = str(item.get("path") or "")
+        else:
+            file_path = str(item or "")
+        return Path(file_path).suffix.lower() in ext_set
+
+    if isinstance(data, dict):
+        value = data.get("files")
+        if isinstance(value, list):
+            return {**data, "files": [item for item in value if _matches(item)]}
+        return data
+    if isinstance(data, list):
+        return [item for item in data if _matches(item)]
+    return data
+
+
 def _code_pages_from_graph(data: dict[str, Any], project: str, source_name: str, graph_snapshot: str) -> list[WikiPage]:
     files = _extract_graph_files(data)
     nodes = _extract_nodes(data)
@@ -745,11 +857,13 @@ def _code_pages_from_graph(data: dict[str, Any], project: str, source_name: str,
     nodes_by_file: dict[str, list[dict[str, Any]]] = {}
     for node in nodes:
         file_path = str(node.get("filePath") or node.get("source_path") or node.get("path") or node.get("file") or "")
-        if file_path.startswith("src/"):
+        if file_path:
             nodes_by_file.setdefault(file_path, []).append(node)
 
-    file_paths = [str(item.get("path")) for item in files if isinstance(item, dict) and str(item.get("path", "")).startswith("src/")]
+    file_paths = [str(item.get("path")) for item in files if isinstance(item, dict) and item.get("path")]
     for file_path in sorted(set(file_paths) | set(nodes_by_file)):
+        if _is_vendored_file(file_path, nodes_by_file):
+            continue
         file_info = next((item for item in files if isinstance(item, dict) and item.get("path") == file_path), {"path": file_path})
         pages.append(_file_code_fact_page(file_info, nodes_by_file.get(file_path, []), edges, node_by_id, project, source_name, graph_snapshot))
     return pages or _code_pages_from_context(data, project, source_name, graph_snapshot)
@@ -770,16 +884,22 @@ def _project_overview_page(
     project: str,
     source_name: str,
     graph_snapshot: str,
+    pipelines: list[Any] | None = None,
 ) -> WikiPage:
-    src_files = [item for item in files if str(item.get("path", "")).startswith("src/")]
+    src_files = [item for item in files if item.get("path")]
     node_kinds: dict[str, int] = {}
+    nodes_by_file: dict[str, list[dict[str, Any]]] = {}
     for node in nodes:
         kind = str(node.get("kind") or "unknown")
         node_kinds[kind] = node_kinds.get(kind, 0) + 1
+        fp = str(node.get("filePath") or node.get("source_path") or node.get("path") or node.get("file") or "")
+        if fp:
+            nodes_by_file.setdefault(fp, []).append(node)
     file_lines = [f"- `{item.get('path')}` ({item.get('language', 'unknown')}, nodes: {item.get('nodeCount', item.get('node_count', 0))})" for item in src_files]
     kind_lines = [f"- {kind}: {count}" for kind, count in sorted(node_kinds.items())]
-    logic_lines = _global_logic_lines(edges, node_by_id)
+    logic_lines = _global_logic_lines(edges, node_by_id, nodes_by_file=nodes_by_file)
     module_lines = _module_summary_lines(src_files, nodes)
+    pipeline_section = _pipeline_overview_lines(pipelines) if pipelines else []
     return WikiPage(
         relative_path=Path("wiki") / "projects" / project / "code" / "overview.md",
         frontmatter={
@@ -798,7 +918,9 @@ def _project_overview_page(
             f"- Source files: {len(src_files)}",
             f"- Symbols: {len(nodes)}",
             f"- Relationships: {len(edges)}",
+            *(([f"- Pipelines: {len(pipelines)}"] if pipelines else [])),
             "",
+            *(["## Business Pipelines", *pipeline_section, ""] if pipeline_section else []),
             "## Module Layout",
             *(module_lines or ["(no modules)"]),
             "",
@@ -862,7 +984,7 @@ def _file_code_fact_page(
 
 def _code_fact_relative_path(project: str, file_path: str) -> Path:
     raw_parts = Path(file_path.replace("\\", "/")).parts
-    if raw_parts and raw_parts[-1].endswith(".py"):
+    if raw_parts and "." in raw_parts[-1]:
         raw_parts = (*raw_parts[:-1], Path(raw_parts[-1]).stem + ".md")
     safe_parts = [safe_segment(Path(part).stem) + Path(part).suffix if part.endswith(".md") else safe_segment(part) for part in raw_parts]
     return Path("wiki") / "projects" / project / "code" / Path(*safe_parts)
@@ -883,25 +1005,164 @@ def _module_summary_lines(src_files: list[dict[str, Any]], nodes: list[dict[str,
     return [f"- `{module}`: {count} files, {node_counts.get(module, 0)} symbols" for module, count in sorted(counts.items())]
 
 
-def _global_logic_lines(edges: list[dict[str, Any]], node_by_id: dict[str, dict[str, Any]], limit: int = 80) -> list[str]:
-    lines: list[str] = []
+_VENDOR_PATH_PARTS = {"node_modules", "vendor", ".venv", "venv", "dist", "build", "__pycache__"}
+_VENDOR_FILE_STEMS = {
+    "papaparse", "lodash", "underscore", "jquery", "moment", "dayjs",
+    "axios", "rxjs", "d3", "chart", "three", "pixi", "phaser",
+}
+_VENDOR_NODE_DENSITY_THRESHOLD = 120
+
+
+def _is_project_source(file_path: str) -> bool:
+    """Return True if file_path looks like project source code (not a vendored/third-party file)."""
+    if not file_path:
+        return False
+    parts = file_path.replace("\\", "/").split("/")
+    if any(part in _VENDOR_PATH_PARTS for part in parts):
+        return False
+    stem = Path(parts[-1]).stem.lower() if parts else ""
+    stem_base = stem.removesuffix(".min")
+    if stem_base in _VENDOR_FILE_STEMS:
+        return False
+    return True
+
+
+def _is_vendored_file(file_path: str, nodes_by_file: dict[str, list[dict[str, Any]]]) -> bool:
+    """Heuristic: a file with extremely high node density is likely a bundled/minified library."""
+    if not _is_project_source(file_path):
+        return True
+    node_count = len(nodes_by_file.get(file_path, []))
+    return node_count >= _VENDOR_NODE_DENSITY_THRESHOLD
+
+
+def _global_logic_lines(
+    edges: list[dict[str, Any]],
+    node_by_id: dict[str, dict[str, Any]],
+    nodes_by_file: dict[str, list[dict[str, Any]]] | None = None,
+    limit: int = 80,
+) -> list[str]:
+    if nodes_by_file is None:
+        nodes_by_file = {}
+    cross_file: list[str] = []
+    intra_file: list[str] = []
     for edge in edges:
         if edge.get("kind") not in {"calls", "imports"}:
             continue
         source_node = node_by_id.get(str(edge.get("source") or ""), {})
         target_node = node_by_id.get(str(edge.get("target") or ""), {})
-        source_name = str(source_node.get("name") or source_node.get("qualifiedName") or edge.get("source") or "unknown")
-        target_name = str(target_node.get("name") or target_node.get("qualifiedName") or edge.get("target") or "unknown")
         source_file = str(source_node.get("filePath") or "")
         target_file = str(target_node.get("filePath") or "")
-        line = edge.get("line")
-        suffix = f" at line {line}" if line else ""
+        if not _is_project_source(source_file) and not _is_project_source(target_file):
+            continue
+        if _is_vendored_file(source_file, nodes_by_file) or _is_vendored_file(target_file, nodes_by_file):
+            continue
+        source_name = str(source_node.get("name") or source_node.get("qualifiedName") or edge.get("source") or "unknown")
+        target_name = str(target_node.get("name") or target_node.get("qualifiedName") or edge.get("target") or "unknown")
+        line_num = edge.get("line")
+        suffix = f" at line {line_num}" if line_num else ""
         files = f" ({source_file} → {target_file})" if source_file or target_file else ""
-        lines.append(f"- `{source_name}` {edge.get('kind')} → `{target_name}`{suffix}{files}")
-        if len(lines) >= limit:
-            lines.append(f"- ... truncated after {limit} relationships; see raw graph snapshot for full graph")
+        entry = f"- `{source_name}` {edge.get('kind')} → `{target_name}`{suffix}{files}"
+        if source_file and target_file and source_file != target_file:
+            cross_file.append(entry)
+        else:
+            intra_file.append(entry)
+        if len(cross_file) + len(intra_file) >= limit * 2:
             break
+    lines = cross_file[:limit]
+    remaining = limit - len(lines)
+    if remaining > 0:
+        lines.extend(intra_file[:remaining])
+    if len(cross_file) + len(intra_file) > limit:
+        lines.append(f"- ... truncated after {limit} relationships; see raw graph snapshot for full graph")
     return lines
+
+
+def _pipeline_overview_lines(pipelines: list[Any]) -> list[str]:
+    """Generate pipeline summary lines for the overview page."""
+    lines: list[str] = []
+    for p in pipelines:
+        entry_str = ", ".join(p.entry_points[:3]) if p.entry_points else "none"
+        lines.append(f"- **[[pipelines/{p.name}|{p.name}]]** ({len(p.files)} files, confidence: {p.confidence})")
+        lines.append(f"  - Entry points: {entry_str}")
+        if p.shared_records:
+            lines.append(f"  - Shared records: {', '.join(p.shared_records[:5])}")
+    return lines
+
+
+def _pipeline_page(pipeline: Any, project: str, source_name: str, graph_snapshot: str) -> WikiPage:
+    """Generate a wiki page for a single detected pipeline."""
+    file_links = "\n".join(f"- [[{Path(f).stem}]] (`{f}`)" for f in pipeline.files)
+    entry_lines = "\n".join(f"- `{e}`" for e in pipeline.entry_points) if pipeline.entry_points else "(none detected)"
+    record_lines = "\n".join(f"- `{r}`" for r in pipeline.shared_records) if pipeline.shared_records else "(none)"
+    implicit_lines: list[str] = []
+    for src, target_id, ref_type in pipeline.implicit_edges[:20]:
+        implicit_lines.append(f"- `{Path(src).stem}` → `{target_id}` ({ref_type})")
+    implicit_section = "\n".join(implicit_lines) if implicit_lines else "(none detected)"
+    return WikiPage(
+        relative_path=Path("wiki") / "projects" / project / "code" / "pipelines" / f"{pipeline.name}.md",
+        frontmatter={
+            "type": "code_fact",
+            "generated": True,
+            "project": project,
+            "source_name": source_name,
+            "sources": [graph_snapshot],
+            "pipeline": pipeline.name,
+            "confidence": pipeline.confidence,
+            "summary": f"Business pipeline: {pipeline.name} ({len(pipeline.files)} scripts)",
+        },
+        title=f"Pipeline: {pipeline.name}",
+        body="\n".join([
+            f"Confidence: {pipeline.confidence}",
+            "",
+            "## Scripts",
+            file_links,
+            "",
+            "## Entry Points",
+            entry_lines,
+            "",
+            "## Shared Records",
+            record_lines,
+            "",
+            "## Implicit References",
+            implicit_section,
+        ]),
+    )
+
+
+def _call_graph_page(pipelines: list[Any], project: str, source_name: str, graph_snapshot: str) -> WikiPage:
+    """Generate a call-graph summary page showing inter-pipeline relationships."""
+    lines: list[str] = []
+    all_implicit: list[str] = []
+    for p in pipelines:
+        lines.append(f"### {p.name}")
+        lines.append(f"- Files: {len(p.files)}")
+        lines.append(f"- Entry points: {len(p.entry_points)}")
+        lines.append(f"- Shared records: {', '.join(p.shared_records[:5]) or 'none'}")
+        lines.append("")
+        for src, target_id, ref_type in p.implicit_edges[:10]:
+            all_implicit.append(f"- `{Path(src).stem}` → `{target_id}` ({ref_type}) [pipeline: {p.name}]")
+    implicit_section = "\n".join(all_implicit[:50]) if all_implicit else "(no implicit triggers detected)"
+    return WikiPage(
+        relative_path=Path("wiki") / "projects" / project / "code" / "call-graph.md",
+        frontmatter={
+            "type": "code_fact",
+            "generated": True,
+            "project": project,
+            "source_name": source_name,
+            "sources": [graph_snapshot],
+            "summary": f"Cross-script call graph and implicit triggers for {project}",
+        },
+        title="Call Graph",
+        body="\n".join([
+            f"Total pipelines: {len(pipelines)}",
+            f"Total implicit references: {sum(len(p.implicit_edges) for p in pipelines)}",
+            "",
+            "## Pipelines",
+            *lines,
+            "## Implicit Trigger Chain",
+            implicit_section,
+        ]),
+    )
 
 
 def _symbol_line(node: dict[str, Any]) -> str:

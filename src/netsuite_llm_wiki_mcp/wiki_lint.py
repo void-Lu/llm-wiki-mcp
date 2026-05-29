@@ -73,6 +73,10 @@ def wiki_lint(
     wiki_root = root / "wiki"
     if wiki_root.exists():
         pages = sorted(wiki_root.rglob("*.md"))
+        by_rel = {page.relative_to(root).as_posix(): page for page in pages}
+        by_stem: dict[str, list[str]] = {}
+        for rel_key in by_rel:
+            by_stem.setdefault(Path(rel_key).stem.casefold(), []).append(rel_key)
         for page in pages:
             rel = page.relative_to(root)
             text = page.read_text(encoding="utf-8")
@@ -100,7 +104,9 @@ def wiki_lint(
                 if not resolved.exists():
                     resolved = (root / "wiki" / target_path).resolve()
                 if resolved.is_relative_to(root) and not resolved.exists():
-                    issues.append(_issue("broken_wikilink", f"wikilink target does not exist: {target}", rel))
+                    stem_matches = by_stem.get(Path(target).stem.casefold(), [])
+                    if not stem_matches:
+                        issues.append(_issue("broken_wikilink", f"wikilink target does not exist: {target}", rel))
         index_path = root / "wiki" / "index.md"
         if index_path.exists():
             for target in _WIKILINK_RE.findall(index_path.read_text(encoding="utf-8")):
@@ -112,10 +118,6 @@ def wiki_lint(
                     issues.append(_issue("index_target_missing", f"index target does not exist: {target}", Path("wiki/index.md")))
         structural_pages = {"wiki/index.md", "wiki/log.md", "wiki/overview.md"}
         referenced: set[str] = set()
-        by_rel = {page.relative_to(root).as_posix(): page for page in pages}
-        by_stem: dict[str, list[str]] = {}
-        for rel in by_rel:
-            by_stem.setdefault(Path(rel).stem.casefold(), []).append(rel)
         for page in pages:
             text = page.read_text(encoding="utf-8")
             for target in _WIKILINK_RE.findall(text):

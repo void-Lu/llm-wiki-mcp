@@ -41,6 +41,8 @@ def wiki_ingest_codegraph_tool(
     source_name: str,
     query: str = "project code overview",
     codegraph_project_path: str | None = None,
+    include_extensions: list[str] | None = None,
+    profile: str = "generic",
 ) -> dict[str, Any]:
     return run_ingest_codegraph(
         vault_root=vault_root,
@@ -48,6 +50,8 @@ def wiki_ingest_codegraph_tool(
         source_name=source_name,
         query=query,
         codegraph_project_path=codegraph_project_path,
+        include_extensions=include_extensions,
+        profile=profile,
     )
 
 
@@ -275,9 +279,15 @@ def wiki_ingest_codegraph(
     source_name: str,
     query: str = "project code overview",
     codegraph_project_path: str | None = None,
+    include_extensions: list[str] | None = None,
+    profile: str = "generic",
 ) -> dict[str, Any]:
     """Ingest CodeGraph symbols and code facts into the LLM Wiki (synchronous, no LLM needed)."""
-    return wiki_ingest_codegraph_tool(vault_root, project, source_name, query, codegraph_project_path)
+    return wiki_ingest_codegraph_tool(
+        vault_root, project, source_name, query, codegraph_project_path,
+        include_extensions=include_extensions,
+        profile=profile,
+    )
 
 
 @mcp.tool()
@@ -404,45 +414,58 @@ def wiki_changelog(vault_root: str, limit: int = 10) -> dict[str, Any]:
 
 @mcp.tool()
 def wiki_write_note(
-    note_type: str,
     title: str,
     content: str,
+    note_type: str | None = None,
+    noteType: str | None = None,
     project: str | None = None,
     domain: str | None = None,
     related_script_types: list[str] | None = None,
+    relatedScriptTypes: list[str] | None = None,
     script_type: str | None = None,
+    scriptType: str | None = None,
     object_type: str | None = None,
+    objectType: str | None = None,
     related_objects: list[str] | None = None,
+    relatedObjects: list[str] | None = None,
     related_scripts: list[str] | None = None,
+    relatedScripts: list[str] | None = None,
     tags: list[str] | None = None,
     zentao_urls: list[str] | None = None,
+    zentaoUrls: list[str] | None = None,
     decision_status: str | None = None,
+    decisionStatus: str | None = None,
     status: str | None = None,
     filename: str | None = None,
     overwrite: bool = False,
     auto_index: bool = True,
+    autoIndex: bool | None = None,
     vault_root: str | None = None,
+    vaultRoot: str | None = None,
 ) -> dict[str, Any]:
     """Write a human-curated note into the wiki. Supports decision, troubleshooting, requirement, and knowledge note types."""
+    resolved_note_type = note_type or noteType
+    if not resolved_note_type:
+        return {"ok": False, "code": "missing_note_type", "error": "note_type is required"}
     return wiki_write_note_tool(
-        note_type=note_type,
+        note_type=resolved_note_type,
         title=title,
         content=content,
         project=project,
         domain=domain,
-        related_script_types=related_script_types,
-        script_type=script_type,
-        object_type=object_type,
-        related_objects=related_objects,
-        related_scripts=related_scripts,
+        related_script_types=related_script_types or relatedScriptTypes,
+        script_type=script_type or scriptType,
+        object_type=object_type or objectType,
+        related_objects=related_objects or relatedObjects,
+        related_scripts=related_scripts or relatedScripts,
         tags=tags,
-        zentao_urls=zentao_urls,
-        decision_status=decision_status,
+        zentao_urls=zentao_urls or zentaoUrls,
+        decision_status=decision_status or decisionStatus,
         status=status,
         filename=filename,
         overwrite=overwrite,
-        auto_index=auto_index,
-        vault_root=vault_root,
+        auto_index=autoIndex if autoIndex is not None else auto_index,
+        vault_root=vault_root or vaultRoot,
     )
 
 

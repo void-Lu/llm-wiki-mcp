@@ -13,6 +13,7 @@ from netsuite_llm_wiki_mcp.server import (
     wiki_query_tool,
     wiki_rescan_tool,
     wiki_synthesis_tool,
+    wiki_write_note,
     wiki_write_note_tool,
 )
 
@@ -93,6 +94,50 @@ class TestLlmWikiServerTools:
             "auto_index": False,
             "vault_root": str(vault),
         }]
+
+    def test_wiki_write_note_accepts_camel_case_params(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "path": "wiki/projects/alpha/decisions/note.md"}
+        calls: list[dict[str, object]] = []
+
+        def fake_save_note(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_write_note", fake_save_note)
+
+        result = wiki_write_note(
+            noteType="decision",
+            title="Decision note",
+            content="Body",
+            project="alpha",
+            relatedScriptTypes=["user-event"],
+            scriptType="restlet",
+            objectType="salesorder",
+            relatedObjects=["invoice"],
+            relatedScripts=["customscript_sync"],
+            zentaoUrls=["https://zentao.example/ticket/1"],
+            decisionStatus="accepted",
+            autoIndex=False,
+            vaultRoot=str(vault),
+        )
+
+        assert result == payload
+        assert calls[0]["note_type"] == "decision"
+        assert calls[0]["related_script_types"] == ["user-event"]
+        assert calls[0]["script_type"] == "restlet"
+        assert calls[0]["object_type"] == "salesorder"
+        assert calls[0]["related_objects"] == ["invoice"]
+        assert calls[0]["related_scripts"] == ["customscript_sync"]
+        assert calls[0]["zentao_urls"] == ["https://zentao.example/ticket/1"]
+        assert calls[0]["decision_status"] == "accepted"
+        assert calls[0]["auto_index"] is False
+        assert calls[0]["vault_root"] == str(vault)
+
+    def test_wiki_write_note_missing_note_type_returns_error(self):
+        result = wiki_write_note(title="Test", content="Body")
+        assert result["ok"] is False
+        assert result["code"] == "missing_note_type"
 
     def test_wiki_init_tool_creates_confirmed_structure(self, tmp_path: Path):
         vault = tmp_path / "wiki-root"
@@ -222,10 +267,26 @@ class TestLlmWikiServerTools:
 
         monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_ingest_codegraph", fake_ingest)
 
-        result = wiki_ingest_codegraph_tool(str(vault), project="alpha", source_name="main", query="entry", codegraph_project_path="repo")
+        result = wiki_ingest_codegraph_tool(
+            str(vault),
+            project="alpha",
+            source_name="main",
+            query="entry",
+            codegraph_project_path="repo",
+            include_extensions=[".js"],
+            profile="suitescript",
+        )
 
         assert result == payload
-        assert calls == [{"vault_root": str(vault), "project": "alpha", "source_name": "main", "query": "entry", "codegraph_project_path": "repo"}]
+        assert calls == [{
+            "vault_root": str(vault),
+            "project": "alpha",
+            "source_name": "main",
+            "query": "entry",
+            "codegraph_project_path": "repo",
+            "include_extensions": [".js"],
+            "profile": "suitescript",
+        }]
 
     def test_wiki_lint_tool_delegates_semantic_stage(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"

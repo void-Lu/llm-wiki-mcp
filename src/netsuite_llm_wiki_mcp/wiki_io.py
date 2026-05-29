@@ -85,11 +85,12 @@ def write_wiki_page(
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    lines = text.splitlines()
-    if not lines or lines[0] != "---":
+    cleaned = text.lstrip("﻿")
+    lines = cleaned.splitlines()
+    if not lines or lines[0].strip() != "---":
         return {}, text
     try:
-        end = next(index for index, line in enumerate(lines[1:], 1) if line == "---")
+        end = next(index for index, line in enumerate(lines[1:], 1) if line.strip() == "---")
         loaded = yaml.safe_load("\n".join(lines[1:end]))
     except (StopIteration, yaml.YAMLError):
         return {}, "\n".join(lines[1:]).strip()

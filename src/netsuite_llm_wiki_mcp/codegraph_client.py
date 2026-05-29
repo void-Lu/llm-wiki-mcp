@@ -66,17 +66,17 @@ class CodeGraphClient:
     def _run(self, args: list[str]) -> dict[str, Any]:
         try:
             return_code, stdout, stderr = self._runner(args, self.project_path, self.timeout)
-        except FileNotFoundError:
-            return {"ok": False, "code": "codegraph_unavailable", "error": "codegraph executable not found"}
+        except (FileNotFoundError, NotADirectoryError):
+            return {"ok": False, "code": "codegraph_unavailable", "error": "codegraph executable not found or project path invalid"}
         except subprocess.TimeoutExpired:
             return {"ok": False, "code": "codegraph_timeout", "error": "codegraph command timed out"}
         if return_code != 0:
-            text = f"{stdout}\n{stderr}".lower()
+            text = f"{stdout or ''}\n{stderr or ''}".lower()
             if "not initialized" in text or "run 'codegraph init" in text:
-                return {"ok": False, "code": "codegraph_not_initialized", "error": stderr or stdout}
-            return {"ok": False, "code": "codegraph_failed", "error": stderr or stdout, "returncode": return_code}
+                return {"ok": False, "code": "codegraph_not_initialized", "error": stderr or stdout or "codegraph not initialized"}
+            return {"ok": False, "code": "codegraph_failed", "error": stderr or stdout or "unknown error", "returncode": return_code}
         try:
-            data = json.loads(stdout) if stdout.strip() else {}
+            data = json.loads(stdout) if stdout and stdout.strip() else {}
         except json.JSONDecodeError as exc:
             return {"ok": False, "code": "invalid_codegraph_json", "error": str(exc), "raw": stdout}
         return {"ok": True, "data": data}

@@ -167,6 +167,8 @@ wiki_ingest_codegraph → raw/sources/codegraph/<project>/
                       → index + overview + log 更新
 ```
 
+`wiki_ingest_codegraph` 默认使用 `profile="generic"`，只生成通用 CodeGraph 代码事实，不运行 SuiteScript 专属 pipeline 深入分析。SuiteScript/SuiteCloud 项目需要传 `profile="suitescript"` 才会启用 `N/task`、`N/record`、`N/url`、`form.clientScriptModulePath`、`custscript_*` 等隐式关系抽取和业务 pipeline 页面生成。对 SDF 项目根目录摄入时，可用 `include_extensions=[".js"]` 只保留脚本文件，避免 `Objects/*.xml` 混入代码事实页。
+
 ### LLM 分阶段摄入
 
 ```
