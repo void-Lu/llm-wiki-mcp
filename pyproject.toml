@@ -3,16 +3,16 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "netsuite-rag-mcp"
-version = "0.3.0"
-description = "Local MCP server for NetSuite Obsidian RAG — index your vault, search & ask with semantic retrieval"
+name = "netsuite-llm-wiki-mcp"
+version = "0.5.0"
+description = "Local MCP server for NetSuite CodeGraph-powered Obsidian LLM Wiki maintenance"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
-    { name = "NetSuite RAG MCP Contributors" },
+    { name = "NetSuite LLM Wiki MCP Contributors" },
 ]
-keywords = ["netsuite", "obsidian", "rag", "mcp", "chromadb", "semantic-search"]
+keywords = ["netsuite", "obsidian", "llm-wiki", "mcp", "codegraph"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -22,21 +22,21 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "chromadb>=0.5.23",
     "mcp>=1.2.0",
     "PyYAML>=6.0.2",
-    "sentence-transformers>=3.3.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.4",
 ]
+url = [
+    "markdownify>=0.11.6",
+]
 
 [project.scripts]
-netsuite-rag-mcp = "netsuite_rag_mcp.cli:main"
-netsuite-rag-mcp-server = "netsuite_rag_mcp.server:main"
-netsuite-rag-mcp-preload-model = "netsuite_rag_mcp.preload:main"
+netsuite-llm-wiki-mcp = "netsuite_llm_wiki_mcp.cli:main"
+netsuite-llm-wiki-mcp-server = "netsuite_llm_wiki_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

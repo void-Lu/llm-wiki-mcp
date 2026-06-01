@@ -2,449 +2,358 @@ from pathlib import Path
 
 import pytest
 
-from netsuite_rag_mcp.server import (
+from netsuite_llm_wiki_mcp.server import (
     _build_filters,
-    generate_suitecloud_wiki_tool,
-    get_index_status_tool,
-    index_sources_tool,
-    index_vault_tool,
+    mcp,
+    wiki_init_tool,
+    wiki_ingest_codegraph_tool,
+    wiki_ingest_llm_tool,
+    wiki_lint_tool,
+    wiki_query_debug_tool,
+    wiki_query_tool,
+    wiki_rescan_tool,
+    wiki_synthesis_tool,
+    wiki_write_note,
+    wiki_write_note_tool,
 )
-from netsuite_rag_mcp.vector_store import FakeEmbedder
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+class TestLlmWikiServerTools:
+    def test_registered_tools_exclude_deprecated_tools(self):
+        deprecated = {
+            "index_vault",
+            "index_sources",
+            "search_netsuite_knowledge",
+            "ask_netsuite_rag",
+            "get_index_status",
+            "generate_suitecloud_wiki",
+            "write_wiki_summaries",
+            "save_obsidian_note",
+        }
 
-def _write_v2_config(vault: Path) -> None:
-    """Write a v2 multi-source sources.yaml."""
-    (vault / "rag").mkdir(parents=True, exist_ok=True)
-    (vault / "rag" / "sources.yaml").write_text(
-        "\n".join(
-            [
-                "schema_version: 2",
-                "workspace_root: .",
-                "index:",
-                "  chroma_path: .rag-index/chroma",
-                "  embedding_model: fake",
-                "  embedding_cache_path: .models",
-                "  collections:",
-                "    default: netsuite_notes",
-                "sources:",
-                "  - source_name: obsidian",
-                "    source_kind: note",
-                "    root: .",
-                "    include: [projects]",
-                "    exclude: [.git, .obsidian, .rag-index]",
-                "    file_types: [md]",
-                "    parser: markdown_frontmatter_h2",
-                "    collection: netsuite_notes",
-                "    authority: curated_note_source",
-                "  - source_name: netsuite_repo",
-                "    source_kind: code",
-                "    root: .",
-                "    include: [projects]",
-                "    exclude: [.git, .obsidian, .rag-index, node_modules]",
-                "    file_types: [js]",
-                "    parser: suitescript_code_and_config",
-                "    collection: netsuite_notes",
-                "    authority: curated_code_source",
-            ]
-        ),
-        encoding="utf-8",
-    )
+        registered = {tool.name for tool in mcp._tool_manager.list_tools()}
 
+        assert registered.isdisjoint(deprecated)
 
-def _write_note(vault: Path, relative_path: str, content: str) -> Path:
-    path = vault / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return path
+    def test_registered_tools_include_wiki_write_note(self):
+        registered = {tool.name for tool in mcp._tool_manager.list_tools()}
 
+        assert "wiki_write_note" in registered
+        assert "wiki_synthesis" in registered
 
-NOTE_CONTENT = """---
-type: script
-project: project-a
-script_type: restlet
-script_id: customscript_order_sync_restlet
-related_objects: [salesorder]
-related_scripts: []
-status: active
----
-
-# RESTlet - 订单同步接口
-
-## 用途
-同步订单到外部系统。
-"""
-
-JS_CONTENT = """/**
- * @NScriptType Restlet
- * @NApiVersion 2.1
- */
-define(['N/record'], function(record) {
-    function doGet(context) {
-        return record.load({type: context.type, id: context.id});
-    }
-    return {get: doGet};
-});
-"""
-
-
-# ── Existing tests ───────────────────────────────────────────────────────────
-
-def test_index_status_before_index(tmp_path: Path):
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    _write_v2_config(vault)
-
-    status = get_index_status_tool(str(vault))
-
-    assert status["indexed"] is False
-    assert status["collection_count"] == 0
-    assert status["manifest_exists"] is False
-
-
-def test_server_status_does_not_use_cwd_as_vault(monkeypatch, tmp_path: Path):
-    cwd_vault = tmp_path / "cwd-vault"
-    cwd_vault.mkdir()
-    _write_v2_config(cwd_vault)
-    monkeypatch.chdir(cwd_vault)
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(tmp_path / "empty-config"))
-    monkeypatch.setenv("NETSUITE_RAG_USER_DATA_DIR", str(tmp_path / "user-data"))
-
-    status = get_index_status_tool()
-
-    assert status["ok"] is False
-    assert status["code"] == "missing_vault_root"
-    assert "netsuite-rag-mcp init --vault" in status["error"]
-
-
-def test_server_status_reports_runtime_paths_from_global_config(monkeypatch, tmp_path: Path):
-    from netsuite_rag_mcp.runtime_config import write_global_config
-
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    _write_v2_config(vault)
-    config_dir = tmp_path / "config"
-    monkeypatch.delenv("NETSUITE_RAG_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(config_dir))
-    write_global_config(config_dir / "config.yaml", vault_name="homework", vault_root=vault, make_default=True)
-
-    status = get_index_status_tool()
-
-    assert status["ok"] is True
-    assert status["vault_root"] == str(vault.resolve())
-    assert status["resolution_source"] == "global_config"
-    assert status["config_path"] == str((config_dir / "config.yaml").resolve())
-    # vault-local: data lives inside vault
-    assert status["vault_data_root"] == str((vault / ".rag-index").resolve())
-    assert status["manifest_path"].endswith("index-manifest.json")
-    assert status["chroma_path"].endswith("chroma")
-    assert status["embedding_cache_path"] == str((vault / ".models").resolve())
-    assert status["sources_config_exists"] is True
-
-
-def test_server_status_reports_runtime_paths_from_env(monkeypatch, tmp_path: Path):
-    vault = tmp_path / "env-vault"
-    vault.mkdir()
-    _write_v2_config(vault)
-    config_dir = tmp_path / "empty-config"
-    data_root = tmp_path / "user-data"
-    monkeypatch.setenv("NETSUITE_RAG_VAULT_ROOT", str(vault))
-    monkeypatch.setenv("NETSUITE_RAG_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("NETSUITE_RAG_USER_DATA_DIR", str(data_root))
-
-    status = get_index_status_tool()
-
-    assert status["ok"] is True
-    assert status["vault_root"] == str(vault.resolve())
-    assert status["resolution_source"] == "env"
-    assert status["global_config_path"] == str((config_dir / "config.yaml").resolve())
-    assert status["data_root"] == str(data_root.resolve())
-    assert status["sources_config_exists"] is True
-
-
-def test_index_vault_tool_uses_core_indexer(tmp_path: Path):
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    (vault / "rag").mkdir()
-    (vault / "rag" / "sources.yaml").write_text(
-        "\n".join(
-            [
-                "vault_root: .",
-                "include:",
-                "  - projects",
-                "exclude:",
-                "  - .rag-index",
-                "chroma_path: .rag-index/chroma",
-                "collection_name: netsuite_notes",
-                "embedding_model: fake",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    note_dir = vault / "projects" / "project-a" / "scripts" / "restlet"
-    note_dir.mkdir(parents=True)
-    (note_dir / "order-sync.md").write_text(
-        """---
-type: script
-project: project-a
-script_type: restlet
-script_id: customscript_order_sync_restlet
-related_objects: [salesorder]
-related_scripts: []
-status: active
----
-
-# RESTlet - 订单同步接口
-
-## 用途
-同步订单到外部系统。
-""",
-        encoding="utf-8",
-    )
-
-    report = index_vault_tool(str(vault), mode="full", embedder=FakeEmbedder())
-
-    assert report["indexed_files"] == 1
-
-
-# ── T13: New tests ───────────────────────────────────────────────────────────
-
-
-class TestBuildFiltersWithSourceParams:
-    """Test that _build_filters includes source_kind and source_name."""
-
-    def test_source_kind_included(self):
-        filters = _build_filters(
-            project=None, script_type=None, related_objects=None,
-            related_scripts=None, object_type=None, status=None,
-            source_kind="note",
-        )
-        assert filters["source_kind"] == "note"
-
-    def test_source_name_included(self):
-        filters = _build_filters(
-            project=None, script_type=None, related_objects=None,
-            related_scripts=None, object_type=None, status=None,
-            source_kind=None, source_name="obsidian",
-        )
-        assert filters["source_name"] == "obsidian"
-
-    def test_both_source_params_with_other_filters(self):
-        filters = _build_filters(
-            project="project-a", script_type="restlet",
-            related_objects=None, related_scripts=None,
-            object_type=None, status=None,
-            source_kind="code", source_name="netsuite_repo",
-        )
-        assert filters["project"] == "project-a"
-        assert filters["script_type"] == "restlet"
-        assert filters["source_kind"] == "code"
-        assert filters["source_name"] == "netsuite_repo"
-
-    def test_source_params_omitted_when_none(self):
-        filters = _build_filters(
-            project="project-a", script_type=None, related_objects=None,
-            related_scripts=None, object_type=None, status=None,
-            source_kind=None, source_name=None,
-        )
-        assert "source_kind" not in filters
-        assert "source_name" not in filters
-        assert filters["project"] == "project-a"
-
-    def test_content_type_filter_is_mapped_to_type(self):
-        filters = _build_filters(
-            project=None,
-            script_type=None,
-            related_objects=None,
-            related_scripts=None,
-            object_type=None,
-            status=None,
-            source_kind=None,
-            source_name=None,
-            content_type="generated_wiki",
-        )
-
-        assert filters["type"] == "generated_wiki"
-
-
-class TestIndexSourcesTool:
-    """Test the index_sources_tool function."""
-
-    def test_index_by_source_name(self, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-        _write_note(vault, "projects/test-note.md", NOTE_CONTENT)
-        _write_note(vault, "projects/other-note.md", NOTE_CONTENT)
-
-        result = index_sources_tool(
-            str(vault), source_names=["obsidian"], mode="full", embedder=FakeEmbedder()
-        )
-
-        assert "sources" in result
-        assert "obsidian" in result["sources"]
-        assert result["total_indexed"] >= 1
-
-    def test_index_by_source_kind(self, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-        _write_note(vault, "projects/test-note.md", NOTE_CONTENT)
-
-        result = index_sources_tool(
-            str(vault), source_kind="note", mode="full", embedder=FakeEmbedder()
-        )
-
-        assert "sources" in result
-        assert "obsidian" in result["sources"]
-
-    def test_index_by_source_name_and_kind(self, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-        _write_note(vault, "projects/test-note.md", NOTE_CONTENT)
-        _write_note(vault, "projects/test-script.js", JS_CONTENT)  # wait, js not md
-
-        # Write a JS file too
-        js_path = vault / "projects" / "test-script.js"
-        js_path.parent.mkdir(parents=True, exist_ok=True)
-        js_path.write_text(JS_CONTENT, encoding="utf-8")
-
-        # Index only code sources
-        result = index_sources_tool(
-            str(vault), source_kind="code", mode="full", embedder=FakeEmbedder()
-        )
-
-        assert "sources" in result
-        # Only netsuite_repo (code source) should appear
-        assert "netsuite_repo" in result["sources"]
-        # obsidian (note source) should NOT appear
-        assert "obsidian" not in result["sources"]
-
-    def test_invalid_mode_returns_error(self, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-
-        result = index_sources_tool(str(vault), mode="bad_mode", embedder=FakeEmbedder())
-
-        assert result["ok"] is False
-        assert result["code"] == "invalid_mode"
-        assert result["mode"] == "bad_mode"
-        assert "full" in result["error"]
-        assert "incremental" in result["error"]
-    def test_unknown_exception_is_not_swallowed(self, monkeypatch, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-
-        def raise_unexpected_error(*_args, **_kwargs):
-            raise RuntimeError("unexpected index failure")
-
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_index_sources", raise_unexpected_error)
-
-        with pytest.raises(RuntimeError, match="unexpected index failure"):
-            index_sources_tool(str(vault), source_names=["obsidian"], mode="full", embedder=FakeEmbedder())
-
-    def test_incremental_mode(self, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-        _write_note(vault, "projects/test-note.md", NOTE_CONTENT)
-
-        # First, full index
-        result = index_sources_tool(
-            str(vault), source_names=["obsidian"], mode="full", embedder=FakeEmbedder()
-        )
-        assert result["total_indexed"] >= 1
-
-        # Then, incremental (should skip already indexed)
-        result2 = index_sources_tool(
-            str(vault), source_names=["obsidian"], mode="incremental", embedder=FakeEmbedder()
-        )
-        assert "total_skipped" in result2
-
-
-class TestGenerateSuitecloudWikiTool:
-    def test_generate_suitecloud_wiki_tool_delegates_to_core(self, monkeypatch, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        payload = {"ok": True, "written": 3, "archived": 1}
+    def test_wiki_write_note_tool_delegates_to_note_writer(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "path": "wiki/projects/alpha/decisions/note.md"}
         calls: list[dict[str, object]] = []
 
-        def fake_generate_suitecloud_wiki(**kwargs: object) -> dict[str, object]:
+        def fake_save_note(**kwargs: object) -> dict[str, object]:
             calls.append(kwargs)
             return payload
 
-        monkeypatch.setattr("netsuite_rag_mcp.server.run_generate_suitecloud_wiki", fake_generate_suitecloud_wiki)
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_write_note", fake_save_note)
 
-        result = generate_suitecloud_wiki_tool(
-            vault_root=str(vault),
-            project="huideng",
-            source_name="huideng",
+        result = wiki_write_note_tool(
+            note_type="decision",
+            title="Decision note",
+            content="Body",
+            project="alpha",
+            domain="common-errors",
+            related_script_types=["user-event"],
+            script_type="restlet",
+            object_type="salesorder",
+            related_objects=["invoice"],
+            related_scripts=["customscript_sync"],
+            tags=["custom"],
+            zentao_urls=["https://zentao.example/ticket/1"],
+            decision_status="accepted",
+            status="open",
+            filename="note",
+            overwrite=True,
             auto_index=False,
+            vault_root=str(vault),
         )
 
         assert result == payload
-        assert calls == [
-            {
-                "vault_root": str(vault),
-                "project": "huideng",
-                "source_name": "huideng",
-                "auto_index": False,
-            }
-        ]
+        assert calls == [{
+            "note_type": "decision",
+            "title": "Decision note",
+            "content": "Body",
+            "project": "alpha",
+            "domain": "common-errors",
+            "related_script_types": ["user-event"],
+            "script_type": "restlet",
+            "object_type": "salesorder",
+            "related_objects": ["invoice"],
+            "related_scripts": ["customscript_sync"],
+            "tags": ["custom"],
+            "zentao_urls": ["https://zentao.example/ticket/1"],
+            "decision_status": "accepted",
+            "status": "open",
+            "filename": "note",
+            "overwrite": True,
+            "auto_index": False,
+            "vault_root": str(vault),
+        }]
+
+    def test_wiki_write_note_accepts_camel_case_params(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "path": "wiki/projects/alpha/decisions/note.md"}
+        calls: list[dict[str, object]] = []
+
+        def fake_save_note(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_write_note", fake_save_note)
+
+        result = wiki_write_note(
+            noteType="decision",
+            title="Decision note",
+            content="Body",
+            project="alpha",
+            relatedScriptTypes=["user-event"],
+            scriptType="restlet",
+            objectType="salesorder",
+            relatedObjects=["invoice"],
+            relatedScripts=["customscript_sync"],
+            zentaoUrls=["https://zentao.example/ticket/1"],
+            decisionStatus="accepted",
+            autoIndex=False,
+            vaultRoot=str(vault),
+        )
+
+        assert result == payload
+        assert calls[0]["note_type"] == "decision"
+        assert calls[0]["related_script_types"] == ["user-event"]
+        assert calls[0]["script_type"] == "restlet"
+        assert calls[0]["object_type"] == "salesorder"
+        assert calls[0]["related_objects"] == ["invoice"]
+        assert calls[0]["related_scripts"] == ["customscript_sync"]
+        assert calls[0]["zentao_urls"] == ["https://zentao.example/ticket/1"]
+        assert calls[0]["decision_status"] == "accepted"
+        assert calls[0]["auto_index"] is False
+        assert calls[0]["vault_root"] == str(vault)
+
+    def test_wiki_write_note_missing_note_type_returns_error(self):
+        result = wiki_write_note(title="Test", content="Body")
+        assert result["ok"] is False
+        assert result["code"] == "missing_note_type"
+
+    def test_wiki_init_tool_creates_confirmed_structure(self, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+
+        result = wiki_init_tool(str(vault))
+
+        assert result["ok"] is True
+        assert (vault / "purpose.md").is_file()
+        assert (vault / "raw/sources").is_dir()
+        assert (vault / "raw/assets").is_dir()
+        assert (vault / "wiki/projects").is_dir()
+        assert (vault / "wiki/concepts").is_dir()
+        assert (vault / ".llm-wiki").is_dir()
+
+    def test_wiki_query_tool_delegates_to_wiki_query(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "results": []}
+        calls: list[dict[str, object]] = []
+
+        def fake_query(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_query", fake_query)
+
+        result = wiki_query_tool(str(vault), question="invoice", project="alpha", top_k=3, include_content=False, context_window_tokens=8000)
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "question": "invoice",
+            "project": "alpha",
+            "top_k": 3,
+            "include_content": False,
+            "context_window_tokens": 8000,
+            "include_context_pack": True,
+            "chat_history": None,
+            "language": "zh-CN",
+            "enable_vector": False,
+            "vector_config": None,
+            "max_graph_hops": 2,
+            "include_raw_sources": False,
+            "filter_type": None,
+            "filter_tags": None,
+        }]
+
+    def test_wiki_ingest_llm_tool_delegates_staged_ingest(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "stage": "prepare_analysis"}
+        calls: list[dict[str, object]] = []
+
+        def fake_staged(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_staged_wiki_ingest", fake_staged)
+
+        result = wiki_ingest_llm_tool(str(vault), stage="prepare_analysis", project="alpha", source_name="docs", source_path="src")
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "stage": "prepare_analysis",
+            "project": "alpha",
+            "source_name": "docs",
+            "source_path": "src",
+            "source_type": "file",
+            "language": "zh-CN",
+            "analysis": None,
+            "generation": None,
+        }]
+
+    def test_wiki_rescan_tool_delegates_rescan(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "status": "changed"}
+        calls: list[dict[str, object]] = []
+
+        def fake_rescan(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_rescan_source", fake_rescan)
+
+        result = wiki_rescan_tool(str(vault), project="alpha", source_name="docs", source_path="src", source_type="file", language="zh-CN")
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "project": "alpha",
+            "source_name": "docs",
+            "source_path": "src",
+            "source_type": "file",
+            "language": "zh-CN",
+        }]
+
+    def test_wiki_query_debug_tool_delegates_debug_query(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "graph_reasons": {}}
+        calls: list[dict[str, object]] = []
+
+        def fake_debug(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_query_debug", fake_debug)
+
+        result = wiki_query_debug_tool(str(vault), question="invoice", project="alpha", top_k=3, max_graph_hops=1, include_raw_sources=True)
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "question": "invoice",
+            "project": "alpha",
+            "top_k": 3,
+            "max_graph_hops": 1,
+            "include_raw_sources": True,
+        }]
+
+    def test_wiki_ingest_codegraph_tool_delegates_codegraph_ingest(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "written": 2}
+        calls: list[dict[str, object]] = []
+
+        def fake_ingest(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_ingest_codegraph", fake_ingest)
+
+        result = wiki_ingest_codegraph_tool(
+            str(vault),
+            project="alpha",
+            source_name="main",
+            query="entry",
+            codegraph_project_path="repo",
+            include_extensions=[".js"],
+            profile="suitescript",
+        )
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "project": "alpha",
+            "source_name": "main",
+            "query": "entry",
+            "codegraph_project_path": "repo",
+            "include_extensions": [".js"],
+            "profile": "suitescript",
+        }]
+
+    def test_wiki_lint_tool_delegates_semantic_stage(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "stage": "prepare_semantic_review"}
+        calls: list[dict[str, object]] = []
+
+        def fake_lint(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_lint", fake_lint)
+
+        result = wiki_lint_tool(str(vault), stage="prepare_semantic_review", project="alpha", semantic_review="review", language="zh-CN")
+
+        assert result == payload
+        assert calls == [{"vault_root": str(vault), "stage": "prepare_semantic_review", "project": "alpha", "semantic_review": "review", "language": "zh-CN"}]
+
+    def test_wiki_synthesis_tool_delegates_to_synthesis_module(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "stage": "prepare"}
+        calls: list[dict[str, object]] = []
+
+        def fake_synthesis(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_synthesis", fake_synthesis)
+
+        result = wiki_synthesis_tool(
+            str(vault),
+            question="invoice sync",
+            stage="prepare",
+            context_pages=[{"path": "wiki/a.md"}],
+            synthesis="body",
+            title="Invoice Sync",
+            project="alpha",
+            language="zh-CN",
+        )
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault),
+            "question": "invoice sync",
+            "stage": "prepare",
+            "context_pages": [{"path": "wiki/a.md"}],
+            "synthesis": "body",
+            "title": "Invoice Sync",
+            "project": "alpha",
+            "language": "zh-CN",
+        }]
 
 
-class TestGetIndexStatusPerSource:
-    """Test that get_index_status_tool returns per-source statistics."""
+class TestBuildFilters:
+    def test_source_kind_included(self):
+        filters = _build_filters(None, None, None, None, None, None, source_kind="note")
+        assert filters["source_kind"] == "note"
 
-    def test_status_with_per_source_stats(self, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-        _write_note(vault, "projects/test-note.md", NOTE_CONTENT)
+    def test_source_name_included(self):
+        filters = _build_filters(None, None, None, None, None, None, source_name="obsidian")
+        assert filters["source_name"] == "obsidian"
 
-        # Index first
-        index_sources_tool(str(vault), mode="full", embedder=FakeEmbedder())
+    def test_content_type_filter_is_mapped_to_type(self):
+        filters = _build_filters(None, None, None, None, None, None, content_type="generated_wiki")
+        assert filters["type"] == "generated_wiki"
 
-        # Check status
-        status = get_index_status_tool(str(vault))
-
-        assert status["indexed"] is True
-        assert status["collection_count"] > 0
-        assert "sources" in status
-        assert "obsidian" in status["sources"]
-
-        source_stats = status["sources"]["obsidian"]
-        assert "file_count" in source_stats
-        assert "last_indexed" in source_stats
-
-    def test_status_shows_per_source_file_counts(self, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-        _write_note(vault, "projects/note1.md", NOTE_CONTENT)
-        _write_note(vault, "projects/note2.md", NOTE_CONTENT)
-
-        index_sources_tool(str(vault), mode="full", embedder=FakeEmbedder())
-
-        status = get_index_status_tool(str(vault))
-        assert status["sources"]["obsidian"]["file_count"] == 2
-
-    def test_status_with_code_source(self, tmp_path: Path):
-        vault = tmp_path / "vault"
-        vault.mkdir()
-        _write_v2_config(vault)
-        _write_note(vault, "projects/test-note.md", NOTE_CONTENT)
-        js_path = vault / "projects" / "test-script.js"
-        js_path.parent.mkdir(parents=True, exist_ok=True)
-        js_path.write_text(JS_CONTENT, encoding="utf-8")
-
-        index_sources_tool(str(vault), mode="full", embedder=FakeEmbedder())
-
-        status = get_index_status_tool(str(vault))
-        assert "obsidian" in status["sources"]
-        assert "netsuite_repo" in status["sources"]
+    def test_source_params_omitted_when_none(self):
+        filters = _build_filters("project-a", None, None, None, None, None)
+        assert filters["project"] == "project-a"
+        assert "source_kind" not in filters
+        assert "source_name" not in filters
