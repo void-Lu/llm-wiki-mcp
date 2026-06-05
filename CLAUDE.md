@@ -42,7 +42,6 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 - CodeGraph 摄入在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：`CodeGraphClient` 读取 `status/files/context/impact` → 写 `raw/sources/codegraph/<project>/` snapshot → 写 `wiki/projects/<project>/code/` code facts + `wiki/sources/projects/<project>/<source_name>.md` 索引页 → refresh index/overview/log → 写 `.llm-wiki/ingest-cache/codegraph/`。MCP 工具名为 `wiki_ingest_codegraph`，同步执行不需要 LLM。
 - LLM 分阶段摄入同在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：推荐两阶段流程 `stage="prepare"`（读源 + 写 `raw/sources/file/` snapshot + 返回合并 prompt）→ `stage="apply"`（校验路径并写 generated pages + 按目标目录写索引页到 `wiki/sources/{target_dir}/`）。旧三阶段（`prepare_analysis` / `prepare_generation` / `apply_generation`）仍兼容但不推荐。`source_path` 支持绝对路径和相对于 vault_root 的相对路径。`generation` 参数中 `source_summary` 可以是 dict 或纯字符串（只需一句话摘要）；顶层 `concept`/`concepts` key 会自动合并到 `pages`。
-- URL 摄入在 [wiki_ingest_url.py](src/netsuite_llm_wiki_mcp/wiki_ingest_url.py)：抓取 URL 列表 → HTML 转 Markdown → 脱敏写 `raw/sources/url/<project>/<source_name>/` → 返回 prompt；apply 阶段复用 `wiki_ingest_llm(stage="apply", source_type="url")`。可选依赖 `markdownify`（`pip install .[url]`），不装则 fallback 到 html.parser。
 - 人工笔记写入在 [note_writer.py](src/netsuite_llm_wiki_mcp/note_writer.py)：`decision`/`troubleshooting`/`requirement` 写入项目目录，`knowledge` 写入 `wiki/concepts/<domain>/` 且不接受 `project`。MCP 入口为 `wiki_write_note` 工具。
 - 写入后维护集中在 [wiki_index.py](src/netsuite_llm_wiki_mcp/wiki_index.py)、[wiki_overview.py](src/netsuite_llm_wiki_mcp/wiki_overview.py)、[wiki_log.py](src/netsuite_llm_wiki_mcp/wiki_log.py)。会产生或变更页面的工具通常要刷新 index/overview 并 append log。
 - 校验在 [wiki_verify.py](src/netsuite_llm_wiki_mcp/wiki_verify.py)：两阶段 grounding check，`prepare` 从 `wiki/sources/` 索引页出发，通过 frontmatter.sources 读 raw source + 通过 body 中 wikilinks 读关联生成页，返回校验 prompt；`apply` 记录 faithfulness 结果。
@@ -81,7 +80,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - MCP 工具注册和调用：`tests/test_server_tools.py`
 - 人工 note 写入：`tests/test_save_obsidian_note.py`
 - CodeGraph client / 摄入：`tests/test_codegraph_client.py`、`tests/test_wiki_ingest_codegraph.py`
-- URL 摄入：`tests/test_wiki_ingest_url.py`
+
 - 校验：`tests/test_wiki_verify.py`
 - 查询和上下文预算：`tests/test_wiki_query.py`、`tests/test_context_budget.py`
 - 维护工具：`tests/test_wiki_lint.py`、`tests/test_wiki_enrich.py`、`tests/test_page_merge.py`、`tests/test_wiki_dedup.py`、`tests/test_wiki_insights.py`、`tests/test_louvain.py`、`tests/test_wiki_delete.py`、`tests/test_wiki_research.py`、`tests/test_wiki_synthesis.py`、`tests/test_wiki_batch.py`

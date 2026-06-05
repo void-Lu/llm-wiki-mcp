@@ -17,8 +17,8 @@ from typing import Any
 
 from netsuite_llm_wiki_mcp.louvain import LouvainResult, community_cohesion, louvain
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
+from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
 
-_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 _STRUCTURAL_PAGES = {"index", "log", "overview"}
 
 
@@ -97,7 +97,7 @@ def _build_graph(
         except (OSError, UnicodeDecodeError):
             continue
         _, body = split_frontmatter(text)
-        for target_text in _WIKILINK_RE.findall(body):
+        for target_text in wikilink_targets(body):
             target_rel = _resolve_target(target_text, path, root, by_rel_set, by_stem)
             if target_rel and target_rel != rel and target_rel in nodes:
                 edges.append({"source": rel, "target": target_rel})

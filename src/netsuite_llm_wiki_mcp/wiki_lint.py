@@ -13,6 +13,7 @@ from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
 from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wikilinks import table_wikilink_alias_pipe_lines, wikilink_targets
 
 _REQUIRED_FILES = (
     Path("purpose.md"),
@@ -38,7 +39,6 @@ _OLD_PATHS = (
     Path("wiki/requirements"),
     Path("wiki/knowledge"),
 )
-_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 
 
 def wiki_lint(
@@ -96,7 +96,9 @@ def wiki_lint(
                         issues.append(_issue("source_missing", f"source path does not exist: {source}", rel))
             if len(text.encode("utf-8")) > max_page_bytes:
                 issues.append(_issue("oversized_page", "page exceeds configured size threshold", rel))
-            for target in _WIKILINK_RE.findall(text):
+            for line_number in table_wikilink_alias_pipe_lines(text):
+                issues.append(_issue("table_wikilink_alias_pipe", f"markdown table wikilink alias separator must be escaped as \\| on line {line_number}", rel))
+            for target in wikilink_targets(text):
                 target_path = Path(target)
                 if target_path.suffix != ".md":
                     target_path = target_path.with_suffix(".md")
@@ -109,7 +111,7 @@ def wiki_lint(
                         issues.append(_issue("broken_wikilink", f"wikilink target does not exist: {target}", rel))
         index_path = root / "wiki" / "index.md"
         if index_path.exists():
-            for target in _WIKILINK_RE.findall(index_path.read_text(encoding="utf-8")):
+            for target in wikilink_targets(index_path.read_text(encoding="utf-8")):
                 target_path = Path(target)
                 if target_path.suffix != ".md":
                     target_path = target_path.with_suffix(".md")
@@ -120,7 +122,7 @@ def wiki_lint(
         referenced: set[str] = set()
         for page in pages:
             text = page.read_text(encoding="utf-8")
-            for target in _WIKILINK_RE.findall(text):
+            for target in wikilink_targets(text):
                 target_path = Path(target)
                 if target_path.suffix != ".md":
                     target_path = target_path.with_suffix(".md")

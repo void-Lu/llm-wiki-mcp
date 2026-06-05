@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
 
-_WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 
 
 def wiki_verify(
@@ -169,7 +168,7 @@ def _resolve_wikilinks(root: Path, body: str) -> list[str]:
     wiki_dir = root / "wiki"
     if not wiki_dir.is_dir():
         return []
-    link_names = _WIKILINK_RE.findall(body)
+    link_names = list(wikilink_targets(body))
     resolved: list[str] = []
     for name in link_names:
         matches = list(wiki_dir.rglob(f"{name}.md"))

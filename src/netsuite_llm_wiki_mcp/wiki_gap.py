@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
+from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
 
-_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 _STRUCTURAL_PAGES = {"index", "log", "overview"}
 _MIN_BODY_TOKENS = 80  # pages with fewer tokens are considered shallow
 
@@ -135,7 +135,7 @@ def _collect_pages(directory: Path, root: Path) -> dict[str, dict[str, Any]]:
         except (OSError, UnicodeDecodeError):
             continue
         frontmatter, body = split_frontmatter(text)
-        wikilinks = set(_WIKILINK_RE.findall(body))
+        wikilinks = set(wikilink_targets(body))
         pages[rel] = {
             "stem": stem,
             "path": path,
@@ -187,7 +187,7 @@ def _find_orphan_pages(root: Path, pages: dict[str, dict[str, Any]]) -> list[dic
             except (OSError, UnicodeDecodeError):
                 continue
             _, body = split_frontmatter(text)
-            for link_target in _WIKILINK_RE.findall(body):
+            for link_target in wikilink_targets(body):
                 linked_stems.add(link_target.lower())
 
     orphans = []
@@ -229,7 +229,7 @@ def _find_dangling_links(root: Path, project: str | None) -> list[dict[str, Any]
         except (OSError, UnicodeDecodeError):
             continue
         _, body = split_frontmatter(text)
-        for link_target in _WIKILINK_RE.findall(body):
+        for link_target in wikilink_targets(body):
             if link_target.lower() not in existing_stems:
                 dangling[link_target].append(path.relative_to(root).as_posix())
 
@@ -332,7 +332,6 @@ def _suggest(
                 "options": [
                     {"tool": "wiki_write_note", "when": "you have domain knowledge to write it directly"},
                     {"tool": "wiki_research", "when": "you need to research the topic first"},
-                    {"tool": "wiki_ingest_url", "when": "there's an authoritative URL for this topic"},
                 ],
             })
         else:
@@ -357,7 +356,6 @@ def _suggest(
             "options": [
                 {"tool": "wiki_enrich", "when": "page just needs more wikilinks"},
                 {"tool": "wiki_page_merge", "when": "you have additional content to merge in"},
-                {"tool": "wiki_ingest_url", "when": "there's a URL with more detail on this topic"},
             ],
         })
 
@@ -371,7 +369,6 @@ def _suggest(
             "options": [
                 {"tool": "wiki_write_note", "params": {"note_type": "knowledge", "title": missing}},
                 {"tool": "wiki_research", "params": {"topic": missing}},
-                {"tool": "wiki_ingest_url", "when": "there's a documentation URL"},
             ],
         })
 

@@ -116,16 +116,6 @@ wiki_ingest_llm(stage="apply")
     -> refresh index/overview/log/cache
 ```
 
-### URL ingest
-
-```text
-wiki_ingest_url(urls=[...])
-    -> raw/sources/url/<project>/<source_name>/
-    -> 返回合并 prompt
-wiki_ingest_llm(stage="apply", source_type="url")
-    -> 同 LLM staged ingest 的 apply
-```
-
 ## Query 与归档规则
 
 1. 回答问题时优先使用 `wiki_query` 获取带编号引用的 context pack，再基于 `[1]`、`[2]` 等引用回答。

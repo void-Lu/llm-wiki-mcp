@@ -30,9 +30,7 @@ dependencies = [
 dev = [
     "pytest>=8.3.4",
 ]
-url = [
-    "markdownify>=0.11.6",
-]
+
 
 [project.scripts]
 netsuite-llm-wiki-mcp = "netsuite_llm_wiki_mcp.cli:main"

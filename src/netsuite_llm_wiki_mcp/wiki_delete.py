@@ -20,8 +20,8 @@ from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
 from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
+from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
 
-_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 
 
 def wiki_delete_source(
@@ -168,7 +168,7 @@ def _find_affected_references(root: Path, slugs: set[str]) -> list[str]:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        for target in _WIKILINK_RE.findall(text):
+        for target in wikilink_targets(text):
             stem = Path(target).stem.casefold()
             if stem in {s.casefold() for s in slugs}:
                 affected.append(path.relative_to(root).as_posix())
@@ -195,8 +195,8 @@ def _remove_references(root: Path, slugs: set[str]) -> int:
         new_content = content
         for slug in slugs:
             escaped = re.escape(slug)
-            pattern = re.compile(r"\[\[" + escaped + r"(?:\|([^\]]+))?\]\]")
-            new_content = pattern.sub(lambda m: m.group(1) or slug, new_content)
+            pattern = re.compile(r"\[\[" + escaped + r"((?:\\\||\|)([^\]]+))?\]\]")
+            new_content = pattern.sub(lambda m: m.group(2) or slug, new_content)
 
         if new_content != content:
             path.write_text(new_content, encoding="utf-8")

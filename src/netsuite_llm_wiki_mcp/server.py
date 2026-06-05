@@ -16,7 +16,6 @@ from netsuite_llm_wiki_mcp.wiki_gap import wiki_gap as run_wiki_gap
 from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
 from netsuite_llm_wiki_mcp.wiki_ingest import rescan_source as run_rescan_source
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
-from netsuite_llm_wiki_mcp.wiki_ingest_url import wiki_ingest_url as run_wiki_ingest_url
 from netsuite_llm_wiki_mcp.wiki_insights import wiki_insights as run_wiki_insights
 from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint as run_wiki_lint
 from netsuite_llm_wiki_mcp.wiki_log import parse_log_entries as run_parse_log_entries
@@ -369,29 +368,6 @@ def wiki_rescan(
 ) -> dict[str, Any]:
     """Rescan a local source, persist snapshots/cache, and report whether it changed."""
     return wiki_rescan_tool(vault_root, project, source_name, source_path, source_type, language)
-
-
-def wiki_ingest_url_tool(
-    vault_root: str,
-    urls: list[str],
-    project: str,
-    source_name: str,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    return run_wiki_ingest_url(vault_root=vault_root, urls=urls, project=project, source_name=source_name, language=language)
-
-
-@mcp.tool()
-def wiki_ingest_url(
-    vault_root: str,
-    urls: list[str],
-    project: str,
-    source_name: str,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    """Fetch URLs, convert HTML to Markdown, snapshot and redact, return LLM prompt. Follow up with wiki_ingest_llm stage='apply'."""
-    return wiki_ingest_url_tool(vault_root, urls, project, source_name, language)
-
 
 
 @mcp.tool()

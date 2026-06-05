@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
+from netsuite_llm_wiki_mcp.wikilinks import format_wikilink, is_markdown_table_row_at, wikilink_targets
 
-_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 
 
 def wiki_enrich(
@@ -56,7 +56,7 @@ def _prepare(root: Path, page_path: str) -> dict[str, Any]:
     index_path = root / "wiki" / "index.md"
     index_content = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
 
-    existing_links = set(_WIKILINK_RE.findall(body))
+    existing_links = set(wikilink_targets(body))
 
     prompt = _build_enrich_prompt(body, index_content, existing_links)
 
@@ -100,7 +100,11 @@ def _apply(root: Path, page_path: str, links: list[dict[str, str]] | str | None)
             continue
         if _already_linked(body, term):
             continue
-        body = body.replace(term, f"[[{link_target}|{term}]]", 1)
+        term_index = body.find(term)
+        if term_index < 0:
+            continue
+        link_text = format_wikilink(link_target, term, in_table=is_markdown_table_row_at(body, term_index))
+        body = body[:term_index] + link_text + body[term_index + len(term) :]
         seen_targets.add(link_target)
         applied += 1
 

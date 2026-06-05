@@ -73,3 +73,19 @@ def test_page_not_found(wiki_root: Path):
     result = wiki_enrich(str(wiki_root), "wiki/nonexistent.md", stage="prepare")
     assert result["ok"] is False
     assert result["code"] == "page_not_found"
+
+def test_apply_escapes_alias_separator_inside_markdown_table_rows(wiki_root: Path):
+    page = wiki_root / "wiki" / "projects" / "myproj" / "code" / "entry-point.md"
+    page.write_text(
+        "---\ntype: code\ntitle: Entry Point\ngenerated: true\n---\n\n# Entry Point\n\n"
+        "| Example | Description |\n|---|---|\n| SuiteQL | query records |\n",
+        encoding="utf-8",
+    )
+    links = [{"term": "SuiteQL", "target": "concepts/suiteql"}]
+
+    result = wiki_enrich(str(wiki_root), "wiki/projects/myproj/code/entry-point.md", stage="apply", links=links)
+
+    assert result["ok"] is True
+    content = page.read_text(encoding="utf-8")
+    assert "[[concepts/suiteql\\|SuiteQL]]" in content
+    assert "[[concepts/suiteql|SuiteQL]]" not in content

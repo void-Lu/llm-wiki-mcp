@@ -201,3 +201,62 @@ def test_wiki_lint_apply_semantic_review_writes_report(tmp_path: Path):
     assert "<think>" not in text
     assert "retry policy" in text
     assert "semantic_lint" in (root / "wiki/log.md").read_text(encoding="utf-8")
+
+def test_wiki_lint_reports_unescaped_wikilink_alias_pipe_in_table(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/concepts/target.md"),
+            {"title": "Target", "type": "concept", "generated": False},
+            "Target",
+            "Referenced by a table.",
+        ),
+        overwrite_generated_only=False,
+    )
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/concepts/table.md"),
+            {"title": "Table", "type": "concept", "generated": False},
+            "Table",
+            "| Example | Description |\n|---|---|\n| [[target|Target Page]] | text |",
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root)
+
+    assert "table_wikilink_alias_pipe" in _issue_codes(result)
+
+
+def test_wiki_lint_accepts_escaped_wikilink_alias_pipe_in_table(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/concepts/target.md"),
+            {"title": "Target", "type": "concept", "generated": False},
+            "Target",
+            "Referenced by a table.",
+        ),
+        overwrite_generated_only=False,
+    )
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/concepts/table.md"),
+            {"title": "Table", "type": "concept", "generated": False},
+            "Table",
+            "| Example | Description |\n|---|---|\n| [[target\\|Target Page]] | text |",
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root)
+    codes = _issue_codes(result)
+
+    assert "table_wikilink_alias_pipe" not in codes
+    assert "broken_wikilink" not in codes

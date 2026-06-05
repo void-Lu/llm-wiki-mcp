@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shutil
 from pathlib import Path
 from typing import Any, Protocol
@@ -15,14 +14,9 @@ from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
 from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry, WikiPage
 from netsuite_llm_wiki_mcp.wiki_overview import refresh_overview
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root, safe_segment, slug
+from netsuite_llm_wiki_mcp.wikilinks import normalize_wikilink_targets
 
 
-_CODE_OR_WIKILINK_RE = re.compile(
-    r"```.*?```"
-    r"|`[^`]+`"
-    r"|\[\[([^\]|]+?)(\|[^\]]*?)?\]\]",
-    re.DOTALL,
-)
 
 _MAX_SOURCE_FILES = 200
 _MAX_SOURCE_BYTES = 5_000_000
@@ -494,13 +488,6 @@ def _prepare_generation(root: Path, project: str, source_name: str, language: st
     }
 
 
-def normalize_wikilink_targets(text: str) -> str:
-    """Lowercase the target portion of [[wikilinks]] outside code spans."""
-    def _replace(m: re.Match) -> str:
-        if m.group(1) is not None:
-            return f"[[{m.group(1).lower()}{m.group(2) or ''}]]"
-        return m.group(0)
-    return _CODE_OR_WIKILINK_RE.sub(_replace, text)
 
 
 def _apply_generation(root: Path, project: str, source_name: str, language: str, generation: dict[str, Any] | str, source_type: str = "file") -> dict[str, Any]:

@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
+from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
 
-_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _STRUCTURAL_PAGE_NAMES = {"index.md", "log.md", "overview.md"}
 _STOPWORDS = {
@@ -339,7 +339,7 @@ def _build_graph(root: Path) -> Graph:
 
 def _wikilink_targets(body: str, path: Path, root: Path, by_rel: dict[str, Path], by_stem: dict[str, list[str]]) -> list[str]:
     targets = []
-    for target in _WIKILINK_RE.findall(body):
+    for target in wikilink_targets(body):
         target_path = Path(target)
         candidates: list[Path] = []
         if target_path.suffix != ".md":

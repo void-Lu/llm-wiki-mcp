@@ -43,3 +43,18 @@ def test_multiple_links_in_one_line():
     result = normalize_wikilink_targets(text)
     assert "[[alpha]]" in result
     assert "[[beta|Display]]" in result
+
+def test_escapes_alias_separator_inside_markdown_table_rows():
+    text = "| Example | Description |\n|---|---|\n| [[RESTlet|REST API]] | details |"
+
+    result = normalize_wikilink_targets(text)
+
+    assert "| [[restlet\\|REST API]] | details |" in result
+
+
+def test_preserves_escaped_alias_separator_inside_markdown_table_rows():
+    text = "| Example | Description |\n|---|---|\n| [[RESTlet\\|REST API]] | details |"
+
+    result = normalize_wikilink_targets(text)
+
+    assert "| [[restlet\\|REST API]] | details |" in result

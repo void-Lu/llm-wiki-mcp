@@ -196,7 +196,7 @@ def _rewrite_cross_references(root: Path, redirects: dict[str, str]) -> int:
         new_content = content
         for old_slug, new_slug in redirects.items():
             escaped = re.escape(old_slug)
-            pattern = re.compile(r"\[\[" + escaped + r"(\|[^\]]+)?\]\]")
+            pattern = re.compile(r"\[\[" + escaped + r"((?:\\\||\|)[^\]]+)?\]\]")
             new_content = pattern.sub(lambda m: f"[[{new_slug}{m.group(1) or ''}]]", new_content)
         if new_content != content:
             path.write_text(new_content, encoding="utf-8")

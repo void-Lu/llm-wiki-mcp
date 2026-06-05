@@ -281,3 +281,23 @@ def test_wiki_query_excludes_structural_pages_from_results(tmp_path: Path):
     assert "wiki/concepts/needle.md" in paths
     assert "wiki/index.md" not in paths
     assert "wiki/overview.md" not in paths
+
+def test_wiki_query_graph_expands_escaped_table_wikilinks(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/seed.md",
+        "Seed Page",
+        "unique needle table link\n\n| Example | Description |\n|---|---|\n| [[neighbor.md\\|Neighbor Page]] | related |",
+        type="concept",
+    )
+    _write(root, "wiki/concepts/neighbor.md", "Neighbor Page", "related content", type="concept")
+    refresh_indexes(root)
+
+    result = wiki_query(root, "needle", top_k=2)
+
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/neighbor.md" in paths
+    neighbor = result["results"][paths.index("wiki/concepts/neighbor.md")]
+    assert neighbor["scores"]["graph"] > 0

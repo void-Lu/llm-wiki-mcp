@@ -67,7 +67,6 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | `wiki_init` | 在 Obsidian vault 中创建 wiki 目录结构 |
 | `wiki_ingest_codegraph` | 将 CodeGraph 符号和代码事实同步摄入 wiki（不需要 LLM） |
 | `wiki_ingest_llm` | 两阶段 LLM 摄入（推荐）：`prepare`（返回合并 prompt）→ `apply`（写入页面）。旧三阶段 `prepare_analysis` → `prepare_generation` → `apply_generation` 仍兼容 |
-| `wiki_ingest_url` | 抓取 URL 列表 → HTML 转 Markdown → 脱敏写 raw snapshot → 返回 LLM prompt；apply 阶段复用 `wiki_ingest_llm stage='apply'` |
 | `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot |
 | `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done |
 
@@ -148,7 +147,7 @@ vault_root/
 2. 摄入 source：
    - 代码仓库 → `wiki_ingest_codegraph`（同步，不需要 LLM）
    - 本地文件 → `wiki_ingest_llm(stage="prepare")` → LLM 生成 → `wiki_ingest_llm(stage="apply")`
-   - URL 文档 → `wiki_ingest_url(urls=[...])` → LLM 生成 → `wiki_ingest_llm(stage="apply", source_type="url")`
+   - 外部生成的 MD 文件 → `wiki_ingest_llm(stage="apply", source_type="url")`
 3. 用 `wiki_verify` 校验生成页面是否忠实于原始来源。
 4. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。
 5. 通过 `wiki_research` / `wiki_synthesis` / `wiki_write_note`，把有价值的研究、对比、查询答案和人工决策写回 `wiki/queries/`、`wiki/synthesis/` 或项目笔记目录。
@@ -182,16 +181,6 @@ prepare_analysis   → 返回 analysis prompt
 prepare_generation → 返回 generation prompt
 apply_generation   → 写入 wiki 页面
 ```
-
-### URL 摄入
-
-```
-wiki_ingest_url → 抓取 URL → HTML 转 Markdown → raw/sources/url/<project>/<source_name>/
-              → 返回 prompt（agent 发送给 LLM）
-wiki_ingest_llm(stage="apply", source_type="url") → 写入 wiki 页面 + 索引页
-```
-
-Cache：`.llm-wiki/ingest-cache/{source_type}/<project>/<source_name>.json`（通过 SHA256 跳过未变化 sources）。
 
 ### 查询流水线
 
