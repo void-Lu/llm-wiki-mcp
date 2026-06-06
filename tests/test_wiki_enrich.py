@@ -89,3 +89,62 @@ def test_apply_escapes_alias_separator_inside_markdown_table_rows(wiki_root: Pat
     content = page.read_text(encoding="utf-8")
     assert "[[concepts/suiteql\\|SuiteQL]]" in content
     assert "[[concepts/suiteql|SuiteQL]]" not in content
+
+
+
+def test_prepare_includes_split_index_fragments(wiki_root: Path):
+    (wiki_root / "wiki" / "index.md").write_text(
+        "---\ntype: index\ngenerated: true\n---\n\n# Index\n\n"
+        "## Detailed Indexes\n- [[index-concepts.md|Concepts Index]]\n",
+        encoding="utf-8",
+    )
+    (wiki_root / "wiki" / "index-concepts.md").write_text(
+        "---\ntype: index\ngenerated: true\n---\n\n# Concepts Index\n\n"
+        "## Concepts\n- [[concepts/suiteql|SuiteQL]]\n",
+        encoding="utf-8-sig",
+    )
+
+    result = wiki_enrich(str(wiki_root), "wiki/projects/myproj/code/entry-point.md", stage="prepare")
+
+    assert result["ok"] is True
+    assert "[[concepts/suiteql|SuiteQL]]" in result["prompt"]
+
+
+def test_apply_preserves_utf8_bom(wiki_root: Path):
+    page = wiki_root / "wiki" / "projects" / "myproj" / "code" / "entry-point.md"
+    page.write_text(
+        "---\ntype: code\ntitle: Entry Point\ngenerated: true\n---\n\n# Entry Point\n\n"
+        "This script uses SuiteQL to query records.\n",
+        encoding="utf-8-sig",
+    )
+
+    result = wiki_enrich(
+        str(wiki_root),
+        "wiki/projects/myproj/code/entry-point.md",
+        stage="apply",
+        links=[{"term": "SuiteQL", "target": "concepts/suiteql"}],
+    )
+
+    assert result["ok"] is True
+    assert page.read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+
+def test_apply_skips_markdown_link_text(wiki_root: Path):
+    page = wiki_root / "wiki" / "projects" / "myproj" / "code" / "entry-point.md"
+    page.write_text(
+        "---\ntype: code\ntitle: Entry Point\ngenerated: true\n---\n\n# Entry Point\n\n"
+        "See [SuiteQL](https://example.com) for details.\n",
+        encoding="utf-8-sig",
+    )
+
+    result = wiki_enrich(
+        str(wiki_root),
+        "wiki/projects/myproj/code/entry-point.md",
+        stage="apply",
+        links=[{"term": "SuiteQL", "target": "concepts/suiteql"}],
+    )
+
+    assert result["ok"] is True
+    assert result["links_applied"] == 0
+    assert "[[concepts/suiteql|SuiteQL]]" not in page.read_text(encoding="utf-8-sig")

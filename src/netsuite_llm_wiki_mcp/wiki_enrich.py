@@ -50,11 +50,10 @@ def _prepare(root: Path, page_path: str) -> dict[str, Any]:
     if not target.is_relative_to(root):
         return {"ok": False, "code": "path_escape", "error": "page path escapes wiki root"}
 
-    content = target.read_text(encoding="utf-8")
+    content = target.read_text(encoding="utf-8-sig")
     frontmatter, body = split_frontmatter(content)
 
-    index_path = root / "wiki" / "index.md"
-    index_content = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+    index_content = _read_index_content(root)
 
     existing_links = set(wikilink_targets(body))
 
@@ -84,7 +83,7 @@ def _apply(root: Path, page_path: str, links: list[dict[str, str]] | str | None)
     if not parsed_links:
         return {"ok": True, "stage": "apply", "page_path": page_path, "links_applied": 0, "message": "no links to apply"}
 
-    content = target.read_text(encoding="utf-8")
+    content = target.read_text(encoding="utf-8-sig")
     frontmatter_text, body = _split_raw(content)
 
     applied = 0
@@ -100,7 +99,7 @@ def _apply(root: Path, page_path: str, links: list[dict[str, str]] | str | None)
             continue
         if _already_linked(body, term):
             continue
-        term_index = body.find(term)
+        term_index = _find_safe_term_index(body, term)
         if term_index < 0:
             continue
         link_text = format_wikilink(link_target, term, in_table=is_markdown_table_row_at(body, term_index))
@@ -112,7 +111,7 @@ def _apply(root: Path, page_path: str, links: list[dict[str, str]] | str | None)
         return {"ok": True, "stage": "apply", "page_path": page_path, "links_applied": 0, "message": "no applicable links found"}
 
     new_content = frontmatter_text + body
-    target.write_text(new_content, encoding="utf-8")
+    target.write_text(new_content, encoding="utf-8-sig")
 
     return {
         "ok": True,
@@ -120,6 +119,25 @@ def _apply(root: Path, page_path: str, links: list[dict[str, str]] | str | None)
         "page_path": page_path,
         "links_applied": applied,
     }
+
+
+def _read_index_content(root: Path) -> str:
+    """Read the root index plus generated split index fragments.
+
+    Root index pages are intentionally kept small for linting, so enrichment
+    needs to include sibling index fragments such as index-concepts.md and
+    index-sources.md when they exist.
+    """
+    wiki_dir = root / "wiki"
+    index_path = wiki_dir / "index.md"
+    parts: list[str] = []
+    if index_path.exists():
+        parts.append(index_path.read_text(encoding="utf-8-sig"))
+    for extra in sorted(wiki_dir.glob("index-*.md")):
+        if extra.name == "index.md":
+            continue
+        parts.append(extra.read_text(encoding="utf-8-sig"))
+    return "\n\n".join(part for part in parts if part)
 
 
 def _build_enrich_prompt(body: str, index_content: str, existing_links: set[str]) -> str:
@@ -207,6 +225,32 @@ def _extract_json_object(text: str) -> Any | None:
                 except json.JSONDecodeError:
                     return None
     return None
+
+
+def _find_safe_term_index(body: str, term: str) -> int:
+    """Return the first occurrence that can be safely replaced by a wikilink."""
+    protected_spans = _protected_spans(body)
+    start = 0
+    while True:
+        index = body.find(term, start)
+        if index < 0:
+            return -1
+        if not any(span_start <= index < span_end for span_start, span_end in protected_spans):
+            return index
+        start = index + len(term)
+
+
+def _protected_spans(body: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    patterns = [
+        r"\[\[[\s\S]*?\]\]",  # existing wikilinks
+        r"```[\s\S]*?```",  # fenced code blocks
+        r"`[^`\n]+`",  # inline code
+        r"\[[^\]\n]+\]\([^\)\n]+\)",  # Markdown links
+    ]
+    for pattern in patterns:
+        spans.extend((match.start(), match.end()) for match in re.finditer(pattern, body))
+    return spans
 
 
 def _already_linked(body: str, term: str) -> bool:
