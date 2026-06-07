@@ -12,6 +12,9 @@ from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_inges
 from netsuite_llm_wiki_mcp.wiki_dedup import wiki_dedup as run_wiki_dedup
 from netsuite_llm_wiki_mcp.wiki_delete import wiki_delete_source as run_wiki_delete_source
 from netsuite_llm_wiki_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
+from netsuite_llm_wiki_mcp.wiki_files import wiki_list_files as run_wiki_list_files
+from netsuite_llm_wiki_mcp.wiki_files import wiki_read_file as run_wiki_read_file
+from netsuite_llm_wiki_mcp.wiki_files import wiki_status as run_wiki_status
 from netsuite_llm_wiki_mcp.wiki_gap import wiki_gap as run_wiki_gap
 from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
 from netsuite_llm_wiki_mcp.wiki_ingest import rescan_source as run_rescan_source
@@ -32,6 +35,32 @@ mcp = FastMCP("netsuite-llm-wiki-mcp")
 def wiki_init_tool(vault_root: str) -> dict[str, Any]:
     paths = create_wiki_root(vault_root)
     return {"ok": True, "vault_root": str(paths.root)}
+
+
+def wiki_status_tool(vault_root: str) -> dict[str, Any]:
+    return run_wiki_status(vault_root)
+
+
+def wiki_list_files_tool(
+    vault_root: str,
+    root_name: str = "wiki",
+    recursive: bool = True,
+    max_files: int | None = None,
+) -> dict[str, Any]:
+    return run_wiki_list_files(
+        vault_root=vault_root,
+        root_name=root_name,
+        recursive=recursive,
+        max_files=max_files,
+    )
+
+
+def wiki_read_file_tool(
+    vault_root: str,
+    path: str,
+    max_bytes: int | None = None,
+) -> dict[str, Any]:
+    return run_wiki_read_file(vault_root=vault_root, path=path, max_bytes=max_bytes)
 
 
 def wiki_ingest_codegraph_tool(
@@ -269,6 +298,33 @@ def _build_filters(
 def wiki_init(vault_root: str) -> dict[str, Any]:
     """Create the confirmed external Obsidian LLM Wiki structure."""
     return wiki_init_tool(vault_root)
+
+
+@mcp.tool()
+def wiki_status(vault_root: str) -> dict[str, Any]:
+    """Return vault diagnostics, queue counts, version, and CodeGraph availability."""
+    return wiki_status_tool(vault_root)
+
+
+@mcp.tool()
+def wiki_list_files(
+    vault_root: str,
+    root_name: str = "wiki",
+    recursive: bool = True,
+    max_files: int | None = None,
+) -> dict[str, Any]:
+    """List public wiki files under wiki/ and raw/sources/ without exposing runtime state."""
+    return wiki_list_files_tool(vault_root, root_name, recursive, max_files)
+
+
+@mcp.tool()
+def wiki_read_file(
+    vault_root: str,
+    path: str,
+    max_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Read a text file under wiki/ or raw/sources/ with path and size limits."""
+    return wiki_read_file_tool(vault_root, path, max_bytes)
 
 
 @mcp.tool()

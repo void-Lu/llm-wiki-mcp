@@ -60,6 +60,14 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 ## 工具
 
+### 诊断与文件
+
+| 工具 | 说明 |
+|------|------|
+| `wiki_status` | 返回 vault 结构诊断、ingest queue 计数、版本和 CodeGraph 可用性；不会创建或修改 vault |
+| `wiki_list_files` | 只列出公开路径 `wiki/` 和 `raw/sources/` 下的文件，支持 `root_name="wiki"|"sources"|"all"`、递归和数量限制 |
+| `wiki_read_file` | 只读取 `wiki/` 或 `raw/sources/` 下的文本文件，拒绝绝对路径、路径穿越、运行时私有目录和非文本扩展，并按字节数截断 |
+
 ### 摄入
 
 | 工具 | 说明 |

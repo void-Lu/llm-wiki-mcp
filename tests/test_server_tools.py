@@ -5,6 +5,9 @@ import pytest
 from netsuite_llm_wiki_mcp.server import (
     _build_filters,
     mcp,
+    wiki_list_files_tool,
+    wiki_read_file_tool,
+    wiki_status_tool,
     wiki_init_tool,
     wiki_ingest_codegraph_tool,
     wiki_ingest_llm_tool,
@@ -40,6 +43,9 @@ class TestLlmWikiServerTools:
 
         assert "wiki_write_note" in registered
         assert "wiki_synthesis" in registered
+        assert "wiki_status" in registered
+        assert "wiki_list_files" in registered
+        assert "wiki_read_file" in registered
 
     def test_wiki_write_note_tool_delegates_to_note_writer(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"
@@ -151,6 +157,54 @@ class TestLlmWikiServerTools:
         assert (vault / "wiki/projects").is_dir()
         assert (vault / "wiki/concepts").is_dir()
         assert (vault / ".llm-wiki").is_dir()
+
+    def test_wiki_status_tool_delegates_status(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "initialized": True}
+        calls: list[object] = []
+
+        def fake_status(vault_root: object) -> dict[str, object]:
+            calls.append(vault_root)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_status", fake_status)
+
+        result = wiki_status_tool(str(vault))
+
+        assert result == payload
+        assert calls == [str(vault)]
+
+    def test_wiki_list_files_tool_delegates_file_listing(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "files": []}
+        calls: list[dict[str, object]] = []
+
+        def fake_list_files(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_list_files", fake_list_files)
+
+        result = wiki_list_files_tool(str(vault), root_name="all", recursive=False, max_files=10)
+
+        assert result == payload
+        assert calls == [{"vault_root": str(vault), "root_name": "all", "recursive": False, "max_files": 10}]
+
+    def test_wiki_read_file_tool_delegates_file_read(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "content": "body"}
+        calls: list[dict[str, object]] = []
+
+        def fake_read_file(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_wiki_read_file", fake_read_file)
+
+        result = wiki_read_file_tool(str(vault), path="wiki/index.md", max_bytes=42)
+
+        assert result == payload
+        assert calls == [{"vault_root": str(vault), "path": "wiki/index.md", "max_bytes": 42}]
 
     def test_wiki_query_tool_delegates_to_wiki_query(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"
