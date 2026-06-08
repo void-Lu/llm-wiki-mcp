@@ -200,7 +200,11 @@ def ingest_codegraph(
         return files
     context = cg.context(query)
     if not context.get("ok"):
-        return context
+        # Graceful degradation: context CLI subcommand may not exist in older
+        # CodeGraph versions.  Fall back to an empty context dict — the full
+        # graph snapshot from graph_snapshot() is sufficient for code-page
+        # generation.
+        context = {"ok": True, "data": {}}
     graph = cg.graph_snapshot()
     has_full_graph = bool(graph.get("ok"))
     if not graph.get("ok"):
