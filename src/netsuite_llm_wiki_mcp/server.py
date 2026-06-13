@@ -408,7 +408,7 @@ def wiki_ingest_llm(
     analysis: dict[str, Any] | str | None = None,
     generation: dict[str, Any] | str | None = None,
 ) -> dict[str, Any]:
-    """Run staged LLM-assisted ingest. Recommended two-stage flow: stage='prepare' (returns prompt) then stage='apply' (writes pages). Legacy three-stage (prepare_analysis/prepare_generation/apply_generation) still supported."""
+    """Run staged LLM-assisted ingest. Recommended two-stage flow: stage='prepare' (returns prompt) then stage='apply' (writes pages). For source_type='chat', prepare stores raw transcripts under raw/sources/chat and apply may write wiki/chatlog/YYYY/MM/DD pages. Legacy three-stage (prepare_analysis/prepare_generation/apply_generation) still supported."""
     return wiki_ingest_llm_tool(vault_root, stage, project, source_name, source_path, source_type, language, analysis, generation)
 
 

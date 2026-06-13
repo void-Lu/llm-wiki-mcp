@@ -489,6 +489,98 @@ def test_staged_wiki_ingest_rejects_invalid_project_subdir(tmp_path: Path):
     assert result["code"] == "invalid_generated_path"
 
 
+def test_staged_wiki_ingest_chat_source_can_write_chatlog_page(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "session.md"
+    source.write_text("# Chat\n\nUser asked to save the current session.", encoding="utf-8")
+    staged_wiki_ingest(
+        root,
+        "prepare",
+        project="alpha",
+        source_name="session-2026-06-13",
+        source_path=source,
+        source_type="chat",
+    )
+
+    generation = {
+        "source_summary": "Chat session about ingest behavior.",
+        "pages": [
+            {
+                "path": "wiki/chatlog/2026/06/13/session-2026-06-13.md",
+                "title": "Session 2026-06-13",
+                "type": "chatlog",
+                "summary": "Chat session summary",
+                "body": "The session was saved raw-first before analysis.",
+            }
+        ],
+    }
+
+    result = staged_wiki_ingest(
+        root,
+        "apply",
+        project="alpha",
+        source_name="session-2026-06-13",
+        generation=generation,
+        source_type="chat",
+    )
+
+    assert result["ok"] is True
+    assert "wiki/chatlog/2026/06/13/session-2026-06-13.md" in result["paths"]
+    assert "wiki/projects/alpha/sources/session-2026-06-13-chatlog.md" in result["paths"]
+    generated = root / "wiki/chatlog/2026/06/13/session-2026-06-13.md"
+    frontmatter = yaml.safe_load(generated.read_text(encoding="utf-8").split("---", 2)[1])
+    assert frontmatter["type"] == "chatlog"
+    assert frontmatter["sources"] == ["raw/sources/chat/alpha/session-2026-06-13/session.md"]
+
+
+def test_staged_wiki_ingest_rejects_chatlog_path_for_non_chat_source(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nAlpha content", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+
+    result = staged_wiki_ingest(
+        root,
+        "apply",
+        project="alpha",
+        source_name="docs",
+        generation={
+            "pages": [
+                {
+                    "path": "wiki/chatlog/2026/06/13/docs.md",
+                    "title": "Docs",
+                    "type": "chatlog",
+                }
+            ]
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_generated_path"
+
+
+def test_prepare_chat_source_prompt_prefers_chatlog_pages(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "session.md"
+    source.write_text("# Chat\n\nUser asked to save the current session.", encoding="utf-8")
+
+    result = staged_wiki_ingest(
+        root,
+        "prepare",
+        project="alpha",
+        source_name="session-2026-06-13",
+        source_path=source,
+        source_type="chat",
+    )
+
+    assert result["ok"] is True
+    assert "wiki/chatlog/YYYY/MM/DD/<slug>.md" in result["prompt"]
+    assert "raw/sources/chat" in result["prompt"]
+
+
 def test_staged_wiki_ingest_applies_generation_with_summary_fallback(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

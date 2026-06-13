@@ -166,6 +166,7 @@ vault_root/
 2. 摄入 source：
    - 代码仓库 → `wiki_ingest_codegraph`（同步，不需要 LLM）
    - 本地文件 → `wiki_ingest_llm(stage="prepare")` → LLM 生成 → `wiki_ingest_llm(stage="apply")`
+   - 会话历史 → `wiki_ingest_llm(source_type="chat", stage="prepare")` 先保存到 `raw/sources/chat/` → `wiki_ingest_llm(stage="apply")` 生成 `wiki/chatlog/YYYY/MM/DD/` 会话页
    - 外部爬虫或人工收集的 MD 文件 → `raw/sources/references/` 或 `raw/sources/file/` → `wiki_ingest_llm(stage="prepare")` → `wiki_ingest_llm(stage="apply")`
 3. 用 `wiki_verify` 校验生成页面是否忠实于原始来源。
 4. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。

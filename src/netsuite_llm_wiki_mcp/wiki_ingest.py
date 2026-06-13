@@ -410,7 +410,7 @@ def _prepare_combined(
         "schema": _read_optional(root / "schema.md"),
         "index": _read_optional(root / "wiki" / "index.md"),
     }
-    prompt = _combined_prompt(project, source_name, language, manifest, wiki_context)
+    prompt = _combined_prompt(project, source_name, language, manifest, wiki_context, source_type)
     return {
         "ok": True,
         "stage": "prepare",
@@ -502,7 +502,7 @@ def _prepare_generation(root: Path, project: str, source_name: str, language: st
         "source_name": source_name,
         "source_hash": cache.get("source_hash", ""),
         "context": {"analysis": analysis, "wiki": wiki_context, "manifest": cache.get("manifest", [])},
-        "prompt": _generation_prompt(project, source_name, language, analysis, wiki_context),
+        "prompt": _generation_prompt(project, source_name, language, analysis, wiki_context, source_type),
         "expected_response_schema": {
             "source_summary": {"title": "string", "summary": "string", "body": "markdown"},
             "pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string", "body": "markdown", "sources": ["raw/..."]}],
@@ -544,7 +544,7 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
         if not isinstance(item, dict):
             continue
         try:
-            path = _safe_generated_page_path(item, project)
+            path = _safe_generated_page_path(item, project, source_type)
         except ValueError as exc:
             return {"ok": False, "code": "invalid_generated_path", "error": str(exc)}
         page_sources = [str(value) for value in item.get("sources", [])] or manifest_sources
@@ -730,13 +730,23 @@ def _analysis_prompt(project: str, source_name: str, language: str, manifest: li
     ])
 
 
-def _generation_prompt(project: str, source_name: str, language: str, analysis: dict[str, Any] | str, wiki_context: dict[str, str]) -> str:
+def _chat_source_instructions(source_type: str) -> list[str]:
+    if source_type != "chat":
+        return []
+    return [
+        "For source_type=chat, preserve the raw transcript under raw/sources/chat and generate the primary session summary as type=chatlog.",
+        "Chatlog page paths must use wiki/chatlog/YYYY/MM/DD/<slug>.md, with the date taken from the session when available.",
+    ]
+
+
+def _generation_prompt(project: str, source_name: str, language: str, analysis: dict[str, Any] | str, wiki_context: dict[str, str], source_type: str = "file") -> str:
     return "\n".join([
         f"Generate LLM Wiki pages for project '{project}' and source '{source_name}'.",
         f"Respond in {language}.",
         "Use the analysis and existing wiki context. Return JSON matching expected_response_schema.",
         "Every page must include source traceability via sources[].",
         "All [[wikilink]] targets must be all-lowercase kebab-case (e.g. [[user-event-script]], not [[User-Event-Script]]).",
+        *_chat_source_instructions(source_type),
         "Analysis:",
         json.dumps(analysis, ensure_ascii=False, indent=2) if not isinstance(analysis, str) else analysis,
         "Existing wiki context:",
@@ -744,7 +754,7 @@ def _generation_prompt(project: str, source_name: str, language: str, analysis: 
     ])
 
 
-def _combined_prompt(project: str, source_name: str, language: str, manifest: list[dict[str, Any]], wiki_context: dict[str, str]) -> str:
+def _combined_prompt(project: str, source_name: str, language: str, manifest: list[dict[str, Any]], wiki_context: dict[str, str], source_type: str = "file") -> str:
     source_listing = "\n".join(f"- {item.get('relative_path', item.get('path', ''))}" for item in manifest)
     index_summary = wiki_context.get("index", "")[:2000]
     return "\n".join([
@@ -769,6 +779,7 @@ def _combined_prompt(project: str, source_name: str, language: str, manifest: li
         "3. Generate additional wiki pages (concepts, specs, plans, researches, etc.) with full body content.",
         "4. Every page must include source traceability via sources[] referencing raw/ paths.",
         "5. All [[wikilink]] targets must be all-lowercase kebab-case (e.g. [[user-event-script]], not [[User-Event-Script]]).",
+        *_chat_source_instructions(source_type),
     ])
 
 
@@ -782,11 +793,11 @@ def _generation_payload(generation: dict[str, Any] | str) -> dict[str, Any] | No
     return loaded if isinstance(loaded, dict) else None
 
 
-def _safe_generated_page_path(item: dict[str, Any], project: str) -> Path:
+def _safe_generated_page_path(item: dict[str, Any], project: str, source_type: str = "file") -> Path:
     raw_path = str(item.get("path") or "")
     if raw_path.startswith("wiki/") and raw_path.endswith(".md"):
         path = Path(raw_path)
-        if _is_allowed_generated_path(path, project):
+        if _is_allowed_generated_path(path, project, source_type):
             return path
         raise ValueError(f"generated page path is outside the allowed project structure: {raw_path}")
     page_type = safe_segment(str(item.get("type") or "concept"))
@@ -806,12 +817,17 @@ def _safe_generated_page_path(item: dict[str, Any], project: str) -> Path:
     return Path("wiki") / "concepts" / project / f"{slug(title)}.md"
 
 
-def _is_allowed_generated_path(path: Path, project: str) -> bool:
+def _is_allowed_generated_path(path: Path, project: str, source_type: str = "file") -> bool:
     parts = path.parts
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
     if len(parts) >= 5 and parts[0] == "wiki" and parts[1] == "projects" and parts[2] == project:
         return parts[3] in {"specs", "plans", "architecture", "pipelines", "troubleshooting", "researches", "sources"}
     if len(parts) >= 4 and parts[0] == "wiki" and parts[1] == "concepts" and parts[2] == project:
         return True
+    if source_type == "chat" and len(parts) >= 6 and parts[0] == "wiki" and parts[1] == "chatlog":
+        year, month, day = parts[2], parts[3], parts[4]
+        return len(year) == 4 and len(month) == 2 and len(day) == 2 and year.isdigit() and month.isdigit() and day.isdigit()
     return False
 
 
