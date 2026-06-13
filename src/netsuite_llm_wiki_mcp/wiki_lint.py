@@ -23,21 +23,32 @@ _REQUIRED_FILES = (
     Path("wiki/overview.md"),
 )
 _REQUIRED_DIRS = (
+    Path("raw/projects"),
     Path("raw/sources"),
+    Path("raw/sources/file"),
+    Path("raw/sources/references"),
+    Path("raw/sources/chat"),
     Path("raw/assets"),
     Path("wiki/projects"),
     Path("wiki/concepts"),
+    Path("wiki/chatlog"),
     Path("wiki/sources"),
     Path("wiki/queries"),
-    Path("wiki/synthesis"),
     Path("wiki/comparisons"),
+    Path("wiki/maintenance"),
+    Path(".llm-wiki/ingest-cache"),
+    Path(".llm-wiki/graph-index"),
+    Path(".llm-wiki/relation-candidates"),
 )
 _OLD_PATHS = (
+    Path("raw/sources/url"),
+    Path("raw/sources/codegraph"),
     Path("wiki/code"),
     Path("wiki/decisions"),
     Path("wiki/troubleshooting"),
     Path("wiki/requirements"),
     Path("wiki/knowledge"),
+    Path("wiki/synthesis"),
 )
 
 
@@ -70,6 +81,8 @@ def wiki_lint(
     if projects_root.exists():
         for objects_dir in projects_root.glob("*/objects"):
             issues.append(_issue("old_structure_present", "objects directory is not part of the LLM Wiki structure", objects_dir.relative_to(root)))
+        for old_project_dir in list(projects_root.glob("*/code")) + list(projects_root.glob("*/decisions")) + list(projects_root.glob("*/requirements")) + list(projects_root.glob("*/synthesis")):
+            issues.append(_issue("old_structure_present", "project subdirectory is not part of the current LLM Wiki structure", old_project_dir.relative_to(root)))
     wiki_root = root / "wiki"
     if wiki_root.exists():
         pages = sorted(wiki_root.rglob("*.md"))
@@ -203,11 +216,11 @@ def _apply_semantic_review(root: Path, semantic_review: str | None, project: str
         return {"ok": False, "code": "empty_semantic_review", "error": "semantic_review content is empty"}
     today = date.today().isoformat()
     filename = f"semantic-lint-{project + '-' if project else ''}{today}.md"
-    rel_path = Path("wiki") / "synthesis" / filename
+    rel_path = Path("wiki") / "maintenance" / filename
     target = root / rel_path
     target.parent.mkdir(parents=True, exist_ok=True)
     frontmatter: dict[str, Any] = {
-        "type": "synthesis",
+        "type": "maintenance",
         "title": f"Semantic Lint: {project or 'vault'}",
         "generated": True,
         "origin": "semantic-lint",
@@ -245,7 +258,7 @@ def _semantic_review_context(root: Path, project: str | None) -> str:
 
 def _page_in_project_scope(path: Path, root: Path, project: str) -> bool:
     rel = path.relative_to(root).as_posix()
-    return rel.startswith(f"wiki/projects/{project}/") or rel.startswith(("wiki/concepts/", "wiki/sources/", "wiki/synthesis/", "wiki/comparisons/"))
+    return rel.startswith(f"wiki/projects/{project}/") or rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/comparisons/", "wiki/maintenance/"))
 
 
 def _strip_thinking_blocks(text: str) -> str:

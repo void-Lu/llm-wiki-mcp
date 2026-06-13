@@ -239,7 +239,7 @@ def ingest_codegraph(
     # 清理旧 code 页面，确保删除的源文件不会残留
     _clean_code_pages(root, project_value)
 
-    snapshot_dir = root / "raw" / "sources" / "codegraph" / project_value
+    snapshot_dir = root / "raw" / "projects" / project_value / "codegraph" / source_value
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshots = {
         "status.json": status.get("data", {}),
@@ -253,19 +253,27 @@ def ingest_codegraph(
         target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         written_paths.append(target.relative_to(root).as_posix())
 
-    source_page_path = Path("wiki") / "sources" / "projects" / project_value / f"{source_value}.md"
-    code_page_paths: list[str] = []
+    source_page_path = Path("wiki") / "projects" / project_value / "sources" / f"{source_value}.md"
+    generated_page_paths: list[str] = []
 
     graph_snapshot_path = next((p for p in written_paths if p.endswith("/graph.json")), written_paths[2] if len(written_paths) > 2 else "")
     if has_full_graph:
         code_pages = _code_pages_from_graph(graph.get("data", {}), project_value, source_value, graph_snapshot_path)
     else:
         code_pages = _code_pages_from_context(context.get("data", {}), project_value, source_value, written_paths[2] if len(written_paths) > 2 else "")
-    for page in code_pages:
+    readable_pages = [page for page in code_pages if page.frontmatter.get("type") != "code_fact"]
+    for page in readable_pages:
         write_wiki_page(root, page)
         written_paths.append(page.relative_path.as_posix())
-        code_page_paths.append(page.relative_path.as_posix())
-        if not has_full_graph:
+        generated_page_paths.append(page.relative_path.as_posix())
+
+    code_fact_pages = [page for page in code_pages if page.frontmatter.get("type") == "code_fact"]
+    if code_fact_pages:
+        codefacts_path = snapshot_dir / "codefacts.json"
+        codefacts_path.write_text(json.dumps([_raw_codefact(page) for page in code_fact_pages], ensure_ascii=False, indent=2), encoding="utf-8")
+        written_paths.append(codefacts_path.relative_to(root).as_posix())
+    if not has_full_graph:
+        for page in code_pages:
             symbol = str(page.frontmatter.get("symbol", ""))
             if symbol:
                 impact = cg.impact(symbol)
@@ -284,12 +292,12 @@ def ingest_codegraph(
             page = _pipeline_page(pipeline, project_value, source_value, graph_snapshot_path)
             write_wiki_page(root, page)
             written_paths.append(page.relative_path.as_posix())
-            code_page_paths.append(page.relative_path.as_posix())
+            generated_page_paths.append(page.relative_path.as_posix())
         if pipelines:
             cg_page = _call_graph_page(pipelines, project_value, source_value, graph_snapshot_path)
             write_wiki_page(root, cg_page)
             written_paths.append(cg_page.relative_path.as_posix())
-            code_page_paths.append(cg_page.relative_path.as_posix())
+            generated_page_paths.append(cg_page.relative_path.as_posix())
             # Regenerate overview with pipeline grouping
             data = graph.get("data", {})
             overview = _project_overview_page(
@@ -301,8 +309,10 @@ def ingest_codegraph(
                 pipelines=pipelines,
             )
             write_wiki_page(root, overview)
+            written_paths.append(overview.relative_path.as_posix())
+            generated_page_paths.append(overview.relative_path.as_posix())
 
-    wikilinks = "\n".join(f"- [[{p[5:-3]}]]" for p in code_page_paths) if code_page_paths else "(no code pages)"
+    wikilinks = "\n".join(f"- [[{p[5:-3]}]]" for p in generated_page_paths) if generated_page_paths else "(no generated wiki pages)"
     raw_sources = [p for p in written_paths if p.startswith("raw/")]
     source_page = WikiPage(
         relative_path=source_page_path,
@@ -332,7 +342,7 @@ def ingest_codegraph(
             operation="ingest",
             title=f"CodeGraph {project_value}/{source_value}",
             paths=written_paths,
-            sources=[f"raw/sources/codegraph/{project_value}/graph.json"],
+            sources=[f"raw/projects/{project_value}/codegraph/{source_value}/graph.json"],
             project=project_value,
             status="ok",
         ),
@@ -345,6 +355,15 @@ def ingest_codegraph(
         "profile": profile_value,
         "written": len(written_paths),
         "paths": written_paths,
+    }
+
+
+def _raw_codefact(page: WikiPage) -> dict[str, Any]:
+    return {
+        "path": page.relative_path.as_posix(),
+        "title": page.title,
+        "frontmatter": page.frontmatter,
+        "body": page.body,
     }
 
 
@@ -601,7 +620,7 @@ def _write_source_index_pages(
 
     written: list[str] = []
     for target_dir, linked_pages in groups.items():
-        index_path = Path("wiki") / "sources" / target_dir / project / f"{source_name}.md"
+        index_path = Path("wiki") / "projects" / project / "sources" / f"{source_name}-{target_dir}.md"
         wikilinks = "\n".join(f"- [[{Path(p).stem}]]" for p in linked_pages) if linked_pages else "(no pages generated)"
         body = f"{summary}\n\n## Raw sources\n\n"
         body += "\n".join(f"- `{s}`" for s in manifest_sources)
@@ -747,7 +766,7 @@ def _combined_prompt(project: str, source_name: str, language: str, manifest: li
         "## Instructions",
         "1. Analyze the source files: extract key entities, concepts, and relationships.",
         "2. Generate a source_summary with a short title and a ONE-LINE summary (no body needed — index pages are auto-generated).",
-        "3. Generate additional wiki pages (concepts, decisions, etc.) with full body content.",
+        "3. Generate additional wiki pages (concepts, specs, plans, researches, etc.) with full body content.",
         "4. Every page must include source traceability via sources[] referencing raw/ paths.",
         "5. All [[wikilink]] targets must be all-lowercase kebab-case (e.g. [[user-event-script]], not [[User-Event-Script]]).",
     ])
@@ -772,8 +791,17 @@ def _safe_generated_page_path(item: dict[str, Any], project: str) -> Path:
         raise ValueError(f"generated page path is outside the allowed project structure: {raw_path}")
     page_type = safe_segment(str(item.get("type") or "concept"))
     title = str(item.get("title") or item.get("summary") or "page")
-    if page_type in {"code", "decision", "troubleshooting", "requirement"}:
-        subdir = {"decision": "decisions", "requirement": "requirements"}.get(page_type, page_type)
+    project_subdirs = {
+        "spec": "specs",
+        "plan": "plans",
+        "architecture": "architecture",
+        "pipeline": "pipelines",
+        "troubleshooting": "troubleshooting",
+        "researches": "researches",
+        "source_index": "sources",
+    }
+    if page_type in project_subdirs:
+        subdir = project_subdirs[page_type]
         return Path("wiki") / "projects" / project / subdir / f"{slug(title)}.md"
     return Path("wiki") / "concepts" / project / f"{slug(title)}.md"
 
@@ -781,7 +809,7 @@ def _safe_generated_page_path(item: dict[str, Any], project: str) -> Path:
 def _is_allowed_generated_path(path: Path, project: str) -> bool:
     parts = path.parts
     if len(parts) >= 5 and parts[0] == "wiki" and parts[1] == "projects" and parts[2] == project:
-        return parts[3] in {"code", "decisions", "troubleshooting", "requirements"}
+        return parts[3] in {"specs", "plans", "architecture", "pipelines", "troubleshooting", "researches", "sources"}
     if len(parts) >= 4 and parts[0] == "wiki" and parts[1] == "concepts" and parts[2] == project:
         return True
     return False
@@ -892,9 +920,9 @@ def _project_overview_page(
     module_lines = _module_summary_lines(src_files, nodes)
     pipeline_section = _pipeline_overview_lines(pipelines) if pipelines else []
     return WikiPage(
-        relative_path=Path("wiki") / "projects" / project / "code" / "overview.md",
+        relative_path=Path("wiki") / "projects" / project / "architecture" / "code-overview.md",
         frontmatter={
-            "type": "code_fact",
+            "type": "architecture",
             "generated": True,
             "project": project,
             "source_name": source_name,
@@ -978,7 +1006,7 @@ def _code_fact_relative_path(project: str, file_path: str) -> Path:
     if raw_parts and "." in raw_parts[-1]:
         raw_parts = (*raw_parts[:-1], Path(raw_parts[-1]).stem + ".md")
     safe_parts = [safe_segment(Path(part).stem) + Path(part).suffix if part.endswith(".md") else safe_segment(part) for part in raw_parts]
-    return Path("wiki") / "projects" / project / "code" / Path(*safe_parts)
+    return Path("wiki") / "projects" / project / "sources" / "codefacts" / Path(*safe_parts)
 
 
 def _module_summary_lines(src_files: list[dict[str, Any]], nodes: list[dict[str, Any]]) -> list[str]:
@@ -1090,9 +1118,9 @@ def _pipeline_page(pipeline: Any, project: str, source_name: str, graph_snapshot
         implicit_lines.append(f"- `{Path(src).stem}` → `{target_id}` ({ref_type})")
     implicit_section = "\n".join(implicit_lines) if implicit_lines else "(none detected)"
     return WikiPage(
-        relative_path=Path("wiki") / "projects" / project / "code" / "pipelines" / f"{pipeline.name}.md",
+        relative_path=Path("wiki") / "projects" / project / "pipelines" / f"{pipeline.name}.md",
         frontmatter={
-            "type": "code_fact",
+            "type": "pipeline",
             "generated": True,
             "project": project,
             "source_name": source_name,
@@ -1134,9 +1162,9 @@ def _call_graph_page(pipelines: list[Any], project: str, source_name: str, graph
             all_implicit.append(f"- `{Path(src).stem}` → `{target_id}` ({ref_type}) [pipeline: {p.name}]")
     implicit_section = "\n".join(all_implicit[:50]) if all_implicit else "(no implicit triggers detected)"
     return WikiPage(
-        relative_path=Path("wiki") / "projects" / project / "code" / "call-graph.md",
+        relative_path=Path("wiki") / "projects" / project / "pipelines" / "call-graph.md",
         frontmatter={
-            "type": "code_fact",
+            "type": "pipeline",
             "generated": True,
             "project": project,
             "source_name": source_name,
@@ -1202,7 +1230,7 @@ def _code_pages_from_context(data: dict[str, Any], project: str, source_name: st
         page_slug = slug(symbol)
         pages.append(
             WikiPage(
-                relative_path=Path("wiki") / "projects" / project / "code" / f"{page_slug}.md",
+                relative_path=Path("wiki") / "projects" / project / "sources" / "codefacts" / f"{page_slug}.md",
                 frontmatter={
                     "type": "code_fact",
                     "generated": True,
@@ -1250,7 +1278,7 @@ def _code_pages_from_context(data: dict[str, Any], project: str, source_name: st
         truncated_body = raw_json
     return [
         WikiPage(
-            relative_path=Path("wiki") / "projects" / project / "code" / "codegraph-context.md",
+            relative_path=Path("wiki") / "projects" / project / "sources" / "codefacts" / "codegraph-context.md",
             frontmatter={
                 "type": "code_fact",
                 "generated": True,
@@ -1349,3 +1377,7 @@ def _clean_code_pages(root: Path, project: str) -> None:
                 path.rmdir()
             except OSError:
                 pass
+    try:
+        code_dir.rmdir()
+    except OSError:
+        pass

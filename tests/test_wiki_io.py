@@ -13,8 +13,8 @@ def test_write_and_read_markdown_page_with_frontmatter(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
     page = WikiPage(
-        relative_path=Path("wiki/projects/alpha/code/script-a.md"),
-        frontmatter={"type": "code_fact", "generated": True, "sources": ["raw/sources/codegraph/alpha/main/status.json"]},
+        relative_path=Path("wiki/projects/alpha/architecture/script-a.md"),
+        frontmatter={"type": "architecture", "generated": True, "sources": ["raw/projects/alpha/codegraph/main/status.json"]},
         title="Script A",
         body="Call 13800138000 before release.",
     )
@@ -22,14 +22,14 @@ def test_write_and_read_markdown_page_with_frontmatter(tmp_path: Path):
     result = write_wiki_page(root, page)
 
     assert result["ok"] is True
-    target = root / "wiki/projects/alpha/code/script-a.md"
+    target = root / "wiki/projects/alpha/architecture/script-a.md"
     assert target.is_file()
     text = target.read_text(encoding="utf-8")
     assert "[REDACTED_PHONE]" in text
     assert "13800138000" not in text
     parsed = read_markdown_page(target, root)
-    assert parsed.relative_path == Path("wiki/projects/alpha/code/script-a.md")
-    assert parsed.frontmatter["type"] == "code_fact"
+    assert parsed.relative_path == Path("wiki/projects/alpha/architecture/script-a.md")
+    assert parsed.frontmatter["type"] == "architecture"
     assert parsed.title == "Script A"
     assert "[REDACTED_PHONE]" in parsed.body
 
@@ -60,7 +60,7 @@ def test_write_wiki_page_redacts_title_and_frontmatter(tmp_path: Path):
 def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    target = root / "wiki/projects/alpha/code/manual.md"
+    target = root / "wiki/projects/alpha/specs/manual.md"
     target.parent.mkdir(parents=True)
     target.write_text("---\ngenerated: false\n---\n\n# Manual\n\nKeep me", encoding="utf-8")
 
@@ -68,8 +68,8 @@ def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
         write_wiki_page(
             root,
             WikiPage(
-                relative_path=Path("wiki/projects/alpha/code/manual.md"),
-                frontmatter={"generated": True, "type": "code_fact", "sources": []},
+                relative_path=Path("wiki/projects/alpha/specs/manual.md"),
+                frontmatter={"generated": True, "type": "spec", "sources": []},
                 title="Replacement",
                 body="new",
             ),
@@ -84,6 +84,7 @@ def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
     [
         Path("wiki/code/old.md"),
         Path("wiki/decisions/old.md"),
+        Path("wiki/synthesis/old.md"),
         Path("wiki/knowledge/old.md"),
         Path("wiki/projects/alpha/objects/object.md"),
         Path("projects/alpha/wiki/objects/object.md"),
@@ -128,10 +129,10 @@ def test_write_wiki_page_rejects_path_escape(tmp_path: Path):
 @pytest.mark.parametrize(
     "relative_path",
     [
-        Path("wiki/projects/CON/code/page.md"),
-        Path("wiki/projects/alpha/code/bad:name.md"),
-        Path("wiki/projects/alpha/code/COM1.md"),
-        Path("wiki/projects/alpha/code/trailing .md"),
+        Path("wiki/projects/CON/specs/page.md"),
+        Path("wiki/projects/alpha/specs/bad:name.md"),
+        Path("wiki/projects/alpha/specs/COM1.md"),
+        Path("wiki/projects/alpha/specs/trailing .md"),
     ],
 )
 def test_write_wiki_page_rejects_windows_invalid_path_components(tmp_path: Path, relative_path: Path):

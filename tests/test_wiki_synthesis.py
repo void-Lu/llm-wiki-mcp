@@ -18,7 +18,7 @@ def test_wiki_synthesis_prepare_builds_prompt_from_query_context(tmp_path: Path)
         root,
         question="How should we handle invoice sync?",
         stage="prepare",
-        context_pages=[{"path": "wiki/projects/alpha/code/sync.md", "title": "Sync", "content": "Invoice sync context."}],
+        context_pages=[{"path": "wiki/projects/alpha/architecture/sync.md", "title": "Sync", "content": "Invoice sync context."}],
         project="alpha",
     )
 
@@ -30,7 +30,7 @@ def test_wiki_synthesis_prepare_builds_prompt_from_query_context(tmp_path: Path)
     assert result["next_call"]["tool"] == "wiki_synthesis"
 
 
-def test_wiki_synthesis_apply_writes_synthesis_page_and_log(tmp_path: Path):
+def test_wiki_synthesis_apply_writes_researches_page_and_log(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
@@ -39,22 +39,22 @@ def test_wiki_synthesis_apply_writes_synthesis_page_and_log(tmp_path: Path):
         question="How should we handle invoice sync?",
         stage="apply",
         synthesis="<thinking>draft</thinking>\n\n## Recommendation\n\nUse staged retries.",
-        context_pages=[{"path": "wiki/projects/alpha/code/sync.md", "title": "Sync"}],
+        context_pages=[{"path": "wiki/projects/alpha/architecture/sync.md", "title": "Sync"}],
         project="alpha",
         title="Invoice Sync Synthesis",
     )
 
     assert result["ok"] is True
     assert result["stage"] == "apply"
-    assert result["path"].startswith("wiki/synthesis/")
+    assert result["path"].startswith("wiki/projects/alpha/researches/")
     page = root / result["path"]
     assert page.exists()
     text = page.read_text(encoding="utf-8")
     frontmatter = yaml.safe_load(text.split("---", 2)[1])
-    assert frontmatter["type"] == "synthesis"
-    assert frontmatter["origin"] == "query-synthesis"
+    assert frontmatter["type"] == "researches"
+    assert frontmatter["origin"] == "query-research"
     assert frontmatter["project"] == "alpha"
-    assert frontmatter["sources"] == ["wiki/projects/alpha/code/sync.md"]
+    assert frontmatter["sources"] == ["wiki/projects/alpha/architecture/sync.md"]
     assert "<thinking>" not in text
     assert "Use staged retries" in text
-    assert "synthesis" in (root / "wiki/log.md").read_text(encoding="utf-8")
+    assert "researches" in (root / "wiki/log.md").read_text(encoding="utf-8")

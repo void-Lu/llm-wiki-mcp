@@ -33,7 +33,7 @@ def wiki_delete_source(
     """Delete a source and cascade-clean derived wiki pages and references."""
     root = Path(vault_root).expanduser().resolve()
 
-    raw_dir = root / "raw" / "sources" / "codegraph" / project / source_name
+    raw_dir = root / "raw" / "projects" / project / "codegraph" / source_name
     if not raw_dir.exists():
         raw_dir = root / "raw" / "sources" / "file" / project / source_name
     if not raw_dir.exists():
@@ -79,8 +79,13 @@ def wiki_delete_source(
 
     _clean_ingest_cache(root, project, source_name)
 
-    source_summary = root / "wiki" / "sources" / f"{source_name}.md"
-    if source_summary.exists():
+    source_summaries = [
+        root / "wiki" / "projects" / project / "sources" / f"{source_name}.md",
+        root / "wiki" / "sources" / f"{source_name}.md",
+    ]
+    for source_summary in source_summaries:
+        if not source_summary.exists():
+            continue
         fm, _ = split_frontmatter(source_summary.read_text(encoding="utf-8"))
         if fm.get("generated") is True:
             source_summary.unlink()

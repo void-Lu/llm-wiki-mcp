@@ -62,6 +62,10 @@ class FakeCodeGraphClient:
         return self.responses.get("callees", {"ok": True, "data": {}})
 
 
+def _codefacts(root: Path, project: str, source_name: str) -> list[dict[str, Any]]:
+    return json.loads((root / "raw" / "projects" / project / "codegraph" / source_name / "codefacts.json").read_text(encoding="utf-8"))
+
+
 def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -70,27 +74,32 @@ def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_
     result = ingest_codegraph(root, project="alpha", source_name="main", query="Suitelet entry", client=client)
 
     assert result["ok"] is True
-    snapshot = root / "raw/sources/codegraph/alpha/context.json"
+    snapshot = root / "raw/projects/alpha/codegraph/main/context.json"
     assert snapshot.is_file()
-    source_page = root / "wiki/sources/projects/alpha/main.md"
+    source_page = root / "wiki/projects/alpha/sources/main.md"
     assert source_page.is_file()
-    code_page = root / "wiki/projects/alpha/code/onrequest.md"
-    assert code_page.is_file()
+    code_page = root / "wiki/projects/alpha/sources/onrequest.md"
+    assert not code_page.exists()
     project_index = root / "wiki/projects/alpha/index.md"
     assert project_index.is_file()
     assert (root / "wiki/index.md").is_file()
     assert (root / "wiki/overview.md").is_file()
     assert "## [" in (root / "wiki/log.md").read_text(encoding="utf-8")
     assert not (root / "wiki/projects/alpha/objects").exists()
+    assert not (root / "wiki/projects/alpha/code").exists()
     assert not (root / "wiki/code").exists()
 
-    frontmatter = yaml.safe_load(code_page.read_text(encoding="utf-8").split("---", 2)[1])
-    assert frontmatter["type"] == "code_fact"
-    assert frontmatter["generated"] is True
-    assert frontmatter["sources"] == ["raw/sources/codegraph/alpha/context.json"]
-    assert frontmatter["codegraph_tool"] == "context"
-    assert frontmatter["source_path"] == "src/FileCabinet/SuiteScripts/sl.js"
-    assert frontmatter["symbol"] == "onRequest"
+    source_frontmatter = yaml.safe_load(source_page.read_text(encoding="utf-8").split("---", 2)[1])
+    assert source_frontmatter["sources"] == [
+        "raw/projects/alpha/codegraph/main/status.json",
+        "raw/projects/alpha/codegraph/main/files.json",
+        "raw/projects/alpha/codegraph/main/context.json",
+        "raw/projects/alpha/codegraph/main/graph.json",
+        "raw/projects/alpha/codegraph/main/codefacts.json",
+        "raw/projects/alpha/codegraph/main/impact-onrequest.json",
+    ]
+    codefacts = json.loads((root / "raw/projects/alpha/codegraph/main/codefacts.json").read_text(encoding="utf-8"))
+    assert codefacts[0]["frontmatter"]["symbol"] == "onRequest"
 
 
 def test_ingest_codegraph_returns_unavailable_error(tmp_path: Path):
@@ -130,10 +139,9 @@ def test_ingest_codegraph_extracts_camelcase_fields(tmp_path: Path):
     result = ingest_codegraph(root, project="mywiki", source_name="cg", client=client)
     assert result["ok"] is True
 
-    code_page = root / "wiki/projects/mywiki/code/save_obsidian_note.md"
-    assert code_page.is_file()
-    content = code_page.read_text(encoding="utf-8")
-    fm = yaml.safe_load(content.split("---", 2)[1])
+    fact = _codefacts(root, "mywiki", "cg")[0]
+    content = fact["body"]
+    fm = fact["frontmatter"]
     assert fm["source_path"] == "src/netsuite_llm_wiki_mcp/note_writer.py"
     assert fm["line_start"] == 142
     assert fm["line_end"] == 229
@@ -193,7 +201,7 @@ def test_ingest_codegraph_uses_codeblocks_and_edges_for_code_facts(tmp_path: Pat
     result = ingest_codegraph(root, project="mywiki", source_name="cg", client=client)
     assert result["ok"] is True
 
-    content = (root / "wiki/projects/mywiki/code/save_obsidian_note.md").read_text(encoding="utf-8")
+    content = _codefacts(root, "mywiki", "cg")[0]["body"]
     assert "## Source Code" in content
     assert "def save_obsidian_note" in content
     assert "refresh_overview(root)" in content
@@ -245,15 +253,9 @@ def test_ingest_codegraph_prefers_full_graph_snapshot_for_project_structure(tmp_
     result = ingest_codegraph(root, project="alpha", source_name="main", client=client)
 
     assert result["ok"] is True
-    assert (root / "raw/sources/codegraph/alpha/graph.json").is_file()
-    overview_page = root / "wiki/projects/alpha/code/overview.md"
-    assert overview_page.is_file()
-    overview = overview_page.read_text(encoding="utf-8")
-    assert "## Global Logic Chain" in overview
-    assert "`a` calls → `b`" in overview
-    a_page = root / "wiki/projects/alpha/code/src/pkg/a.md"
-    assert a_page.is_file()
-    content = a_page.read_text(encoding="utf-8")
+    assert (root / "raw/projects/alpha/codegraph/main/graph.json").is_file()
+    facts = _codefacts(root, "alpha", "main")
+    content = next(fact["body"] for fact in facts if fact["frontmatter"].get("symbol") == "src/pkg/a.py")
     assert "## Symbols" in content
     assert "`a`" in content
     assert "## Outgoing Relationships" in content
@@ -386,8 +388,8 @@ def test_ingest_codegraph_skips_unchanged_context(tmp_path: Path):
     client = FakeCodeGraphClient()
 
     first = ingest_codegraph(root, project="alpha", source_name="main", query="Suitelet entry", client=client)
-    code_page = root / "wiki/projects/alpha/code/onrequest.md"
-    first_mtime = code_page.stat().st_mtime
+    codefacts = root / "raw/projects/alpha/codegraph/main/codefacts.json"
+    first_mtime = codefacts.stat().st_mtime
 
     time.sleep(0.05)
 
@@ -396,7 +398,7 @@ def test_ingest_codegraph_skips_unchanged_context(tmp_path: Path):
     assert first["ok"] is True
     assert second["ok"] is True
     assert second.get("status") == "unchanged"
-    assert code_page.stat().st_mtime == first_mtime
+    assert codefacts.stat().st_mtime == first_mtime
 
 
 
@@ -510,7 +512,7 @@ def test_staged_wiki_ingest_applies_generation_with_summary_fallback(tmp_path: P
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
+    assert "wiki/projects/alpha/sources/docs-concepts.md" in result["paths"]
     assert "wiki/concepts/alpha/generated.md" in result["paths"]
     generated = root / "wiki/concepts/alpha/generated.md"
     frontmatter = yaml.safe_load(generated.read_text(encoding="utf-8").split("---", 2)[1])
@@ -549,8 +551,8 @@ def test_apply_generation_writes_source_summary_in_hierarchical_directory(tmp_pa
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
-    assert (root / "wiki/sources/concepts/alpha/docs.md").is_file()
+    assert "wiki/projects/alpha/sources/docs-concepts.md" in result["paths"]
+    assert (root / "wiki/projects/alpha/sources/docs-concepts.md").is_file()
 
 
 def test_apply_generation_accepts_string_source_summary(tmp_path: Path):
@@ -564,7 +566,7 @@ def test_apply_generation_accepts_string_source_summary(tmp_path: Path):
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    written = (root / "wiki/sources/concepts/alpha/docs.md").read_text(encoding="utf-8")
+    written = (root / "wiki/projects/alpha/sources/docs-concepts.md").read_text(encoding="utf-8")
     assert "plain string summary" in written
 
 
@@ -606,7 +608,7 @@ def test_two_stage_prepare_and_apply(tmp_path: Path):
     }
     result = staged_wiki_ingest(root, "apply", project="alpha", source_name="docs", generation=generation)
     assert result["ok"] is True
-    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
+    assert "wiki/projects/alpha/sources/docs-concepts.md" in result["paths"]
     assert "wiki/concepts/alpha/my-concept.md" in result["paths"]
 
 
@@ -671,18 +673,20 @@ def test_ingest_codegraph_filters_vendored_files_from_overview(tmp_path: Path):
     result = ingest_codegraph(root, project="demo", source_name="main", client=client)
     assert result["ok"] is True
 
-    overview = (root / "wiki/projects/demo/code/overview.md").read_text(encoding="utf-8")
+    overview = (root / "wiki/projects/demo/architecture/code-overview.md").read_text(encoding="utf-8")
     assert "handleOrder" in overview
     assert "calcTotal" in overview
     # Vendor internal functions should be filtered out
     assert "_internal0" not in overview
     assert "_internal50" not in overview
 
-    # No code fact page generated for the vendored file
-    assert not (root / "wiki/projects/demo/code/src/lib/papaparse.md").exists()
-    # Business files still get pages
-    assert (root / "wiki/projects/demo/code/src/scripts/order.md").exists()
-    assert (root / "wiki/projects/demo/code/src/scripts/calc.md").exists()
+    # Code facts are stored as raw machine facts, and vendored files are filtered out.
+    facts = _codefacts(root, "demo", "main")
+    fact_paths = {fact["frontmatter"]["source_path"] for fact in facts}
+    assert "src/lib/papaparse.js" not in fact_paths
+    assert "src/scripts/order.js" in fact_paths
+    assert "src/scripts/calc.js" in fact_paths
+    assert not (root / "wiki/projects/demo/code").exists()
 
 
 def test_is_project_source_filters_known_vendor_stems():
@@ -803,22 +807,22 @@ def test_ingest_codegraph_generates_pipeline_pages_when_full_graph(tmp_path: Pat
     result = ingest_codegraph(root, project="vendpay", source_name="main", client=client, profile="suitescript")
     assert result["ok"] is True
 
-    pipelines_dir = root / "wiki" / "projects" / "vendpay" / "code" / "pipelines"
+    pipelines_dir = root / "wiki" / "projects" / "vendpay" / "pipelines"
     assert pipelines_dir.exists()
     pipeline_files = list(pipelines_dir.glob("*.md"))
     assert len(pipeline_files) >= 1
 
-    call_graph = root / "wiki" / "projects" / "vendpay" / "code" / "call-graph.md"
+    call_graph = root / "wiki" / "projects" / "vendpay" / "pipelines" / "call-graph.md"
     assert call_graph.is_file()
 
-    overview = root / "wiki" / "projects" / "vendpay" / "code" / "overview.md"
+    overview = root / "wiki" / "projects" / "vendpay" / "architecture" / "code-overview.md"
     overview_content = overview.read_text(encoding="utf-8")
     assert "Business Pipelines" in overview_content
     assert "vendpay" in overview_content.lower()
 
 
 def test_ingest_codegraph_generates_code_facts_without_src_prefix(tmp_path: Path):
-    """Files without src/ prefix should still get code fact pages generated."""
+    """Files without src/ prefix should still get raw code facts generated."""
     root = tmp_path / "vault"
     create_wiki_root(root)
     graph_data = {
@@ -845,11 +849,11 @@ def test_ingest_codegraph_generates_code_facts_without_src_prefix(tmp_path: Path
     result = ingest_codegraph(root, project="huideng", source_name="codegraph", client=client)
 
     assert result["ok"] is True
-    verify_page = root / "wiki/projects/huideng/code/SuiteScripts_GL/mr_hc_vendpay_verify.md"
-    assert verify_page.is_file(), f"Expected code fact page at {verify_page}"
-    import_page = root / "wiki/projects/huideng/code/SuiteScripts_GL/mr_hc_vendpay_import.md"
-    assert import_page.is_file(), f"Expected code fact page at {import_page}"
-    content = verify_page.read_text(encoding="utf-8")
+    facts = _codefacts(root, "huideng", "codegraph")
+    fact_paths = {fact["frontmatter"]["source_path"] for fact in facts}
+    assert "SuiteScripts_GL/mr_hc_vendpay_verify.js" in fact_paths
+    assert "SuiteScripts_GL/mr_hc_vendpay_import.js" in fact_paths
+    content = "\n\n".join(fact["body"] for fact in facts)
     assert "## Symbols" in content
     assert "`getInputData`" in content
 
@@ -884,19 +888,18 @@ def test_pipeline_page_wikilinks_resolve_to_code_fact_pages(tmp_path: Path):
     result = ingest_codegraph(root, project="huideng", source_name="codegraph", client=client)
     assert result["ok"] is True
 
-    pipelines_dir = root / "wiki/projects/huideng/code/pipelines"
+    pipelines_dir = root / "wiki/projects/huideng/pipelines"
     if not pipelines_dir.exists():
         return  # no pipelines detected — acceptable for small graph
 
-    code_dir = root / "wiki/projects/huideng/code"
-    all_code_stems = {p.stem for p in code_dir.rglob("*.md")}
+    all_code_stems = {Path(fact["path"]).stem for fact in _codefacts(root, "huideng", "codegraph")}
 
     for pipeline_file in pipelines_dir.glob("*.md"):
         content = pipeline_file.read_text(encoding="utf-8")
         wikilinks = _re.findall(r"\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]", content)
         for link in wikilinks:
             assert link in all_code_stems, \
-                f"Dangling wikilink [[{link}]] in {pipeline_file.name} — no matching code fact page"
+                f"Dangling wikilink [[{link}]] in {pipeline_file.name}; no matching code fact"
 
 
 def test_ingest_codegraph_pipeline_includes_client_script_module_path(tmp_path: Path):
@@ -940,7 +943,7 @@ def test_ingest_codegraph_pipeline_includes_client_script_module_path(tmp_path: 
     )
 
     assert result["ok"] is True
-    call_graph = (root / "wiki/projects/huideng/code/call-graph.md").read_text(encoding="utf-8")
+    call_graph = (root / "wiki/projects/huideng/pipelines/call-graph.md").read_text(encoding="utf-8")
     assert "`sl_order_page` → `src/SuiteScripts/cs_order_page.js` (client_script_module_path)" in call_graph
 
 
@@ -968,9 +971,10 @@ def test_ingest_codegraph_generic_profile_skips_suitescript_pipeline_pages(tmp_p
     result = ingest_codegraph(root, project="generic", source_name="codegraph", client=client, profile="generic")
 
     assert result["ok"] is True
-    assert (root / "wiki/projects/generic/code/src/sl_order_page.md").is_file()
-    assert not (root / "wiki/projects/generic/code/pipelines").exists()
-    assert not (root / "wiki/projects/generic/code/call-graph.md").exists()
+    facts = _codefacts(root, "generic", "codegraph")
+    assert any(fact["frontmatter"]["source_path"] == "src/sl_order_page.js" for fact in facts)
+    assert not (root / "wiki/projects/generic/pipelines").exists()
+    assert not (root / "wiki/projects/generic/code").exists()
 
 
 def test_ingest_codegraph_profile_is_part_of_cache_key(tmp_path: Path):
@@ -1000,7 +1004,7 @@ def test_ingest_codegraph_profile_is_part_of_cache_key(tmp_path: Path):
     assert first["ok"] is True
     assert second["ok"] is True
     assert second.get("status") != "unchanged"
-    assert (root / "wiki/projects/alpha/code/call-graph.md").is_file()
+    assert (root / "wiki/projects/alpha/pipelines/call-graph.md").is_file()
 
 
 def test_ingest_codegraph_returns_clear_error_for_nonexistent_path(tmp_path: Path):
@@ -1020,7 +1024,7 @@ def test_ingest_codegraph_returns_clear_error_for_nonexistent_path(tmp_path: Pat
 
 
 def test_ingest_codegraph_filters_by_include_extensions(tmp_path: Path):
-    """When include_extensions is specified, only matching files get code fact pages."""
+    """When include_extensions is specified, only matching files get raw code facts."""
     root = tmp_path / "vault"
     create_wiki_root(root)
     graph_data = {
@@ -1054,15 +1058,13 @@ def test_ingest_codegraph_filters_by_include_extensions(tmp_path: Path):
     )
 
     assert result["ok"] is True
-    # JS file should have a code fact page
-    js_page = root / "wiki/projects/alpha/code/src/FileCabinet/SuiteScripts/sl_main.md"
-    assert js_page.is_file()
-    # XML files should NOT have code fact pages
-    xml_pages = list((root / "wiki/projects/alpha/code").rglob("*payment*"))
-    assert len(xml_pages) == 0
-    xml_pages2 = list((root / "wiki/projects/alpha/code").rglob("*custscript*"))
-    assert len(xml_pages2) == 0
+    # JS file should have a raw code fact; XML files should not.
+    facts = _codefacts(root, "alpha", "main")
+    fact_paths = {fact["frontmatter"]["source_path"] for fact in facts}
+    assert fact_paths == {"src/FileCabinet/SuiteScripts/sl_main.js"}
+    assert "onRequest" in "\n".join(fact["body"] for fact in facts)
+    assert not (root / "wiki/projects/alpha/code").exists()
 
-    files_snapshot = json.loads((root / "raw/sources/codegraph/alpha/files.json").read_text(encoding="utf-8"))
+    files_snapshot = json.loads((root / "raw/projects/alpha/codegraph/main/files.json").read_text(encoding="utf-8"))
     snapshot_files = files_snapshot.get("files", files_snapshot)
     assert [item["path"] for item in snapshot_files] == ["src/FileCabinet/SuiteScripts/sl_main.js"]

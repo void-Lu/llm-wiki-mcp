@@ -43,8 +43,8 @@ def test_wiki_lint_reports_missing_frontmatter_and_generated_sources(tmp_path: P
     write_wiki_page(
         root,
         WikiPage(
-            relative_path=Path("wiki/projects/alpha/code/script.md"),
-            frontmatter={"generated": True, "type": "code_fact"},
+            relative_path=Path("wiki/projects/alpha/architecture/script.md"),
+            frontmatter={"generated": True, "type": "architecture"},
             title="Script",
             body="body",
         ),
@@ -96,8 +96,8 @@ def test_wiki_lint_reports_missing_generated_raw_source(tmp_path: Path):
     write_wiki_page(
         root,
         WikiPage(
-            Path("wiki/projects/alpha/code/script.md"),
-            {"title": "Script", "type": "code_fact", "generated": True, "sources": ["raw/sources/file/alpha/docs/missing.md"]},
+            Path("wiki/projects/alpha/architecture/script.md"),
+            {"title": "Script", "type": "architecture", "generated": True, "sources": ["raw/sources/file/alpha/docs/missing.md"]},
             "Script",
             "Body",
         ),
@@ -107,7 +107,7 @@ def test_wiki_lint_reports_missing_generated_raw_source(tmp_path: Path):
     result = wiki_lint(root)
 
     assert result["ok"] is False
-    assert any(issue["code"] == "source_missing" and issue["path"] == "wiki/projects/alpha/code/script.md" for issue in result["issues"])
+    assert any(issue["code"] == "source_missing" and issue["path"] == "wiki/projects/alpha/architecture/script.md" for issue in result["issues"])
 
 
 def test_wiki_lint_reports_cache_manifest_missing_path(tmp_path: Path):
@@ -195,7 +195,7 @@ def test_wiki_lint_apply_semantic_review_writes_report(tmp_path: Path):
 
     assert result["ok"] is True
     assert result["stage"] == "apply_semantic_review"
-    assert result["path"].startswith("wiki/synthesis/")
+    assert result["path"].startswith("wiki/maintenance/")
     text = (root / result["path"]).read_text(encoding="utf-8")
     assert "semantic-lint" in text
     assert "<think>" not in text

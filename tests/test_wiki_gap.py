@@ -25,7 +25,7 @@ def wiki_vault(tmp_path):
     (tmp_path / "wiki" / "concepts" / "domain-a").mkdir(parents=True)
     (tmp_path / "wiki" / "sources").mkdir(parents=True)
     (tmp_path / "wiki" / "queries").mkdir(parents=True)
-    (tmp_path / "wiki" / "synthesis").mkdir(parents=True)
+    (tmp_path / "wiki" / "maintenance").mkdir(parents=True)
     (tmp_path / "wiki" / "comparisons").mkdir(parents=True)
     (tmp_path / ".llm-wiki" / "ingest-cache" / "file" / "myproj").mkdir(parents=True)
     (tmp_path / ".obsidian").mkdir(parents=True)

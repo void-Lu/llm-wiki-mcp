@@ -313,7 +313,7 @@ def wiki_list_files(
     recursive: bool = True,
     max_files: int | None = None,
 ) -> dict[str, Any]:
-    """List public wiki files under wiki/ and raw/sources/ without exposing runtime state."""
+    """List public wiki files under wiki/, raw/sources/, and raw/projects/ without exposing runtime state."""
     return wiki_list_files_tool(vault_root, root_name, recursive, max_files)
 
 
@@ -323,7 +323,7 @@ def wiki_read_file(
     path: str,
     max_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Read a text file under wiki/ or raw/sources/ with path and size limits."""
+    """Read a text file under wiki/, raw/sources/, or raw/projects/ with path and size limits."""
     return wiki_read_file_tool(vault_root, path, max_bytes)
 
 
@@ -475,7 +475,7 @@ def wiki_write_note(
     vault_root: str | None = None,
     vaultRoot: str | None = None,
 ) -> dict[str, Any]:
-    """Write a human-curated note into the wiki. Supports decision, troubleshooting, requirement, and knowledge note types."""
+    """Write a human-curated note into the wiki. Supports spec, plan, troubleshooting, researches, and knowledge note types."""
     resolved_note_type = note_type or noteType
     if not resolved_note_type:
         return {"ok": False, "code": "missing_note_type", "error": "note_type is required"}
@@ -591,7 +591,7 @@ def wiki_synthesis(
     project: str | None = None,
     language: str = "zh-CN",
 ) -> dict[str, Any]:
-    """Persist a valuable query answer or analysis as a wiki synthesis page. Stages: prepare → apply."""
+    """Persist a valuable query answer or analysis as a project researches page. Stages: prepare → apply."""
     return wiki_synthesis_tool(vault_root, question, stage, context_pages, synthesis, title, project, language)
 
 

@@ -15,7 +15,7 @@ def test_refresh_overview_writes_deterministic_counts_and_recent_log(tmp_path: P
     write_wiki_page(
         root,
         WikiPage(
-            relative_path=Path("wiki/projects/alpha/code/script.md"),
+            relative_path=Path("wiki/projects/alpha/architecture/script.md"),
             frontmatter={"title": "Script", "generated": True, "sources": ["raw/sources/a.md"]},
             title="Script",
             body="code",
@@ -24,9 +24,9 @@ def test_refresh_overview_writes_deterministic_counts_and_recent_log(tmp_path: P
     write_wiki_page(
         root,
         WikiPage(
-            relative_path=Path("wiki/projects/alpha/decisions/decision.md"),
-            frontmatter={"title": "Decision", "generated": False},
-            title="Decision",
+            relative_path=Path("wiki/projects/alpha/specs/spec.md"),
+            frontmatter={"title": "Spec", "generated": False},
+            title="Spec",
             body="manual",
         ),
         overwrite_generated_only=False,
@@ -45,7 +45,7 @@ def test_refresh_overview_writes_deterministic_counts_and_recent_log(tmp_path: P
         WikiLogEntry(
             operation="ingest",
             title="Alpha",
-            paths=["wiki/projects/alpha/code/script.md"],
+            paths=["wiki/projects/alpha/architecture/script.md"],
             sources=["raw/sources/a.md"],
             project="alpha",
             status="ok",

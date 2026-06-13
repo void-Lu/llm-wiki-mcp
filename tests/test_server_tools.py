@@ -49,7 +49,7 @@ class TestLlmWikiServerTools:
 
     def test_wiki_write_note_tool_delegates_to_note_writer(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"
-        payload = {"ok": True, "path": "wiki/projects/alpha/decisions/note.md"}
+        payload = {"ok": True, "path": "wiki/projects/alpha/specs/note.md"}
         calls: list[dict[str, object]] = []
 
         def fake_save_note(**kwargs: object) -> dict[str, object]:
@@ -59,8 +59,8 @@ class TestLlmWikiServerTools:
         monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_write_note", fake_save_note)
 
         result = wiki_write_note_tool(
-            note_type="decision",
-            title="Decision note",
+            note_type="spec",
+            title="Spec note",
             content="Body",
             project="alpha",
             domain="common-errors",
@@ -81,8 +81,8 @@ class TestLlmWikiServerTools:
 
         assert result == payload
         assert calls == [{
-            "note_type": "decision",
-            "title": "Decision note",
+            "note_type": "spec",
+            "title": "Spec note",
             "content": "Body",
             "project": "alpha",
             "domain": "common-errors",
@@ -103,7 +103,7 @@ class TestLlmWikiServerTools:
 
     def test_wiki_write_note_accepts_camel_case_params(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"
-        payload = {"ok": True, "path": "wiki/projects/alpha/decisions/note.md"}
+        payload = {"ok": True, "path": "wiki/projects/alpha/specs/note.md"}
         calls: list[dict[str, object]] = []
 
         def fake_save_note(**kwargs: object) -> dict[str, object]:
@@ -113,8 +113,8 @@ class TestLlmWikiServerTools:
         monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_write_note", fake_save_note)
 
         result = wiki_write_note(
-            noteType="decision",
-            title="Decision note",
+            noteType="spec",
+            title="Spec note",
             content="Body",
             project="alpha",
             relatedScriptTypes=["user-event"],
@@ -129,7 +129,7 @@ class TestLlmWikiServerTools:
         )
 
         assert result == payload
-        assert calls[0]["note_type"] == "decision"
+        assert calls[0]["note_type"] == "spec"
         assert calls[0]["related_script_types"] == ["user-event"]
         assert calls[0]["script_type"] == "restlet"
         assert calls[0]["object_type"] == "salesorder"

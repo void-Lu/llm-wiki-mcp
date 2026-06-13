@@ -59,7 +59,7 @@ def test_validate_merged_body_too_short():
 @pytest.fixture
 def merge_root(tmp_path: Path) -> Path:
     root = tmp_path / "vault"
-    page_dir = root / "wiki" / "projects" / "proj" / "code"
+    page_dir = root / "wiki" / "projects" / "proj" / "architecture"
     page_dir.mkdir(parents=True)
     page = page_dir / "my-page.md"
     page.write_text(
@@ -72,14 +72,14 @@ def merge_root(tmp_path: Path) -> Path:
 def test_apply_page_merge_no_body_merge(merge_root: Path):
     result = apply_page_merge(
         str(merge_root),
-        "wiki/projects/proj/code/my-page.md",
+        "wiki/projects/proj/architecture/my-page.md",
         incoming_frontmatter={"sources": ["new-source.ts"], "tags": ["suiteql"]},
         incoming_body="New body content.",
     )
     assert result["ok"] is True
     assert result["body_merged"] is False
 
-    content = (merge_root / "wiki" / "projects" / "proj" / "code" / "my-page.md").read_text(encoding="utf-8")
+    content = (merge_root / "wiki" / "projects" / "proj" / "architecture" / "my-page.md").read_text(encoding="utf-8")
     assert "My Page" in content
     assert "New body content" in content
     assert "old-source.ts" in content
@@ -87,8 +87,8 @@ def test_apply_page_merge_no_body_merge(merge_root: Path):
 
 
 def test_apply_page_merge_refuses_manual_page(merge_root: Path):
-    page = merge_root / "wiki" / "projects" / "proj" / "code" / "my-page.md"
+    page = merge_root / "wiki" / "projects" / "proj" / "architecture" / "my-page.md"
     page.write_text("---\ntype: code\ntitle: My Page\n---\n\n# My Page\n\nManual.\n", encoding="utf-8")
-    result = apply_page_merge(str(merge_root), "wiki/projects/proj/code/my-page.md", {}, "new")
+    result = apply_page_merge(str(merge_root), "wiki/projects/proj/architecture/my-page.md", {}, "new")
     assert result["ok"] is False
     assert result["code"] == "manual_page"

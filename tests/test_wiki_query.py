@@ -19,19 +19,19 @@ def test_wiki_query_finds_keyword_matches_and_returns_citations(tmp_path: Path):
     create_wiki_root(root)
     _write(
         root,
-        "wiki/projects/alpha/code/suitelet.md",
+        "wiki/projects/alpha/architecture/suitelet.md",
         "Suitelet Entry",
-        "This Suitelet handles invoice approval and links to [[decisions/invoice-approval.md|decision]].",
-        type="code_fact",
+        "This Suitelet handles invoice approval and links to [[specs/invoice-approval.md|spec]].",
+        type="architecture",
         tags=["suitelet", "invoice"],
         summary="invoice suitelet",
     )
     _write(
         root,
-        "wiki/projects/alpha/decisions/invoice-approval.md",
+        "wiki/projects/alpha/specs/invoice-approval.md",
         "Invoice Approval Decision",
         "We chose synchronous invoice approval because finance needs immediate feedback.",
-        type="decision",
+        type="spec",
         generated=False,
         summary="finance decision",
     )
@@ -41,35 +41,35 @@ def test_wiki_query_finds_keyword_matches_and_returns_citations(tmp_path: Path):
 
     assert result["ok"] is True
     paths = [item["path"] for item in result["results"]]
-    assert paths[0] == "wiki/projects/alpha/code/suitelet.md"
-    assert "wiki/projects/alpha/decisions/invoice-approval.md" in paths
-    assert result["context"][0]["citation"] == "[1] wiki/projects/alpha/code/suitelet.md"
+    assert paths[0] == "wiki/projects/alpha/architecture/suitelet.md"
+    assert "wiki/projects/alpha/specs/invoice-approval.md" in paths
+    assert result["context"][0]["citation"] == "[1] wiki/projects/alpha/architecture/suitelet.md"
 
 
 def test_wiki_query_project_scope_prioritizes_project_pages(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    _write(root, "wiki/projects/alpha/code/script.md", "Alpha Script", "shared keyword alpha behavior", type="code_fact")
-    _write(root, "wiki/projects/beta/code/script.md", "Beta Script", "shared keyword beta behavior", type="code_fact")
+    _write(root, "wiki/projects/alpha/architecture/script.md", "Alpha Script", "shared keyword alpha behavior", type="architecture")
+    _write(root, "wiki/projects/beta/architecture/script.md", "Beta Script", "shared keyword beta behavior", type="architecture")
     refresh_indexes(root)
 
     result = wiki_query(root, "shared keyword", project="beta", top_k=2)
 
-    assert result["results"][0]["path"] == "wiki/projects/beta/code/script.md"
+    assert result["results"][0]["path"] == "wiki/projects/beta/architecture/script.md"
 
 
 def test_wiki_query_project_scope_filters_other_projects(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    _write(root, "wiki/projects/alpha/code/script.md", "Alpha Script", "shared keyword alpha behavior extra extra", type="code_fact")
-    _write(root, "wiki/projects/beta/code/script.md", "Beta Script", "shared keyword beta behavior", type="code_fact")
+    _write(root, "wiki/projects/alpha/architecture/script.md", "Alpha Script", "shared keyword alpha behavior extra extra", type="architecture")
+    _write(root, "wiki/projects/beta/architecture/script.md", "Beta Script", "shared keyword beta behavior", type="architecture")
     refresh_indexes(root)
 
     result = wiki_query(root, "shared keyword alpha", project="beta", top_k=5)
 
     paths = [item["path"] for item in result["results"]]
-    assert "wiki/projects/beta/code/script.md" in paths
-    assert "wiki/projects/alpha/code/script.md" not in paths
+    assert "wiki/projects/beta/architecture/script.md" in paths
+    assert "wiki/projects/alpha/architecture/script.md" not in paths
 
 
 def test_wiki_query_uses_frontmatter_tags_and_index(tmp_path: Path):
@@ -225,15 +225,15 @@ def test_wiki_query_idf_weights_rare_terms_higher(tmp_path: Path):
 def test_wiki_query_frontmatter_filter_by_type(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    _write(root, "wiki/projects/alpha/code/script.md", "Script", "shared keyword alpha", type="code_fact")
-    _write(root, "wiki/projects/alpha/decisions/choice.md", "Choice", "shared keyword alpha", type="decision", generated=False)
+    _write(root, "wiki/projects/alpha/architecture/script.md", "Script", "shared keyword alpha", type="architecture")
+    _write(root, "wiki/projects/alpha/specs/choice.md", "Choice", "shared keyword alpha", type="spec", generated=False)
     refresh_indexes(root)
 
-    result = wiki_query(root, "shared keyword", project="alpha", top_k=5, filter_type="decision")
+    result = wiki_query(root, "shared keyword", project="alpha", top_k=5, filter_type="spec")
 
     paths = [item["path"] for item in result["results"]]
-    assert "wiki/projects/alpha/decisions/choice.md" in paths
-    assert "wiki/projects/alpha/code/script.md" not in paths
+    assert "wiki/projects/alpha/specs/choice.md" in paths
+    assert "wiki/projects/alpha/architecture/script.md" not in paths
 
 
 def test_wiki_query_returns_title_match_and_images(tmp_path: Path):

@@ -35,17 +35,17 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 - `vault_root` 解析优先级在 [runtime_config.py](src/netsuite_llm_wiki_mcp/runtime_config.py)：工具参数 > `NETSUITE_LLM_WIKI_VAULT_ROOT` > 全局 `config.yaml` 的 `default_vault`。
 - 跨平台配置/数据目录在 [platform_paths.py](src/netsuite_llm_wiki_mcp/platform_paths.py)，测试通过 [tests/conftest.py](tests/conftest.py) 自动隔离这些环境变量。
-- Wiki 目录创建和 path segment 校验在 [wiki_paths.py](src/netsuite_llm_wiki_mcp/wiki_paths.py)。外部 Obsidian root 固定包含 `purpose.md`、`schema.md`、`raw/sources/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/sources/`、`wiki/queries/`、`wiki/synthesis/`、`wiki/comparisons/`、`.obsidian/`、`.llm-wiki/`。
+- Wiki 目录创建和 path segment 校验在 [wiki_paths.py](src/netsuite_llm_wiki_mcp/wiki_paths.py)。外部 Obsidian root 固定包含 `purpose.md`、`schema.md`、`raw/projects/`、`raw/sources/{file,references,chat}/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/chatlog/`、`wiki/sources/`、`wiki/queries/`、`wiki/comparisons/`、`wiki/maintenance/`、`.obsidian/`、`.llm-wiki/{ingest-cache,graph-index,relation-candidates}/`。
 - `wiki/sources/` 是纯索引溯源页目录，按关联目标分级：`wiki/sources/concepts/`、`wiki/sources/projects/` 等。索引页只保留 frontmatter、一句话摘要、raw source 路径和指向生成页的 wikilinks，不承载知识内容。
 - Cache 路径按 source_type 隔离：`.llm-wiki/ingest-cache/{source_type}/{project}/{source_name}.json`。
 - Markdown/frontmatter 读写、覆盖保护和脱敏在 [wiki_io.py](src/netsuite_llm_wiki_mcp/wiki_io.py)。生成页只能覆盖 `generated: true` 页面；人工页不能被静默覆盖。
 
 ### 写入与维护流水线
 
-- CodeGraph 摄入在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：`CodeGraphClient` 读取 `status/files/context/impact` → 写 `raw/sources/codegraph/<project>/` snapshot → 写 `wiki/projects/<project>/code/` code facts + `wiki/sources/projects/<project>/<source_name>.md` 索引页 → refresh index/overview/log → 写 `.llm-wiki/ingest-cache/codegraph/`。MCP 工具名为 `wiki_ingest_codegraph`，同步执行不需要 LLM。
+- CodeGraph 摄入在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：`CodeGraphClient`（定义在 [codegraph_client.py](src/netsuite_llm_wiki_mcp/codegraph_client.py)）读取 `status/files/context/impact/graph_snapshot` → 写 `raw/projects/<project>/codegraph/<source_name>/` snapshot → 写 `wiki/projects/<project>/architecture/` 可读页 + `wiki/projects/<project>/sources/<source_name>.md` 索引页 → refresh index/overview/log → 写 `.llm-wiki/ingest-cache/codegraph/`。MCP 工具名为 `wiki_ingest_codegraph`，同步执行不需要 LLM。`profile="suitescript"` 时额外生成 `wiki/projects/<project>/pipelines/` 页（需要完整 graph snapshot）。
 - LLM 分阶段摄入同在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：推荐两阶段流程 `stage="prepare"`（读源 + 写 `raw/sources/file/` snapshot + 返回合并 prompt）→ `stage="apply"`（校验路径并写 generated pages + 按目标目录写索引页到 `wiki/sources/{target_dir}/`）。旧三阶段（`prepare_analysis` / `prepare_generation` / `apply_generation`）仍兼容但不推荐。`source_path` 支持绝对路径和相对于 vault_root 的相对路径。`generation` 参数中 `source_summary` 可以是 dict 或纯字符串（只需一句话摘要）；顶层 `concept`/`concepts` key 会自动合并到 `pages`。
 - URL 摄入已移除（`wiki_ingest_url` 模块和工具不再存在）；URL 来源统一通过 `wiki_ingest_llm` 以 `source_type="url"` 处理。
-- 人工笔记写入在 [note_writer.py](src/netsuite_llm_wiki_mcp/note_writer.py)：`decision`/`troubleshooting`/`requirement` 写入项目目录，`knowledge` 写入 `wiki/concepts/<domain>/` 且不接受 `project`。MCP 入口为 `wiki_write_note` 工具。
+- 人工笔记写入在 [note_writer.py](src/netsuite_llm_wiki_mcp/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
 - 写入后维护集中在 [wiki_index.py](src/netsuite_llm_wiki_mcp/wiki_index.py)、[wiki_overview.py](src/netsuite_llm_wiki_mcp/wiki_overview.py)、[wiki_log.py](src/netsuite_llm_wiki_mcp/wiki_log.py)。会产生或变更页面的工具通常要刷新 index/overview 并 append log。
 - 校验在 [wiki_verify.py](src/netsuite_llm_wiki_mcp/wiki_verify.py)：两阶段 grounding check，`prepare` 从 `wiki/sources/` 索引页出发，通过 frontmatter.sources 读 raw source + 通过 body 中 wikilinks 读关联生成页，返回校验 prompt；`apply` 记录 faithfulness 结果。
 
@@ -58,6 +58,8 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 [wiki_files.py](src/netsuite_llm_wiki_mcp/wiki_files.py) 提供 `wiki_status`（vault 诊断、队列状态、版本、CodeGraph 可用性）、`wiki_list_files`（列出 wiki/sources 下公共文件，支持大小限制）和 `wiki_read_file`（读取文本文件，路径必须在 wiki/ 或 raw/sources/ 下且后缀合法）。MCP 工具为 `wiki_status`、`wiki_list_files`、`wiki_read_file`。
 
 [wiki_models.py](src/netsuite_llm_wiki_mcp/wiki_models.py) 定义核心数据结构 `WikiConfig`、`WikiPage`、`WikiLogEntry`、`WikiSearchResult`、`LintIssue`、`CodeGraphSnapshot`。
+
+[codegraph_client.py](src/netsuite_llm_wiki_mcp/codegraph_client.py) 封装 `codegraph` CLI 调用和 SQLite graph snapshot 读取，提供 `status/files/context/query/callers/callees/impact/graph_snapshot` 方法。[wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py) 通过 `CodeGraphLike` Protocol 解耦，测试可注入 mock client。
 
 [pipeline_detector.py](src/netsuite_llm_wiki_mcp/pipeline_detector.py) 基于 Louvain 社区检测的 SuiteScript 业务流水线识别：从 CodeGraph 边 + 文本隐式引用（N/task、N/record 等）构建文件级调用图，聚类为 `Pipeline` 对象（含入口点、共享记录、隐式边、置信度）。
 
@@ -74,7 +76,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - [wiki_insights.py](src/netsuite_llm_wiki_mcp/wiki_insights.py) + [louvain.py](src/netsuite_llm_wiki_mcp/louvain.py)：图谱洞察、社区、桥接页、孤立页。
 - [wiki_delete.py](src/netsuite_llm_wiki_mcp/wiki_delete.py)：source 删除及派生页/交叉引用/cache 级联清理。
 - [wiki_research.py](src/netsuite_llm_wiki_mcp/wiki_research.py)：prepare/apply 研究综合，写入 `wiki/queries/`。
-- [wiki_synthesis.py](src/netsuite_llm_wiki_mcp/wiki_synthesis.py)：prepare/apply 持久化有价值的查询答案或跨页分析，写入 `wiki/synthesis/`。
+- [wiki_synthesis.py](src/netsuite_llm_wiki_mcp/wiki_synthesis.py)：prepare/apply 持久化有价值的查询答案或跨页分析，写入 `wiki/projects/<project>/researches/`（`project` 参数必填）。
 - [wiki_gap.py](src/netsuite_llm_wiki_mcp/wiki_gap.py)：覆盖缺口分析 analyze/suggest 两阶段，扫描浅页面、悬空链接、未摄入源、分类法缺失，推荐补充动作。
 - [wiki_batch.py](src/netsuite_llm_wiki_mcp/wiki_batch.py)：持久化 ingest 队列 `.llm-wiki/ingest-queue.json`。
 
@@ -84,7 +86,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 旧 RAG 工具和旧人工笔记入口 `save_obsidian_note` 不应注册；人工笔记公开入口统一为 `wiki_write_note`。
 - 不再保存 `script` / `object` 人工事实页；对象、部署、字段和脚本参数折叠到 CodeGraph 派生页或 source 摘要。
 - `knowledge` 写入 `wiki/concepts/<domain>/`，禁止 `project`。
-- 项目目录固定为 `wiki/projects/<project>/{index.md,code/,decisions/,troubleshooting/,requirements/}`。
+- 项目目录固定为 `wiki/projects/<project>/{index.md,specs/,plans/,architecture/,pipelines/,troubleshooting/,researches/,sources/}`。
 - Windows 路径相关逻辑要覆盖非法字符、冒号 ADS、保留设备名、控制字符、尾随点/空格等边界。
 - 不要在代码、测试或文档中硬编码个人 Vault 路径、API key、token、邮箱、手机号等敏感信息；脱敏逻辑在 [redaction.py](src/netsuite_llm_wiki_mcp/redaction.py)。
 
@@ -99,7 +101,6 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 文件管理工具（status/list/read）：`tests/test_wiki_files.py`
 - Git 辅助：`tests/test_git_utils.py`
 - Pipeline 检测：`tests/test_pipeline_detector.py`
-
 - 校验：`tests/test_wiki_verify.py`
 - 查询和上下文预算：`tests/test_wiki_query.py`、`tests/test_context_budget.py`
 - 维护工具：`tests/test_wiki_lint.py`、`tests/test_wiki_enrich.py`、`tests/test_page_merge.py`、`tests/test_wiki_dedup.py`、`tests/test_wiki_insights.py`、`tests/test_louvain.py`、`tests/test_wiki_delete.py`、`tests/test_wiki_research.py`、`tests/test_wiki_synthesis.py`、`tests/test_wiki_batch.py`

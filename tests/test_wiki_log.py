@@ -16,8 +16,8 @@ def test_append_log_entry_uses_parseable_heading_and_fields(tmp_path: Path):
         WikiLogEntry(
             operation="ingest",
             title="CodeGraph alpha",
-            paths=["wiki/projects/alpha/code/script.md"],
-            sources=["raw/sources/codegraph/alpha/main/status.json"],
+            paths=["wiki/projects/alpha/architecture/script.md"],
+            sources=["raw/projects/alpha/codegraph/main/status.json"],
             project="alpha",
             status="ok",
             timestamp="2026-05-26T10:20:30Z",
@@ -29,9 +29,9 @@ def test_append_log_entry_uses_parseable_heading_and_fields(tmp_path: Path):
     assert "- project: alpha" in text
     assert "- status: ok" in text
     assert "- paths:" in text
-    assert "  - wiki/projects/alpha/code/script.md" in text
+    assert "  - wiki/projects/alpha/architecture/script.md" in text
     assert "- sources:" in text
-    assert "  - raw/sources/codegraph/alpha/main/status.json" in text
+    assert "  - raw/projects/alpha/codegraph/main/status.json" in text
 
 
 def test_append_log_entry_redacts_persisted_strings(tmp_path: Path):
@@ -90,8 +90,8 @@ def test_parse_log_entries_returns_structured_entries(tmp_path: Path):
         WikiLogEntry(
             operation="ingest",
             title="CodeGraph alpha",
-            paths=["wiki/projects/alpha/code/script.md", "wiki/sources/alpha/main.md"],
-            sources=["raw/sources/codegraph/alpha/main/context.json"],
+            paths=["wiki/projects/alpha/architecture/script.md", "wiki/projects/alpha/sources/main.md"],
+            sources=["raw/projects/alpha/codegraph/main/context.json"],
             project="alpha",
             status="ok",
             timestamp="2026-05-26T10:20:30Z",

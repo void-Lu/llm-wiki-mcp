@@ -16,8 +16,8 @@ from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 from netsuite_llm_wiki_mcp.wiki_overview import refresh_overview
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
-NOTE_TYPES = {"decision", "troubleshooting", "requirement", "knowledge"}
-PROJECT_NOTE_TYPES = {"decision", "troubleshooting", "requirement"}
+NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge"}
+PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
 DOMAINS = {"common-errors", "integration-patterns", "netsuite-object-playbooks", "suitescript-patterns"}
 WINDOWS_RESERVED_CHARS = set('<>:"|?*')
 WINDOWS_RESERVED_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL"}
@@ -126,12 +126,14 @@ def _frontmatter(
         "tags": ["netsuite", note_type, *(tags or [])],
         "title": title,
     }
-    if note_type == "decision":
-        data.update({"decision_status": decision_status or "", "decision_date": date.today().isoformat(), "related_objects": related_objects or [], "related_scripts": related_scripts or []})
+    if note_type == "spec":
+        data.update({"status": status or "", "related_objects": related_objects or [], "related_scripts": related_scripts or []})
+    elif note_type == "plan":
+        data.update({"status": status or "", "related_objects": related_objects or [], "related_scripts": related_scripts or []})
     elif note_type == "troubleshooting":
         data.update({"status": status or "", "related_objects": related_objects or [], "related_scripts": related_scripts or []})
-    elif note_type == "requirement":
-        data.update({"zentao_urls": zentao_urls or [], "related_objects": related_objects or [], "related_scripts": related_scripts or []})
+    elif note_type == "researches":
+        data.update({"status": status or "", "related_objects": related_objects or [], "related_scripts": related_scripts or [], "zentao_urls": zentao_urls or []})
     elif note_type == "knowledge":
         data.update({"topic": title, "domain": domain or "", "related_objects": related_objects or []})
         if related_script_types is not None:
@@ -177,12 +179,14 @@ def save_obsidian_note(
         if project_error is not None:
             return project_error
         assert project_value is not None
-        if note_type == "decision":
-            relative_path = Path("wiki") / "projects" / project_value / "decisions" / name
+        if note_type == "spec":
+            relative_path = Path("wiki") / "projects" / project_value / "specs" / name
+        elif note_type == "plan":
+            relative_path = Path("wiki") / "projects" / project_value / "plans" / name
         elif note_type == "troubleshooting":
             relative_path = Path("wiki") / "projects" / project_value / "troubleshooting" / name
         else:
-            relative_path = Path("wiki") / "projects" / project_value / "requirements" / name
+            relative_path = Path("wiki") / "projects" / project_value / "researches" / name
         project = project_value
     else:
         if project:

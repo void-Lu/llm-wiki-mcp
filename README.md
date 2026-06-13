@@ -65,15 +65,15 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | 工具 | 说明 |
 |------|------|
 | `wiki_status` | 返回 vault 结构诊断、ingest queue 计数、版本和 CodeGraph 可用性；不会创建或修改 vault |
-| `wiki_list_files` | 只列出公开路径 `wiki/` 和 `raw/sources/` 下的文件，支持 `root_name="wiki"|"sources"|"all"`、递归和数量限制 |
-| `wiki_read_file` | 只读取 `wiki/` 或 `raw/sources/` 下的文本文件，拒绝绝对路径、路径穿越、运行时私有目录和非文本扩展，并按字节数截断 |
+| `wiki_list_files` | 只列出公开路径 `wiki/`、`raw/sources/` 和 `raw/projects/` 下的文件，支持 `root_name="wiki"|"sources"|"all"`、递归和数量限制 |
+| `wiki_read_file` | 只读取 `wiki/`、`raw/sources/` 或 `raw/projects/` 下的文本文件，拒绝绝对路径、路径穿越、运行时私有目录和非文本扩展，并按字节数截断 |
 
 ### 摄入
 
 | 工具 | 说明 |
 |------|------|
 | `wiki_init` | 在 Obsidian vault 中创建 wiki 目录结构 |
-| `wiki_ingest_codegraph` | 将 CodeGraph 符号和代码事实同步摄入 wiki（不需要 LLM） |
+| `wiki_ingest_codegraph` | 将 CodeGraph 快照和机器代码事实同步摄入 raw，并生成项目 source/architecture/pipeline 可读页（不需要 LLM） |
 | `wiki_ingest_llm` | 两阶段 LLM 摄入（推荐）：`prepare`（返回合并 prompt）→ `apply`（写入页面）。旧三阶段 `prepare_analysis` → `prepare_generation` → `apply_generation` 仍兼容 |
 | `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot |
 | `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done |
@@ -104,45 +104,56 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | 工具 | 说明 |
 |------|------|
 | `wiki_research` | 深度研究综合：搜索结果 + `purpose.md` / `wiki/overview.md` / `wiki/index.md` → LLM 综合 → `wiki/queries/` 页面 |
-| `wiki_synthesis` | 将有价值的查询答案或分析保存为持久的 `wiki/synthesis/` 页面：`prepare` → `apply` |
+| `wiki_synthesis` | 将有价值的查询答案或分析保存为项目内 `wiki/projects/<project>/researches/` 页面：`prepare` → `apply` |
 | `wiki_write_note` | 写入人工整理的 wiki note；替代旧的 `save_obsidian_note` 公开工具名 |
 
 ## Wiki 结构
 
 ```
 vault_root/
-├── purpose.md              # 研究范围和关键问题
-├── schema.md               # 页面类型、frontmatter 规范、维护规则
+├── purpose.md
+├── schema.md
 ├── raw/
-│   ├── sources/            # 不可变 source snapshot（LLM 只读）
-│   │   ├── codegraph/     # CodeGraph 摄入的原始数据
-│   │   ├── file/          # 本地文件摄入的脱敏副本
-│   │   └── url/           # URL 抓取转换的 Markdown
-│   └── assets/             # 二进制资产
+│   ├── projects/
+│   │   └── <project>/
+│   │       ├── requirements/
+│   │       ├── codegraph/
+│   │       │   └── <source_name>/
+│   │       ├── chat/
+│   │       │   └── <yyyy>/<mm>/<dd>/<session-id>/
+│   │       └── assets/
+│   ├── sources/
+│   │   ├── file/
+│   │   ├── references/
+│   │   └── chat/
+│   └── assets/
 ├── wiki/
-│   ├── index.md            # 内容目录，LLM 导航入口
-│   ├── log.md              # 仅追加操作日志
-│   ├── overview.md         # 自动生成摘要
-│   ├── projects/<project>/ # 项目范围页面
-│   │   ├── index.md
-│   │   ├── code/           # CodeGraph 派生事实
-│   │   ├── decisions/
-│   │   ├── troubleshooting/
-│   │   └── requirements/
-│   ├── concepts/           # 领域知识（按 domain 子目录组织）
-│   ├── sources/            # 索引溯源页（不承载知识内容）
-│   │   ├── concepts/      # 关联 wiki/concepts/ 生成页的索引
-│   │   └── projects/      # 关联 wiki/projects/ 生成页的索引
-│   ├── queries/            # 研究综合页面
-│   ├── synthesis/          # 跨页面分析
-│   └── comparisons/        # 并排对比
-├── .obsidian/              # Obsidian 应用配置
-└── .llm-wiki/              # 运行时状态
-    ├── ingest-cache/       # 按 source_type 分级的摄入缓存
-    │   ├── codegraph/
-    │   ├── file/
-    │   └── url/
-    └── ingest-queue.json   # 批量摄入队列
+│   ├── index.md
+│   ├── log.md
+│   ├── overview.md
+│   ├── concepts/
+│   │   └── <domain>/
+│   ├── chatlog/
+│   │   └── <yyyy>/<mm>/<dd>/
+│   ├── projects/
+│   │   └── <project>/
+│   │       ├── index.md
+│   │       ├── specs/
+│   │       ├── plans/
+│   │       ├── architecture/
+│   │       ├── pipelines/
+│   │       ├── troubleshooting/
+│   │       ├── researches/
+│   │       └── sources/
+│   ├── sources/
+│   ├── queries/
+│   ├── comparisons/
+│   └── maintenance/
+└── .llm-wiki/
+    ├── ingest-cache/
+    ├── ingest-queue.json
+    ├── graph-index/
+    └── relation-candidates/
 ```
 
 ## LLM Wiki 工作流
@@ -155,10 +166,10 @@ vault_root/
 2. 摄入 source：
    - 代码仓库 → `wiki_ingest_codegraph`（同步，不需要 LLM）
    - 本地文件 → `wiki_ingest_llm(stage="prepare")` → LLM 生成 → `wiki_ingest_llm(stage="apply")`
-   - 外部生成的 MD 文件 → `wiki_ingest_llm(stage="apply", source_type="url")`
+   - 外部爬虫或人工收集的 MD 文件 → `raw/sources/references/` 或 `raw/sources/file/` → `wiki_ingest_llm(stage="prepare")` → `wiki_ingest_llm(stage="apply")`
 3. 用 `wiki_verify` 校验生成页面是否忠实于原始来源。
 4. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。
-5. 通过 `wiki_research` / `wiki_synthesis` / `wiki_write_note`，把有价值的研究、对比、查询答案和人工决策写回 `wiki/queries/`、`wiki/synthesis/` 或项目笔记目录。
+5. 通过 `wiki_research` / `wiki_synthesis` / `wiki_write_note`，把有价值的研究、对比、查询答案和人工整理内容写回 `wiki/queries/`、`wiki/projects/<project>/researches/`、`wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/` 或 `wiki/concepts/`。
 6. 用 `wiki_lint`、`wiki_enrich`、`wiki_dedup`、`wiki_insights` 和 `wiki_changelog` 保持图谱健康；使用 `wiki_lint(stage="prepare_semantic_review")` → `wiki_lint(stage="apply_semantic_review")` 进行 LLM 辅助的矛盾、过期声明和缺失概念审查。
 
 对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
@@ -168,13 +179,15 @@ vault_root/
 ### CodeGraph 摄入
 
 ```
-wiki_ingest_codegraph → raw/sources/codegraph/<project>/
-                      → wiki/projects/<project>/code/ (代码事实页面)
-                      → wiki/sources/projects/<project>/<source_name>.md (索引页)
+wiki_ingest_codegraph → raw/projects/<project>/codegraph/<source_name>/
+                      → raw/projects/<project>/codegraph/<source_name>/codefacts.json
+                      → wiki/projects/<project>/sources/<source_name>.md (索引页)
+                      → wiki/projects/<project>/architecture/code-overview.md
+                      → wiki/projects/<project>/pipelines/ (仅 profile="suitescript" 且检测到链路时)
                       → index + overview + log 更新
 ```
 
-`wiki_ingest_codegraph` 默认使用 `profile="generic"`，只生成通用 CodeGraph 代码事实，不运行 SuiteScript 专属 pipeline 深入分析。SuiteScript/SuiteCloud 项目需要传 `profile="suitescript"` 才会启用 `N/task`、`N/record`、`N/url`、`form.clientScriptModulePath`、`custscript_*` 等隐式关系抽取和业务 pipeline 页面生成。对 SDF 项目根目录摄入时，可用 `include_extensions=[".js"]` 只保留脚本文件，避免 `Objects/*.xml` 混入代码事实页。
+`wiki_ingest_codegraph` 默认使用 `profile="generic"`，CodeGraph 机器事实保存到 raw，不再作为普通 wiki 知识页展示；可读层只生成项目 source 索引和 architecture overview。SuiteScript/SuiteCloud 项目需要传 `profile="suitescript"` 才会启用 `N/task`、`N/record`、`N/url`、`form.clientScriptModulePath`、`custscript_*` 等隐式关系抽取和业务 pipeline 页面生成。对 SDF 项目根目录摄入时，可用 `include_extensions=[".js"]` 只保留脚本文件，避免 `Objects/*.xml` 混入代码事实。
 
 ### LLM 分阶段摄入
 
@@ -182,7 +195,7 @@ wiki_ingest_codegraph → raw/sources/codegraph/<project>/
 推荐两阶段流程：
 prepare → 读源文件 + 写 raw/sources/file/ snapshot + 返回合并 prompt（agent 发送给 LLM）
 apply   → 写 wiki/concepts/ 或 wiki/projects/ 下的知识页面
-        → 写 wiki/sources/{target_dir}/<project>/<source_name>.md 索引溯源页
+        → 写 wiki/projects/<project>/sources/<source_name>-<target_dir>.md 索引溯源页
 
 旧三阶段（仍兼容）：
 prepare_analysis   → 返回 analysis prompt

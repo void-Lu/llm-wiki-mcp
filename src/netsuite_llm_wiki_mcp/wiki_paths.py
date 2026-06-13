@@ -10,17 +10,23 @@ WINDOWS_RESERVED_DEVICE_PREFIXES = ("COM", "LPT")
 WINDOWS_RESERVED_DEVICE_SUFFIXES = set("123456789¹²³")
 
 TOP_LEVEL_DIRS = (
+    Path("raw/projects"),
     Path("raw/sources"),
+    Path("raw/sources/file"),
+    Path("raw/sources/references"),
+    Path("raw/sources/chat"),
     Path("raw/assets"),
     Path("wiki/projects"),
     Path("wiki/concepts"),
-    Path("wiki/sources/concepts"),
-    Path("wiki/sources/projects"),
+    Path("wiki/chatlog"),
+    Path("wiki/sources"),
     Path("wiki/queries"),
-    Path("wiki/synthesis"),
     Path("wiki/comparisons"),
+    Path("wiki/maintenance"),
     Path(".obsidian"),
-    Path(".llm-wiki"),
+    Path(".llm-wiki/ingest-cache"),
+    Path(".llm-wiki/graph-index"),
+    Path(".llm-wiki/relation-candidates"),
 )
 
 
@@ -30,7 +36,7 @@ DEFAULT_SCHEMA_TEXT = """# Schema
 
 ## LLM Wiki 维护原则
 
-1. `raw/sources/` 是来源事实层：保存经过脱敏的 source snapshot、manifest 或 CodeGraph 输出；除 rescan/delete 等生命周期工具外，不把它当成普通可编辑笔记。
+1. `raw/` 是来源事实层：保存经过脱敏的 source snapshot、manifest、项目原始资料、会话原文或 CodeGraph 输出；除 rescan/delete 等生命周期工具外，不把它当成普通可编辑笔记。
 2. `wiki/` 是知识编译层：页面可以总结、关联、比较、综合，但必须能通过 `sources` 字段追溯到 raw snapshot、外部搜索结果或人工 note。
 3. `purpose.md` 描述当前 vault 的研究范围；`schema.md` 描述维护规则；`wiki/index.md` 是内容目录；`wiki/log.md` 是时间线。
 4. 优先维护可读 Markdown、YAML frontmatter 和 `[[wikilink]]` 图谱；不要把 embedding/vector DB 作为主路径。
@@ -40,15 +46,18 @@ DEFAULT_SCHEMA_TEXT = """# Schema
 
 | frontmatter `type` | 位置 | 说明 | generated |
 | --- | --- | --- | --- |
-| `source_index` | `wiki/sources/{target_dir}/<project>/` | 索引溯源页：frontmatter + 一句话摘要 + raw source 路径 + wikilinks，不承载知识内容 | `true` |
-| `code_fact` | `wiki/projects/<project>/code/` | CodeGraph 派生的代码事实页 | `true` |
-| `decision` | `wiki/projects/<project>/decisions/` | 人工决策记录 | `false` |
+| `source_index` | `wiki/projects/<project>/sources/` 或 `wiki/sources/` | 索引溯源页：frontmatter + 一句话摘要 + raw source 路径 + wikilinks，不承载知识内容 | `true` |
+| `spec` | `wiki/projects/<project>/specs/` | 模型生成的规格文档 | `true` 或 `false` |
+| `plan` | `wiki/projects/<project>/plans/` | 模型生成的实施计划 | `true` 或 `false` |
+| `architecture` | `wiki/projects/<project>/architecture/` | 长期稳定的项目架构说明 | `true` 或 `false` |
+| `pipeline` | `wiki/projects/<project>/pipelines/` | 业务流程、SuiteScript 调用链、数据流、任务链路 | `true` |
 | `troubleshooting` | `wiki/projects/<project>/troubleshooting/` | 人工排障经验 | `false` |
-| `requirement` | `wiki/projects/<project>/requirements/` | 人工需求记录 | `false` |
+| `researches` | `wiki/projects/<project>/researches/` | 项目调查结果、代码阅读结论、专题研究沉淀 | `true` 或 `false` |
+| `chatlog` | `wiki/chatlog/<yyyy>/<mm>/<dd>/` | 会话摘要入口 | `true` |
 | `concept` / `knowledge` | `wiki/concepts/<domain-or-project>/` | 领域知识、API 参考、场景实践 | `true` 或 `false` |
 | `query` | `wiki/queries/` | 外部研究或一次问题综合后的归档页 | `true` |
-| `synthesis` | `wiki/synthesis/` | 跨项目、跨来源的综合分析 | `true` 或 `false` |
 | `comparison` | `wiki/comparisons/` | 方案、对象、实现路径的对比 | `true` 或 `false` |
+| `maintenance` | `wiki/maintenance/` | 断链、孤儿页、重复页、候选关联、迁移审计等治理报告 | `true` |
 | `index` | `wiki/index.md` | 内容目录，按类别列出页面和摘要 | `true` |
 | `project_index` | `wiki/projects/<project>/index.md` | 项目内目录 | `true` |
 | `overview` | `wiki/overview.md` | 自动统计和最近日志摘要 | `true` |
@@ -67,7 +76,7 @@ domain: suitescript       # knowledge/concept 可选
 source_name: docs         # 来源命名空间，可选
 source_hash: sha256...    # source snapshot hash，可选
 sources:
-    - raw/sources/file/project-a/docs/source.md
+    - raw/projects/project-a/codegraph/main/graph.json
 summary: 一句话摘要
 tags:
     - netsuite
@@ -85,7 +94,7 @@ tags:
 
 ## 写入与覆盖规则
 
-1. 只能写入固定结构：`wiki/projects/<project>/{code,decisions,troubleshooting,requirements}/`、`wiki/concepts/`、`wiki/sources/`、`wiki/queries/`、`wiki/synthesis/`、`wiki/comparisons/`。
+1. 只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,pipelines,troubleshooting,researches,sources}/`、`wiki/concepts/`、`wiki/chatlog/`、`wiki/sources/`、`wiki/queries/`、`wiki/comparisons/`、`wiki/maintenance/`。
 2. 工具生成页只能覆盖已有 `generated: true` 页面；遇到 `generated: false` 必须停止并报告。
 3. 页面合并时保留锁定字段：`type`、`title`、`created`、人工维护字段；数组字段采用去重合并。
 4. 文件名和路径段必须是 Windows 安全的单段名称：不得包含 `<>:"|?*`、控制字符、ADS 冒号、保留设备名、尾随点或空格。
@@ -97,9 +106,9 @@ tags:
 
 ```text
 wiki_ingest_codegraph
-    -> raw/sources/codegraph/<project>/<source_name>/
-    -> wiki/projects/<project>/code/*.md
-    -> wiki/sources/projects/<project>/<source_name>.md (索引页)
+    -> raw/projects/<project>/codegraph/<source_name>/
+    -> wiki/projects/<project>/sources/<source_name>.md (索引页)
+    -> wiki/projects/<project>/architecture/ 或 pipelines/ (可读总结页)
     -> refresh wiki/index.md + wiki/overview.md
     -> append wiki/log.md
 ```
@@ -112,7 +121,7 @@ wiki_ingest_llm(stage="prepare")
     -> 返回合并 prompt
 wiki_ingest_llm(stage="apply")
     -> wiki/concepts/ 或 wiki/projects/ 下的知识页面
-    -> wiki/sources/{target_dir}/<project>/<source_name>.md (索引页)
+    -> wiki/projects/<project>/sources/<source_name>.md 或 wiki/sources/<source_name>.md (索引页)
     -> refresh index/overview/log/cache
 ```
 
@@ -120,7 +129,7 @@ wiki_ingest_llm(stage="apply")
 
 1. 回答问题时优先使用 `wiki_query` 获取带编号引用的 context pack，再基于 `[1]`、`[2]` 等引用回答。
 2. `wiki_query` 默认搜索 `wiki/**`，必要时可启用 `include_raw_sources` 查看 raw snapshot。
-3. 重要的比较、研究结论或跨页洞察，不应只留在聊天记录里；应通过 `wiki_research`、`wiki_write_note` 或后续 synthesis 工具归档到 `wiki/queries/` / `wiki/synthesis/`。
+3. 重要的比较、研究结论或跨页洞察，不应只留在聊天记录里；应通过 `wiki_research`、`wiki_write_note` 或后续 research 工具归档到 `wiki/queries/` / `wiki/projects/<project>/researches/`。
 4. 本地 Markdown 的宽泛检索可搭配 qmd 等外部工具，但不要把 qmd/embedding 设为本 MCP 的默认运行依赖。
 
 ## 维护工作流
@@ -185,20 +194,47 @@ class WikiPaths:
     def project_root(self, project: str) -> Path:
         return self.root / "wiki" / "projects" / safe_segment(project)
 
-    def project_code_dir(self, project: str) -> Path:
-        return self.project_root(project) / "code"
+    def raw_project_root(self, project: str) -> Path:
+        return self.root / "raw" / "projects" / safe_segment(project)
 
-    def project_decisions_dir(self, project: str) -> Path:
-        return self.project_root(project) / "decisions"
+    def raw_project_requirements_dir(self, project: str) -> Path:
+        return self.raw_project_root(project) / "requirements"
+
+    def raw_project_codegraph_dir(self, project: str) -> Path:
+        return self.raw_project_root(project) / "codegraph"
+
+    def raw_project_chat_dir(self, project: str) -> Path:
+        return self.raw_project_root(project) / "chat"
+
+    def raw_project_assets_dir(self, project: str) -> Path:
+        return self.raw_project_root(project) / "assets"
+
+    def project_specs_dir(self, project: str) -> Path:
+        return self.project_root(project) / "specs"
+
+    def project_plans_dir(self, project: str) -> Path:
+        return self.project_root(project) / "plans"
+
+    def project_architecture_dir(self, project: str) -> Path:
+        return self.project_root(project) / "architecture"
+
+    def project_pipelines_dir(self, project: str) -> Path:
+        return self.project_root(project) / "pipelines"
 
     def project_troubleshooting_dir(self, project: str) -> Path:
         return self.project_root(project) / "troubleshooting"
 
-    def project_requirements_dir(self, project: str) -> Path:
-        return self.project_root(project) / "requirements"
+    def project_researches_dir(self, project: str) -> Path:
+        return self.project_root(project) / "researches"
+
+    def project_sources_dir(self, project: str) -> Path:
+        return self.project_root(project) / "sources"
 
     def concepts_dir(self) -> Path:
         return self.root / "wiki" / "concepts"
+
+    def chatlog_dir(self) -> Path:
+        return self.root / "wiki" / "chatlog"
 
     def sources_dir(self) -> Path:
         return self.root / "wiki" / "sources"
@@ -206,11 +242,11 @@ class WikiPaths:
     def queries_dir(self) -> Path:
         return self.root / "wiki" / "queries"
 
-    def synthesis_dir(self) -> Path:
-        return self.root / "wiki" / "synthesis"
-
     def comparisons_dir(self) -> Path:
         return self.root / "wiki" / "comparisons"
+
+    def maintenance_dir(self) -> Path:
+        return self.root / "wiki" / "maintenance"
 
 
 def safe_segment(value: str) -> str:

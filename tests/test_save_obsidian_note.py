@@ -64,9 +64,10 @@ def test_script_and_object_note_types_are_removed(vault: Path, note_type: str):
 @pytest.mark.parametrize(
     ("note_type", "kwargs", "expected_path"),
     [
-        ("decision", {"project": "project-a"}, "wiki/projects/project-a/decisions/decision-note.md"),
+        ("spec", {"project": "project-a"}, "wiki/projects/project-a/specs/spec-note.md"),
+        ("plan", {"project": "project-a"}, "wiki/projects/project-a/plans/plan-note.md"),
         ("troubleshooting", {"project": "project-a"}, "wiki/projects/project-a/troubleshooting/troubleshooting-note.md"),
-        ("requirement", {"project": "project-a"}, "wiki/projects/project-a/requirements/requirement-note.md"),
+        ("researches", {"project": "project-a"}, "wiki/projects/project-a/researches/researches-note.md"),
         ("knowledge", {"domain": "suitescript-patterns"}, "wiki/concepts/suitescript-patterns/knowledge-note.md"),
     ],
 )
@@ -78,7 +79,7 @@ def test_note_type_path_mappings_create_expected_files(vault: Path, note_type: s
     assert (vault / expected_path).is_file()
 
 
-@pytest.mark.parametrize("note_type", ["decision", "troubleshooting", "requirement"])
+@pytest.mark.parametrize("note_type", ["spec", "plan", "troubleshooting", "researches"])
 def test_project_note_types_require_project(vault: Path, note_type: str):
     result = _save(vault, note_type=note_type)
 
@@ -108,16 +109,16 @@ def test_unknown_knowledge_domain_returns_code(vault: Path):
 
 
 def test_explicit_filename_appends_markdown_extension(vault: Path):
-    result = _save(vault, note_type="decision", project="project-a", filename="chosen-name")
+    result = _save(vault, note_type="spec", project="project-a", filename="chosen-name")
 
     assert result["ok"] is True
-    assert result["path"] == "wiki/projects/project-a/decisions/chosen-name.md"
-    assert (vault / "wiki/projects/project-a/decisions/chosen-name.md").is_file()
+    assert result["path"] == "wiki/projects/project-a/specs/chosen-name.md"
+    assert (vault / "wiki/projects/project-a/specs/chosen-name.md").is_file()
 
 
 @pytest.mark.parametrize("filename", ["bad<name", "bad>name", "bad:name", "bad\"name", "bad|name", "bad?name", "bad*name", "bad\x00name", "bad\x1fname"])
 def test_explicit_filename_rejects_windows_invalid_characters(vault: Path, filename: str):
-    result = _save(vault, note_type="decision", project="project-a", filename=filename)
+    result = _save(vault, note_type="spec", project="project-a", filename=filename)
 
     assert result["ok"] is False
     assert result["code"] == "invalid_filename"
@@ -125,7 +126,7 @@ def test_explicit_filename_rejects_windows_invalid_characters(vault: Path, filen
 
 @pytest.mark.parametrize("filename", ["bad/name", "bad\\name"])
 def test_explicit_filename_rejects_path_separators_as_path_escape(vault: Path, filename: str):
-    result = _save(vault, note_type="decision", project="project-a", filename=filename)
+    result = _save(vault, note_type="spec", project="project-a", filename=filename)
 
     assert result["ok"] is False
     assert result["code"] == "path_escape"
@@ -133,7 +134,7 @@ def test_explicit_filename_rejects_path_separators_as_path_escape(vault: Path, f
 
 @pytest.mark.parametrize("filename", ["CON", "con.md", "NUL.tar.gz", "COM1", "COM¹.md", "LPT9"])
 def test_explicit_filename_rejects_windows_reserved_device_names(vault: Path, filename: str):
-    result = _save(vault, note_type="decision", project="project-a", filename=filename)
+    result = _save(vault, note_type="spec", project="project-a", filename=filename)
 
     assert result["ok"] is False
     assert result["code"] == "invalid_filename"
@@ -142,12 +143,12 @@ def test_explicit_filename_rejects_windows_reserved_device_names(vault: Path, fi
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"note_type": "decision", "project": "client:ads"},
-        {"note_type": "decision", "project": "bad\x1fname"},
-        {"note_type": "decision", "project": "project-a."},
-        {"note_type": "decision", "project": "project-a "},
-        {"note_type": "decision", "project": "CON"},
-        {"note_type": "decision", "project": "con.md"},
+        {"note_type": "spec", "project": "client:ads"},
+        {"note_type": "spec", "project": "bad\x1fname"},
+        {"note_type": "spec", "project": "project-a."},
+        {"note_type": "spec", "project": "project-a "},
+        {"note_type": "spec", "project": "CON"},
+        {"note_type": "spec", "project": "con.md"},
         {"note_type": "knowledge", "domain": "common-errors:ads"},
     ],
 )
@@ -161,9 +162,9 @@ def test_path_segments_reject_windows_invalid_components(vault: Path, kwargs: di
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"note_type": "decision", "project": "../../escape"},
+        {"note_type": "spec", "project": "../../escape"},
         {"note_type": "knowledge", "domain": "../escape"},
-        {"note_type": "decision", "project": "project-a", "filename": "../escape"},
+        {"note_type": "spec", "project": "project-a", "filename": "../escape"},
     ],
 )
 def test_path_traversal_returns_path_escape(vault: Path, kwargs: dict[str, str]):
@@ -179,19 +180,19 @@ def test_auto_index_is_ignored_and_returns_null_indexed(vault: Path, monkeypatch
 
     monkeypatch.setattr("netsuite_llm_wiki_mcp.note_writer.run_index_sources", fail_index, raising=False)
 
-    result = _save(vault, note_type="decision", project="project-a", auto_index=True)
+    result = _save(vault, note_type="spec", project="project-a", auto_index=True)
 
     assert result["ok"] is True
     assert result["indexed"] is None
 
 
 def test_existing_target_overwrite_false_returns_file_exists_and_preserves_bytes(vault: Path):
-    target = vault / "wiki" / "projects" / "project-a" / "decisions" / "existing-note.md"
+    target = vault / "wiki" / "projects" / "project-a" / "specs" / "existing-note.md"
     target.parent.mkdir(parents=True)
     original = b"original bytes\xff\n"
     target.write_bytes(original)
 
-    result = save_obsidian_note(note_type="decision", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", vault_root=str(vault), auto_index=False)
 
     assert result["ok"] is False
     assert result["code"] == "file_exists"
@@ -199,11 +200,11 @@ def test_existing_target_overwrite_false_returns_file_exists_and_preserves_bytes
 
 
 def test_existing_target_overwrite_true_replaces_content(vault: Path):
-    target = vault / "wiki" / "projects" / "project-a" / "decisions" / "existing-note.md"
+    target = vault / "wiki" / "projects" / "project-a" / "specs" / "existing-note.md"
     target.parent.mkdir(parents=True)
     target.write_text("Original body", encoding="utf-8")
 
-    result = save_obsidian_note(note_type="decision", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", overwrite=True, vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", overwrite=True, vault_root=str(vault), auto_index=False)
 
     assert result["ok"] is True
     assert target.read_text(encoding="utf-8") != "Original body"
@@ -211,18 +212,18 @@ def test_existing_target_overwrite_true_replaces_content(vault: Path):
 
 
 def test_frontmatter_fixed_fields_and_old_fields_absent(vault: Path):
-    result = save_obsidian_note(note_type="decision", title="Decision fields", content="Body", project="project-a", tags=["custom"], related_objects=["salesorder"], related_scripts=["customscript_sync"], decision_status="accepted", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="Spec fields", content="Body", project="project-a", tags=["custom"], related_objects=["salesorder"], related_scripts=["customscript_sync"], status="accepted", vault_root=str(vault), auto_index=False)
 
     path = _written_path(vault, result)
     text = path.read_text(encoding="utf-8")
     frontmatter, body = _frontmatter_and_body(path)
-    assert frontmatter["type"] == "decision"
+    assert frontmatter["type"] == "spec"
     assert frontmatter["generated"] is False
     assert frontmatter["project"] == "project-a"
     assert frontmatter["author"] == "copilot"
     assert date.fromisoformat(str(frontmatter["updated_at"])) <= date.today()
     assert "netsuite" in frontmatter["tags"]
-    assert "decision" in frontmatter["tags"]
+    assert "spec" in frontmatter["tags"]
     assert "custom" in frontmatter["tags"]
     assert frontmatter["related_objects"] == ["salesorder"]
     assert frontmatter["related_scripts"] == ["customscript_sync"]
@@ -232,21 +233,21 @@ def test_frontmatter_fixed_fields_and_old_fields_absent(vault: Path):
 
 
 def test_slug_keeps_chinese_and_cleans_punctuation(vault: Path):
-    result = save_obsidian_note(note_type="decision", title="  修复 RESTlet: 订单/同步!!!  ", content="Body", project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="  修复 RESTlet: 订单/同步!!!  ", content="Body", project="project-a", vault_root=str(vault), auto_index=False)
 
     assert result["ok"] is True
-    assert result["path"] == "wiki/projects/project-a/decisions/修复-RESTlet-订单-同步.md"
+    assert result["path"] == "wiki/projects/project-a/specs/修复-RESTlet-订单-同步.md"
 
 
 def test_slug_truncates_to_80_characters(vault: Path):
-    result = save_obsidian_note(note_type="decision", title="a" * 100, content="Body", project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="a" * 100, content="Body", project="project-a", vault_root=str(vault), auto_index=False)
 
     assert result["ok"] is True
     assert len(Path(str(result["path"])).stem) == 80
 
 
 def test_empty_slug_returns_code(vault: Path):
-    result = save_obsidian_note(note_type="decision", title="/\\:*?\"<>| !!!", content="Body", project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="/\\:*?\"<>| !!!", content="Body", project="project-a", vault_root=str(vault), auto_index=False)
 
     assert result["ok"] is False
     assert result["code"] == "empty_slug"
@@ -286,11 +287,11 @@ def test_redacts_sensitive_body_without_corrupting_frontmatter(vault: Path):
 
 
 def test_no_sensitive_body_returns_zero_redactions(vault: Path):
-    result = save_obsidian_note(note_type="requirement", title="No redaction", content="普通需求说明，不包含敏感信息。", project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="researches", title="No redaction", content="普通需求说明，不包含敏感信息。", project="project-a", vault_root=str(vault), auto_index=False)
 
     path = _written_path(vault, result)
     frontmatter, body = _frontmatter_and_body(path)
-    assert frontmatter["type"] == "requirement"
+    assert frontmatter["type"] == "researches"
     assert result["redacted_count"] == 0
     assert "普通需求说明" in body
 
@@ -323,7 +324,7 @@ def test_save_note_missing_config_does_not_use_cwd(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(tmp_path / "missing-config"))
     monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
 
-    result = save_obsidian_note(note_type="decision", title="No config", content="Body", project="project-a", auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="No config", content="Body", project="project-a", auto_index=False)
 
     assert result["ok"] is False
     assert result["code"] == "missing_vault_root"

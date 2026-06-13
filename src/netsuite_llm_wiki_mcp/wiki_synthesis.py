@@ -45,7 +45,7 @@ def _prepare(
         "stage": "prepare",
         "question": question,
         "prompt": prompt,
-        "expected_response_schema": {"body": "markdown synthesis body only, no frontmatter"},
+        "expected_response_schema": {"body": "markdown research body only, no frontmatter"},
         "next_call": {"tool": "wiki_synthesis", "stage": "apply", "required": ["synthesis"]},
     }
 
@@ -63,25 +63,27 @@ def _apply(
         return {"ok": False, "code": "empty_synthesis", "error": "synthesis content is empty"}
     cleaned = _strip_thinking_blocks(synthesis).strip()
     today = date.today().isoformat()
-    page_title = title or f"Synthesis: {question}"
-    filename = f"synthesis-{slug(page_title)}-{today}.md"
-    rel_path = Path("wiki") / "synthesis" / filename
+    page_title = title or f"Research: {question}"
+    filename = f"research-{slug(page_title)}-{today}.md"
+    if not project:
+        return {"ok": False, "code": "missing_project", "error": "project is required for research pages"}
+    rel_path = Path("wiki") / "projects" / project / "researches" / filename
     sources = [str(page.get("path")) for page in context_pages if page.get("path")]
     frontmatter: dict[str, Any] = {
-        "type": "synthesis",
+        "type": "researches",
         "generated": True,
-        "origin": "query-synthesis",
+        "origin": "query-research",
         "question": question,
         "created": today,
         "language": language,
         "sources": sources,
-        "summary": f"Query synthesis for: {question}",
+        "summary": f"Query research for: {question}",
     }
     if project:
         frontmatter["project"] = project
     write_wiki_page(root, WikiPage(rel_path, frontmatter, page_title, cleaned))
     refresh_indexes(root)
-    append_log_entry(root, WikiLogEntry(operation="synthesis", title=page_title, paths=[rel_path.as_posix()], sources=sources, project=project or "", status="ok"))
+    append_log_entry(root, WikiLogEntry(operation="researches", title=page_title, paths=[rel_path.as_posix()], sources=sources, project=project or "", status="ok"))
     return {"ok": True, "stage": "apply", "path": rel_path.as_posix(), "question": question}
 
 
@@ -99,7 +101,7 @@ def _build_prompt(root: Path, question: str, context_pages: list[dict[str, Any]]
         for idx, page in enumerate(context_pages, 1)
     )
     return "\n".join([
-        "You are writing a durable LLM Wiki synthesis page from a prior query.",
+        "You are writing a durable LLM Wiki research page from a prior query.",
         f"Language: {language}",
         f"Project: {project or ''}",
         f"Title: {title or ''}",

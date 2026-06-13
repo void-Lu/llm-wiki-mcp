@@ -20,41 +20,49 @@ def _page(path: str, title: str, summary: str = "") -> WikiPage:
 def test_refresh_indexes_groups_top_level_wiki_categories(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    write_wiki_page(root, _page("wiki/projects/alpha/code/script.md", "Script", "code summary"))
+    write_wiki_page(root, _page("wiki/projects/alpha/specs/spec.md", "Spec", "spec summary"))
     write_wiki_page(root, _page("wiki/concepts/suitescript.md", "SuiteScript", "concept summary"))
+    write_wiki_page(root, _page("wiki/chatlog/2026/06/13/session.md", "Session", "chat summary"))
     write_wiki_page(root, _page("wiki/sources/source-a.md", "Source A", "source summary"))
     write_wiki_page(root, _page("wiki/queries/query-a.md", "Query A", "query summary"))
-    write_wiki_page(root, _page("wiki/synthesis/synth-a.md", "Synthesis A", "synthesis summary"))
     write_wiki_page(root, _page("wiki/comparisons/compare-a.md", "Compare A", "comparison summary"))
+    write_wiki_page(root, _page("wiki/maintenance/link-audit.md", "Link Audit", "maintenance summary"))
 
     result = refresh_indexes(root)
 
     assert result["ok"] is True
     index = (root / "wiki/index.md").read_text(encoding="utf-8")
-    for heading in ["## Projects", "## Concepts", "## Sources", "## Queries", "## Synthesis", "## Comparisons"]:
+    for heading in ["## Projects", "## Concepts", "## Chatlog", "## Sources", "## Queries", "## Comparisons", "## Maintenance"]:
         assert heading in index
     assert "[[projects/alpha/index.md|alpha]]" in index
     assert "[[concepts/suitescript.md|SuiteScript]] — concept summary" in index
+    assert "[[chatlog/2026/06/13/session.md|Session]] — chat summary" in index
     assert "[[sources/source-a.md|Source A]] — source summary" in index
 
 
 def test_refresh_indexes_creates_project_index_grouped_by_subdirectories(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    write_wiki_page(root, _page("wiki/projects/alpha/code/script.md", "Script", "code summary"))
-    write_wiki_page(root, _page("wiki/projects/alpha/decisions/decision.md", "Decision", "decision summary"))
+    write_wiki_page(root, _page("wiki/projects/alpha/specs/spec.md", "Spec", "spec summary"))
+    write_wiki_page(root, _page("wiki/projects/alpha/plans/plan.md", "Plan", "plan summary"))
+    write_wiki_page(root, _page("wiki/projects/alpha/architecture/arch.md", "Architecture", "architecture summary"))
+    write_wiki_page(root, _page("wiki/projects/alpha/pipelines/pipeline.md", "Pipeline", "pipeline summary"))
     write_wiki_page(root, _page("wiki/projects/alpha/troubleshooting/issue.md", "Issue", "issue summary"))
-    write_wiki_page(root, _page("wiki/projects/alpha/requirements/spec.md", "Spec", "spec summary"))
+    write_wiki_page(root, _page("wiki/projects/alpha/researches/investigation.md", "Investigation", "research summary"))
+    write_wiki_page(root, _page("wiki/projects/alpha/sources/source.md", "Source", "source summary"))
 
     refresh_indexes(root)
 
     project_index = (root / "wiki/projects/alpha/index.md").read_text(encoding="utf-8")
-    for heading in ["## Code", "## Decisions", "## Troubleshooting", "## Requirements"]:
+    for heading in ["## Specs", "## Plans", "## Architecture", "## Pipelines", "## Troubleshooting", "## Researches", "## Sources"]:
         assert heading in project_index
-    assert "[[code/script.md|Script]] — code summary" in project_index
-    assert "[[decisions/decision.md|Decision]] — decision summary" in project_index
+    assert "[[specs/spec.md|Spec]] — spec summary" in project_index
+    assert "[[plans/plan.md|Plan]] — plan summary" in project_index
+    assert "[[architecture/arch.md|Architecture]] — architecture summary" in project_index
+    assert "[[pipelines/pipeline.md|Pipeline]] — pipeline summary" in project_index
     assert "[[troubleshooting/issue.md|Issue]] — issue summary" in project_index
-    assert "[[requirements/spec.md|Spec]] — spec summary" in project_index
+    assert "[[researches/investigation.md|Investigation]] — research summary" in project_index
+    assert "[[sources/source.md|Source]] — source summary" in project_index
 
 
 def test_refresh_indexes_refuses_to_overwrite_manual_top_index(tmp_path: Path):

@@ -122,7 +122,7 @@ qmd 本身不负责：
 3. agent 基于上下文生成外部搜索 query。
 4. 用户或 agent 执行 web search。
 5. 将搜索结果传给 `wiki_research(stage="prepare")`。
-6. 将 LLM synthesis 传给 `wiki_research(stage="apply")`。
+6. 将 LLM research body 传给 `wiki_research(stage="apply")`。
 
 该流程保留了当前 MCP 的 staged 可控性，也避免新增搜索 API key 和 provider 配置。
 

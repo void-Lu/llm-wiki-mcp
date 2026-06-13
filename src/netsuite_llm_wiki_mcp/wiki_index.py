@@ -10,17 +10,21 @@ from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 _TOP_LEVEL_GROUPS = (
     ("Projects", Path("wiki/projects")),
     ("Concepts", Path("wiki/concepts")),
+    ("Chatlog", Path("wiki/chatlog")),
     ("Sources", Path("wiki/sources")),
     ("Queries", Path("wiki/queries")),
-    ("Synthesis", Path("wiki/synthesis")),
     ("Comparisons", Path("wiki/comparisons")),
+    ("Maintenance", Path("wiki/maintenance")),
 )
 
 _PROJECT_GROUPS = (
-    ("Code", "code"),
-    ("Decisions", "decisions"),
+    ("Specs", "specs"),
+    ("Plans", "plans"),
+    ("Architecture", "architecture"),
+    ("Pipelines", "pipelines"),
     ("Troubleshooting", "troubleshooting"),
-    ("Requirements", "requirements"),
+    ("Researches", "researches"),
+    ("Sources", "sources"),
 )
 
 

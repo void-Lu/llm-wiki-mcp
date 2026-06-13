@@ -19,10 +19,11 @@ class WikiWriteError(ValueError):
 _ALLOWED_PREFIXES = (
     Path("wiki/projects"),
     Path("wiki/concepts"),
+    Path("wiki/chatlog"),
     Path("wiki/sources"),
     Path("wiki/queries"),
-    Path("wiki/synthesis"),
     Path("wiki/comparisons"),
+    Path("wiki/maintenance"),
 )
 
 _FORBIDDEN_PARTS = {"objects"}
@@ -32,8 +33,31 @@ _FORBIDDEN_PREFIXES = (
     Path("wiki/troubleshooting"),
     Path("wiki/requirements"),
     Path("wiki/knowledge"),
+    Path("wiki/synthesis"),
     Path("projects"),
 )
+
+_PROJECT_SUBDIRS = {
+    "specs",
+    "plans",
+    "architecture",
+    "pipelines",
+    "troubleshooting",
+    "researches",
+    "sources",
+}
+
+_RESERVED_STRUCTURE_PARTS = {
+    "wiki",
+    "projects",
+    "concepts",
+    "chatlog",
+    "sources",
+    "queries",
+    "comparisons",
+    "maintenance",
+    *_PROJECT_SUBDIRS,
+}
 
 
 def read_markdown_page(path: str | Path, vault_root: str | Path | None = None) -> WikiPage:
@@ -113,7 +137,7 @@ def _validate_relative_path(path: Path) -> Path:
     if _starts_with(normalized, Path("wiki/projects")) and not _is_valid_project_path(normalized):
         raise WikiWriteError("invalid_wiki_path", f"project page path is outside the confirmed project structure: {normalized.as_posix()}")
     for part in normalized.parts:
-        if part in {"wiki", "projects", "concepts", "sources", "queries", "synthesis", "comparisons", "code", "decisions", "troubleshooting", "requirements"}:
+        if part in _RESERVED_STRUCTURE_PARTS:
             continue
         stem = Path(part).stem if part.endswith(".md") else part
         try:
@@ -128,7 +152,7 @@ def _is_valid_project_path(path: Path) -> bool:
     parts = path.parts
     if len(parts) == 4 and parts[3] == "index.md":
         return True
-    return len(parts) >= 5 and parts[3] in {"code", "decisions", "troubleshooting", "requirements"}
+    return len(parts) >= 5 and parts[3] in _PROJECT_SUBDIRS
 
 
 def _redact_value(value: Any) -> Any:
