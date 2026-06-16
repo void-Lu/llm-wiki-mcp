@@ -262,31 +262,58 @@ def _find_uningested_sources(root: Path, project: str | None) -> list[dict[str, 
         for path in cache_dir.rglob("*.json"):
             known_sources.add(path.stem.lower())
 
-    # Scan raw sources
     uningested = []
+    for source in _iter_raw_source_dirs(root, raw_dir, project):
+        if source["source_name"].lower() not in known_sources:
+            uningested.append(source)
+
+    return uningested
+
+
+def _iter_raw_source_dirs(root: Path, raw_dir: Path, project: str | None) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
     for source_type_dir in sorted(raw_dir.iterdir()):
         if not source_type_dir.is_dir():
             continue
         source_type = source_type_dir.name
+        if source_type == "chat":
+            sources.extend(_iter_date_grouped_chat_sources(root, source_type_dir, project))
+            continue
         for item in sorted(source_type_dir.iterdir()):
             if not item.is_dir():
                 continue
-            # item is project-level dir
             if project and item.name != project:
                 continue
             for source_dir in sorted(item.iterdir()):
-                if not source_dir.is_dir():
-                    continue
-                source_name = source_dir.name
-                if source_name.lower() not in known_sources:
-                    uningested.append({
+                if source_dir.is_dir():
+                    sources.append({
                         "source_type": source_type,
                         "project": item.name,
-                        "source_name": source_name,
+                        "source_name": source_dir.name,
                         "path": source_dir.relative_to(root).as_posix(),
                     })
+    return sources
 
-    return uningested
+
+def _iter_date_grouped_chat_sources(root: Path, chat_dir: Path, project: str | None) -> list[dict[str, str]]:
+    if project and project != "general":
+        return []
+    sources: list[dict[str, str]] = []
+    for year_dir in sorted(path for path in chat_dir.iterdir() if path.is_dir() and _date_part(path.name, 4)):
+        for month_dir in sorted(path for path in year_dir.iterdir() if path.is_dir() and _date_part(path.name, 2)):
+            for day_dir in sorted(path for path in month_dir.iterdir() if path.is_dir() and _date_part(path.name, 2)):
+                for source_dir in sorted(path for path in day_dir.iterdir() if path.is_dir()):
+                    sources.append({
+                        "source_type": "chat",
+                        "project": "general",
+                        "source_name": source_dir.name,
+                        "path": source_dir.relative_to(root).as_posix(),
+                    })
+    return sources
+
+
+def _date_part(value: str, length: int) -> bool:
+    return len(value) == length and value.isdigit()
 
 
 # ---------------------------------------------------------------------------

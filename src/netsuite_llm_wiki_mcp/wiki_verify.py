@@ -153,15 +153,21 @@ def _collect_index_pages(root: Path, project: str | None, page_path: str | None)
         return []
     pages: list[str] = []
     if project:
-        for subdir in ("concepts", "projects"):
-            d = sources_dir / subdir / project
-            if d.is_dir():
-                for f in sorted(d.rglob("*.md")):
-                    pages.append(f.relative_to(root).as_posix())
+        for f in sorted(sources_dir.rglob("*.md")):
+            if _source_index_matches_project(f, project):
+                pages.append(f.relative_to(root).as_posix())
     else:
         for f in sorted(sources_dir.rglob("*.md")):
             pages.append(f.relative_to(root).as_posix())
     return pages
+
+
+def _source_index_matches_project(path: Path, project: str) -> bool:
+    try:
+        frontmatter = read_markdown_page(path).frontmatter
+    except (OSError, UnicodeDecodeError):
+        return False
+    return str(frontmatter.get("project") or "") == project
 
 
 def _resolve_wikilinks(root: Path, body: str) -> list[str]:

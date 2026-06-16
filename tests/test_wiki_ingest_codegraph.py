@@ -365,6 +365,24 @@ def test_rescan_source_cache_is_source_type_aware(tmp_path: Path):
     assert (root / "raw/sources/manual/alpha/docs/notes.md").is_file()
 
 
+def test_rescan_chat_source_writes_snapshot_under_date_directory(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "session.md").write_text("# Chat\n\nAlpha session", encoding="utf-8")
+
+    result = rescan_source(root, project="alpha", source_name="session-2026-06-13", source_path=source, source_type="chat")
+
+    assert result["ok"] is True
+    assert result["status"] == "changed"
+    assert result["paths"] == [
+        "raw/sources/chat/2026/06/13/session-2026-06-13/session.md",
+        "raw/sources/chat/2026/06/13/session-2026-06-13/manifest.json",
+    ]
+    assert (root / "raw/sources/chat/2026/06/13/session-2026-06-13/session.md").is_file()
+
+
 
 def test_rescan_source_reuses_source_validation(tmp_path: Path):
     root = tmp_path / "vault"
@@ -527,11 +545,18 @@ def test_staged_wiki_ingest_chat_source_can_write_chatlog_page(tmp_path: Path):
 
     assert result["ok"] is True
     assert "wiki/chatlog/2026/06/13/session-2026-06-13.md" in result["paths"]
-    assert "wiki/projects/alpha/sources/session-2026-06-13-chatlog.md" in result["paths"]
+    assert "wiki/sources/chatlog/2026/06/13/session-2026-06-13.md" in result["paths"]
     generated = root / "wiki/chatlog/2026/06/13/session-2026-06-13.md"
     frontmatter = yaml.safe_load(generated.read_text(encoding="utf-8").split("---", 2)[1])
     assert frontmatter["type"] == "chatlog"
-    assert frontmatter["sources"] == ["raw/sources/chat/alpha/session-2026-06-13/session.md"]
+    assert frontmatter["sources"] == ["raw/sources/chat/2026/06/13/session-2026-06-13/session.md"]
+    source_index = root / "wiki/sources/chatlog/2026/06/13/session-2026-06-13.md"
+    assert source_index.is_file()
+    source_frontmatter = yaml.safe_load(source_index.read_text(encoding="utf-8").split("---", 2)[1])
+    assert source_frontmatter["type"] == "source_index"
+    assert source_frontmatter["source_type"] == "chat"
+    assert source_frontmatter["sources"] == ["raw/sources/chat/2026/06/13/session-2026-06-13/session.md"]
+    assert (root / "raw/sources/chat/2026/06/13/session-2026-06-13/session.md").is_file()
 
 
 def test_staged_wiki_ingest_rejects_chatlog_path_for_non_chat_source(tmp_path: Path):
@@ -604,7 +629,7 @@ def test_staged_wiki_ingest_applies_generation_with_summary_fallback(tmp_path: P
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    assert "wiki/projects/alpha/sources/docs-concepts.md" in result["paths"]
+    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
     assert "wiki/concepts/alpha/generated.md" in result["paths"]
     generated = root / "wiki/concepts/alpha/generated.md"
     frontmatter = yaml.safe_load(generated.read_text(encoding="utf-8").split("---", 2)[1])
@@ -632,7 +657,7 @@ def test_prepare_analysis_resolves_relative_source_path_against_vault_root(tmp_p
     assert result["stage"] == "prepare_analysis"
 
 
-def test_apply_generation_writes_source_summary_in_hierarchical_directory(tmp_path: Path):
+def test_apply_generation_writes_source_summary_to_wiki_sources_directory(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
     source = tmp_path / "source.md"
@@ -643,8 +668,8 @@ def test_apply_generation_writes_source_summary_in_hierarchical_directory(tmp_pa
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    assert "wiki/projects/alpha/sources/docs-concepts.md" in result["paths"]
-    assert (root / "wiki/projects/alpha/sources/docs-concepts.md").is_file()
+    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
+    assert (root / "wiki/sources/concepts/alpha/docs.md").is_file()
 
 
 def test_apply_generation_accepts_string_source_summary(tmp_path: Path):
@@ -658,7 +683,7 @@ def test_apply_generation_accepts_string_source_summary(tmp_path: Path):
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
     assert result["ok"] is True
-    written = (root / "wiki/projects/alpha/sources/docs-concepts.md").read_text(encoding="utf-8")
+    written = (root / "wiki/sources/concepts/alpha/docs.md").read_text(encoding="utf-8")
     assert "plain string summary" in written
 
 
@@ -700,7 +725,7 @@ def test_two_stage_prepare_and_apply(tmp_path: Path):
     }
     result = staged_wiki_ingest(root, "apply", project="alpha", source_name="docs", generation=generation)
     assert result["ok"] is True
-    assert "wiki/projects/alpha/sources/docs-concepts.md" in result["paths"]
+    assert "wiki/sources/concepts/alpha/docs.md" in result["paths"]
     assert "wiki/concepts/alpha/my-concept.md" in result["paths"]
 
 

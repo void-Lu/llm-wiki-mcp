@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
+from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -111,10 +113,11 @@ def rescan_source(
         return source_error
 
     source_hash = _sources_hash(sources, source_root)
+    raw_dir = _raw_source_snapshot_dir(root, project_value, source_value, source_type_value)
     cache_path = _cache_path(root, project_value, source_value, source_type_value)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cache.get("source_type") == source_type_value and cache.get("source_hash") == source_hash:
+        if cache.get("source_type") == source_type_value and cache.get("source_hash") == source_hash and _cache_manifest_uses_raw_dir(cache, root, raw_dir):
             return {
                 "ok": True,
                 "stage": "rescan",
@@ -126,7 +129,7 @@ def rescan_source(
                 "message": "source hash unchanged; reuse previous generated wiki pages",
             }
 
-    raw_dir = root / "raw" / "sources" / source_type_value / project_value / source_value
+    _remove_stale_raw_snapshot_dirs(root, project_value, source_value, source_type_value, keep=raw_dir)
     if raw_dir.exists():
         shutil.rmtree(raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -385,10 +388,11 @@ def _prepare_combined(
     if source_error is not None:
         return source_error
     source_hash = _sources_hash(sources, source_root)
+    raw_dir = _raw_source_snapshot_dir(root, project, source_name, source_type)
     cache_path = _cache_path(root, project, source_name, source_type)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cache.get("source_hash") == source_hash:
+        if cache.get("source_hash") == source_hash and _cache_manifest_uses_raw_dir(cache, root, raw_dir):
             return {
                 "ok": True,
                 "stage": "prepare",
@@ -400,7 +404,7 @@ def _prepare_combined(
                 "message": "source hash unchanged; reuse previous generated wiki pages",
             }
 
-    raw_dir = root / "raw" / "sources" / source_type / project / source_name
+    _remove_stale_raw_snapshot_dirs(root, project, source_name, source_type, keep=raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
     manifest = _write_source_snapshots(raw_dir, root, sources, source_root)
     _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared"}, source_type=source_type)
@@ -445,10 +449,11 @@ def _prepare_analysis(
     if source_error is not None:
         return source_error
     source_hash = _sources_hash(sources, source_root)
+    raw_dir = _raw_source_snapshot_dir(root, project, source_name, source_type)
     cache_path = _cache_path(root, project, source_name, source_type)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cache.get("source_hash") == source_hash:
+        if cache.get("source_hash") == source_hash and _cache_manifest_uses_raw_dir(cache, root, raw_dir):
             return {
                 "ok": True,
                 "stage": "prepare_analysis",
@@ -460,7 +465,7 @@ def _prepare_analysis(
                 "message": "source hash unchanged; reuse previous generated wiki pages",
             }
 
-    raw_dir = root / "raw" / "sources" / source_type / project / source_name
+    _remove_stale_raw_snapshot_dirs(root, project, source_name, source_type, keep=raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
     manifest = _write_source_snapshots(raw_dir, root, sources, source_root)
     _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared"}, source_type=source_type)
@@ -595,6 +600,38 @@ def _collect_sources(source_root: Path) -> list[Path]:
     return [path for path in sorted(source_root.rglob("*")) if path.is_file() and _is_allowed_source_file(path)]
 
 
+def _raw_source_snapshot_dir(root: Path, project: str, source_name: str, source_type: str) -> Path:
+    if source_type == "chat":
+        year, month, day = _date_parts_from_source_name(source_name) or _today_date_parts()
+        return root / "raw" / "sources" / "chat" / year / month / day / source_name
+    return root / "raw" / "sources" / source_type / project / source_name
+
+
+def _today_date_parts() -> tuple[str, str, str]:
+    today = date.today()
+    return f"{today.year:04d}", f"{today.month:02d}", f"{today.day:02d}"
+
+
+def _cache_manifest_uses_raw_dir(cache: dict[str, Any], root: Path, raw_dir: Path) -> bool:
+    manifest = cache.get("manifest", [])
+    if not isinstance(manifest, list) or not manifest:
+        return False
+    try:
+        expected_prefix = raw_dir.relative_to(root).as_posix().rstrip("/") + "/"
+    except ValueError:
+        return False
+    paths = [str(item.get("path") or "") for item in manifest if isinstance(item, dict)]
+    return bool(paths) and all(path.startswith(expected_prefix) for path in paths)
+
+
+def _remove_stale_raw_snapshot_dirs(root: Path, project: str, source_name: str, source_type: str, keep: Path) -> None:
+    if source_type != "chat":
+        return
+    legacy_dir = root / "raw" / "sources" / "chat" / project / source_name
+    if legacy_dir.exists() and legacy_dir.resolve() != keep.resolve():
+        shutil.rmtree(legacy_dir)
+
+
 def _write_source_index_pages(
     root: Path,
     project: str,
@@ -606,21 +643,16 @@ def _write_source_index_pages(
     summary: str,
     page_paths: list[str],
 ) -> list[str]:
-    groups: dict[str, list[str]] = {}
+    groups: dict[Path, list[str]] = {}
     for p in page_paths:
-        parts = p.split("/")
-        if len(parts) >= 2 and parts[0] == "wiki":
-            target_dir = parts[1]
-        else:
-            target_dir = "other"
-        groups.setdefault(target_dir, []).append(p)
+        index_path = _source_index_path_for_generated_page(p, project, source_name)
+        groups.setdefault(index_path, []).append(p)
 
     if not groups:
-        groups["concepts"] = []
+        groups[_fallback_source_index_path(project, source_name, source_type)] = []
 
     written: list[str] = []
-    for target_dir, linked_pages in groups.items():
-        index_path = Path("wiki") / "projects" / project / "sources" / f"{source_name}-{target_dir}.md"
+    for index_path, linked_pages in groups.items():
         wikilinks = "\n".join(f"- [[{Path(p).stem}]]" for p in linked_pages) if linked_pages else "(no pages generated)"
         body = f"{summary}\n\n## Raw sources\n\n"
         body += "\n".join(f"- `{s}`" for s in manifest_sources)
@@ -644,6 +676,36 @@ def _write_source_index_pages(
         write_wiki_page(root, index_page)
         written.append(index_path.as_posix())
     return written
+
+
+def _source_index_path_for_generated_page(page_path: str, project: str, source_name: str) -> Path:
+    parts = Path(page_path).parts
+    if len(parts) >= 6 and parts[0] == "wiki" and parts[1] == "chatlog":
+        year, month, day = parts[2], parts[3], parts[4]
+        if len(year) == 4 and len(month) == 2 and len(day) == 2 and year.isdigit() and month.isdigit() and day.isdigit():
+            return Path("wiki") / "sources" / "chatlog" / year / month / day / f"{source_name}.md"
+
+    if len(parts) >= 2 and parts[0] == "wiki":
+        target_dir = parts[1]
+    else:
+        target_dir = "other"
+    return Path("wiki") / "sources" / target_dir / project / f"{source_name}.md"
+
+
+def _fallback_source_index_path(project: str, source_name: str, source_type: str) -> Path:
+    if source_type == "chat":
+        date_parts = _date_parts_from_source_name(source_name)
+        if date_parts is not None:
+            year, month, day = date_parts
+            return Path("wiki") / "sources" / "chatlog" / year / month / day / f"{source_name}.md"
+    return Path("wiki") / "sources" / "concepts" / project / f"{source_name}.md"
+
+
+def _date_parts_from_source_name(source_name: str) -> tuple[str, str, str] | None:
+    match = re.search(r"(\d{4})-(\d{2})-(\d{2})", source_name)
+    if not match:
+        return None
+    return match.group(1), match.group(2), match.group(3)
 def _is_allowed_source_file(path: Path) -> bool:
     lowered_parts = {part.casefold() for part in path.parts}
     if lowered_parts & _DENIED_SOURCE_PARTS:
@@ -734,7 +796,7 @@ def _chat_source_instructions(source_type: str) -> list[str]:
     if source_type != "chat":
         return []
     return [
-        "For source_type=chat, preserve the raw transcript under raw/sources/chat and generate the primary session summary as type=chatlog.",
+        "For source_type=chat, preserve the raw transcript under raw/sources/chat/YYYY/MM/DD/<source_name>/ and generate the primary session summary as type=chatlog.",
         "Chatlog page paths must use wiki/chatlog/YYYY/MM/DD/<slug>.md, with the date taken from the session when available.",
     ]
 

@@ -42,6 +42,10 @@ def wiki_delete_source(
             if candidate.exists():
                 raw_dir = candidate
                 break
+    if not raw_dir.exists():
+        candidate = _find_date_grouped_chat_raw_dir(root, source_name)
+        if candidate is not None:
+            raw_dir = candidate
 
     derived_pages, source_pruned_pages = _find_derived_pages(root, project, source_name)
     slugs_to_remove = {p.stem for p in derived_pages}
@@ -143,6 +147,23 @@ def _find_derived_pages(root: Path, project: str, source_name: str) -> tuple[lis
                 pages_to_delete.append(path)
 
     return pages_to_delete, pages_to_prune
+
+
+def _find_date_grouped_chat_raw_dir(root: Path, source_name: str) -> Path | None:
+    chat_dir = root / "raw" / "sources" / "chat"
+    if not chat_dir.is_dir():
+        return None
+    for year_dir in sorted(path for path in chat_dir.iterdir() if path.is_dir() and _date_part(path.name, 4)):
+        for month_dir in sorted(path for path in year_dir.iterdir() if path.is_dir() and _date_part(path.name, 2)):
+            for day_dir in sorted(path for path in month_dir.iterdir() if path.is_dir() and _date_part(path.name, 2)):
+                candidate = day_dir / source_name
+                if candidate.is_dir():
+                    return candidate
+    return None
+
+
+def _date_part(value: str, length: int) -> bool:
+    return len(value) == length and value.isdigit()
 
 
 def _source_matches(source: str, source_name: str) -> bool:

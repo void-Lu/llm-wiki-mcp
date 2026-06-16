@@ -106,3 +106,46 @@ def test_delete_source_preserves_generated_pages_with_other_sources(delete_root:
     assert "my-source" not in text
     assert "other-source" in text
     assert shared_page.relative_to(delete_root).as_posix() not in result["pages_deleted"]
+
+
+def test_delete_source_removes_date_grouped_chat_raw_dir(tmp_path: Path):
+    root = tmp_path / "vault"
+    raw = root / "raw" / "sources" / "chat" / "2026" / "06" / "16" / "session-2026-06-16"
+    raw.mkdir(parents=True)
+    (raw / "session.md").write_text("chat", encoding="utf-8")
+    wiki = root / "wiki"
+    (wiki / "chatlog" / "2026" / "06" / "16").mkdir(parents=True)
+    (wiki / "chatlog" / "2026" / "06" / "16" / "session.md").write_text(
+        "---\n"
+        "type: chatlog\n"
+        "title: Session\n"
+        "generated: true\n"
+        "project: general\n"
+        "sources:\n"
+        "- raw/sources/chat/2026/06/16/session-2026-06-16/session.md\n"
+        "---\n\n"
+        "# Session\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (wiki / "sources" / "chatlog" / "2026" / "06" / "16").mkdir(parents=True)
+    (wiki / "sources" / "chatlog" / "2026" / "06" / "16" / "session-2026-06-16.md").write_text(
+        "---\n"
+        "type: source_index\n"
+        "title: Session Source\n"
+        "generated: true\n"
+        "project: general\n"
+        "source_name: session-2026-06-16\n"
+        "sources:\n"
+        "- raw/sources/chat/2026/06/16/session-2026-06-16/session.md\n"
+        "---\n\n"
+        "# Session Source\n\n- [[session]]\n",
+        encoding="utf-8",
+    )
+    (wiki / "index.md").write_text("---\ntype: index\ngenerated: true\n---\n\n# Index\n", encoding="utf-8")
+    (wiki / "log.md").write_text("", encoding="utf-8")
+
+    result = wiki_delete_source(root, "general", "session-2026-06-16")
+
+    assert result["ok"] is True
+    assert result["raw_deleted"] is True
+    assert not raw.exists()

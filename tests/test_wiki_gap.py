@@ -17,6 +17,8 @@ def wiki_vault(tmp_path):
     (tmp_path / "raw" / "sources" / "file" / "myproj" / "src-a" / "src-a.md").write_text("raw content", encoding="utf-8")
     (tmp_path / "raw" / "sources" / "file" / "myproj" / "src-b").mkdir(parents=True)
     (tmp_path / "raw" / "sources" / "file" / "myproj" / "src-b" / "src-b.md").write_text("raw content b", encoding="utf-8")
+    (tmp_path / "raw" / "sources" / "chat" / "2026" / "06" / "16" / "chat-src").mkdir(parents=True)
+    (tmp_path / "raw" / "sources" / "chat" / "2026" / "06" / "16" / "chat-src" / "session.md").write_text("chat raw", encoding="utf-8")
     (tmp_path / "raw" / "assets").mkdir(parents=True, exist_ok=True)
     (tmp_path / "wiki" / "projects" / "myproj" / "code").mkdir(parents=True)
     (tmp_path / "wiki" / "projects" / "myproj" / "decisions").mkdir(parents=True)
@@ -106,6 +108,19 @@ class TestAnalyzeStage:
         # src-a is ingested (has wiki/sources page + cache)
         assert "src-a" not in uningested_names
 
+    def test_finds_date_grouped_uningested_chat_sources(self, wiki_vault):
+        result = wiki_gap(str(wiki_vault), stage="analyze")
+        chat_sources = [s for s in result["uningested_sources"] if s["source_type"] == "chat"]
+
+        assert chat_sources == [
+            {
+                "source_type": "chat",
+                "project": "general",
+                "source_name": "chat-src",
+                "path": "raw/sources/chat/2026/06/16/chat-src",
+            }
+        ]
+
     def test_taxonomy_check(self, wiki_vault):
         taxonomy = ["concept-one", "concept-two", "concept-three", "concept-four"]
         result = wiki_gap(str(wiki_vault), stage="analyze", taxonomy=taxonomy)
@@ -146,7 +161,8 @@ class TestSuggestStage:
             s for s in result["suggestions"] if s["action"] == "wiki_ingest_llm"
         ]
         assert len(ingest_suggestions) > 0
-        assert ingest_suggestions[0]["params"]["source_name"] == "src-b"
+        suggested_sources = {s["params"]["source_name"] for s in ingest_suggestions}
+        assert "src-b" in suggested_sources
 
     def test_suggests_enrich_for_shallow(self, wiki_vault):
         result = wiki_gap(str(wiki_vault), stage="suggest")

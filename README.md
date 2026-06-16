@@ -146,6 +146,9 @@ vault_root/
 │   │       ├── researches/
 │   │       └── sources/
 │   ├── sources/
+│   │   ├── concepts/
+│   │   ├── projects/
+│   │   └── chatlog/
 │   ├── queries/
 │   ├── comparisons/
 │   └── maintenance/
@@ -166,7 +169,7 @@ vault_root/
 2. 摄入 source：
    - 代码仓库 → `wiki_ingest_codegraph`（同步，不需要 LLM）
    - 本地文件 → `wiki_ingest_llm(stage="prepare")` → LLM 生成 → `wiki_ingest_llm(stage="apply")`
-   - 会话历史 → `wiki_ingest_llm(source_type="chat", stage="prepare")` 先保存到 `raw/sources/chat/` → `wiki_ingest_llm(stage="apply")` 生成 `wiki/chatlog/YYYY/MM/DD/` 会话页
+  - 会话历史 → `wiki_ingest_llm(source_type="chat", stage="prepare")` 先保存到 `raw/sources/chat/YYYY/MM/DD/<source_name>/` → `wiki_ingest_llm(stage="apply")` 生成 `wiki/chatlog/YYYY/MM/DD/` 会话页，并写 `wiki/sources/chatlog/YYYY/MM/DD/` 索引溯源页
    - 外部爬虫或人工收集的 MD 文件 → `raw/sources/references/` 或 `raw/sources/file/` → `wiki_ingest_llm(stage="prepare")` → `wiki_ingest_llm(stage="apply")`
 3. 用 `wiki_verify` 校验生成页面是否忠实于原始来源。
 4. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。
@@ -194,9 +197,11 @@ wiki_ingest_codegraph → raw/projects/<project>/codegraph/<source_name>/
 
 ```
 推荐两阶段流程：
-prepare → 读源文件 + 写 raw/sources/file/ snapshot + 返回合并 prompt（agent 发送给 LLM）
+prepare → 读源文件 + 写 raw/sources/<source_type>/ snapshot + 返回合并 prompt（agent 发送给 LLM）
+  → source_type="chat" 时，写 raw/sources/chat/YYYY/MM/DD/<source_name>/
 apply   → 写 wiki/concepts/ 或 wiki/projects/ 下的知识页面
-        → 写 wiki/projects/<project>/sources/<source_name>-<target_dir>.md 索引溯源页
+  → 写 wiki/sources/<target_dir>/<project>/<source_name>.md 索引溯源页
+  → source_type="chat" 且生成 chatlog 时，写 wiki/sources/chatlog/YYYY/MM/DD/<source_name>.md 索引溯源页
 
 旧三阶段（仍兼容）：
 prepare_analysis   → 返回 analysis prompt

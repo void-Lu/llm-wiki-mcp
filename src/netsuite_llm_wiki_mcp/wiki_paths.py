@@ -46,7 +46,7 @@ DEFAULT_SCHEMA_TEXT = """# Schema
 
 | frontmatter `type` | 位置 | 说明 | generated |
 | --- | --- | --- | --- |
-| `source_index` | `wiki/projects/<project>/sources/` 或 `wiki/sources/` | 索引溯源页：frontmatter + 一句话摘要 + raw source 路径 + wikilinks，不承载知识内容 | `true` |
+| `source_index` | CodeGraph: `wiki/projects/<project>/sources/`；LLM: `wiki/sources/<target>/<project>/`；会话: `wiki/sources/chatlog/<yyyy>/<mm>/<dd>/` | 索引溯源页：frontmatter + 一句话摘要 + raw source 路径 + wikilinks，不承载知识内容 | `true` |
 | `spec` | `wiki/projects/<project>/specs/` | 模型生成的规格文档 | `true` 或 `false` |
 | `plan` | `wiki/projects/<project>/plans/` | 模型生成的实施计划 | `true` 或 `false` |
 | `architecture` | `wiki/projects/<project>/architecture/` | 长期稳定的项目架构说明 | `true` 或 `false` |
@@ -117,11 +117,13 @@ wiki_ingest_codegraph
 
 ```text
 wiki_ingest_llm(stage="prepare")
-    -> raw/sources/file/<project>/<source_name>/
+    -> raw/sources/<source_type>/<project>/<source_name>/
+    -> source_type="chat" 时，写 raw/sources/chat/<yyyy>/<mm>/<dd>/<source_name>/
     -> 返回合并 prompt
 wiki_ingest_llm(stage="apply")
     -> wiki/concepts/ 或 wiki/projects/ 下的知识页面
-    -> wiki/projects/<project>/sources/<source_name>.md 或 wiki/sources/<source_name>.md (索引页)
+    -> wiki/sources/<target_dir>/<project>/<source_name>.md (索引页)
+    -> source_type="chat" 且生成 chatlog 时，写 wiki/sources/chatlog/<yyyy>/<mm>/<dd>/<source_name>.md (索引页)
     -> refresh index/overview/log/cache
 ```
 
