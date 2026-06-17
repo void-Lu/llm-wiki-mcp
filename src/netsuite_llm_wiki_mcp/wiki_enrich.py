@@ -111,7 +111,7 @@ def _apply(root: Path, page_path: str, links: list[dict[str, str]] | str | None)
         return {"ok": True, "stage": "apply", "page_path": page_path, "links_applied": 0, "message": "no applicable links found"}
 
     new_content = frontmatter_text + body
-    target.write_text(new_content, encoding="utf-8-sig")
+    target.write_text(new_content, encoding="utf-8")
 
     return {
         "ok": True,

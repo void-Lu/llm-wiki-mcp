@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph, rescan_source, staged_wiki_ingest
+from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph, rescan_source, staged_wiki_ingest, _repair_cache_manifest_paths
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
 
@@ -640,6 +640,61 @@ def test_staged_wiki_ingest_applies_generation_with_summary_fallback(tmp_path: P
     assert "llm_ingest" in (root / "wiki/log.md").read_text(encoding="utf-8")
 
 
+def test_apply_generation_canonicalizes_stale_raw_source_paths(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "article_0091700424.md"
+    source.write_text("# Article\n\nNetSuite help content", encoding="utf-8")
+    staged_wiki_ingest(
+        root,
+        "prepare",
+        project="netsuite-online-help",
+        source_name="article_0091700424",
+        source_path=source,
+    )
+
+    old_source = "raw/sources/file/crawl4ai/level2/article_0091700424.md"
+    canonical_source = "raw/sources/file/netsuite-online-help/article_0091700424/article_0091700424.md"
+    generation = {
+        "source_summary": {"title": "Article", "summary": f"来源于 {old_source}"},
+        "pages": [
+            {
+                "path": "wiki/concepts/netsuite-online-help/article_0091700424.md",
+                "title": "Article",
+                "type": "concept",
+                "summary": f"来源于 {old_source}",
+                "body": f"## 原始来源\n\n- `{old_source}`",
+                "sources": [old_source],
+            }
+        ],
+    }
+
+    result = staged_wiki_ingest(
+        root,
+        "apply",
+        project="netsuite-online-help",
+        source_name="article_0091700424",
+        generation=generation,
+    )
+
+    assert result["ok"] is True
+    generated = root / "wiki/concepts/netsuite-online-help/article_0091700424.md"
+    generated_content = generated.read_text(encoding="utf-8")
+    generated_frontmatter = yaml.safe_load(generated_content.split("---", 2)[1])
+    assert generated_frontmatter["sources"] == [canonical_source]
+    assert generated_frontmatter["summary"] == f"来源于 {canonical_source}"
+    assert canonical_source in generated_content
+    assert old_source not in generated_content
+
+    source_index = root / "wiki/sources/concepts/netsuite-online-help/article_0091700424.md"
+    source_index_content = source_index.read_text(encoding="utf-8")
+    source_index_frontmatter = yaml.safe_load(source_index_content.split("---", 2)[1])
+    assert source_index_frontmatter["sources"] == [canonical_source]
+    assert source_index_frontmatter["summary"] == f"来源于 {canonical_source}"
+    assert canonical_source in source_index_content
+    assert old_source not in source_index_content
+
+
 def test_prepare_analysis_resolves_relative_source_path_against_vault_root(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -1187,3 +1242,186 @@ def test_ingest_codegraph_filters_by_include_extensions(tmp_path: Path):
     files_snapshot = json.loads((root / "raw/sources/projects/alpha/codegraph/files.json").read_text(encoding="utf-8"))
     snapshot_files = files_snapshot.get("files", files_snapshot)
     assert [item["path"] for item in snapshot_files] == ["src/FileCabinet/SuiteScripts/sl_main.js"]
+
+
+def test_repair_cache_manifest_paths_direct(tmp_path: Path):
+    """_repair_cache_manifest_paths repairs manifest paths when files exist at the new location."""
+    from netsuite_llm_wiki_mcp.wiki_ingest import _write_cache
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    project, source_name, source_type = "alpha", "docs", "file"
+
+    # Create the correct raw dir with the actual files
+    correct_raw_dir = root / "raw" / "sources" / source_type / project / source_name
+    correct_raw_dir.mkdir(parents=True)
+    (correct_raw_dir / "notes.md").write_text("# Notes\n\nContent", encoding="utf-8")
+    (correct_raw_dir / "extra.md").write_text("# Extra\n\nMore", encoding="utf-8")
+
+    # Build a cache with OLD (wrong) manifest paths — missing the source_type level
+    old_prefix = f"raw/sources/{project}/{source_name}/"
+    cache = {
+        "source_hash": "abc123",
+        "source_type": source_type,
+        "manifest": [
+            {"path": f"{old_prefix}notes.md", "relative_path": "notes.md", "stored_sha256": "x"},
+            {"path": f"{old_prefix}extra.md", "relative_path": "extra.md", "stored_sha256": "y"},
+        ],
+        "status": "prepared",
+    }
+    _write_cache(root, project, source_name, cache, source_type=source_type)
+
+    result = _repair_cache_manifest_paths(cache, root, project, source_name, source_type)
+
+    assert result["ok"] is True
+    assert result["repaired_count"] == 2
+    assert result["unrepairable_paths"] == []
+    correct_prefix = f"raw/sources/{source_type}/{project}/{source_name}/"
+    assert result["repaired_paths"] == [f"{correct_prefix}notes.md", f"{correct_prefix}extra.md"]
+
+    # Verify the cache file was updated
+    updated_cache = json.loads((root / ".llm-wiki/ingest-cache/file/alpha/docs.json").read_text(encoding="utf-8"))
+    assert updated_cache["manifest"][0]["path"] == f"{correct_prefix}notes.md"
+
+
+def test_repair_cache_manifest_paths_fails_when_files_missing(tmp_path: Path):
+    """_repair_cache_manifest_paths returns ok=False when repaired paths don't exist on disk."""
+    from netsuite_llm_wiki_mcp.wiki_ingest import _write_cache
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    project, source_name, source_type = "alpha", "docs", "file"
+
+    # No files at the correct location — repair should fail
+    old_prefix = f"raw/sources/{project}/{source_name}/"
+    cache = {
+        "source_hash": "abc123",
+        "source_type": source_type,
+        "manifest": [
+            {"path": f"{old_prefix}notes.md", "relative_path": "notes.md", "stored_sha256": "x"},
+        ],
+        "status": "prepared",
+    }
+    _write_cache(root, project, source_name, cache, source_type=source_type)
+
+    result = _repair_cache_manifest_paths(cache, root, project, source_name, source_type)
+
+    assert result["ok"] is False
+    assert result["repaired_count"] == 0
+    assert result["unrepairable_paths"] == [f"{old_prefix}notes.md"]
+
+
+def test_rescan_source_auto_repairs_mismatched_manifest_paths(tmp_path: Path):
+    """rescan_source detects mismatched manifest paths and auto-repairs them when source hash is unchanged."""
+    from netsuite_llm_wiki_mcp.wiki_ingest import _write_cache
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notes.md").write_text("# Notes\n\nAlpha content", encoding="utf-8")
+
+    # First rescan — writes correct cache and snapshot
+    first = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+    assert first["status"] == "changed"
+    source_hash = first["source_hash"]
+
+    # Now simulate a path migration: corrupt the cache manifest to use old-style paths
+    # (missing the source_type level), but keep the files at the correct new location
+    correct_raw_dir = root / "raw" / "sources" / "file" / "alpha" / "docs"
+    assert correct_raw_dir.exists()
+    old_prefix = "raw/sources/alpha/docs/"
+    correct_prefix = "raw/sources/file/alpha/docs/"
+    corrupt_cache = {
+        "source_hash": source_hash,
+        "source_type": "file",
+        "manifest": [
+            {"path": f"{old_prefix}notes.md", "relative_path": "notes.md", "stored_sha256": "x"},
+        ],
+        "status": "prepared",
+    }
+    _write_cache(root, "alpha", "docs", corrupt_cache, source_type="file")
+
+    # Second rescan should detect the mismatch, repair the manifest, and return unchanged
+    second = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+    assert second["ok"] is True
+    assert second["status"] == "unchanged"
+    assert second.get("manifest_repaired") is True
+    assert second["repaired_count"] == 1
+    assert second["repaired_paths"] == [f"{correct_prefix}notes.md"]
+
+
+def test_rescan_source_falls_through_when_repaired_paths_missing(tmp_path: Path):
+    """rescan_source falls through to re-snapshot when repaired paths don't exist on filesystem."""
+    from netsuite_llm_wiki_mcp.wiki_ingest import _write_cache
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notes.md").write_text("# Notes\n\nAlpha content", encoding="utf-8")
+
+    # First rescan
+    first = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+    assert first["status"] == "changed"
+    source_hash = first["source_hash"]
+
+    # Corrupt the cache AND remove the raw snapshot files
+    old_prefix = "raw/sources/alpha/docs/"
+    corrupt_cache = {
+        "source_hash": source_hash,
+        "source_type": "file",
+        "manifest": [
+            {"path": f"{old_prefix}notes.md", "relative_path": "notes.md", "stored_sha256": "x"},
+        ],
+        "status": "prepared",
+    }
+    _write_cache(root, "alpha", "docs", corrupt_cache, source_type="file")
+    # Remove the actual raw snapshot so repair verification fails
+    import shutil
+    correct_raw_dir = root / "raw" / "sources" / "file" / "alpha" / "docs"
+    if correct_raw_dir.exists():
+        shutil.rmtree(correct_raw_dir)
+
+    # Second rescan should fall through to full re-snapshot
+    second = rescan_source(root, project="alpha", source_name="docs", source_path=source)
+    assert second["ok"] is True
+    assert second["status"] == "changed"
+    assert "manifest_repaired" not in second
+
+
+def test_prepare_combined_auto_repairs_mismatched_manifest_paths(tmp_path: Path):
+    """_prepare_combined also auto-repairs mismatched manifest paths."""
+    from netsuite_llm_wiki_mcp.wiki_ingest import _write_cache
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notes.md").write_text("# Notes\n\nAlpha content", encoding="utf-8")
+
+    # First prepare — writes correct cache
+    first = staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+    assert first["status"] == "needs_model"
+    source_hash = first["source_hash"]
+
+    # Corrupt the cache manifest to use old-style paths
+    correct_raw_dir = root / "raw" / "sources" / "file" / "alpha" / "docs"
+    assert correct_raw_dir.exists()
+    old_prefix = "raw/sources/alpha/docs/"
+    corrupt_cache = {
+        "source_hash": source_hash,
+        "source_type": "file",
+        "manifest": [
+            {"path": f"{old_prefix}notes.md", "relative_path": "notes.md", "stored_sha256": "x"},
+        ],
+        "status": "prepared",
+    }
+    _write_cache(root, "alpha", "docs", corrupt_cache, source_type="file")
+
+    # Second prepare should detect mismatch, repair, and return skipped
+    second = staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+    assert second["ok"] is True
+    assert second["status"] == "skipped"
+    assert second.get("manifest_repaired") is True
+    assert second["repaired_count"] == 1

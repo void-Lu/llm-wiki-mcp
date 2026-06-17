@@ -83,8 +83,8 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | `wiki_init` | 在 Obsidian vault 中创建 wiki 目录结构 |
 | `wiki_ingest_codegraph` | 将 CodeGraph 快照和机器代码事实同步摄入 raw，并生成项目 source/architecture/pipeline 可读页（不需要 LLM） |
 | `wiki_ingest_llm` | 两阶段 LLM 摄入（推荐）：`prepare`（返回合并 prompt）→ `apply`（写入页面）。旧三阶段 `prepare_analysis` → `prepare_generation` → `apply_generation` 仍兼容 |
-| `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot |
-| `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done |
+| `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot；如果 manifest 路径与期望 raw dir 不匹配（如目录结构重构后旧路径未同步），自动修复 manifest 路径并在响应中返回 `manifest_repaired` 信息 |
+| `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done / reapply / prepare_all / apply_all。`reapply` 从缓存重新 apply（无需 LLM），含页面完整性检测（`regeneration_needed`、`pages_restored`、`index_refreshed`）；`prepare_all` 批量运行 prepare 并标记 `prepared`；`apply_all` 批量运行 apply 完成 `prepared` → `done` |
 
 ### 查询
 
@@ -194,6 +194,17 @@ vault_root/
 
 对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
 
+### 批量摄入工作流
+
+当需要一次性摄入大量源文件时，使用 `wiki_ingest_batch` 的批量 action：
+
+1. **入队**：`wiki_ingest_batch(action="enqueue", tasks=[...])` — 批量添加待摄入任务
+2. **批量 prepare**：`wiki_ingest_batch(action="prepare_all")` — 对所有 `pending` 任务运行 prepare，标记为 `prepared`（需要 LLM）或 `done`（源未变化）
+3. **LLM 处理**：对每个 `prepared` 任务，从 `result.prompt` 取 prompt 发送给 LLM，将生成结果存回 `result.generation`
+4. **批量 apply**：`wiki_ingest_batch(action="apply_all")` — 对所有 `prepared` 任务运行 apply，完成页面写入
+
+**页面损坏恢复**：当 wiki 页面损坏但 ingest cache 完好时，使用 `wiki_ingest_batch(action="reapply")` 从缓存重新 apply，无需重新 prepare 或调用 LLM。reapply 会检测每页完整性，报告 `regeneration_needed`（需要完整 LLM 重新摄入的页面）和 `pages_restored`（仍然完好的页面数）。
+
 ## 数据流
 
 ### CodeGraph 摄入
@@ -255,6 +266,7 @@ uv run pytest tests/test_wiki_query.py::test_function_name -v
 - 所有写入都限制在 vault root 内；`wiki/concepts/` 和 `wiki/projects/` 下的路径遵循固定结构
 - 敏感数据（手机号、邮箱、token）写入前会被脱敏
 - Windows 路径安全：非法字符、ADS 冒号、保留设备名、控制字符、尾随点/空格
+- 文件写入统一 `encoding="utf-8"`（无 BOM）；读取可用 `utf-8-sig` 兼容 Obsidian BOM 文件，但写入绝不产生 BOM
 - 不引入 Chroma、sentence-transformers 或 embedding 模型
 - 不创建 `.rag-index/` 或 `.models/`
 

@@ -43,7 +43,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 ### 写入与维护流水线
 
 - CodeGraph 摄入在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：`CodeGraphClient`（定义在 [codegraph_client.py](src/netsuite_llm_wiki_mcp/codegraph_client.py)）读取 `status/files/context/impact/graph_snapshot` → 写 `raw/sources/projects/<project>/codegraph/` snapshot（含 `graph.json`、`codefacts.json` 等） → 写 `wiki/projects/<project>/architecture/` 可读页 + `wiki/sources/projects/<project>/architecture/codegraph.md` 索引页 → refresh index/overview/log → 写 `.llm-wiki/ingest-cache/codegraph/`。MCP 工具名为 `wiki_ingest_codegraph`，同步执行不需要 LLM。`profile="suitescript"` 时额外生成 `wiki/projects/<project>/pipelines/` 页（需要完整 graph snapshot）。
-- LLM 分阶段摄入同在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：推荐两阶段流程 `stage="prepare"`（读源 + 写 `raw/sources/<source_type>/` snapshot + 返回合并 prompt；`source_type="chat"` 时写到 `raw/sources/chat/<yyyy>/<mm>/<dd>/<source_name>/`）→ `stage="apply"`（校验路径并写 generated pages + 按目标目录写索引页到 `wiki/sources/<target_dir>/<project>/`；`source_type="chat"` 且生成 chatlog 时写到 `wiki/sources/chatlog/<yyyy>/<mm>/<dd>/`）。旧三阶段（`prepare_analysis` / `prepare_generation` / `apply_generation`）仍兼容但不推荐。`source_path` 支持绝对路径和相对于 vault_root 的相对路径。`generation` 参数中 `source_summary` 可以是 dict 或纯字符串（只需一句话摘要）；顶层 `concept`/`concepts` key 会自动合并到 `pages`。
+- LLM 分阶段摄入同在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：推荐两阶段流程 `stage="prepare"`（读源 + 写 `raw/sources/<source_type>/` snapshot + 返回合并 prompt；`source_type="chat"` 时写到 `raw/sources/chat/<yyyy>/<mm>/<dd>/<source_name>/`）→ `stage="apply"`（校验路径并写 generated pages + 按目标目录写索引页到 `wiki/sources/<target_dir>/<project>/`；`source_type="chat"` 且生成 chatlog 时写到 `wiki/sources/chatlog/<yyyy>/<mm>/<dd>/`）。旧三阶段（`prepare_analysis` / `prepare_generation` / `apply_generation`）仍兼容但不推荐。`source_path` 支持绝对路径和相对于 vault_root 的相对路径。`generation` 参数中 `source_summary` 可以是 dict 或纯字符串（只需一句话摘要）；顶层 `concept`/`concepts` key 会自动合并到 `pages`。当 cache manifest 路径与期望 raw dir 不匹配（如 raw/sources 层级重构后旧路径未同步），`rescan`、`prepare` 和 `prepare_analysis` 会自动调用 `_repair_cache_manifest_paths` 修复 manifest 路径，并在响应中返回 `manifest_repaired`、`repaired_count` 和 `repaired_paths`；修复成功视为 `unchanged`，修复失败则回退到完整 re-snapshot。
 - URL 摄入已移除（`wiki_ingest_url` 模块和工具不再存在）；URL 来源统一通过 `wiki_ingest_llm` 以 `source_type="url"` 处理。
 - 人工笔记写入在 [note_writer.py](src/netsuite_llm_wiki_mcp/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
 - 写入后维护集中在 [wiki_index.py](src/netsuite_llm_wiki_mcp/wiki_index.py)、[wiki_overview.py](src/netsuite_llm_wiki_mcp/wiki_overview.py)、[wiki_log.py](src/netsuite_llm_wiki_mcp/wiki_log.py)。会产生或变更页面的工具通常要刷新 index/overview 并 append log。
@@ -70,7 +70,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 维护工具按阶段拆分：
 
 - [wiki_lint.py](src/netsuite_llm_wiki_mcp/wiki_lint.py)：结构、frontmatter、source traceability、broken wikilinks、orphan pages、cache manifest。
-- [wiki_enrich.py](src/netsuite_llm_wiki_mcp/wiki_enrich.py)：prepare/apply 两阶段 wikilink 富化。apply 阶段使用 [wikilinks.py](src/netsuite_llm_wiki_mcp/wikilinks.py) 的 `format_wikilink` 和 `is_markdown_table_row_at` 生成表格安全链接；搜索 index 时会合并 `index-*.md` 分片；term 替换跳过代码块、行内代码、已有 wikilink 和 Markdown 链接内的保护区。文件读写统一使用 `utf-8-sig` 以兼容 UTF-8 BOM。
+- [wiki_enrich.py](src/netsuite_llm_wiki_mcp/wiki_enrich.py)：prepare/apply 两阶段 wikilink 富化。apply 阶段使用 [wikilinks.py](src/netsuite_llm_wiki_mcp/wikilinks.py) 的 `format_wikilink` 和 `is_markdown_table_row_at` 生成表格安全链接；搜索 index 时会合并 `index-*.md` 分片；term 替换跳过代码块、行内代码、已有 wikilink 和 Markdown 链接内的保护区。读取时使用 `utf-8-sig` 以兼容 Obsidian UTF-8 BOM 文件，写入时使用 `utf-8`（无 BOM）。
 - [wiki_dedup.py](src/netsuite_llm_wiki_mcp/wiki_dedup.py)：detect/confirm/merge 三阶段重复页合并。
 - [page_merge.py](src/netsuite_llm_wiki_mcp/page_merge.py)：generated 页面合并，锁定字段保护 + 数组字段 union + 可选 body merge。
 - [wiki_insights.py](src/netsuite_llm_wiki_mcp/wiki_insights.py) + [louvain.py](src/netsuite_llm_wiki_mcp/louvain.py)：图谱洞察、社区、桥接页、孤立页。
@@ -78,7 +78,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - [wiki_research.py](src/netsuite_llm_wiki_mcp/wiki_research.py)：prepare/apply 研究综合，写入 `wiki/queries/`。
 - [wiki_synthesis.py](src/netsuite_llm_wiki_mcp/wiki_synthesis.py)：prepare/apply 持久化有价值的查询答案或跨页分析，写入 `wiki/projects/<project>/researches/`（`project` 参数必填）。
 - [wiki_gap.py](src/netsuite_llm_wiki_mcp/wiki_gap.py)：覆盖缺口分析 analyze/suggest 两阶段，扫描浅页面、悬空链接、未摄入源、分类法缺失，推荐补充动作。
-- [wiki_batch.py](src/netsuite_llm_wiki_mcp/wiki_batch.py)：持久化 ingest 队列 `.llm-wiki/ingest-queue.json`。
+- [wiki_batch.py](src/netsuite_llm_wiki_mcp/wiki_batch.py)：持久化 ingest 队列 `.llm-wiki/ingest-queue.json`。除原有 queue CRUD（enqueue / next / complete / fail / retry / cancel / clear_done）外，新增三个批量 action：`reapply`（从 cache 重新 apply，无需 LLM；含页面完整性检测，报告 `regeneration_needed`、`pages_restored`、`index_refreshed`）、`prepare_all`（批量运行 prepare，标记 `prepared` 状态）、`apply_all`（批量运行 apply，完成 `prepared` → `done` 转换）。任务生命周期扩展为 `pending → processing → prepared → done`（任意阶段可 `failed`）。
 
 ## 必守约定
 
@@ -89,6 +89,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 项目目录固定为 `wiki/projects/<project>/{index.md,specs/,plans/,architecture/,pipelines/,troubleshooting/,researches/,sources/}`。
 - Windows 路径相关逻辑要覆盖非法字符、冒号 ADS、保留设备名、控制字符、尾随点/空格等边界。
 - 不要在代码、测试或文档中硬编码个人 Vault 路径、API key、token、邮箱、手机号等敏感信息；脱敏逻辑在 [redaction.py](src/netsuite_llm_wiki_mcp/redaction.py)。
+- 所有 MCP 工具写入文件统一使用 `encoding="utf-8"`（无 BOM）；读取 Obsidian 文件时可用 `utf-8-sig` 以兼容 BOM，但写入绝不产生 BOM。禁止使用 PowerShell `Set-Content` 默认编码（UTF-16 LE）修改项目文件。
 
 ## 测试定位
 

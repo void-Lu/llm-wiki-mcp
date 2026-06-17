@@ -110,8 +110,10 @@ def test_prepare_includes_split_index_fragments(wiki_root: Path):
     assert "[[concepts/suiteql|SuiteQL]]" in result["prompt"]
 
 
-def test_apply_preserves_utf8_bom(wiki_root: Path):
+def test_apply_writes_utf8_without_bom(wiki_root: Path):
+    """Verify that wiki_enrich writes UTF-8 without BOM, even when reading a file with BOM."""
     page = wiki_root / "wiki" / "projects" / "myproj" / "architecture" / "entry-point.md"
+    # Write the page with BOM (simulating an Obsidian file with BOM)
     page.write_text(
         "---\ntype: architecture\ntitle: Entry Point\ngenerated: true\n---\n\n# Entry Point\n\n"
         "This script uses SuiteQL to query records.\n",
@@ -126,7 +128,34 @@ def test_apply_preserves_utf8_bom(wiki_root: Path):
     )
 
     assert result["ok"] is True
-    assert page.read_bytes().startswith(b"\xef\xbb\xbf")
+    # Verify the written file does NOT start with BOM
+    content_bytes = page.read_bytes()
+    assert not content_bytes.startswith(b"\xef\xbb\xbf"), "File should not have UTF-8 BOM"
+    # Verify content is correct
+    content = content_bytes.decode("utf-8")
+    assert "[[concepts/suiteql|SuiteQL]]" in content
+
+
+def test_prepare_reads_utf8_bom_correctly(wiki_root: Path):
+    """Verify that wiki_enrich correctly reads files with UTF-8 BOM."""
+    page = wiki_root / "wiki" / "projects" / "myproj" / "architecture" / "entry-point.md"
+    # Write the page with BOM
+    page.write_text(
+        "---\ntype: architecture\ntitle: Entry Point\ngenerated: true\n---\n\n# Entry Point\n\n"
+        "This script uses SuiteQL to query records.\n",
+        encoding="utf-8-sig",
+    )
+
+    result = wiki_enrich(
+        str(wiki_root),
+        "wiki/projects/myproj/architecture/entry-point.md",
+        stage="prepare",
+    )
+
+    assert result["ok"] is True
+    # Verify the prompt contains the content (BOM was stripped correctly)
+    assert "SuiteQL" in result["prompt"]
+    assert "Entry Point" in result["prompt"]
 
 
 

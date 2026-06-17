@@ -603,7 +603,12 @@ def wiki_ingest_batch(
     task_id: str | None = None,
     result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Manage persistent ingest queue: enqueue, next, complete, fail, retry, status, cancel, clear_done."""
+    """Manage persistent ingest queue: enqueue, next, complete, fail, retry, status, cancel, clear_done, reapply, prepare_all, apply_all.
+
+    action="reapply": re-apply from cache for pending/failed tasks without re-preparing or calling LLM.
+    action="prepare_all": run prepare stage for all pending tasks; marks tasks as "prepared" when LLM response is needed.
+    action="apply_all": run apply stage for all prepared tasks (requires generation in task result).
+    """
     return run_wiki_ingest_batch(vault_root=vault_root, action=action, tasks=tasks, task_id=task_id, result=result)
 
 

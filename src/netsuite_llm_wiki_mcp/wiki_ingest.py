@@ -117,17 +117,34 @@ def rescan_source(
     cache_path = _cache_path(root, project_value, source_value, source_type_value)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cache.get("source_type") == source_type_value and cache.get("source_hash") == source_hash and _cache_manifest_uses_raw_dir(cache, root, raw_dir):
-            return {
-                "ok": True,
-                "stage": "rescan",
-                "status": "unchanged",
-                "project": project_value,
-                "source_name": source_value,
-                "source_hash": source_hash,
-                "paths": [],
-                "message": "source hash unchanged; reuse previous generated wiki pages",
-            }
+        if cache.get("source_type") == source_type_value and cache.get("source_hash") == source_hash:
+            if _cache_manifest_uses_raw_dir(cache, root, raw_dir):
+                return {
+                    "ok": True,
+                    "stage": "rescan",
+                    "status": "unchanged",
+                    "project": project_value,
+                    "source_name": source_value,
+                    "source_hash": source_hash,
+                    "paths": [],
+                    "message": "source hash unchanged; reuse previous generated wiki pages",
+                }
+            # Hash matches but manifest paths are stale — try auto-repair
+            repair = _repair_cache_manifest_paths(cache, root, project_value, source_value, source_type_value)
+            if repair["ok"]:
+                return {
+                    "ok": True,
+                    "stage": "rescan",
+                    "status": "unchanged",
+                    "project": project_value,
+                    "source_name": source_value,
+                    "source_hash": source_hash,
+                    "paths": [],
+                    "message": "source hash unchanged; manifest paths repaired",
+                    "manifest_repaired": True,
+                    "repaired_count": repair["repaired_count"],
+                    "repaired_paths": repair["repaired_paths"],
+                }
 
     _remove_stale_raw_snapshot_dirs(root, project_value, source_value, source_type_value, keep=raw_dir)
     if raw_dir.exists():
@@ -400,17 +417,34 @@ def _prepare_combined(
     cache_path = _cache_path(root, project, source_name, source_type)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cache.get("source_hash") == source_hash and _cache_manifest_uses_raw_dir(cache, root, raw_dir):
-            return {
-                "ok": True,
-                "stage": "prepare",
-                "status": "skipped",
-                "code": "source_unchanged",
-                "project": project,
-                "source_name": source_name,
-                "source_hash": source_hash,
-                "message": "source hash unchanged; reuse previous generated wiki pages",
-            }
+        if cache.get("source_hash") == source_hash:
+            if _cache_manifest_uses_raw_dir(cache, root, raw_dir):
+                return {
+                    "ok": True,
+                    "stage": "prepare",
+                    "status": "skipped",
+                    "code": "source_unchanged",
+                    "project": project,
+                    "source_name": source_name,
+                    "source_hash": source_hash,
+                    "message": "source hash unchanged; reuse previous generated wiki pages",
+                }
+            # Hash matches but manifest paths are stale — try auto-repair
+            repair = _repair_cache_manifest_paths(cache, root, project, source_name, source_type)
+            if repair["ok"]:
+                return {
+                    "ok": True,
+                    "stage": "prepare",
+                    "status": "skipped",
+                    "code": "source_unchanged",
+                    "project": project,
+                    "source_name": source_name,
+                    "source_hash": source_hash,
+                    "message": "source hash unchanged; manifest paths repaired",
+                    "manifest_repaired": True,
+                    "repaired_count": repair["repaired_count"],
+                    "repaired_paths": repair["repaired_paths"],
+                }
 
     _remove_stale_raw_snapshot_dirs(root, project, source_name, source_type, keep=raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -461,17 +495,34 @@ def _prepare_analysis(
     cache_path = _cache_path(root, project, source_name, source_type)
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cache.get("source_hash") == source_hash and _cache_manifest_uses_raw_dir(cache, root, raw_dir):
-            return {
-                "ok": True,
-                "stage": "prepare_analysis",
-                "status": "skipped",
-                "code": "source_unchanged",
-                "project": project,
-                "source_name": source_name,
-                "source_hash": source_hash,
-                "message": "source hash unchanged; reuse previous generated wiki pages",
-            }
+        if cache.get("source_hash") == source_hash:
+            if _cache_manifest_uses_raw_dir(cache, root, raw_dir):
+                return {
+                    "ok": True,
+                    "stage": "prepare_analysis",
+                    "status": "skipped",
+                    "code": "source_unchanged",
+                    "project": project,
+                    "source_name": source_name,
+                    "source_hash": source_hash,
+                    "message": "source hash unchanged; reuse previous generated wiki pages",
+                }
+            # Hash matches but manifest paths are stale — try auto-repair
+            repair = _repair_cache_manifest_paths(cache, root, project, source_name, source_type)
+            if repair["ok"]:
+                return {
+                    "ok": True,
+                    "stage": "prepare_analysis",
+                    "status": "skipped",
+                    "code": "source_unchanged",
+                    "project": project,
+                    "source_name": source_name,
+                    "source_hash": source_hash,
+                    "message": "source hash unchanged; manifest paths repaired",
+                    "manifest_repaired": True,
+                    "repaired_count": repair["repaired_count"],
+                    "repaired_paths": repair["repaired_paths"],
+                }
 
     _remove_stale_raw_snapshot_dirs(root, project, source_name, source_type, keep=raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -535,6 +586,7 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
         return {"ok": False, "code": "invalid_generation", "error": "generation must be a JSON object or JSON string"}
     manifest_sources = [item["path"] for item in cache.get("manifest", []) if isinstance(item, dict) and item.get("path")]
     written_paths: list[str] = []
+    manifest_fallback = manifest_sources[0] if len(manifest_sources) == 1 else ""
 
     raw_summary = payload.get("source_summary")
     if isinstance(raw_summary, dict):
@@ -543,8 +595,6 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
         summary = {"summary": raw_summary}
     else:
         summary = {}
-    one_line_summary = str(summary.get("summary") or f"Source index for {project}/{source_name}")
-
     pages = list(payload.get("pages") or [])
     for key in ("concept", "concepts"):
         extra = payload.get(key)
@@ -553,9 +603,31 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
         elif isinstance(extra, list):
             pages.extend(item for item in extra if isinstance(item, dict))
 
+    normalized_pages: list[dict[str, Any]] = []
+    source_replacements: dict[str, str] = {}
     for item in pages:
         if not isinstance(item, dict):
             continue
+        page_sources, replacements = _normalize_generated_sources([str(value) for value in item.get("sources", [])], manifest_sources)
+        source_replacements.update(replacements)
+        normalized_pages.append({
+            "path": item.get("path"),
+            "title": item.get("title"),
+            "type": item.get("type"),
+            "summary": _normalize_source_traceability_text(str(item.get("summary") or ""), replacements, manifest_fallback),
+            "body": normalize_wikilink_targets(
+                _normalize_source_traceability_text(str(item.get("body") or item.get("summary") or ""), replacements, manifest_fallback)
+            ),
+            "sources": page_sources,
+        })
+
+    one_line_summary = _normalize_source_traceability_text(
+        str(summary.get("summary") or f"Source index for {project}/{source_name}"),
+        source_replacements,
+        manifest_fallback,
+    )
+
+    for item in normalized_pages:
         try:
             path = _safe_generated_page_path(item, project, source_type)
         except ValueError as exc:
@@ -574,7 +646,7 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
                 "summary": str(item.get("summary") or ""),
             },
             title=str(item.get("title") or path.stem),
-            body=normalize_wikilink_targets(str(item.get("body") or item.get("summary") or "")),
+            body=str(item.get("body") or item.get("summary") or ""),
         )
         write_wiki_page(root, page)
         written_paths.append(path.as_posix())
@@ -630,6 +702,94 @@ def _cache_manifest_uses_raw_dir(cache: dict[str, Any], root: Path, raw_dir: Pat
         return False
     paths = [str(item.get("path") or "") for item in manifest if isinstance(item, dict)]
     return bool(paths) and all(path.startswith(expected_prefix) for path in paths)
+
+
+def _repair_cache_manifest_paths(
+    cache: dict[str, Any],
+    root: Path,
+    project: str,
+    source_name: str,
+    source_type: str,
+) -> dict[str, Any]:
+    """Attempt to repair cache manifest paths that don't match the expected raw dir.
+
+    When the raw/sources directory structure changes (e.g. adding a source_type
+    level: ``raw/sources/crawl4ai/`` -> ``raw/sources/file/crawl4ai/``), existing
+    cache manifests still reference the old paths.  This function detects the
+    correct source_type-based prefix and rewrites manifest entries, then
+    verifies the repaired paths exist on the filesystem.
+
+    Returns a dict with:
+      ``ok`` — whether all paths were successfully repaired;
+      ``repaired_count`` — number of entries repaired;
+      ``repaired_paths`` — list of new path strings;
+      ``unrepairable_paths`` — list of path strings that could not be repaired.
+    """
+    manifest = cache.get("manifest", [])
+    if not isinstance(manifest, list) or not manifest:
+        return {"ok": False, "repaired_count": 0, "repaired_paths": [], "unrepairable_paths": []}
+
+    raw_dir = _raw_source_snapshot_dir(root, project, source_name, source_type)
+    try:
+        correct_prefix = raw_dir.relative_to(root).as_posix().rstrip("/") + "/"
+    except ValueError:
+        return {"ok": False, "repaired_count": 0, "repaired_paths": [], "unrepairable_paths": []}
+
+    repaired_count = 0
+    repaired_paths: list[str] = []
+    unrepairable_paths: list[str] = []
+
+    for item in manifest:
+        if not isinstance(item, dict):
+            continue
+        old_path = str(item.get("path") or "")
+        if not old_path:
+            unrepairable_paths.append(old_path)
+            continue
+        if old_path.startswith(correct_prefix):
+            # Already correct
+            repaired_paths.append(old_path)
+            continue
+
+        # Detect the old prefix: everything up to and including the source_name
+        # segment.  For non-chat sources the structure is
+        # raw/sources/{old_type}/{project}/{source_name}/rest
+        # For chat sources it is raw/sources/chat/YYYY/MM/DD/{source_name}/rest
+        parts = old_path.split("/")
+        source_name_idx = None
+        for i, part in enumerate(parts):
+            if part == source_name:
+                source_name_idx = i
+                break
+
+        if source_name_idx is None:
+            unrepairable_paths.append(old_path)
+            continue
+
+        # Rebuild with the correct prefix: keep everything after source_name
+        suffix = "/".join(parts[source_name_idx + 1:])
+        new_path = correct_prefix + suffix
+
+        # Verify the repaired path exists on the filesystem
+        if (root / new_path).exists():
+            item["path"] = new_path
+            repaired_count += 1
+            repaired_paths.append(new_path)
+        else:
+            unrepairable_paths.append(old_path)
+
+    result: dict[str, Any] = {
+        "ok": not unrepairable_paths and repaired_count > 0,
+        "repaired_count": repaired_count,
+        "repaired_paths": repaired_paths,
+        "unrepairable_paths": unrepairable_paths,
+    }
+
+    if result["ok"]:
+        # Persist the repaired cache
+        _write_cache(root, project, source_name, cache, source_type=source_type)
+
+    return result
 
 
 def _remove_stale_raw_snapshot_dirs(root: Path, project: str, source_name: str, source_type: str, keep: Path) -> None:
@@ -865,6 +1025,61 @@ def _generation_payload(generation: dict[str, Any] | str) -> dict[str, Any] | No
     except json.JSONDecodeError:
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _normalize_generated_sources(raw_sources: list[str], manifest_sources: list[str]) -> tuple[list[str], dict[str, str]]:
+    manifest_sources = [str(source) for source in manifest_sources if str(source)]
+    raw_sources = [str(source) for source in raw_sources if str(source)]
+    if not raw_sources:
+        return manifest_sources, {}
+
+    manifest_set = set(manifest_sources)
+    manifest_by_name: dict[str, list[str]] = {}
+    for source in manifest_sources:
+        manifest_by_name.setdefault(Path(source).name, []).append(source)
+
+    normalized: list[str] = []
+    replacements: dict[str, str] = {}
+    for source in raw_sources:
+        if source in manifest_set:
+            normalized.append(source)
+            continue
+
+        target = ""
+        candidates = manifest_by_name.get(Path(source).name, [])
+        if len(candidates) == 1:
+            target = candidates[0]
+        elif len(manifest_sources) == 1:
+            target = manifest_sources[0]
+
+        if target:
+            normalized.append(target)
+            replacements[source] = target
+        else:
+            normalized.append(source)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for source in normalized:
+        if source and source not in seen:
+            seen.add(source)
+            deduped.append(source)
+
+    return deduped or manifest_sources, replacements
+
+
+def _normalize_source_traceability_text(text: str, replacements: dict[str, str], fallback_source: str = "") -> str:
+    if not text:
+        return text
+
+    normalized = text
+    for old_source, new_source in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+        normalized = normalized.replace(old_source, new_source)
+
+    if fallback_source and not replacements:
+        normalized = re.sub(r"raw/sources/[^\n\r\t`'\"<>|)]+", fallback_source, normalized)
+
+    return normalized
 
 
 def _safe_generated_page_path(item: dict[str, Any], project: str, source_type: str = "file") -> Path:
