@@ -53,6 +53,23 @@ def test_readme_avoids_machine_specific_python_paths_and_history_notes():
 
     assert "C:\\Python" not in text
     assert "python.exe -m pip install" not in text
+    assert "python -m pip install -e" not in text
     assert "字段名变更" not in text
     assert "related_script_ids" not in text
     assert "related_records" not in text
+
+
+def test_installation_docs_prefer_uv_commands():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    claude = Path("CLAUDE.md").read_text(encoding="utf-8")
+
+    combined = readme + "\n" + claude
+
+    assert "uv sync --extra dev" in readme
+    assert "uv run pytest" in readme
+    assert '"command": "uv"' in readme
+    assert '"command": "netsuite-llm-wiki-mcp-server"' not in readme
+
+    assert "uv sync --extra dev" in claude
+    assert "命令为 `uv run pytest tests/test_<module>.py`" in claude
+    assert "python -m pip install -e" not in combined

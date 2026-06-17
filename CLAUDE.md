@@ -6,15 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 常用命令
 
-- 安装开发依赖：`python -m pip install -e ".[dev]"`
-- 运行全部测试：`pytest`
-- 运行单个测试文件：`pytest tests/test_wiki_query.py`
-- 运行单个测试函数：`pytest tests/test_wiki_query.py::test_function_name -v`
-- 启动 MCP server：`netsuite-llm-wiki-mcp-server`、`netsuite-llm-wiki-mcp server` 或 `python -m netsuite_llm_wiki_mcp.server`
-- CLI 初始化 vault：`netsuite-llm-wiki-mcp init --vault <name> --root <path> --default`
-- CLI 查看状态：`netsuite-llm-wiki-mcp status`
+- 安装/同步开发环境：`uv sync --extra dev`
+- 运行全部测试：`uv run pytest`
+- 运行单个测试文件：`uv run pytest tests/test_wiki_query.py`
+- 运行单个测试函数：`uv run pytest tests/test_wiki_query.py::test_function_name -v`
+- 启动 MCP server：`uv run netsuite-llm-wiki-mcp-server`、`uv run netsuite-llm-wiki-mcp server` 或 `uv run python -m netsuite_llm_wiki_mcp.server`
+- CLI 初始化 vault：`uv run netsuite-llm-wiki-mcp init --vault <name> --root <path> --default`
+- CLI 查看状态：`uv run netsuite-llm-wiki-mcp status`
 
-项目没有单独配置 lint/typecheck 工具；完成前至少运行相关 `pytest`，较大改动运行全量 `pytest`。
+项目使用 `uv.lock` 管理开发环境。没有单独配置 lint/typecheck 工具；完成前至少运行相关 `uv run pytest`，较大改动运行全量 `uv run pytest`。
 
 ## 架构总览
 
@@ -92,7 +92,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ## 测试定位
 
-测试文件按模块一一对应，命令为 `pytest tests/test_<module>.py`：
+测试文件按模块一一对应，命令为 `uv run pytest tests/test_<module>.py`：
 - CLI/runtime/config：`test_cli.py`、`test_runtime_config.py`、`test_readme_global_mcp_docs.py`
 - Wiki 基础设施（paths/io/index/overview/log/files）：`test_wiki_paths.py`、`test_wiki_io.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
 - CodeGraph client / 摄入 / normalize：`test_codegraph_client.py`、`test_wiki_ingest_codegraph.py`、`test_wiki_ingest_normalize.py`

@@ -7,25 +7,27 @@
 ## 安装
 
 ```bash
-python -m pip install -e ".[dev]"
+uv sync --extra dev
 ```
+
+本仓库提交了 `uv.lock`；开发时优先使用 `uv sync --extra dev` 创建/同步 `.venv`，并安装 `dev` 可选依赖。
 
 ## 运行
 
 ```bash
 # 启动 MCP server
-netsuite-llm-wiki-mcp-server
+uv run netsuite-llm-wiki-mcp-server
 
 # 或通过 CLI / module 启动
-netsuite-llm-wiki-mcp server
-python -m netsuite_llm_wiki_mcp.server
+uv run netsuite-llm-wiki-mcp server
+uv run python -m netsuite_llm_wiki_mcp.server
 ```
 
 ### CLI
 
 ```bash
-netsuite-llm-wiki-mcp init --vault <name> --root <path> --default
-netsuite-llm-wiki-mcp status
+uv run netsuite-llm-wiki-mcp init --vault <name> --root <path> --default
+uv run netsuite-llm-wiki-mcp status
 ```
 
 ## 配置
@@ -46,13 +48,19 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 ### MCP 客户端配置
 
-添加到你的 MCP 客户端配置中（例如 Claude Code 的 `settings.json`）：
+添加到你的 MCP 客户端配置中（例如 Claude Code 的 `settings.json`）。`<path-to-netsuite-llm-wiki-mcp>` 替换为本仓库路径；客户端会通过 `uv` 在该目录运行 server：
 
 ```json
 {
   "mcpServers": {
     "netsuite-wiki": {
-      "command": "netsuite-llm-wiki-mcp-server"
+      "command": "uv",
+      "args": [
+        "--directory",
+        "<path-to-netsuite-llm-wiki-mcp>",
+        "run",
+        "netsuite-llm-wiki-mcp-server"
+      ]
     }
   }
 }
@@ -230,13 +238,13 @@ apply_generation   → 写入 wiki 页面
 
 ```bash
 # 运行全部测试
-pytest
+uv run pytest
 
 # 运行单个测试文件
-pytest tests/test_wiki_query.py
+uv run pytest tests/test_wiki_query.py
 
 # 运行单个测试函数
-pytest tests/test_wiki_query.py::test_function_name -v
+uv run pytest tests/test_wiki_query.py::test_function_name -v
 ```
 
 ### 约定
