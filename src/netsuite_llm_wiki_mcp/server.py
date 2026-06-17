@@ -313,7 +313,7 @@ def wiki_list_files(
     recursive: bool = True,
     max_files: int | None = None,
 ) -> dict[str, Any]:
-    """List public wiki files under wiki/, raw/sources/, and raw/projects/ without exposing runtime state."""
+    """List public wiki files under wiki/ and raw/sources/ without exposing runtime state."""
     return wiki_list_files_tool(vault_root, root_name, recursive, max_files)
 
 
@@ -323,7 +323,7 @@ def wiki_read_file(
     path: str,
     max_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Read a text file under wiki/, raw/sources/, or raw/projects/ with path and size limits."""
+    """Read a text file under wiki/ or raw/sources/ with path and size limits."""
     return wiki_read_file_tool(vault_root, path, max_bytes)
 
 

@@ -153,9 +153,13 @@ class TestLlmWikiServerTools:
         assert result["ok"] is True
         assert (vault / "purpose.md").is_file()
         assert (vault / "raw/sources").is_dir()
+        assert (vault / "raw/sources/projects").is_dir()
+        assert not (vault / "raw/projects").exists()
         assert (vault / "raw/assets").is_dir()
         assert (vault / "wiki/projects").is_dir()
         assert (vault / "wiki/concepts").is_dir()
+        assert (vault / "wiki/entities").is_dir()
+        assert (vault / "wiki/archives/log.md").is_file()
         assert (vault / ".llm-wiki").is_dir()
 
     def test_wiki_status_tool_delegates_status(self, monkeypatch, tmp_path: Path):

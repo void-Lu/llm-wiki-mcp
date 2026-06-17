@@ -33,9 +33,7 @@ def wiki_delete_source(
     """Delete a source and cascade-clean derived wiki pages and references."""
     root = Path(vault_root).expanduser().resolve()
 
-    raw_dir = root / "raw" / "projects" / project / "codegraph" / source_name
-    if not raw_dir.exists():
-        raw_dir = root / "raw" / "sources" / "file" / project / source_name
+    raw_dir = root / "raw" / "sources" / "file" / project / source_name
     if not raw_dir.exists():
         for source_type_dir in (root / "raw" / "sources").iterdir():
             candidate = source_type_dir / project / source_name
@@ -46,6 +44,8 @@ def wiki_delete_source(
         candidate = _find_date_grouped_chat_raw_dir(root, source_name)
         if candidate is not None:
             raw_dir = candidate
+    if not raw_dir.exists() and (root / ".llm-wiki" / "ingest-cache" / "codegraph" / project / f"{source_name}.json").exists():
+        raw_dir = root / "raw" / "sources" / "projects" / project / "codegraph"
 
     derived_pages, source_pruned_pages = _find_derived_pages(root, project, source_name)
     slugs_to_remove = {p.stem for p in derived_pages}
@@ -83,10 +83,7 @@ def wiki_delete_source(
 
     _clean_ingest_cache(root, project, source_name)
 
-    source_summaries = [
-        root / "wiki" / "projects" / project / "sources" / f"{source_name}.md",
-        root / "wiki" / "sources" / f"{source_name}.md",
-    ]
+    source_summaries = [path for path in (root / "wiki" / "sources").rglob("*.md") if path.stem in {source_name, "codegraph"}]
     for source_summary in source_summaries:
         if not source_summary.exists():
             continue
@@ -138,9 +135,10 @@ def _find_derived_pages(root: Path, project: str, source_name: str) -> tuple[lis
         if not isinstance(sources, list):
             sources = [sources] if sources else []
         source_strs = [str(s) for s in sources]
+        page_source_matches = str(fm.get("source_name") or "").casefold() == source_name.casefold()
         matching = [source for source in source_strs if _source_matches(source, source_name)]
-        if matching and (not fm.get("project") or fm.get("project") == project):
-            remaining = [source for source in source_strs if not _source_matches(source, source_name)]
+        if (matching or page_source_matches) and (not fm.get("project") or fm.get("project") == project):
+            remaining = [] if page_source_matches else [source for source in source_strs if not _source_matches(source, source_name)]
             if remaining:
                 pages_to_prune.append((path, remaining))
             else:
@@ -233,7 +231,13 @@ def _remove_references(root: Path, slugs: set[str]) -> int:
 
 def _clean_ingest_cache(root: Path, project: str, source_name: str) -> None:
     """Remove ingest cache entry for this source."""
-    cache_dir = root / ".llm-wiki" / "ingest-cache" / project
-    cache_file = cache_dir / f"{source_name}.json"
-    if cache_file.exists():
-        cache_file.unlink()
+    cache_root = root / ".llm-wiki" / "ingest-cache"
+    for cache_file in (
+        cache_root / project / f"{source_name}.json",
+        cache_root / "file" / project / f"{source_name}.json",
+        cache_root / "references" / project / f"{source_name}.json",
+        cache_root / "chat" / project / f"{source_name}.json",
+        cache_root / "codegraph" / project / f"{source_name}.json",
+    ):
+        if cache_file.exists():
+            cache_file.unlink()

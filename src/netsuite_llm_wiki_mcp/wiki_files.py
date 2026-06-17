@@ -146,9 +146,9 @@ def _public_roots(root: Path, root_name: str) -> list[Path] | None:
     if root_name == "wiki":
         return [root / "wiki"]
     if root_name == "sources":
-        return [root / "raw" / "sources", root / "raw" / "projects"]
+        return [root / "raw" / "sources"]
     if root_name == "all":
-        return [root / "wiki", root / "raw" / "sources", root / "raw" / "projects"]
+        return [root / "wiki", root / "raw" / "sources"]
     return None
 
 
@@ -172,9 +172,8 @@ def _resolve_public_text_path(root: Path, value: str) -> dict[str, Any]:
     if not (
         _starts_with(normalized, Path("wiki"))
         or _starts_with(normalized, Path("raw/sources"))
-        or _starts_with(normalized, Path("raw/projects"))
     ):
-        return {"ok": False, "code": "path_not_allowed", "error": "path must be under wiki/, raw/sources/, or raw/projects/"}
+        return {"ok": False, "code": "path_not_allowed", "error": "path must be under wiki/ or raw/sources/"}
     if normalized.suffix.lower() not in _TEXT_EXTENSIONS:
         return {"ok": False, "code": "unsupported_file_type", "error": "only text-like files can be read"}
 

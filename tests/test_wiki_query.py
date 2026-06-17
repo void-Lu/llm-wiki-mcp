@@ -72,6 +72,25 @@ def test_wiki_query_project_scope_filters_other_projects(tmp_path: Path):
     assert "wiki/projects/alpha/architecture/script.md" not in paths
 
 
+def test_wiki_query_excludes_archives_by_default(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/current/invoice.md", "Current Invoice", "current invoice workflow", type="concept")
+    archived = root / "wiki/archives/2026/06/16/concepts/old/invoice.md"
+    archived.parent.mkdir(parents=True, exist_ok=True)
+    archived.write_text(
+        "---\ntitle: Old Invoice\ngenerated: true\narchived: true\n---\n\n# Old Invoice\n\narchived invoice workflow",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = wiki_query(root, "invoice workflow", top_k=5)
+
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/current/invoice.md" in paths
+    assert all(not path.startswith("wiki/archives/") for path in paths)
+
+
 def test_wiki_query_uses_frontmatter_tags_and_index(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

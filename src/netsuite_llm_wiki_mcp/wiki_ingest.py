@@ -242,7 +242,7 @@ def ingest_codegraph(
     # 清理旧 code 页面，确保删除的源文件不会残留
     _clean_code_pages(root, project_value)
 
-    snapshot_dir = root / "raw" / "projects" / project_value / "codegraph" / source_value
+    snapshot_dir = root / "raw" / "sources" / "projects" / project_value / "codegraph"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshots = {
         "status.json": status.get("data", {}),
@@ -256,14 +256,20 @@ def ingest_codegraph(
         target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         written_paths.append(target.relative_to(root).as_posix())
 
-    source_page_path = Path("wiki") / "projects" / project_value / "sources" / f"{source_value}.md"
+    source_page_path = Path("wiki") / "sources" / "projects" / project_value / "architecture" / "codegraph.md"
     generated_page_paths: list[str] = []
 
     graph_snapshot_path = next((p for p in written_paths if p.endswith("/graph.json")), written_paths[2] if len(written_paths) > 2 else "")
     if has_full_graph:
         code_pages = _code_pages_from_graph(graph.get("data", {}), project_value, source_value, graph_snapshot_path)
     else:
-        code_pages = _code_pages_from_context(context.get("data", {}), project_value, source_value, written_paths[2] if len(written_paths) > 2 else "")
+        context_snapshot_path = written_paths[2] if len(written_paths) > 2 else ""
+        context_data = context.get("data", {})
+        context_nodes = _extract_nodes(context_data)
+        context_edges = _extract_edges(context_data)
+        context_node_by_id = {str(node.get("id")): node for node in context_nodes if node.get("id")}
+        code_pages = [_project_overview_page([], context_nodes, context_edges, context_node_by_id, project_value, source_value, context_snapshot_path)]
+        code_pages.extend(_code_pages_from_context(context_data, project_value, source_value, context_snapshot_path))
     readable_pages = [page for page in code_pages if page.frontmatter.get("type") != "code_fact"]
     for page in readable_pages:
         write_wiki_page(root, page)
@@ -277,6 +283,8 @@ def ingest_codegraph(
         written_paths.append(codefacts_path.relative_to(root).as_posix())
     if not has_full_graph:
         for page in code_pages:
+            if page.frontmatter.get("type") != "code_fact":
+                continue
             symbol = str(page.frontmatter.get("symbol", ""))
             if symbol:
                 impact = cg.impact(symbol)
@@ -345,7 +353,7 @@ def ingest_codegraph(
             operation="ingest",
             title=f"CodeGraph {project_value}/{source_value}",
             paths=written_paths,
-            sources=[f"raw/projects/{project_value}/codegraph/{source_value}/graph.json"],
+            sources=[f"raw/sources/projects/{project_value}/codegraph/graph.json"],
             project=project_value,
             status="ok",
         ),
@@ -685,11 +693,15 @@ def _source_index_path_for_generated_page(page_path: str, project: str, source_n
         if len(year) == 4 and len(month) == 2 and len(day) == 2 and year.isdigit() and month.isdigit() and day.isdigit():
             return Path("wiki") / "sources" / "chatlog" / year / month / day / f"{source_name}.md"
 
-    if len(parts) >= 2 and parts[0] == "wiki":
-        target_dir = parts[1]
-    else:
-        target_dir = "other"
-    return Path("wiki") / "sources" / target_dir / project / f"{source_name}.md"
+    if len(parts) >= 5 and parts[0] == "wiki" and parts[1] == "projects" and parts[2] == project:
+        return Path("wiki") / "sources" / "projects" / project / parts[3] / f"{source_name}.md"
+    if len(parts) >= 4 and parts[0] == "wiki" and parts[1] == "concepts":
+        return Path("wiki") / "sources" / "concepts" / parts[2] / f"{source_name}.md"
+    if len(parts) >= 6 and parts[0] == "wiki" and parts[1] == "queries":
+        return Path("wiki") / "sources" / "queries" / parts[2] / parts[3] / parts[4] / f"{source_name}.md"
+    if len(parts) >= 4 and parts[0] == "wiki" and parts[1] == "entities":
+        return Path("wiki") / "sources" / "entities" / parts[2] / f"{source_name}.md"
+    return Path("wiki") / "sources" / "concepts" / project / f"{source_name}.md"
 
 
 def _fallback_source_index_path(project: str, source_name: str, source_type: str) -> Path:
@@ -871,7 +883,6 @@ def _safe_generated_page_path(item: dict[str, Any], project: str, source_type: s
         "pipeline": "pipelines",
         "troubleshooting": "troubleshooting",
         "researches": "researches",
-        "source_index": "sources",
     }
     if page_type in project_subdirs:
         subdir = project_subdirs[page_type]
@@ -884,8 +895,10 @@ def _is_allowed_generated_path(path: Path, project: str, source_type: str = "fil
     if any(part in {"", ".", ".."} for part in parts):
         return False
     if len(parts) >= 5 and parts[0] == "wiki" and parts[1] == "projects" and parts[2] == project:
-        return parts[3] in {"specs", "plans", "architecture", "pipelines", "troubleshooting", "researches", "sources"}
+        return parts[3] in {"specs", "plans", "architecture", "pipelines", "troubleshooting", "researches"}
     if len(parts) >= 4 and parts[0] == "wiki" and parts[1] == "concepts" and parts[2] == project:
+        return True
+    if len(parts) >= 4 and parts[0] == "wiki" and parts[1] == "entities":
         return True
     if source_type == "chat" and len(parts) >= 6 and parts[0] == "wiki" and parts[1] == "chatlog":
         year, month, day = parts[2], parts[3], parts[4]

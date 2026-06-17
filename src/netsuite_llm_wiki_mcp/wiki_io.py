@@ -22,8 +22,8 @@ _ALLOWED_PREFIXES = (
     Path("wiki/chatlog"),
     Path("wiki/sources"),
     Path("wiki/queries"),
-    Path("wiki/comparisons"),
-    Path("wiki/maintenance"),
+    Path("wiki/entities"),
+    Path("wiki/archives"),
 )
 
 _FORBIDDEN_PARTS = {"objects"}
@@ -34,6 +34,8 @@ _FORBIDDEN_PREFIXES = (
     Path("wiki/requirements"),
     Path("wiki/knowledge"),
     Path("wiki/synthesis"),
+    Path("wiki/comparisons"),
+    Path("wiki/maintenance"),
     Path("projects"),
 )
 
@@ -44,7 +46,6 @@ _PROJECT_SUBDIRS = {
     "pipelines",
     "troubleshooting",
     "researches",
-    "sources",
 }
 
 _RESERVED_STRUCTURE_PARTS = {
@@ -54,8 +55,8 @@ _RESERVED_STRUCTURE_PARTS = {
     "chatlog",
     "sources",
     "queries",
-    "comparisons",
-    "maintenance",
+    "entities",
+    "archives",
     *_PROJECT_SUBDIRS,
 }
 

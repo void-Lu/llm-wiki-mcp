@@ -8,8 +8,8 @@ from netsuite_llm_wiki_mcp.wiki_paths import WikiPathError, WikiPaths, create_wi
 
 
 EXPECTED_DIRS = [
-    "raw/projects",
     "raw/sources",
+    "raw/sources/projects",
     "raw/sources/file",
     "raw/sources/references",
     "raw/sources/chat",
@@ -19,8 +19,8 @@ EXPECTED_DIRS = [
     "wiki/chatlog",
     "wiki/sources",
     "wiki/queries",
-    "wiki/comparisons",
-    "wiki/maintenance",
+    "wiki/entities",
+    "wiki/archives",
     ".llm-wiki/ingest-cache",
     ".llm-wiki/graph-index",
     ".llm-wiki/relation-candidates",
@@ -33,6 +33,12 @@ EXPECTED_FILES = [
     "wiki/index.md",
     "wiki/log.md",
     "wiki/overview.md",
+    "wiki/concepts/index.md",
+    "wiki/chatlog/index.md",
+    "wiki/sources/index.md",
+    "wiki/queries/index.md",
+    "wiki/entities/index.md",
+    "wiki/archives/log.md",
 ]
 
 
@@ -67,7 +73,8 @@ def test_create_wiki_root_writes_actionable_schema_template(tmp_path: Path):
     schema = (root / "schema.md").read_text(encoding="utf-8")
     assert "LLM Wiki 维护原则" in schema
     assert "raw/sources/" in schema
-    assert "raw/projects/<project>/codegraph/" in schema
+    assert "raw/sources/projects/<project>/codegraph/" in schema
+    assert "raw/projects/<project>/codegraph/" not in schema
     assert "wiki/projects/<project>/specs/" in schema
     assert "wiki/projects/<project>/plans/" in schema
     assert "wiki/index.md" in schema
@@ -79,22 +86,22 @@ def test_project_helpers_return_confirmed_project_substructure(tmp_path: Path):
     paths = create_wiki_root(tmp_path / "vault")
 
     assert paths.project_root("alpha") == paths.root / "wiki" / "projects" / "alpha"
-    assert paths.raw_project_root("alpha") == paths.root / "raw" / "projects" / "alpha"
-    assert paths.raw_project_codegraph_dir("alpha") == paths.root / "raw" / "projects" / "alpha" / "codegraph"
-    assert paths.raw_project_requirements_dir("alpha") == paths.root / "raw" / "projects" / "alpha" / "requirements"
+    assert paths.raw_project_root("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha"
+    assert paths.raw_project_codegraph_dir("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha" / "codegraph"
+    assert paths.raw_project_requirements_dir("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha" / "requirements"
+    assert paths.raw_project_assets_dir("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha" / "assets"
     assert paths.project_specs_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "specs"
     assert paths.project_plans_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "plans"
     assert paths.project_architecture_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "architecture"
     assert paths.project_pipelines_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "pipelines"
     assert paths.project_troubleshooting_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "troubleshooting"
     assert paths.project_researches_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "researches"
-    assert paths.project_sources_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "sources"
     assert paths.concepts_dir() == paths.root / "wiki" / "concepts"
     assert paths.chatlog_dir() == paths.root / "wiki" / "chatlog"
     assert paths.sources_dir() == paths.root / "wiki" / "sources"
     assert paths.queries_dir() == paths.root / "wiki" / "queries"
-    assert paths.comparisons_dir() == paths.root / "wiki" / "comparisons"
-    assert paths.maintenance_dir() == paths.root / "wiki" / "maintenance"
+    assert paths.entities_dir() == paths.root / "wiki" / "entities"
+    assert paths.archives_dir() == paths.root / "wiki" / "archives"
 
 
 @pytest.mark.parametrize(

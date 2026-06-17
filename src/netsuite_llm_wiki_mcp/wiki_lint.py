@@ -21,10 +21,16 @@ _REQUIRED_FILES = (
     Path("wiki/index.md"),
     Path("wiki/log.md"),
     Path("wiki/overview.md"),
+    Path("wiki/concepts/index.md"),
+    Path("wiki/chatlog/index.md"),
+    Path("wiki/sources/index.md"),
+    Path("wiki/queries/index.md"),
+    Path("wiki/entities/index.md"),
+    Path("wiki/archives/log.md"),
 )
 _REQUIRED_DIRS = (
-    Path("raw/projects"),
     Path("raw/sources"),
+    Path("raw/sources/projects"),
     Path("raw/sources/file"),
     Path("raw/sources/references"),
     Path("raw/sources/chat"),
@@ -34,13 +40,14 @@ _REQUIRED_DIRS = (
     Path("wiki/chatlog"),
     Path("wiki/sources"),
     Path("wiki/queries"),
-    Path("wiki/comparisons"),
-    Path("wiki/maintenance"),
+    Path("wiki/entities"),
+    Path("wiki/archives"),
     Path(".llm-wiki/ingest-cache"),
     Path(".llm-wiki/graph-index"),
     Path(".llm-wiki/relation-candidates"),
 )
 _OLD_PATHS = (
+    Path("raw/projects"),
     Path("raw/sources/url"),
     Path("raw/sources/codegraph"),
     Path("wiki/code"),
@@ -49,6 +56,8 @@ _OLD_PATHS = (
     Path("wiki/requirements"),
     Path("wiki/knowledge"),
     Path("wiki/synthesis"),
+    Path("wiki/comparisons"),
+    Path("wiki/maintenance"),
 )
 
 
@@ -81,11 +90,11 @@ def wiki_lint(
     if projects_root.exists():
         for objects_dir in projects_root.glob("*/objects"):
             issues.append(_issue("old_structure_present", "objects directory is not part of the LLM Wiki structure", objects_dir.relative_to(root)))
-        for old_project_dir in list(projects_root.glob("*/code")) + list(projects_root.glob("*/decisions")) + list(projects_root.glob("*/requirements")) + list(projects_root.glob("*/synthesis")):
+        for old_project_dir in list(projects_root.glob("*/code")) + list(projects_root.glob("*/decisions")) + list(projects_root.glob("*/requirements")) + list(projects_root.glob("*/synthesis")) + list(projects_root.glob("*/sources")):
             issues.append(_issue("old_structure_present", "project subdirectory is not part of the current LLM Wiki structure", old_project_dir.relative_to(root)))
     wiki_root = root / "wiki"
     if wiki_root.exists():
-        pages = sorted(wiki_root.rglob("*.md"))
+        pages = sorted(page for page in wiki_root.rglob("*.md") if not _is_archived_page(page, root))
         by_rel = {page.relative_to(root).as_posix(): page for page in pages}
         by_stem: dict[str, list[str]] = {}
         for rel_key in by_rel:
@@ -131,7 +140,17 @@ def wiki_lint(
                 resolved = (root / "wiki" / target_path).resolve()
                 if resolved.is_relative_to(root) and not resolved.exists():
                     issues.append(_issue("index_target_missing", f"index target does not exist: {target}", Path("wiki/index.md")))
-        structural_pages = {"wiki/index.md", "wiki/log.md", "wiki/overview.md"}
+        structural_pages = {
+            "wiki/index.md",
+            "wiki/log.md",
+            "wiki/overview.md",
+            "wiki/concepts/index.md",
+            "wiki/chatlog/index.md",
+            "wiki/sources/index.md",
+            "wiki/queries/index.md",
+            "wiki/entities/index.md",
+            "wiki/archives/log.md",
+        }
         referenced: set[str] = set()
         for page in pages:
             text = page.read_text(encoding="utf-8")
@@ -215,12 +234,14 @@ def _apply_semantic_review(root: Path, semantic_review: str | None, project: str
     if not semantic_review or not semantic_review.strip():
         return {"ok": False, "code": "empty_semantic_review", "error": "semantic_review content is empty"}
     today = date.today().isoformat()
+    year, month, day = today.split("-")
     filename = f"semantic-lint-{project + '-' if project else ''}{today}.md"
-    rel_path = Path("wiki") / "maintenance" / filename
+    query_id = f"semantic-lint-{project or 'vault'}"
+    rel_path = Path("wiki") / "queries" / year / month / day / query_id / filename
     target = root / rel_path
     target.parent.mkdir(parents=True, exist_ok=True)
     frontmatter: dict[str, Any] = {
-        "type": "maintenance",
+        "type": "semantic_review",
         "title": f"Semantic Lint: {project or 'vault'}",
         "generated": True,
         "origin": "semantic-lint",
@@ -258,7 +279,12 @@ def _semantic_review_context(root: Path, project: str | None) -> str:
 
 def _page_in_project_scope(path: Path, root: Path, project: str) -> bool:
     rel = path.relative_to(root).as_posix()
-    return rel.startswith(f"wiki/projects/{project}/") or rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/comparisons/", "wiki/maintenance/"))
+    return rel.startswith(f"wiki/projects/{project}/") or rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/entities/"))
+
+
+def _is_archived_page(path: Path, root: Path) -> bool:
+    rel = path.relative_to(root).as_posix()
+    return rel.startswith("wiki/archives/") and rel != "wiki/archives/log.md"
 
 
 def _strip_thinking_blocks(text: str) -> str:

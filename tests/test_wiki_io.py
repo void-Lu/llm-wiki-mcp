@@ -14,7 +14,7 @@ def test_write_and_read_markdown_page_with_frontmatter(tmp_path: Path):
     create_wiki_root(root)
     page = WikiPage(
         relative_path=Path("wiki/projects/alpha/architecture/script-a.md"),
-        frontmatter={"type": "architecture", "generated": True, "sources": ["raw/projects/alpha/codegraph/main/status.json"]},
+        frontmatter={"type": "architecture", "generated": True, "sources": ["raw/sources/projects/alpha/codegraph/status.json"]},
         title="Script A",
         body="Call 13800138000 before release.",
     )
@@ -41,14 +41,14 @@ def test_write_wiki_page_redacts_title_and_frontmatter(tmp_path: Path):
     write_wiki_page(
         root,
         WikiPage(
-            relative_path=Path("wiki/concepts/secret.md"),
+            relative_path=Path("wiki/concepts/security/secret.md"),
             frontmatter={"generated": True, "summary": "Contact a@example.com", "sources": ["token=abc1234567890"]},
             title="Call 13800138000",
             body="safe body",
         ),
     )
 
-    text = (root / "wiki/concepts/secret.md").read_text(encoding="utf-8")
+    text = (root / "wiki/concepts/security/secret.md").read_text(encoding="utf-8")
     assert "13800138000" not in text
     assert "a@example.com" not in text
     assert "token=abc1234567890" not in text
@@ -86,6 +86,9 @@ def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
         Path("wiki/decisions/old.md"),
         Path("wiki/synthesis/old.md"),
         Path("wiki/knowledge/old.md"),
+        Path("wiki/comparisons/old.md"),
+        Path("wiki/maintenance/old.md"),
+        Path("wiki/projects/alpha/sources/source.md"),
         Path("wiki/projects/alpha/objects/object.md"),
         Path("projects/alpha/wiki/objects/object.md"),
     ],
@@ -156,11 +159,12 @@ def test_write_wiki_page_rejects_windows_invalid_path_components(tmp_path: Path,
 def test_read_markdown_page_treats_malformed_frontmatter_as_empty(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    target = root / "wiki/concepts/bad.md"
+    target = root / "wiki/concepts/general/bad.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("---\ntitle: [broken\n---\n\n# Bad\n\nbody", encoding="utf-8")
 
     parsed = read_markdown_page(target, root)
 
-    assert parsed.relative_path == Path("wiki/concepts/bad.md")
+    assert parsed.relative_path == Path("wiki/concepts/general/bad.md")
     assert parsed.frontmatter == {}
     assert parsed.title == "Bad"

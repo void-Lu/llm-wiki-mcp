@@ -94,10 +94,11 @@ def _apply(
 
     cleaned = _strip_thinking_blocks(synthesis)
     today = date.today().isoformat()
+    year, month, day = today.split("-")
     slug = _topic_to_slug(topic)
     filename = f"research-{slug}-{today}.md"
 
-    queries_dir = root / "wiki" / "queries"
+    queries_dir = root / "wiki" / "queries" / year / month / day / slug
     queries_dir.mkdir(parents=True, exist_ok=True)
     target = queries_dir / filename
 

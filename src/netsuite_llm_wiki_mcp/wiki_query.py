@@ -195,6 +195,8 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False) -> list[Quer
         for path in sorted(wiki.rglob("*.md")):
             if path.name in _STRUCTURAL_PAGE_NAMES:
                 continue
+            if path.relative_to(root).parts[:2] == ("wiki", "archives"):
+                continue
             candidates.append(_wiki_candidate(path, root))
     raw_sources = root / "raw" / "sources"
     if include_raw_sources and raw_sources.exists():
@@ -208,9 +210,7 @@ def _in_project_scope(rel: str, project: str) -> bool:
     parts = Path(rel).parts
     if rel.startswith(f"wiki/projects/{project}/"):
         return True
-    if rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/comparisons/", "wiki/maintenance/")):
-        return True
-    if len(parts) >= 5 and parts[0] == "raw" and parts[1] == "projects" and parts[2] == project:
+    if rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/entities/")):
         return True
     if len(parts) >= 5 and parts[0] == "raw" and parts[1] == "sources" and parts[3] == project:
         return True

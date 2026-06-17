@@ -35,6 +35,7 @@ def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, o
     ]
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
+    _enforce_log_limit(root, log_path, "wiki-log", record_archive=True)
     return {"ok": True, "path": "wiki/log.md"}
 
 
@@ -96,3 +97,87 @@ def _indented_items(items: list[str]) -> list[str]:
     if not items:
         return ["  - none"]
     return [f"  - {redact_sensitive_text(item)}" for item in items]
+
+
+def _enforce_log_limit(root: Path, log_path: Path, source_log_name: str, record_archive: bool) -> None:
+    text = log_path.read_text(encoding="utf-8")
+    preamble, blocks = _split_log_blocks(text)
+    if len(blocks) <= 200:
+        return
+    overflow = blocks[: len(blocks) - 200]
+    keep = blocks[len(blocks) - 200 :]
+    log_path.write_text(_join_log_blocks(preamble, keep), encoding="utf-8")
+    archive_path = _write_archived_log_blocks(root, source_log_name, overflow)
+    if record_archive:
+        _append_archive_log(root, archive_path)
+
+
+def _split_log_blocks(text: str) -> tuple[str, list[str]]:
+    lines = text.splitlines()
+    preamble_lines: list[str] = []
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if line.startswith("## ["):
+            if current is not None:
+                blocks.append(current)
+            current = [line]
+        elif current is None:
+            preamble_lines.append(line)
+        else:
+            current.append(line)
+    if current is not None:
+        blocks.append(current)
+    preamble = "\n".join(preamble_lines).rstrip()
+    return preamble, ["\n".join(block).rstrip() for block in blocks]
+
+
+def _join_log_blocks(preamble: str, blocks: list[str]) -> str:
+    parts = [preamble] if preamble else []
+    parts.extend(blocks)
+    return "\n\n".join(part for part in parts if part).rstrip() + "\n\n"
+
+
+def _write_archived_log_blocks(root: Path, source_log_name: str, blocks: list[str]) -> Path:
+    year, month, day = _archive_date_parts(blocks)
+    archive_dir = root / "wiki" / "archives" / year / month / day / "log"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    sequence = len(list(archive_dir.glob(f"{source_log_name}-*.md"))) + 1
+    archive_path = archive_dir / f"{source_log_name}-{sequence:03d}.md"
+    archive_path.write_text("---\narchived: true\ntags:\n- archived\n---\n\n" + "\n\n".join(blocks).rstrip() + "\n", encoding="utf-8")
+    return archive_path
+
+
+def _archive_date_parts(blocks: list[str]) -> tuple[str, str, str]:
+    for block in blocks:
+        first_line = block.splitlines()[0] if block.splitlines() else ""
+        match = _LOG_HEADING_RE.match(first_line)
+        if match:
+            date_part = match.group(1)[:10]
+            if re.match(r"\d{4}-\d{2}-\d{2}", date_part):
+                year, month, day = date_part.split("-")
+                return year, month, day
+    now = datetime.now(timezone.utc)
+    return f"{now.year:04d}", f"{now.month:02d}", f"{now.day:02d}"
+
+
+def _append_archive_log(root: Path, archive_path: Path) -> None:
+    archive_log = root / "wiki" / "archives" / "log.md"
+    archive_log.parent.mkdir(parents=True, exist_ok=True)
+    if not archive_log.exists():
+        archive_log.write_text("# Archives Log\n\n", encoding="utf-8")
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    rel = archive_path.relative_to(root).as_posix()
+    lines = [
+        f"## [{timestamp}] archive_log | Archived wiki log entries",
+        "- project: ",
+        "- status: ok",
+        "- paths:",
+        f"  - {rel}",
+        "- sources:",
+        "  - wiki/log.md",
+        "",
+    ]
+    with archive_log.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    _enforce_log_limit(root, archive_log, "archives-log", record_archive=False)

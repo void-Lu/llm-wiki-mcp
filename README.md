@@ -65,8 +65,8 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | 工具 | 说明 |
 |------|------|
 | `wiki_status` | 返回 vault 结构诊断、ingest queue 计数、版本和 CodeGraph 可用性；不会创建或修改 vault |
-| `wiki_list_files` | 只列出公开路径 `wiki/`、`raw/sources/` 和 `raw/projects/` 下的文件，支持 `root_name="wiki"|"sources"|"all"`、递归和数量限制 |
-| `wiki_read_file` | 只读取 `wiki/`、`raw/sources/` 或 `raw/projects/` 下的文本文件，拒绝绝对路径、路径穿越、运行时私有目录和非文本扩展，并按字节数截断 |
+| `wiki_list_files` | 只列出公开路径 `wiki/` 和 `raw/sources/` 下的文件，支持 `root_name="wiki"|"sources"|"all"`、递归和数量限制 |
+| `wiki_read_file` | 只读取 `wiki/` 或 `raw/sources/` 下的文本文件，拒绝绝对路径、路径穿越、运行时私有目录和非文本扩展，并按字节数截断 |
 
 ### 摄入
 
@@ -114,26 +114,26 @@ vault_root/
 ├── purpose.md
 ├── schema.md
 ├── raw/
-│   ├── projects/
-│   │   └── <project>/
-│   │       ├── requirements/
-│   │       ├── codegraph/
-│   │       │   └── <source_name>/
-│   │       ├── chat/
-│   │       │   └── <yyyy>/<mm>/<dd>/<session-id>/
-│   │       └── assets/
-│   ├── sources/
-│   │   ├── file/
-│   │   ├── references/
-│   │   └── chat/
-│   └── assets/
+│   ├── assets/
+│   └── sources/
+│       ├── projects/
+│       │   └── <project>/
+│       │       ├── requirements/
+│       │       ├── codegraph/
+│       │       └── assets/
+│       ├── chat/
+│       │   └── <yyyy>/<mm>/<dd>/<session-id>/
+│       ├── file/
+│       └── references/
 ├── wiki/
 │   ├── index.md
 │   ├── log.md
 │   ├── overview.md
 │   ├── concepts/
+│   │   ├── index.md
 │   │   └── <domain>/
 │   ├── chatlog/
+│   │   ├── index.md
 │   │   └── <yyyy>/<mm>/<dd>/
 │   ├── projects/
 │   │   └── <project>/
@@ -143,15 +143,23 @@ vault_root/
 │   │       ├── architecture/
 │   │       ├── pipelines/
 │   │       ├── troubleshooting/
-│   │       ├── researches/
-│   │       └── sources/
+│   │       └── researches/
 │   ├── sources/
+│   │   ├── index.md
 │   │   ├── concepts/
 │   │   ├── projects/
-│   │   └── chatlog/
+│   │   ├── chatlog/
+│   │   ├── queries/
+│   │   └── entities/
 │   ├── queries/
-│   ├── comparisons/
-│   └── maintenance/
+│   │   ├── index.md
+│   │   └── <yyyy>/<mm>/<dd>/<query-id>/
+│   ├── entities/
+│   │   ├── index.md
+│   │   └── <entity>/
+│   └── archives/
+│       ├── log.md
+│       └── <yyyy>/<mm>/<dd>/
 └── .llm-wiki/
     ├── ingest-cache/
     ├── ingest-queue.json
@@ -183,15 +191,15 @@ vault_root/
 ### CodeGraph 摄入
 
 ```
-wiki_ingest_codegraph → raw/projects/<project>/codegraph/<source_name>/
-                      → raw/projects/<project>/codegraph/<source_name>/codefacts.json
-                      → wiki/projects/<project>/sources/<source_name>.md (索引页)
+wiki_ingest_codegraph → raw/sources/projects/<project>/codegraph/
+                      → raw/sources/projects/<project>/codegraph/codefacts.json
+                      → wiki/sources/projects/<project>/architecture/codegraph.md (索引溯源页)
                       → wiki/projects/<project>/architecture/code-overview.md
                       → wiki/projects/<project>/pipelines/ (仅 profile="suitescript" 且检测到链路时)
                       → index + overview + log 更新
 ```
 
-`wiki_ingest_codegraph` 默认使用 `profile="generic"`，CodeGraph 机器事实保存到 raw，不再作为普通 wiki 知识页展示；可读层只生成项目 source 索引和 architecture overview。SuiteScript/SuiteCloud 项目需要传 `profile="suitescript"` 才会启用 `N/task`、`N/record`、`N/url`、`form.clientScriptModulePath`、`custscript_*` 等隐式关系抽取和业务 pipeline 页面生成。对 SDF 项目根目录摄入时，可用 `include_extensions=[".js"]` 只保留脚本文件，避免 `Objects/*.xml` 混入代码事实。
+`wiki_ingest_codegraph` 默认使用 `profile="generic"`，CodeGraph 机器事实保存到 raw，不再作为普通 wiki 知识页展示；可读层生成 `wiki/sources/` 下的索引溯源页和项目 architecture overview。SuiteScript/SuiteCloud 项目需要传 `profile="suitescript"` 才会启用 `N/task`、`N/record`、`N/url`、`form.clientScriptModulePath`、`custscript_*` 等隐式关系抽取和业务 pipeline 页面生成。对 SDF 项目根目录摄入时，可用 `include_extensions=[".js"]` 只保留脚本文件，避免 `Objects/*.xml` 混入代码事实。
 
 ### LLM 分阶段摄入
 
@@ -200,7 +208,7 @@ wiki_ingest_codegraph → raw/projects/<project>/codegraph/<source_name>/
 prepare → 读源文件 + 写 raw/sources/<source_type>/ snapshot + 返回合并 prompt（agent 发送给 LLM）
   → source_type="chat" 时，写 raw/sources/chat/YYYY/MM/DD/<source_name>/
 apply   → 写 wiki/concepts/ 或 wiki/projects/ 下的知识页面
-  → 写 wiki/sources/<target_dir>/<project>/<source_name>.md 索引溯源页
+  → 写 wiki/sources/ 下镜像目标 wiki 结构的索引溯源页
   → source_type="chat" 且生成 chatlog 时，写 wiki/sources/chatlog/YYYY/MM/DD/<source_name>.md 索引溯源页
 
 旧三阶段（仍兼容）：

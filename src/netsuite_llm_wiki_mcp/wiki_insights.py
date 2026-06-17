@@ -293,7 +293,7 @@ def _resolve_target(
 def _in_scope(rel: str, project: str) -> bool:
     if rel.startswith(f"wiki/projects/{project}/"):
         return True
-    if rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/comparisons/", "wiki/maintenance/")):
+    if rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/entities/")):
         return True
     return False
 

@@ -61,6 +61,12 @@ def test_apply_writes_page(research_root: Path):
     assert result["ok"] is True
     assert result["stage"] == "apply"
     assert result["path"].startswith("wiki/queries/")
+    parts = Path(result["path"]).parts
+    assert parts[:2] == ("wiki", "queries")
+    assert len(parts) == 7
+    assert len(parts[2]) == 4 and parts[2].isdigit()
+    assert len(parts[3]) == 2 and parts[3].isdigit()
+    assert len(parts[4]) == 2 and parts[4].isdigit()
 
     page_path = research_root / result["path"]
     assert page_path.exists()

@@ -35,14 +35,14 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 - `vault_root` 解析优先级在 [runtime_config.py](src/netsuite_llm_wiki_mcp/runtime_config.py)：工具参数 > `NETSUITE_LLM_WIKI_VAULT_ROOT` > 全局 `config.yaml` 的 `default_vault`。
 - 跨平台配置/数据目录在 [platform_paths.py](src/netsuite_llm_wiki_mcp/platform_paths.py)，测试通过 [tests/conftest.py](tests/conftest.py) 自动隔离这些环境变量。
-- Wiki 目录创建和 path segment 校验在 [wiki_paths.py](src/netsuite_llm_wiki_mcp/wiki_paths.py)。外部 Obsidian root 固定包含 `purpose.md`、`schema.md`、`raw/projects/`、`raw/sources/{file,references,chat}/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/chatlog/`、`wiki/sources/`、`wiki/queries/`、`wiki/comparisons/`、`wiki/maintenance/`、`.obsidian/`、`.llm-wiki/{ingest-cache,graph-index,relation-candidates}/`。
-- `wiki/sources/` 是 LLM 摄入的纯索引溯源页目录，按关联目标分级：`wiki/sources/concepts/<project>/`、`wiki/sources/projects/<project>/` 等；会话来源按日期写入 `wiki/sources/chatlog/<yyyy>/<mm>/<dd>/`。索引页只保留 frontmatter、一句话摘要、raw source 路径和指向生成页的 wikilinks，不承载知识内容。
+- Wiki 目录创建和 path segment 校验在 [wiki_paths.py](src/netsuite_llm_wiki_mcp/wiki_paths.py)。外部 Obsidian root 固定包含 `purpose.md`、`schema.md`、`raw/sources/{projects,file,references,chat}/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/chatlog/`、`wiki/sources/`、`wiki/queries/`、`wiki/entities/`、`wiki/archives/`、`.obsidian/`、`.llm-wiki/{ingest-cache,graph-index,relation-candidates}/`。
+- `wiki/sources/` 是纯索引溯源页目录，按关联目标分级：CodeGraph 索引页写 `wiki/sources/projects/<project>/architecture/codegraph.md`；LLM 摄入索引页写 `wiki/sources/<target_dir>/<project>/<source_name>.md`；会话来源按日期写入 `wiki/sources/chatlog/<yyyy>/<mm>/<dd>/`。索引页只保留 frontmatter、一句话摘要、raw source 路径和指向生成页的 wikilinks，不承载知识内容。
 - Cache 路径按 source_type 隔离：`.llm-wiki/ingest-cache/{source_type}/{project}/{source_name}.json`。
 - Markdown/frontmatter 读写、覆盖保护和脱敏在 [wiki_io.py](src/netsuite_llm_wiki_mcp/wiki_io.py)。生成页只能覆盖 `generated: true` 页面；人工页不能被静默覆盖。
 
 ### 写入与维护流水线
 
-- CodeGraph 摄入在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：`CodeGraphClient`（定义在 [codegraph_client.py](src/netsuite_llm_wiki_mcp/codegraph_client.py)）读取 `status/files/context/impact/graph_snapshot` → 写 `raw/projects/<project>/codegraph/<source_name>/` snapshot → 写 `wiki/projects/<project>/architecture/` 可读页 + `wiki/projects/<project>/sources/<source_name>.md` 索引页 → refresh index/overview/log → 写 `.llm-wiki/ingest-cache/codegraph/`。MCP 工具名为 `wiki_ingest_codegraph`，同步执行不需要 LLM。`profile="suitescript"` 时额外生成 `wiki/projects/<project>/pipelines/` 页（需要完整 graph snapshot）。
+- CodeGraph 摄入在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：`CodeGraphClient`（定义在 [codegraph_client.py](src/netsuite_llm_wiki_mcp/codegraph_client.py)）读取 `status/files/context/impact/graph_snapshot` → 写 `raw/sources/projects/<project>/codegraph/` snapshot（含 `graph.json`、`codefacts.json` 等） → 写 `wiki/projects/<project>/architecture/` 可读页 + `wiki/sources/projects/<project>/architecture/codegraph.md` 索引页 → refresh index/overview/log → 写 `.llm-wiki/ingest-cache/codegraph/`。MCP 工具名为 `wiki_ingest_codegraph`，同步执行不需要 LLM。`profile="suitescript"` 时额外生成 `wiki/projects/<project>/pipelines/` 页（需要完整 graph snapshot）。
 - LLM 分阶段摄入同在 [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py)：推荐两阶段流程 `stage="prepare"`（读源 + 写 `raw/sources/<source_type>/` snapshot + 返回合并 prompt；`source_type="chat"` 时写到 `raw/sources/chat/<yyyy>/<mm>/<dd>/<source_name>/`）→ `stage="apply"`（校验路径并写 generated pages + 按目标目录写索引页到 `wiki/sources/<target_dir>/<project>/`；`source_type="chat"` 且生成 chatlog 时写到 `wiki/sources/chatlog/<yyyy>/<mm>/<dd>/`）。旧三阶段（`prepare_analysis` / `prepare_generation` / `apply_generation`）仍兼容但不推荐。`source_path` 支持绝对路径和相对于 vault_root 的相对路径。`generation` 参数中 `source_summary` 可以是 dict 或纯字符串（只需一句话摘要）；顶层 `concept`/`concepts` key 会自动合并到 `pages`。
 - URL 摄入已移除（`wiki_ingest_url` 模块和工具不再存在）；URL 来源统一通过 `wiki_ingest_llm` 以 `source_type="url"` 处理。
 - 人工笔记写入在 [note_writer.py](src/netsuite_llm_wiki_mcp/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
@@ -92,17 +92,12 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ## 测试定位
 
-- CLI/runtime/config/storage：`tests/test_cli.py`、`tests/test_runtime_config.py`、`tests/test_readme_global_mcp_docs.py`
-- Wiki primitives（paths/io/index/overview/log）：`tests/test_wiki_paths.py`、`tests/test_wiki_io.py`、`tests/test_wiki_index.py`、`tests/test_wiki_overview.py`、`tests/test_wiki_log.py`
-- MCP 工具注册和调用：`tests/test_server_tools.py`
-- 人工 note 写入：`tests/test_save_obsidian_note.py`
-- CodeGraph client / 摄入：`tests/test_codegraph_client.py`、`tests/test_wiki_ingest_codegraph.py`
-- Wikilink 工具函数：`tests/test_wiki_enrich.py`（含 wikilinks 模块覆盖）
-- 文件管理工具（status/list/read）：`tests/test_wiki_files.py`
-- Git 辅助：`tests/test_git_utils.py`
-- Pipeline 检测：`tests/test_pipeline_detector.py`
-- 校验：`tests/test_wiki_verify.py`
-- 查询和上下文预算：`tests/test_wiki_query.py`、`tests/test_context_budget.py`
-- 维护工具：`tests/test_wiki_lint.py`、`tests/test_wiki_enrich.py`、`tests/test_page_merge.py`、`tests/test_wiki_dedup.py`、`tests/test_wiki_insights.py`、`tests/test_louvain.py`、`tests/test_wiki_delete.py`、`tests/test_wiki_research.py`、`tests/test_wiki_synthesis.py`、`tests/test_wiki_batch.py`
-- 缺口分析：`tests/test_wiki_gap.py`
-- Ingest 路径规范化：`tests/test_wiki_ingest_normalize.py`
+测试文件按模块一一对应，命令为 `pytest tests/test_<module>.py`：
+- CLI/runtime/config：`test_cli.py`、`test_runtime_config.py`、`test_readme_global_mcp_docs.py`
+- Wiki 基础设施（paths/io/index/overview/log/files）：`test_wiki_paths.py`、`test_wiki_io.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
+- CodeGraph client / 摄入 / normalize：`test_codegraph_client.py`、`test_wiki_ingest_codegraph.py`、`test_wiki_ingest_normalize.py`
+- MCP 工具注册：`test_server_tools.py`
+- 人工 note：`test_save_obsidian_note.py`
+- 查询 / 上下文预算 / wikilink：`test_wiki_query.py`、`test_context_budget.py`、`test_wiki_enrich.py`
+- 维护工具（lint/enrich/merge/dedup/insights/delete/verify/gap/batch/research/synthesis）：对应 `test_wiki_lint.py`、`test_wiki_enrich.py`、`test_page_merge.py`、`test_wiki_dedup.py`、`test_wiki_insights.py`、`test_louvain.py`、`test_wiki_delete.py`、`test_wiki_verify.py`、`test_wiki_gap.py`、`test_wiki_batch.py`、`test_wiki_research.py`、`test_wiki_synthesis.py`
+- Git 辅助 / pipeline 检测：`test_git_utils.py`、`test_pipeline_detector.py`

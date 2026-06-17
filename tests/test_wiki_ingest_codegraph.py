@@ -63,7 +63,7 @@ class FakeCodeGraphClient:
 
 
 def _codefacts(root: Path, project: str, source_name: str) -> list[dict[str, Any]]:
-    return json.loads((root / "raw" / "projects" / project / "codegraph" / source_name / "codefacts.json").read_text(encoding="utf-8"))
+    return json.loads((root / "raw" / "sources" / "projects" / project / "codegraph" / "codefacts.json").read_text(encoding="utf-8"))
 
 
 def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_path: Path):
@@ -74,12 +74,14 @@ def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_
     result = ingest_codegraph(root, project="alpha", source_name="main", query="Suitelet entry", client=client)
 
     assert result["ok"] is True
-    snapshot = root / "raw/projects/alpha/codegraph/main/context.json"
+    snapshot = root / "raw/sources/projects/alpha/codegraph/context.json"
     assert snapshot.is_file()
-    source_page = root / "wiki/projects/alpha/sources/main.md"
+    source_page = root / "wiki/sources/projects/alpha/architecture/codegraph.md"
     assert source_page.is_file()
     code_page = root / "wiki/projects/alpha/sources/onrequest.md"
     assert not code_page.exists()
+    assert not (root / "raw/sources/projects/alpha/codegraph/main").exists()
+    assert not (root / "raw/projects").exists()
     project_index = root / "wiki/projects/alpha/index.md"
     assert project_index.is_file()
     assert (root / "wiki/index.md").is_file()
@@ -91,14 +93,14 @@ def test_ingest_codegraph_writes_snapshot_source_page_code_page_and_indexes(tmp_
 
     source_frontmatter = yaml.safe_load(source_page.read_text(encoding="utf-8").split("---", 2)[1])
     assert source_frontmatter["sources"] == [
-        "raw/projects/alpha/codegraph/main/status.json",
-        "raw/projects/alpha/codegraph/main/files.json",
-        "raw/projects/alpha/codegraph/main/context.json",
-        "raw/projects/alpha/codegraph/main/graph.json",
-        "raw/projects/alpha/codegraph/main/codefacts.json",
-        "raw/projects/alpha/codegraph/main/impact-onrequest.json",
+        "raw/sources/projects/alpha/codegraph/status.json",
+        "raw/sources/projects/alpha/codegraph/files.json",
+        "raw/sources/projects/alpha/codegraph/context.json",
+        "raw/sources/projects/alpha/codegraph/graph.json",
+        "raw/sources/projects/alpha/codegraph/codefacts.json",
+        "raw/sources/projects/alpha/codegraph/impact-onrequest.json",
     ]
-    codefacts = json.loads((root / "raw/projects/alpha/codegraph/main/codefacts.json").read_text(encoding="utf-8"))
+    codefacts = json.loads((root / "raw/sources/projects/alpha/codegraph/codefacts.json").read_text(encoding="utf-8"))
     assert codefacts[0]["frontmatter"]["symbol"] == "onRequest"
 
 
@@ -253,7 +255,7 @@ def test_ingest_codegraph_prefers_full_graph_snapshot_for_project_structure(tmp_
     result = ingest_codegraph(root, project="alpha", source_name="main", client=client)
 
     assert result["ok"] is True
-    assert (root / "raw/projects/alpha/codegraph/main/graph.json").is_file()
+    assert (root / "raw/sources/projects/alpha/codegraph/graph.json").is_file()
     facts = _codefacts(root, "alpha", "main")
     content = next(fact["body"] for fact in facts if fact["frontmatter"].get("symbol") == "src/pkg/a.py")
     assert "## Symbols" in content
@@ -406,7 +408,7 @@ def test_ingest_codegraph_skips_unchanged_context(tmp_path: Path):
     client = FakeCodeGraphClient()
 
     first = ingest_codegraph(root, project="alpha", source_name="main", query="Suitelet entry", client=client)
-    codefacts = root / "raw/projects/alpha/codegraph/main/codefacts.json"
+    codefacts = root / "raw/sources/projects/alpha/codegraph/codefacts.json"
     first_mtime = codefacts.stat().st_mtime
 
     time.sleep(0.05)
@@ -1182,6 +1184,6 @@ def test_ingest_codegraph_filters_by_include_extensions(tmp_path: Path):
     assert "onRequest" in "\n".join(fact["body"] for fact in facts)
     assert not (root / "wiki/projects/alpha/code").exists()
 
-    files_snapshot = json.loads((root / "raw/projects/alpha/codegraph/main/files.json").read_text(encoding="utf-8"))
+    files_snapshot = json.loads((root / "raw/sources/projects/alpha/codegraph/files.json").read_text(encoding="utf-8"))
     snapshot_files = files_snapshot.get("files", files_snapshot)
     assert [item["path"] for item in snapshot_files] == ["src/FileCabinet/SuiteScripts/sl_main.js"]

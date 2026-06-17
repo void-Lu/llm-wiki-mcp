@@ -57,6 +57,19 @@ def test_wiki_lint_reports_missing_frontmatter_and_generated_sources(tmp_path: P
     assert "generated_missing_sources" in codes
 
 
+def test_wiki_lint_ignores_archived_markdown_content(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    archived = root / "wiki/archives/2026/06/16/raw/sources/codegraph/legacy.md"
+    archived.parent.mkdir(parents=True)
+    archived.write_text("# Legacy raw markdown without frontmatter\n\n[[missing-old-page]]", encoding="utf-8")
+
+    result = wiki_lint(root)
+
+    assert result["ok"] is True
+    assert result["issues"] == []
+
+
 def test_wiki_lint_reports_broken_wikilink_and_old_directories(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -71,7 +84,11 @@ def test_wiki_lint_reports_broken_wikilink_and_old_directories(tmp_path: Path):
         overwrite_generated_only=False,
     )
     (root / "wiki/code").mkdir()
+    (root / "raw/projects").mkdir(parents=True)
+    (root / "wiki/comparisons").mkdir()
+    (root / "wiki/maintenance").mkdir()
     (root / "wiki/projects/alpha/objects").mkdir(parents=True)
+    (root / "wiki/projects/alpha/sources").mkdir(parents=True)
 
     result = wiki_lint(root)
 
@@ -195,7 +212,7 @@ def test_wiki_lint_apply_semantic_review_writes_report(tmp_path: Path):
 
     assert result["ok"] is True
     assert result["stage"] == "apply_semantic_review"
-    assert result["path"].startswith("wiki/maintenance/")
+    assert result["path"].startswith("wiki/queries/")
     text = (root / result["path"]).read_text(encoding="utf-8")
     assert "semantic-lint" in text
     assert "<think>" not in text

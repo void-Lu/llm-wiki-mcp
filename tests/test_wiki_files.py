@@ -46,8 +46,10 @@ def test_wiki_list_files_limits_to_public_roots(tmp_path: Path):
     (root / "wiki/concepts/a.md").write_text("# A\n", encoding="utf-8")
     (root / "raw/sources/file/alpha/a.txt").parent.mkdir(parents=True, exist_ok=True)
     (root / "raw/sources/file/alpha/a.txt").write_text("raw", encoding="utf-8")
+    (root / "raw/sources/projects/alpha/codegraph/graph.json").parent.mkdir(parents=True, exist_ok=True)
+    (root / "raw/sources/projects/alpha/codegraph/graph.json").write_text("{}", encoding="utf-8")
     (root / "raw/projects/alpha/codegraph/main/graph.json").parent.mkdir(parents=True, exist_ok=True)
-    (root / "raw/projects/alpha/codegraph/main/graph.json").write_text("{}", encoding="utf-8")
+    (root / "raw/projects/alpha/codegraph/main/graph.json").write_text("legacy", encoding="utf-8")
     (root / ".llm-wiki/private.json").write_text("{}", encoding="utf-8")
 
     result = wiki_list_files(root, root_name="all", recursive=True)
@@ -56,7 +58,8 @@ def test_wiki_list_files_limits_to_public_roots(tmp_path: Path):
     paths = {item["path"] for item in result["files"]}
     assert "wiki/concepts/a.md" in paths
     assert "raw/sources/file/alpha/a.txt" in paths
-    assert "raw/projects/alpha/codegraph/main/graph.json" in paths
+    assert "raw/sources/projects/alpha/codegraph/graph.json" in paths
+    assert "raw/projects/alpha/codegraph/main/graph.json" not in paths
     assert ".llm-wiki/private.json" not in paths
 
 
@@ -87,7 +90,21 @@ def test_wiki_read_file_reads_public_text_file_and_truncates(tmp_path: Path):
     assert result["omitted_bytes"] == 6
 
 
-def test_wiki_read_file_reads_raw_project_text_file(tmp_path: Path):
+def test_wiki_read_file_reads_raw_sources_project_text_file(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    path = root / "raw/sources/projects/alpha/codegraph/graph.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"nodes":[]}', encoding="utf-8")
+
+    result = wiki_read_file(root, "raw/sources/projects/alpha/codegraph/graph.json")
+
+    assert result["ok"] is True
+    assert result["path"] == "raw/sources/projects/alpha/codegraph/graph.json"
+    assert result["content"] == '{"nodes":[]}'
+
+
+def test_wiki_read_file_rejects_legacy_raw_projects_path(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
     path = root / "raw/projects/alpha/codegraph/main/graph.json"
@@ -96,9 +113,8 @@ def test_wiki_read_file_reads_raw_project_text_file(tmp_path: Path):
 
     result = wiki_read_file(root, "raw/projects/alpha/codegraph/main/graph.json")
 
-    assert result["ok"] is True
-    assert result["path"] == "raw/projects/alpha/codegraph/main/graph.json"
-    assert result["content"] == '{"nodes":[]}'
+    assert result["ok"] is False
+    assert result["code"] == "path_not_allowed"
 
 
 def test_wiki_read_file_truncates_without_splitting_utf8_characters(tmp_path: Path):
