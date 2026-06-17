@@ -100,12 +100,20 @@ def _indented_items(items: list[str]) -> list[str]:
 
 
 def _enforce_log_limit(root: Path, log_path: Path, source_log_name: str, record_archive: bool) -> None:
+    """Archive oldest entries when the log exceeds *max_entries*.
+
+    When the log exceeds 200 entries the oldest 100 are moved to an
+    archive file so each archive batch is a meaningful chunk rather than
+    a single-entry fragment.
+    """
+    max_entries = 200
+    keep_after_archive = 100
     text = log_path.read_text(encoding="utf-8")
     preamble, blocks = _split_log_blocks(text)
-    if len(blocks) <= 200:
+    if len(blocks) <= max_entries:
         return
-    overflow = blocks[: len(blocks) - 200]
-    keep = blocks[len(blocks) - 200 :]
+    overflow = blocks[: len(blocks) - keep_after_archive]
+    keep = blocks[len(blocks) - keep_after_archive :]
     log_path.write_text(_join_log_blocks(preamble, keep), encoding="utf-8")
     archive_path = _write_archived_log_blocks(root, source_log_name, overflow)
     if record_archive:

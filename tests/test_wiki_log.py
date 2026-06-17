@@ -124,7 +124,8 @@ def test_parse_log_entries_returns_structured_entries(tmp_path: Path):
     assert entries[1]["operation"] == "ingest"
 
 
-def test_append_log_entry_archives_old_entries_after_two_hundred(tmp_path: Path):
+def test_append_log_entry_archives_oldest_half_when_exceeding_limit(tmp_path: Path):
+    """When log exceeds 200 entries, the oldest 100 are archived, leaving 100."""
     root = tmp_path / "vault"
     create_wiki_root(root)
     for index in range(201):
@@ -144,8 +145,10 @@ def test_append_log_entry_archives_old_entries_after_two_hundred(tmp_path: Path)
     text = (root / "wiki/log.md").read_text(encoding="utf-8")
     archived = sorted((root / "wiki/archives/2026/05/26/log").glob("wiki-log-*.md"))
 
-    assert len(entries) == 200
-    assert "Question 000" not in text
-    assert "Question 001" in text
+    # After 201 entries: 101 oldest archived (0-100), 100 kept in log (101-200)
+    assert len(entries) == 100
+    assert "Question 100" not in text
+    assert "Question 101" in text
     assert archived
     assert "Question 000" in archived[0].read_text(encoding="utf-8")
+    assert "Question 100" in archived[0].read_text(encoding="utf-8")
