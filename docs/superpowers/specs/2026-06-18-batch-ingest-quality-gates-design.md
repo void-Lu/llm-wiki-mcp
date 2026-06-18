@@ -12,17 +12,18 @@
 2. 在写入 wiki 前强制校验模型 generation 的结构和最低质量。
 3. 将 schema 错误与低质量输出隔离在队列状态中，避免进入 wiki 文件和索引。
 4. 保持现有 staged ingest API 的兼容性，优先做小步、可回滚的修复。
+5. 为每个目标 wiki 文档生成任务提供独立、干净、可审计的上下文包。
 
 ## 非目标
 
-1. 不在本阶段实现完全独立的模型调用运行器。
+1. 不在 MCP 服务端内部实现模型调用运行器；独立上下文由主代理或外部编排器通过子代理/新会话实现。
 2. 不引入新依赖。
 3. 不改变 CodeGraph 直接摄入流程。
 4. 不重写 wiki 页面生成模型或整体信息架构。
 
 ## 推荐方案
 
-采用 “A 快速止血 + C 质量治理” 的两阶段设计。
+采用 “A 快速止血 + C 质量治理” 的两阶段设计，并把目标 wiki 文档生成从批量会话中拆成独立 page generation job。
 
 第一阶段先减少批量接口返回的大 payload，并在 `apply` 前加硬校验。第二阶段补齐 validate/repair/verify 状态链，让失败输出可诊断、可重试、不会污染下一轮生成。
 
@@ -42,35 +43,65 @@
 
 这样同一轮工具响应不会把几十或几百条 prompt 注入当前对话上下文，调用方也会自然形成 “一次取一条、一次生成一条、一次提交一条” 的节奏。
 
+### Page generation job
+
+一次 source ingest 可以产生多个目标 wiki 文档。每个目标文档必须被表示为独立 page generation job，而不是让一个长上下文一次生成整批页面。
+
+page generation job 的最小输入：
+
+- `job_id`
+- `project`
+- `source_name`
+- `target_path`
+- `target_type`
+- `target_title`
+- `target_summary`
+- `required_skill` 或 `required_skills`
+- `expected_response_schema`
+- `raw_sources`
+- `raw_reading_instructions`
+- 精简 wiki context，例如 purpose、schema、少量相关 index 条目
+
+page generation job 的输出只包含该目标文档的 generation，不包含其他任务的 prompt、generation 或错误历史。
+
 ### 单任务读取动作
 
 新增 batch action：
 
 ```text
 next_prepared
+next_generation_job
 set_generation
 apply_one
 ```
 
-返回最早一条 `status == "prepared"` 且包含 prompt 的任务：
+`next_prepared` 保留 source-level 兼容语义：返回最早一条 `status == "prepared"` 且包含 prompt 或 generation jobs 的任务。
+
+`next_generation_job` 是推荐的隔离生成入口：返回最早一条尚未生成的 page generation job。
 
 ```json
 {
   "ok": true,
-  "task": {
-    "id": "string",
+  "job": {
+    "job_id": "string",
+    "task_id": "string",
     "project": "string",
     "source_name": "string",
-    "source_type": "file",
-    "prompt": "string",
+    "target_path": "wiki/...",
+    "target_type": "entity",
+    "target_title": "string",
+    "required_skills": ["string"],
+    "raw_sources": ["raw/..."],
+    "raw_reading_instructions": ["string"],
+    "context": {},
     "expected_response_schema": {}
   }
 }
 ```
 
-没有任务时返回 `ok: true` 和空任务，不视为错误。
+没有任务或 job 时返回 `ok: true` 和空对象，不视为错误。
 
-`set_generation` 接收 `task_id` 和单条模型 generation，只更新该任务的 `result.generation`，不改变任务终态。`apply_one` 对一条 prepared 且已有 generation 的任务执行 apply。这样避免复用现有 `complete`，因为 `complete` 当前语义是把任务直接标记为 `done`。
+`set_generation` 接收 `task_id`/`job_id` 和单条模型 generation，只更新该任务或 job 的 generation，不改变任务终态。`apply_one` 对一条已有 generation 的任务或 job 执行 validate/apply。这样避免复用现有 `complete`，因为 `complete` 当前语义是把任务直接标记为 `done`。
 
 ## 阶段二：硬校验与质量治理
 
@@ -152,9 +183,9 @@ repair prompt 只包含原始 schema、精简错误列表、当前任务源文�
 ```text
 enqueue
   -> prepare_all
-  -> next_prepared
+  -> next_generation_job
   -> model generation outside batch response
-  -> set_generation for one task
+  -> set_generation for one job
   -> apply_one or apply_all
   -> validate_generation_payload
   -> apply pages only if valid
@@ -165,21 +196,32 @@ enqueue
 
 ## 上下文隔离与子代理
 
-当前 MCP 服务端批量摄入不会自动调用子代理，也不会自己创建新的 LLM 上下文空间。服务端只维护队列、生成 prompt、接收 generation 并写入 wiki；真正的模型调用发生在 MCP 客户端或外部编排层。
+当前 MCP 服务端批量摄入不会自动调用子代理，也不会自己创建新的 LLM 上下文空间。服务端只维护队列、生成 prompt/job、接收 generation 并写入 wiki；真正的模型调用发生在 MCP 客户端、主代理或外部编排层。
 
-因此，`prepare_all`、`next_prepared`、`set_generation`、`apply_one` 的第一阶段目标是减少批量工具响应对当前会话上下文的污染，而不是保证每个 wiki 文档天然运行在新上下文中。
+目标执行模型要求主代理不要在自己的长会话里直接生成所有 wiki 文档。主代理应该只做调度、上下文包构造、结果收集、写入和审查安排。
 
-如果需要强隔离，可以在外部编排层增加 “每个 prepared task 一个新子代理或新会话” 的执行模式：
+每个 page generation job 应派发给独立子代理或新会话。子代理拿到的上下文必须是干净的、最小的、可复现的：
+
+- 指定要使用的技能或工具。
+- 明确的输出 schema 和质量规则。
+- 明确必须阅读的 raw 文档路径。
+- 当前目标 wiki 文档的 page spec。
+- 必要但精简的 wiki purpose/schema/index context。
+- 不包含其他批量任务的历史 generation、失败样本、聊天记录或无关 prompt。
+
+执行模式：
 
 ```text
-next_prepared
-  -> spawn isolated worker with only this task prompt/schema
+prepare source
+  -> derive page generation jobs
+  -> for each job, spawn isolated worker with only this job context
+  -> worker invokes required skill/tool and reads listed raw docs
   -> worker returns generation
   -> set_generation
   -> apply_one
 ```
 
-该模式属于后续增强，不应放进第一阶段服务端止血修复中。第一阶段服务端只提供适合隔离编排的单任务接口和严格 apply gate。
+主代理收到 generation 后不直接信任结果。它先调用服务端 validate/apply gate；必要时再安排新的独立审查子代理处理文档审查、错误定位和 repair prompt 生成。
 
 ## 兼容性
 
@@ -193,11 +235,12 @@ next_prepared
 
 1. `prepare_all` 不在 `results[]` 返回 prompt 正文。
 2. `next_prepared` 返回单条 prepared 任务和 prompt。
-3. `_apply_generation` 拒绝缺字段页面且不写文件。
-4. `_apply_generation` 拒绝非法 sources。
-5. `_apply_generation` 接受合法 payload 并保持现有写入行为。
-6. `apply_all` 对 validation failure 记录 `error_stage == "validate"`。
-7. 队列 status 不返回大段 prompt/generation。
+3. `next_generation_job` 返回单条 page generation job，且上下文包不包含其他任务的 prompt、generation 或失败历史。
+4. `_apply_generation` 拒绝缺字段页面且不写文件。
+5. `_apply_generation` 拒绝非法 sources。
+6. `_apply_generation` 接受合法 payload 并保持现有写入行为。
+7. `apply_all` 对 validation failure 记录 `error_stage == "validate"`。
+8. 队列 status 不返回大段 prompt/generation。
 
 ## 风险与缓解
 
@@ -210,7 +253,7 @@ next_prepared
 ## 完成标准
 
 1. 大批量 `prepare_all` 响应不会把整批 prompt 注入当前会话上下文。
-2. 单条 prepared 任务可以被显式读取并生成。
+2. 单条 page generation job 可以被显式读取，并包含派发给独立子代理所需的最小上下文。
 3. 不符合 schema 或最低质量规则的 generation 不会写入 wiki。
 4. validation failure 有结构化错误，便于重试或 repair。
 5. 现有 staged ingest 正常路径继续通过测试。
