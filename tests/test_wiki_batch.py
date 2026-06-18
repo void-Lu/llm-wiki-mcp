@@ -127,6 +127,37 @@ def test_status_includes_prepared_count(batch_root: Path):
     assert "prepared" in status["counts"]
 
 
+def test_status_redacts_large_prompt_and_generation_payloads(batch_root: Path):
+    queue_path = batch_root / ".llm-wiki" / "ingest-queue.json"
+    queue_data = [{
+        "id": "ingest-999-0100",
+        "source_path": "raw/a.md",
+        "project": "p",
+        "source_name": "a",
+        "source_type": "file",
+        "status": "prepared",
+        "added_at": 0,
+        "retry_count": 0,
+        "error": None,
+        "result": {
+            "prompt": "PROMPT BODY " * 100,
+            "generation": {"source_summary": "Summary", "pages": [{"body": "BODY " * 100}]},
+            "source_hash": "abc123",
+        },
+    }]
+    queue_path.write_text(json.dumps(queue_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    status = wiki_ingest_batch(str(batch_root), action="status")
+
+    task = status["tasks"][0]
+    task_text = json.dumps(task)
+    assert "PROMPT BODY" not in task_text
+    assert "BODY BODY" not in task_text
+    assert task["has_prompt"] is True
+    assert task["has_generation"] is True
+    assert task["source_hash"] == "abc123"
+
+
 # --- reapply tests ---
 
 
@@ -302,8 +333,90 @@ def test_prepare_all_marks_prepared_when_needs_model(vault_root: Path):
     status = wiki_ingest_batch(str(vault_root), action="status")
     task = status["tasks"][0]
     if task["status"] == "prepared":
-        # Verify result field has prompt info
-        assert "prompt" in (task.get("result") or {})
+        assert task["has_prompt"] is True
+        prepared = wiki_ingest_batch(str(vault_root), action="next_prepared")
+        assert prepared["ok"] is True
+        assert prepared["task"]["id"] == task["id"]
+        assert "prompt" in (prepared["task"].get("result") or {})
+
+
+def test_prepare_all_response_omits_prompt_body(vault_root: Path):
+    project, source_name, source_type = "proj", "slimsrc", "file"
+    source_dir = vault_root / "raw" / "sources" / source_type / project / source_name
+    source_dir.mkdir(parents=True)
+    (source_dir / "notes.md").write_text("# Notes\n\nSome content", encoding="utf-8")
+    tasks = [{"source_path": f"raw/sources/{source_type}/{project}/{source_name}", "project": project, "source_name": source_name, "source_type": source_type}]
+    wiki_ingest_batch(str(vault_root), action="enqueue", tasks=tasks)
+
+    result = wiki_ingest_batch(str(vault_root), action="prepare_all")
+
+    assert result["ok"] is True
+    response_text = json.dumps(result)
+    assert "Generate wiki pages" not in response_text
+    assert all("prompt" not in item for item in result["results"])
+
+
+def test_next_prepared_returns_single_prepared_task_with_prompt(batch_root: Path):
+    queue_path = batch_root / ".llm-wiki" / "ingest-queue.json"
+    queue_path.write_text(json.dumps([
+        {
+            "id": "ingest-999-0101",
+            "source_path": "raw/a.md",
+            "project": "p",
+            "source_name": "a",
+            "source_type": "file",
+            "status": "prepared",
+            "added_at": 0,
+            "retry_count": 0,
+            "error": None,
+            "result": {"prompt": "single prompt", "source_hash": "hash-a"},
+        },
+        {
+            "id": "ingest-999-0102",
+            "source_path": "raw/b.md",
+            "project": "p",
+            "source_name": "b",
+            "source_type": "file",
+            "status": "prepared",
+            "added_at": 0,
+            "retry_count": 0,
+            "error": None,
+            "result": {"prompt": "other prompt", "source_hash": "hash-b"},
+        },
+    ], ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = wiki_ingest_batch(str(batch_root), action="next_prepared")
+
+    assert result["ok"] is True
+    assert result["task"]["id"] == "ingest-999-0101"
+    assert result["task"]["result"]["prompt"] == "single prompt"
+    assert "other prompt" not in json.dumps(result)
+
+
+def test_next_generation_job_returns_isolated_context(vault_root: Path):
+    project, source_name, source_type = "proj", "jobsrc", "file"
+    source_dir = vault_root / "raw" / "sources" / source_type / project / source_name
+    source_dir.mkdir(parents=True)
+    (source_dir / "notes.md").write_text("# Notes\n\nSome content", encoding="utf-8")
+    tasks = [{"source_path": f"raw/sources/{source_type}/{project}/{source_name}", "project": project, "source_name": source_name, "source_type": source_type}]
+    wiki_ingest_batch(str(vault_root), action="enqueue", tasks=tasks)
+    wiki_ingest_batch(str(vault_root), action="prepare_all")
+
+    result = wiki_ingest_batch(str(vault_root), action="next_generation_job")
+
+    assert result["ok"] is True
+    job = result["job"]
+    assert job["task_id"]
+    assert job["job_id"]
+    assert job["project"] == project
+    assert job["source_name"] == source_name
+    assert job["target_path"].startswith("wiki/")
+    assert job["target_type"] == "source_index"
+    assert job["expected_response_schema"]["pages"]
+    assert job["raw_sources"]
+    job_text = json.dumps(job)
+    assert "Generate wiki pages for project" not in job_text
+    assert "generation" not in job
 
 
 def test_prepare_all_empty_queue(vault_root: Path):
@@ -370,6 +483,132 @@ def test_apply_all_skips_task_without_generation(vault_root: Path):
     assert result["ok"] is True
     assert result["skipped_count"] >= 1
     assert any("generation" in r.get("reason", "") for r in result["results"])
+
+
+def test_set_generation_updates_one_generation_job(vault_root: Path):
+    queue_path = vault_root / ".llm-wiki" / "ingest-queue.json"
+    queue_path.write_text(json.dumps([{
+        "id": "ingest-999-0103",
+        "source_path": "raw/a.md",
+        "project": "proj",
+        "source_name": "s",
+        "source_type": "file",
+        "status": "prepared",
+        "added_at": 0,
+        "retry_count": 0,
+        "error": None,
+        "result": {
+            "generation_jobs": [{
+                "job_id": "job-1",
+                "target_path": "wiki/sources/proj/s.md",
+                "target_type": "source_index",
+                "target_title": "s",
+                "generated": False,
+            }],
+        },
+    }], ensure_ascii=False, indent=2), encoding="utf-8")
+
+    generation = {"source_summary": "Summary", "pages": []}
+    result = wiki_ingest_batch(
+        str(vault_root),
+        action="set_generation",
+        task_id="ingest-999-0103",
+        result={"job_id": "job-1", "generation": generation},
+    )
+
+    assert result["ok"] is True
+    status = wiki_ingest_batch(str(vault_root), action="status")
+    task = status["tasks"][0]
+    assert task["status"] == "prepared"
+    assert task["generation_jobs"][0]["has_generation"] is True
+
+
+def test_apply_one_applies_stored_job_generation(vault_root: Path):
+    project, source_name, source_type = "proj", "onejob", "file"
+    _write_cache(vault_root, project, source_name, {
+        "source_hash": "abc123",
+        "status": "prepared",
+        "manifest": [],
+    }, source_type=source_type)
+    queue_path = vault_root / ".llm-wiki" / "ingest-queue.json"
+    queue_path.write_text(json.dumps([{
+        "id": "ingest-999-0104",
+        "source_path": f"raw/sources/{source_type}/{project}/{source_name}",
+        "project": project,
+        "source_name": source_name,
+        "source_type": source_type,
+        "status": "prepared",
+        "added_at": 0,
+        "retry_count": 0,
+        "error": None,
+        "result": {
+            "generation_jobs": [{
+                "job_id": "job-1",
+                "generation": {"source_summary": "Summary", "pages": []},
+            }],
+        },
+    }], ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = wiki_ingest_batch(
+        str(vault_root),
+        action="apply_one",
+        task_id="ingest-999-0104",
+        result={"job_id": "job-1"},
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    status = wiki_ingest_batch(str(vault_root), action="status")
+    assert status["counts"]["done"] == 1
+
+
+def test_apply_all_records_validation_failure_without_returning_generation(vault_root: Path):
+    project, source_name, source_type = "proj", "badgen", "file"
+    _write_cache(vault_root, project, source_name, {
+        "source_hash": "abc123",
+        "status": "prepared",
+        "manifest": [{"path": "raw/sources/file/proj/badgen/notes.md"}],
+    }, source_type=source_type)
+    queue_path = vault_root / ".llm-wiki" / "ingest-queue.json"
+    queue_path.write_text(json.dumps([{
+        "id": "ingest-999-0105",
+        "source_path": f"raw/sources/{source_type}/{project}/{source_name}",
+        "project": project,
+        "source_name": source_name,
+        "source_type": source_type,
+        "status": "prepared",
+        "added_at": 0,
+        "retry_count": 0,
+        "error": None,
+        "result": {
+            "generation": {
+                "source_summary": "Summary",
+                "pages": [{
+                    "path": "wiki/concepts/proj/bad.md",
+                    "title": "Bad",
+                    "type": "concept",
+                    "summary": "Bad summary",
+                    "body": "",
+                    "sources": ["raw/sources/file/proj/badgen/notes.md"],
+                }],
+            },
+        },
+    }], ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = wiki_ingest_batch(str(vault_root), action="apply_all")
+
+    assert result["ok"] is True
+    assert result["failed_count"] == 1
+    assert result["results"][0]["error_stage"] == "validate"
+    assert result["results"][0]["validation_errors"]
+    assert "Bad summary" not in json.dumps(result["results"][0])
+    status = wiki_ingest_batch(str(vault_root), action="status")
+    task = status["tasks"][0]
+    assert task["status"] == "failed"
+    assert task["error_stage"] == "validate"
+    assert task["validation_errors"]
+    assert task["generation_hash"]
+    assert "Bad summary" not in json.dumps(status)
 
 
 def test_apply_all_processes_prepared_task_with_generation(vault_root: Path):

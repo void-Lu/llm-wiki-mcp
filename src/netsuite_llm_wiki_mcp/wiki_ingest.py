@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shutil
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
@@ -25,6 +26,26 @@ _MAX_SOURCE_BYTES = 5_000_000
 _ALLOWED_SOURCE_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}
 _DENIED_SOURCE_NAMES = {".env", "credentials.json", "token.json", "secrets.json"}
 _DENIED_SOURCE_PARTS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+
+_VALID_MESSAGE_ROLES = {"user", "assistant", "model", "system", "tool"}
+_ALLOWED_GENERATED_PAGE_TYPES = {
+    "concept",
+    "entity",
+    "pipeline",
+    "spec",
+    "plan",
+    "research",
+    "troubleshooting",
+    "chatlog",
+    "source_index",
+}
+_MIN_GENERATED_BODY_CHARS = 80
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    ok: bool
+    errors: list[dict[str, str]]
 
 
 def _resolve_source_path(root: Path, source_path: str | Path) -> Path:
@@ -60,6 +81,7 @@ def staged_wiki_ingest(
     language: str = "zh-CN",
     analysis: dict[str, Any] | str | None = None,
     generation: dict[str, Any] | str | None = None,
+    messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
     create_wiki_root(root)
@@ -71,9 +93,9 @@ def staged_wiki_ingest(
         return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": str(exc)}
 
     if stage == "prepare":
-        return _prepare_combined(root, project_value, source_value, source_path, source_type_value, language)
+        return _prepare_combined(root, project_value, source_value, source_path, source_type_value, language, messages=messages)
     if stage == "prepare_analysis":
-        return _prepare_analysis(root, project_value, source_value, source_path, source_type_value, language)
+        return _prepare_analysis(root, project_value, source_value, source_path, source_type_value, language, messages=messages)
     if stage == "prepare_generation":
         if analysis is None:
             return {"ok": False, "code": "missing_analysis", "error": "analysis is required for prepare_generation"}
@@ -402,7 +424,12 @@ def _prepare_combined(
     source_path: str | Path | None,
     source_type: str,
     language: str,
+    messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # Chat source: accept messages directly (no source_path needed)
+    if source_type == "chat" and messages is not None:
+        return _prepare_chat_from_messages(root, project, source_name, source_type, language, messages)
+
     if source_path is None:
         return {"ok": False, "code": "missing_source_path", "error": "source_path is required for prepare"}
     source_root = _resolve_source_path(root, source_path)
@@ -473,6 +500,113 @@ def _prepare_combined(
     }
 
 
+def _prepare_chat_from_messages(
+    root: Path,
+    project: str,
+    source_name: str,
+    source_type: str,
+    language: str,
+    messages: list[dict[str, Any]],
+    analysis_mode: bool = False,
+) -> dict[str, Any]:
+    """Prepare stage for chat sources when messages are provided directly.
+
+    Instead of reading from source_path, this formats the messages into a
+    structured Markdown transcript and raw JSON, writes them as snapshots,
+    and returns the appropriate prompt for LLM processing.
+    """
+    if not messages:
+        return {"ok": False, "code": "empty_messages", "error": "messages list is empty; at least one message is required"}
+
+    source_hash = _messages_hash(messages)
+    raw_dir = _raw_source_snapshot_dir(root, project, source_name, source_type)
+    cache_path = _cache_path(root, project, source_name, source_type)
+
+    if cache_path.exists():
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        if cache.get("source_hash") == source_hash:
+            if _cache_manifest_uses_raw_dir(cache, root, raw_dir):
+                stage_name = "prepare_analysis" if analysis_mode else "prepare"
+                return {
+                    "ok": True,
+                    "stage": stage_name,
+                    "status": "skipped",
+                    "code": "source_unchanged",
+                    "project": project,
+                    "source_name": source_name,
+                    "source_hash": source_hash,
+                    "message": "source hash unchanged; reuse previous generated wiki pages",
+                }
+            # Hash matches but manifest paths are stale — try auto-repair
+            repair = _repair_cache_manifest_paths(cache, root, project, source_name, source_type)
+            if repair["ok"]:
+                stage_name = "prepare_analysis" if analysis_mode else "prepare"
+                return {
+                    "ok": True,
+                    "stage": stage_name,
+                    "status": "skipped",
+                    "code": "source_unchanged",
+                    "project": project,
+                    "source_name": source_name,
+                    "source_hash": source_hash,
+                    "message": "source hash unchanged; manifest paths repaired",
+                    "manifest_repaired": True,
+                    "repaired_count": repair["repaired_count"],
+                    "repaired_paths": repair["repaired_paths"],
+                }
+
+    _remove_stale_raw_snapshot_dirs(root, project, source_name, source_type, keep=raw_dir)
+    if raw_dir.exists():
+        shutil.rmtree(raw_dir)
+
+    manifest = _write_chat_snapshot(raw_dir, root, messages, source_name)
+    _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared", "source_type": source_type}, source_type=source_type)
+
+    wiki_context = {
+        "purpose": _read_optional(root / "purpose.md"),
+        "schema": _read_optional(root / "schema.md"),
+        "index": _read_optional(root / "wiki" / "index.md"),
+    }
+
+    if analysis_mode:
+        classification_context = [item["relative_path"] for item in manifest]
+        prompt = _analysis_prompt(project, source_name, language, manifest)
+        return {
+            "ok": True,
+            "stage": "prepare_analysis",
+            "status": "needs_model",
+            "project": project,
+            "source_name": source_name,
+            "source_hash": source_hash,
+            "classification_context": classification_context,
+            "context": {"sources": manifest, "language": language},
+            "prompt": prompt,
+            "expected_response_schema": {
+                "key_entities": ["string"],
+                "concepts": ["string"],
+                "tensions": ["string"],
+                "suggested_pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string"}],
+            },
+            "next_call": {"tool": "wiki_ingest_llm", "stage": "prepare_generation", "required": ["analysis"]},
+        }
+
+    prompt = _combined_prompt(project, source_name, language, manifest, wiki_context, source_type)
+    return {
+        "ok": True,
+        "stage": "prepare",
+        "status": "needs_model",
+        "project": project,
+        "source_name": source_name,
+        "source_hash": source_hash,
+        "prompt": prompt,
+        "expected_response_schema": {
+            "source_summary": {"title": "string", "summary": "string", "body": "markdown"},
+            "pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string", "body": "markdown", "sources": ["raw/..."]}],
+        },
+        "next_call": {"tool": "wiki_ingest_llm", "stage": "apply", "required": ["generation"]},
+    }
+
+
 def _prepare_analysis(
     root: Path,
     project: str,
@@ -480,7 +614,12 @@ def _prepare_analysis(
     source_path: str | Path | None,
     source_type: str,
     language: str,
+    messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # Chat source: accept messages directly (no source_path needed)
+    if source_type == "chat" and messages is not None:
+        return _prepare_chat_from_messages(root, project, source_name, source_type, language, messages, analysis_mode=True)
+
     if source_path is None:
         return {"ok": False, "code": "missing_source_path", "error": "source_path is required for prepare_analysis"}
     source_root = _resolve_source_path(root, source_path)
@@ -577,6 +716,132 @@ def _prepare_generation(root: Path, project: str, source_name: str, language: st
 
 
 
+def validate_generation_payload(
+    payload: dict[str, Any],
+    manifest_sources: list[str],
+    project: str,
+    source_type: str,
+) -> ValidationResult:
+    errors: list[dict[str, str]] = []
+
+    if not isinstance(payload, dict):
+        return ValidationResult(False, [{
+            "path": "$",
+            "code": "not_object",
+            "message": "generation must be a JSON object",
+        }])
+
+    raw_summary = payload.get("source_summary")
+    if raw_summary is None:
+        errors.append({
+            "path": "source_summary",
+            "code": "missing_required_field",
+            "message": "source_summary is required",
+        })
+    elif not isinstance(raw_summary, (dict, str)):
+        errors.append({
+            "path": "source_summary",
+            "code": "invalid_type",
+            "message": "source_summary must be an object or non-empty string",
+        })
+    elif isinstance(raw_summary, str) and not raw_summary.strip():
+        errors.append({
+            "path": "source_summary",
+            "code": "empty_summary",
+            "message": "source_summary must be non-empty when provided as a string",
+        })
+
+    raw_pages = payload.get("pages", [])
+    if raw_pages is None:
+        raw_pages = []
+    if not isinstance(raw_pages, list):
+        errors.append({
+            "path": "pages",
+            "code": "invalid_type",
+            "message": "pages must be a list",
+        })
+        raw_pages = []
+
+    pages = list(raw_pages)
+    for key in ("concept", "concepts"):
+        extra = payload.get(key)
+        if isinstance(extra, dict):
+            pages.append(extra)
+        elif isinstance(extra, list):
+            pages.extend(extra)
+
+    manifest_source_set = set(str(source) for source in manifest_sources if str(source))
+    for index, item in enumerate(pages):
+        page_path = f"pages[{index}]"
+        if not isinstance(item, dict):
+            errors.append({
+                "path": page_path,
+                "code": "not_object",
+                "message": "page must be an object",
+            })
+            continue
+
+        for field in ("path", "title", "type", "summary", "body"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value.strip():
+                errors.append({
+                    "path": f"{page_path}.{field}",
+                    "code": "missing_required_field",
+                    "message": f"{field} is required",
+                })
+
+        page_type = item.get("type")
+        if isinstance(page_type, str) and page_type.strip() and page_type not in _ALLOWED_GENERATED_PAGE_TYPES:
+            errors.append({
+                "path": f"{page_path}.type",
+                "code": "invalid_type",
+                "message": f"type must be one of {sorted(_ALLOWED_GENERATED_PAGE_TYPES)}",
+            })
+
+        body = item.get("body")
+        if isinstance(body, str) and body.strip() and len(body.strip()) < _MIN_GENERATED_BODY_CHARS:
+            errors.append({
+                "path": f"{page_path}.body",
+                "code": "body_too_short",
+                "message": f"body must be at least {_MIN_GENERATED_BODY_CHARS} non-whitespace characters",
+            })
+
+        summary = item.get("summary")
+        if isinstance(summary, str) and "\n\n" in summary.strip():
+            errors.append({
+                "path": f"{page_path}.summary",
+                "code": "summary_too_long",
+                "message": "summary must be short text, not multi-paragraph body",
+            })
+
+        try:
+            _safe_generated_page_path(item, project, source_type)
+        except ValueError as exc:
+            errors.append({
+                "path": f"{page_path}.path",
+                "code": "invalid_path",
+                "message": str(exc),
+            })
+
+        raw_sources = [str(value) for value in item.get("sources", [])]
+        page_sources, _ = _normalize_generated_sources(raw_sources, manifest_sources)
+        if not page_sources:
+            errors.append({
+                "path": f"{page_path}.sources",
+                "code": "missing_required_field",
+                "message": "sources must be non-empty",
+            })
+        invalid_sources = [source for source in page_sources if source not in manifest_source_set]
+        if invalid_sources:
+            errors.append({
+                "path": f"{page_path}.sources",
+                "code": "invalid_source",
+                "message": "sources must reference prepared raw source manifest paths",
+            })
+
+    return ValidationResult(not errors, errors)
+
+
 def _apply_generation(root: Path, project: str, source_name: str, language: str, generation: dict[str, Any] | str, source_type: str = "file") -> dict[str, Any]:
     cache = _read_cache(root, project, source_name, source_type)
     if not cache:
@@ -585,6 +850,17 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
     if payload is None:
         return {"ok": False, "code": "invalid_generation", "error": "generation must be a JSON object or JSON string"}
     manifest_sources = [item["path"] for item in cache.get("manifest", []) if isinstance(item, dict) and item.get("path")]
+    validation = validate_generation_payload(payload, manifest_sources, project, source_type)
+    if not validation.ok:
+        path_error = next((error for error in validation.errors if error.get("code") == "invalid_path"), None)
+        if path_error:
+            return {"ok": False, "code": "invalid_generated_path", "error": path_error.get("message", "invalid generated path")}
+        return {
+            "ok": False,
+            "code": "generation_schema_invalid",
+            "error": "generation failed validation",
+            "errors": validation.errors,
+        }
     written_paths: list[str] = []
     manifest_fallback = manifest_sources[0] if len(manifest_sources) == 1 else ""
 
@@ -605,10 +881,19 @@ def _apply_generation(root: Path, project: str, source_name: str, language: str,
 
     normalized_pages: list[dict[str, Any]] = []
     source_replacements: dict[str, str] = {}
+    manifest_source_set = set(manifest_sources)
     for item in pages:
         if not isinstance(item, dict):
             continue
         page_sources, replacements = _normalize_generated_sources([str(value) for value in item.get("sources", [])], manifest_sources)
+        invalid_sources = [source for source in page_sources if source not in manifest_source_set]
+        if invalid_sources:
+            return {
+                "ok": False,
+                "code": "invalid_generated_sources",
+                "error": "generated page sources must reference prepared raw source manifest paths",
+                "invalid_sources": invalid_sources,
+            }
         source_replacements.update(replacements)
         normalized_pages.append({
             "path": item.get("path"),
@@ -910,6 +1195,120 @@ def _sources_hash(sources: list[Path], source_root: Path) -> str:
     return digest.hexdigest()
 
 
+def _format_chat_messages(messages: list[dict[str, Any]]) -> str:
+    """Format chat messages into a structured Markdown transcript.
+
+    Each message is rendered as a section with role heading and content body.
+    Tool calls/results are included inline.  Sensitive content is redacted.
+    """
+    lines: list[str] = []
+    for i, msg in enumerate(messages):
+        role = str(msg.get("role", "unknown")).lower()
+        if role not in _VALID_MESSAGE_ROLES:
+            role = "unknown"
+        # Role display names
+        role_display = {
+            "user": "User",
+            "assistant": "Assistant",
+            "model": "Model",
+            "system": "System",
+            "tool": "Tool",
+        }.get(role, role.capitalize())
+        lines.append(f"### {role_display} (turn {i + 1})")
+        lines.append("")
+
+        # Tool calls (assistant messages may include tool_calls)
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    func = tc.get("function", {})
+                    name = func.get("name", "unknown")
+                    args = func.get("arguments", "")
+                    if isinstance(args, dict):
+                        args = json.dumps(args, ensure_ascii=False, indent=2)
+                    lines.append(f"**Tool call: `{name}`**")
+                    lines.append(f"```json")
+                    lines.append(str(args))
+                    lines.append("```")
+                    lines.append("")
+
+        # Content
+        content = msg.get("content", "")
+        if content is not None:
+            content_str = str(content)
+            if content_str.strip():
+                lines.append(content_str)
+                lines.append("")
+
+        # Tool call id / name (for tool role messages)
+        tool_call_id = msg.get("tool_call_id")
+        if tool_call_id:
+            lines.append(f"*Tool call ID: {tool_call_id}*")
+            lines.append("")
+
+        # Tool name
+        tool_name = msg.get("name")
+        if tool_name and role == "tool":
+            lines.append(f"*Tool: {tool_name}*")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
+def _write_chat_snapshot(
+    raw_dir: Path,
+    root: Path,
+    messages: list[dict[str, Any]],
+    source_name: str,
+) -> list[dict[str, Any]]:
+    """Write a formatted chat transcript and raw JSON to the snapshot directory.
+
+    Creates two files:
+    - ``transcript.md``: human-readable formatted conversation
+    - ``messages.json``: raw message array for programmatic access
+
+    Returns the manifest entries for the written files.
+    """
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    # Format and redact the Markdown transcript
+    formatted = _format_chat_messages(messages)
+    redacted_md = redact_sensitive_text(formatted)
+    transcript_path = raw_dir / "transcript.md"
+    transcript_path.write_text(redacted_md, encoding="utf-8")
+
+    # Redact and write raw JSON
+    raw_json = json.dumps(messages, ensure_ascii=False, indent=2)
+    redacted_json = redact_sensitive_text(raw_json)
+    messages_path = raw_dir / "messages.json"
+    messages_path.write_text(redacted_json, encoding="utf-8")
+
+    manifest: list[dict[str, Any]] = []
+    for rel_name, file_path in [("transcript.md", transcript_path), ("messages.json", messages_path)]:
+        data = file_path.read_bytes()
+        manifest.append({
+            "relative_path": rel_name,
+            "path": file_path.relative_to(root).as_posix(),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "stored_sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+        })
+
+    # Write manifest
+    (raw_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
+
+
+def _messages_hash(messages: list[dict[str, Any]]) -> str:
+    """Compute a content hash for chat messages, used for change detection."""
+    digest = hashlib.sha256()
+    # Deterministic serialization: sort keys, compact JSON
+    serialized = json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest.update(serialized.encode("utf-8"))
+    return digest.hexdigest()
+
+
 def _write_source_snapshots(raw_dir: Path, root: Path, sources: list[Path], source_root: Path) -> list[dict[str, Any]]:
     manifest = []
     base = source_root.parent if source_root.is_file() else source_root
@@ -968,8 +1367,10 @@ def _chat_source_instructions(source_type: str) -> list[str]:
     if source_type != "chat":
         return []
     return [
-        "For source_type=chat, preserve the raw transcript under raw/sources/chat/YYYY/MM/DD/<source_name>/ and generate the primary session summary as type=chatlog.",
+        "For source_type=chat, the raw transcript is stored under raw/sources/chat/YYYY/MM/DD/<source_name>/ as transcript.md (formatted conversation) and messages.json (raw message array).",
+        "Generate the primary session summary as type=chatlog.",
         "Chatlog page paths must use wiki/chatlog/YYYY/MM/DD/<slug>.md, with the date taken from the session when available.",
+        "The transcript.md preserves the user/assistant turn-by-turn structure; use it to understand the conversation flow and extract key decisions, insights, and action items.",
     ]
 
 

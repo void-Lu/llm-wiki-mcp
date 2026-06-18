@@ -7,6 +7,7 @@ persisted to .llm-wiki/ingest-queue.json and survive process restarts.
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ def wiki_ingest_batch(
     action: str = "status",
     tasks: list[dict[str, str]] | None = None,
     task_id: str | None = None,
+    job_id: str | None = None,
     result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Manage the persistent ingest queue.
@@ -40,6 +42,10 @@ def wiki_ingest_batch(
     action="reapply": re-apply from cache for pending/failed tasks (batch).
     action="prepare_all": run prepare stage for all pending tasks (batch).
     action="apply_all": run apply stage for all prepared tasks (batch).
+    action="next_prepared": get one prepared task with prompt.
+    action="next_generation_job": get one isolated page generation job.
+    action="set_generation": store generation on one task/job.
+    action="apply_one": validate/apply one task/job generation.
     """
     root = Path(vault_root).expanduser().resolve()
     queue_path = _queue_path(root)
@@ -66,6 +72,14 @@ def wiki_ingest_batch(
         return _prepare_all(root, queue_path)
     elif action == "apply_all":
         return _apply_all(root, queue_path)
+    elif action == "next_prepared":
+        return _next_prepared(queue_path)
+    elif action == "next_generation_job":
+        return _next_generation_job(queue_path)
+    elif action == "set_generation":
+        return _set_generation(queue_path, task_id, job_id, result)
+    elif action == "apply_one":
+        return _apply_one(root, queue_path, task_id, job_id, result)
     else:
         return {"ok": False, "code": "invalid_action", "error": f"unknown action: {action}"}
 
@@ -158,6 +172,169 @@ def _update_status(
     return {"ok": False, "code": "task_not_found", "error": f"task {task_id} not found"}
 
 
+def _generation_hash(generation: Any) -> str:
+    data = json.dumps(generation, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def _error_summary(errors: list[dict[str, Any]]) -> str:
+    if not errors:
+        return "generation failed validation"
+    first = errors[0]
+    return f"{first.get('path', '$')}: {first.get('code', 'invalid')}"
+
+
+def _summarize_generation_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for job in jobs:
+        summaries.append({
+            "job_id": job.get("job_id"),
+            "task_id": job.get("task_id"),
+            "project": job.get("project"),
+            "source_name": job.get("source_name"),
+            "target_path": job.get("target_path"),
+            "target_type": job.get("target_type"),
+            "target_title": job.get("target_title"),
+            "status": job.get("status", "pending"),
+            "has_generation": bool(job.get("generation")),
+            "generation_hash": job.get("generation_hash"),
+            "error_stage": job.get("error_stage"),
+            "validation_errors": job.get("validation_errors"),
+        })
+    return summaries
+
+
+def _summarize_task(task: dict[str, Any]) -> dict[str, Any]:
+    result = task.get("result") or {}
+    summary = {
+        "id": task.get("id"),
+        "source_path": task.get("source_path"),
+        "project": task.get("project"),
+        "source_name": task.get("source_name"),
+        "source_type": task.get("source_type"),
+        "status": task.get("status"),
+        "added_at": task.get("added_at"),
+        "started_at": task.get("started_at"),
+        "completed_at": task.get("completed_at"),
+        "retry_count": task.get("retry_count", 0),
+        "error": task.get("error"),
+        "error_stage": task.get("error_stage"),
+        "validation_errors": task.get("validation_errors"),
+        "generation_hash": task.get("generation_hash"),
+        "source_hash": result.get("source_hash"),
+        "has_prompt": bool(result.get("prompt")),
+        "has_generation": bool(result.get("generation")),
+        "has_expected_response_schema": bool(result.get("expected_response_schema")),
+    }
+    jobs = result.get("generation_jobs")
+    if isinstance(jobs, list):
+        summary["generation_jobs"] = _summarize_generation_jobs([job for job in jobs if isinstance(job, dict)])
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _public_task(task: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(task, ensure_ascii=False))
+
+
+def _build_generation_jobs(root: Path, task: dict[str, Any], prepare_result: dict[str, Any]) -> list[dict[str, Any]]:
+    project = task.get("project", "")
+    source_name = task.get("source_name", "")
+    source_type = task.get("source_type", "file")
+    cache = _read_cache(root, project, source_name, source_type) or {}
+    manifest = [item for item in cache.get("manifest", []) if isinstance(item, dict)]
+    raw_sources = [item.get("path") for item in manifest if item.get("path")]
+    job_id = f"{task['id']}:source-index"
+    return [{
+        "job_id": job_id,
+        "task_id": task["id"],
+        "project": project,
+        "source_name": source_name,
+        "target_path": f"wiki/sources/concepts/{project}/{source_name}.md",
+        "target_type": "source_index",
+        "target_title": source_name,
+        "target_summary": f"Generate wiki pages for {project}/{source_name}.",
+        "required_skills": [],
+        "expected_response_schema": prepare_result.get("expected_response_schema") or {},
+        "raw_sources": raw_sources,
+        "raw_reading_instructions": [
+            "Read only the listed raw_sources for this page generation job.",
+            "Return one generation payload that matches expected_response_schema.",
+        ],
+        "context": {
+            "purpose": _read_optional(root / "purpose.md"),
+            "schema": _read_optional(root / "schema.md"),
+            "index": _read_optional(root / "wiki" / "index.md"),
+        },
+        "status": "pending",
+    }]
+
+
+def _read_optional(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError:
+        return ""
+
+
+def _next_prepared(path: Path) -> dict[str, Any]:
+    queue = _load_queue(path)
+    for task in queue:
+        result = task.get("result") or {}
+        if task.get("status") == "prepared" and (result.get("prompt") or result.get("generation_jobs")):
+            return {"ok": True, "action": "next_prepared", "task": _public_task(task)}
+    return {"ok": True, "action": "next_prepared", "task": None, "message": "no prepared tasks"}
+
+
+def _next_generation_job(path: Path) -> dict[str, Any]:
+    queue = _load_queue(path)
+    for task in queue:
+        if task.get("status") != "prepared":
+            continue
+        jobs = (task.get("result") or {}).get("generation_jobs") or []
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            if not job.get("generation") and job.get("status", "pending") not in ("applied", "failed"):
+                return {"ok": True, "action": "next_generation_job", "job": _public_task(job)}
+    return {"ok": True, "action": "next_generation_job", "job": None, "message": "no generation jobs"}
+
+
+def _set_generation(
+    path: Path,
+    task_id: str | None,
+    job_id: str | None,
+    result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not task_id:
+        return {"ok": False, "code": "missing_task_id", "error": "task_id is required"}
+    result = result or {}
+    generation = result.get("generation")
+    target_job_id = job_id or result.get("job_id")
+    if generation is None:
+        return {"ok": False, "code": "missing_generation", "error": "generation is required"}
+
+    queue = _load_queue(path)
+    for task in queue:
+        if task.get("id") != task_id:
+            continue
+        task_result = task.setdefault("result", {})
+        if target_job_id:
+            for job in task_result.get("generation_jobs") or []:
+                if isinstance(job, dict) and job.get("job_id") == target_job_id:
+                    job["generation"] = generation
+                    job["generation_hash"] = _generation_hash(generation)
+                    job["status"] = "generated"
+                    _save_queue(path, queue)
+                    return {"ok": True, "action": "set_generation", "task_id": task_id, "job_id": target_job_id}
+            return {"ok": False, "code": "job_not_found", "error": f"job {target_job_id} not found"}
+        task_result["generation"] = generation
+        task["generation_hash"] = _generation_hash(generation)
+        _save_queue(path, queue)
+        return {"ok": True, "action": "set_generation", "task_id": task_id}
+
+    return {"ok": False, "code": "task_not_found", "error": f"task {task_id} not found"}
+
+
 def _retry_failed(path: Path) -> dict[str, Any]:
     queue = _load_queue(path)
     retried: list[str] = []
@@ -182,7 +359,7 @@ def _status(path: Path) -> dict[str, Any]:
         "action": "status",
         "total": len(queue),
         "counts": counts,
-        "tasks": queue,
+        "tasks": [_summarize_task(task) for task in queue],
     }
 
 
@@ -400,9 +577,16 @@ def _prepare_all(root: Path, queue_path: Path) -> dict[str, Any]:
                     "prompt": prepare_result.get("prompt"),
                     "expected_response_schema": prepare_result.get("expected_response_schema"),
                     "source_hash": prepare_result.get("source_hash"),
+                    "generation_jobs": _build_generation_jobs(root, task, prepare_result),
                 }
                 processed += 1
-                results.append({"task_id": task["id"], "status": "prepared", "source_hash": prepare_result.get("source_hash")})
+                results.append({
+                    "task_id": task["id"],
+                    "status": "prepared",
+                    "source_hash": prepare_result.get("source_hash"),
+                    "has_prompt": bool(prepare_result.get("prompt")),
+                    "generation_job_count": len(task["result"]["generation_jobs"]),
+                })
             elif prepare_result.get("ok") and status in ("skipped", "source_unchanged"):
                 task["status"] = "done"
                 task["completed_at"] = time.time()
@@ -432,6 +616,104 @@ def _prepare_all(root: Path, queue_path: Path) -> dict[str, Any]:
     }
 
 
+def _record_apply_failure(task: dict[str, Any], apply_result: dict[str, Any], generation: Any) -> dict[str, Any]:
+    task["status"] = "failed"
+    task["retry_count"] = task.get("retry_count", 0) + 1
+    task["error"] = apply_result.get("error", "apply failed")
+    if apply_result.get("code") == "generation_schema_invalid":
+        errors = apply_result.get("errors") or []
+        task["error_stage"] = "validate"
+        task["validation_errors"] = errors
+        task["generation_hash"] = _generation_hash(generation)
+        task["error"] = _error_summary(errors)
+        return {
+            "task_id": task["id"],
+            "status": "failed",
+            "error": task["error"],
+            "error_stage": "validate",
+            "validation_errors": errors,
+            "generation_hash": task["generation_hash"],
+        }
+    return {"task_id": task["id"], "status": "failed", "error": task["error"]}
+
+
+def _select_generation(task: dict[str, Any], job_id: str | None) -> tuple[dict[str, Any] | None, Any]:
+    task_result = task.get("result") or {}
+    if job_id:
+        for job in task_result.get("generation_jobs") or []:
+            if isinstance(job, dict) and job.get("job_id") == job_id:
+                return job, job.get("generation")
+        return None, None
+    return None, task_result.get("generation")
+
+
+def _apply_generation_to_task(
+    root: Path,
+    task: dict[str, Any],
+    generation: Any,
+    job: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    project = task.get("project", "")
+    source_name = task.get("source_name", "")
+    source_type = task.get("source_type", "file")
+    apply_result = staged_wiki_ingest(
+        root, stage="apply", project=project,
+        source_name=source_name, generation=generation,
+        source_type=source_type,
+    )
+    if apply_result.get("ok"):
+        if job is not None:
+            job["status"] = "applied"
+            job["applied_at"] = time.time()
+            jobs = (task.get("result") or {}).get("generation_jobs") or []
+            if all(not isinstance(item, dict) or item.get("status") == "applied" for item in jobs):
+                task["status"] = "done"
+                task["completed_at"] = time.time()
+        else:
+            task["status"] = "done"
+            task["completed_at"] = time.time()
+        return {
+            "task_id": task["id"],
+            "job_id": job.get("job_id") if job else None,
+            "status": "done",
+            "written": apply_result.get("written", 0),
+        }
+
+    failure = _record_apply_failure(task, apply_result, generation)
+    if job is not None:
+        job["status"] = "failed"
+        job["error_stage"] = failure.get("error_stage")
+        job["validation_errors"] = failure.get("validation_errors")
+        job["generation_hash"] = failure.get("generation_hash")
+        failure["job_id"] = job.get("job_id")
+    return failure
+
+
+def _apply_one(
+    root: Path,
+    queue_path: Path,
+    task_id: str | None,
+    job_id: str | None,
+    result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not task_id:
+        return {"ok": False, "code": "missing_task_id", "error": "task_id is required"}
+    target_job_id = job_id or (result or {}).get("job_id")
+    queue = _load_queue(queue_path)
+    for task in queue:
+        if task.get("id") != task_id:
+            continue
+        job, generation = _select_generation(task, target_job_id)
+        if target_job_id and job is None:
+            return {"ok": False, "code": "job_not_found", "error": f"job {target_job_id} not found"}
+        if not generation:
+            return {"ok": False, "code": "missing_generation", "error": "generation is required"}
+        apply_summary = _apply_generation_to_task(root, task, generation, job)
+        _save_queue(queue_path, queue)
+        return {"ok": apply_summary.get("status") == "done", "action": "apply_one", **apply_summary}
+    return {"ok": False, "code": "task_not_found", "error": f"task {task_id} not found"}
+
+
 def _apply_all(root: Path, queue_path: Path) -> dict[str, Any]:
     """Run the apply stage for all prepared tasks.
 
@@ -453,36 +735,37 @@ def _apply_all(root: Path, queue_path: Path) -> dict[str, Any]:
     for task in targets:
         project = task.get("project", "")
         source_name = task.get("source_name", "")
-        source_type = task.get("source_type", "file")
-        generation = (task.get("result") or {}).get("generation")
+        task_result = task.get("result") or {}
+        generation = task_result.get("generation")
 
         if not project or not source_name:
             skipped += 1
             results.append({"task_id": task["id"], "status": "skipped", "reason": "missing project or source_name"})
             continue
 
-        if not generation:
+        jobs = [job for job in task_result.get("generation_jobs") or [] if isinstance(job, dict)]
+        generated_jobs = [job for job in jobs if job.get("generation") and job.get("status") != "applied"]
+        if not generation and not generated_jobs:
             skipped += 1
             results.append({"task_id": task["id"], "status": "skipped", "reason": "missing generation in task result"})
             continue
 
         try:
-            apply_result = staged_wiki_ingest(
-                root, stage="apply", project=project,
-                source_name=source_name, generation=generation,
-                source_type=source_type,
-            )
-            if apply_result.get("ok"):
-                task["status"] = "done"
-                task["completed_at"] = time.time()
-                processed += 1
-                results.append({"task_id": task["id"], "status": "done", "written": apply_result.get("written", 0)})
+            if generation:
+                summary = _apply_generation_to_task(root, task, generation)
+                if summary["status"] == "done":
+                    processed += 1
+                else:
+                    failed += 1
+                results.append({key: value for key, value in summary.items() if value is not None})
             else:
-                task["status"] = "failed"
-                task["retry_count"] = task.get("retry_count", 0) + 1
-                task["error"] = apply_result.get("error", "apply failed")
-                failed += 1
-                results.append({"task_id": task["id"], "status": "failed", "error": task["error"]})
+                for job in generated_jobs:
+                    summary = _apply_generation_to_task(root, task, job.get("generation"), job)
+                    if summary["status"] == "done":
+                        processed += 1
+                    else:
+                        failed += 1
+                    results.append({key: value for key, value in summary.items() if value is not None})
         except Exception as exc:
             task["status"] = "failed"
             task["retry_count"] = task.get("retry_count", 0) + 1

@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph, rescan_source, staged_wiki_ingest, _repair_cache_manifest_paths
+from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph, rescan_source, staged_wiki_ingest, _repair_cache_manifest_paths, _format_chat_messages
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
 
@@ -509,6 +509,138 @@ def test_staged_wiki_ingest_rejects_invalid_project_subdir(tmp_path: Path):
     assert result["code"] == "invalid_generated_path"
 
 
+def test_staged_wiki_ingest_rejects_non_manifest_generated_sources(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "article_001.md").write_text("# Article 001\n\nAlpha content", encoding="utf-8")
+    (source / "article_002.md").write_text("# Article 002\n\nBeta content", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
+
+    result = staged_wiki_ingest(
+        root,
+        "apply_generation",
+        project="alpha",
+        source_name="docs",
+        generation={
+            "pages": [
+                {
+                    "path": "wiki/concepts/alpha/generated.md",
+                    "title": "Generated",
+                    "sources": ["raw/sources/file/alpha/docs/generated/article_999.md"],
+                }
+            ]
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "generation_schema_invalid"
+    assert any(error["code"] == "invalid_source" for error in result["errors"])
+    assert not (root / "wiki/concepts/alpha/generated.md").exists()
+
+
+def test_staged_wiki_ingest_rejects_page_missing_required_body(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "article_001.md").write_text("# Article 001\n\nAlpha content", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+
+    result = staged_wiki_ingest(
+        root,
+        "apply",
+        project="alpha",
+        source_name="docs",
+        generation={
+            "source_summary": "Alpha source summary",
+            "pages": [
+                {
+                    "path": "wiki/concepts/alpha/generated.md",
+                    "title": "Generated",
+                    "type": "concept",
+                    "summary": "Generated summary",
+                    "sources": ["raw/sources/file/alpha/docs/generated/article_001.md"],
+                }
+            ],
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "generation_schema_invalid"
+    assert any(error["path"] == "pages[0].body" and error["code"] == "missing_required_field" for error in result["errors"])
+    assert not (root / "wiki/concepts/alpha/generated.md").exists()
+    log_path = root / "wiki/log.md"
+    assert not log_path.exists() or "llm_ingest" not in log_path.read_text(encoding="utf-8")
+
+
+def test_staged_wiki_ingest_rejects_short_page_body(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "article_001.md").write_text("# Article 001\n\nAlpha content", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+
+    result = staged_wiki_ingest(
+        root,
+        "apply",
+        project="alpha",
+        source_name="docs",
+        generation={
+            "source_summary": "Alpha source summary",
+            "pages": [
+                {
+                    "path": "wiki/concepts/alpha/generated.md",
+                    "title": "Generated",
+                    "type": "concept",
+                    "summary": "Generated summary",
+                    "body": "Too short.",
+                    "sources": ["raw/sources/file/alpha/docs/generated/article_001.md"],
+                }
+            ],
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "generation_schema_invalid"
+    assert any(error["path"] == "pages[0].body" and error["code"] == "body_too_short" for error in result["errors"])
+    assert not (root / "wiki/concepts/alpha/generated.md").exists()
+
+
+def test_staged_wiki_ingest_accepts_valid_generation_payload(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "article_001.md").write_text("# Article 001\n\nAlpha content", encoding="utf-8")
+    staged_wiki_ingest(root, "prepare", project="alpha", source_name="docs", source_path=source)
+
+    result = staged_wiki_ingest(
+        root,
+        "apply",
+        project="alpha",
+        source_name="docs",
+        generation={
+            "source_summary": {"summary": "Alpha source summary"},
+            "pages": [
+                {
+                    "path": "wiki/concepts/alpha/generated.md",
+                    "title": "Generated",
+                    "type": "concept",
+                    "summary": "Generated summary",
+                    "body": "This generated page contains enough sourced detail to satisfy the minimum quality gate before wiki files are written.",
+                    "sources": ["raw/sources/file/alpha/docs/generated/article_001.md"],
+                }
+            ],
+        },
+    )
+
+    assert result["ok"] is True
+    assert (root / "wiki/concepts/alpha/generated.md").exists()
+
+
 def test_staged_wiki_ingest_chat_source_can_write_chatlog_page(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -526,13 +658,13 @@ def test_staged_wiki_ingest_chat_source_can_write_chatlog_page(tmp_path: Path):
     generation = {
         "source_summary": "Chat session about ingest behavior.",
         "pages": [
-            {
-                "path": "wiki/chatlog/2026/06/13/session-2026-06-13.md",
-                "title": "Session 2026-06-13",
-                "type": "chatlog",
-                "summary": "Chat session summary",
-                "body": "The session was saved raw-first before analysis.",
-            }
+                {
+                    "path": "wiki/chatlog/2026/06/13/session-2026-06-13.md",
+                    "title": "Session 2026-06-13",
+                    "type": "chatlog",
+                    "summary": "Chat session summary",
+                    "body": "The session was saved raw-first before analysis, preserving enough context for a later reviewer to trace the ingest behavior.",
+                }
         ],
     }
 
@@ -608,6 +740,83 @@ def test_prepare_chat_source_prompt_prefers_chatlog_pages(tmp_path: Path):
     assert "raw/sources/chat" in result["prompt"]
 
 
+def test_format_chat_messages_preserves_user_model_turn_order():
+    messages = [
+        {"role": "user", "content": "Need formatted snapshots."},
+        {"role": "model", "content": "Use a transcript before LLM ingest."},
+        {"role": "user", "content": "Keep order?"},
+        {"role": "assistant", "content": "Yes, turn-by-turn."},
+    ]
+
+    transcript = _format_chat_messages(messages)
+
+    assert transcript.index("### User (turn 1)") < transcript.index("### Model (turn 2)")
+    assert transcript.index("### Model (turn 2)") < transcript.index("### User (turn 3)")
+    assert transcript.index("### User (turn 3)") < transcript.index("### Assistant (turn 4)")
+    assert "Need formatted snapshots." in transcript
+    assert "Use a transcript before LLM ingest." in transcript
+
+
+def test_staged_wiki_ingest_chat_messages_write_formatted_snapshot(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    messages = [
+        {"role": "user", "content": "请把会话做快照。"},
+        {"role": "model", "content": "我会先写 transcript.md，再交给 LLM 理解。"},
+    ]
+
+    result = staged_wiki_ingest(
+        root,
+        "prepare",
+        project="alpha",
+        source_name="session-2026-06-18",
+        source_type="chat",
+        messages=messages,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "needs_model"
+    assert "transcript.md" in result["prompt"]
+    assert "messages.json" in result["prompt"]
+
+    raw_dir = root / "raw/sources/chat/2026/06/18/session-2026-06-18"
+    transcript_path = raw_dir / "transcript.md"
+    messages_path = raw_dir / "messages.json"
+    manifest_path = raw_dir / "manifest.json"
+
+    assert transcript_path.is_file()
+    assert messages_path.is_file()
+    assert manifest_path.is_file()
+
+    transcript = transcript_path.read_text(encoding="utf-8")
+    assert "### User (turn 1)" in transcript
+    assert "### Model (turn 2)" in transcript
+    assert transcript.index("请把会话做快照。") < transcript.index("我会先写 transcript.md")
+
+    stored_messages = json.loads(messages_path.read_text(encoding="utf-8"))
+    assert stored_messages == messages
+    assert [item["relative_path"] for item in json.loads(manifest_path.read_text(encoding="utf-8"))] == ["transcript.md", "messages.json"]
+
+
+def test_staged_wiki_ingest_chat_messages_prepare_analysis_uses_formatted_snapshot(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    result = staged_wiki_ingest(
+        root,
+        "prepare_analysis",
+        project="alpha",
+        source_name="session-2026-06-18",
+        source_type="chat",
+        messages=[{"role": "user", "content": "分析这个会话。"}],
+    )
+
+    assert result["ok"] is True
+    assert result["stage"] == "prepare_analysis"
+    assert result["classification_context"] == ["transcript.md", "messages.json"]
+    assert (root / "raw/sources/chat/2026/06/18/session-2026-06-18/transcript.md").is_file()
+
+
 def test_staged_wiki_ingest_applies_generation_with_summary_fallback(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -617,13 +826,14 @@ def test_staged_wiki_ingest_applies_generation_with_summary_fallback(tmp_path: P
     prepared = staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
     assert prepared["ok"] is True
     generation = {
+        "source_summary": "Generated source summary",
         "pages": [
             {
                 "path": "wiki/concepts/alpha/generated.md",
                 "title": "Generated Concept",
                 "type": "concept",
                 "summary": "Generated summary",
-                "body": "Generated body",
+                "body": "Generated body with enough detail to satisfy the quality gate while preserving the original summary fallback behavior.",
             }
         ]
     }
@@ -663,7 +873,7 @@ def test_apply_generation_canonicalizes_stale_raw_source_paths(tmp_path: Path):
                 "title": "Article",
                 "type": "concept",
                 "summary": f"来源于 {old_source}",
-                "body": f"## 原始来源\n\n- `{old_source}`",
+                "body": f"## 原始来源\n\n- `{old_source}`\n\nThis page keeps a stale raw source reference long enough to prove canonicalization rewrites it to the prepared manifest path.",
                 "sources": [old_source],
             }
         ],
@@ -753,7 +963,13 @@ def test_apply_generation_collects_top_level_concept_key(tmp_path: Path):
 
     generation = {
         "source_summary": {"title": "T", "summary": "S", "body": "B"},
-        "concept": {"path": "wiki/concepts/alpha/my-concept.md", "title": "My Concept", "type": "concept", "summary": "CS", "body": "CB"},
+        "concept": {
+            "path": "wiki/concepts/alpha/my-concept.md",
+            "title": "My Concept",
+            "type": "concept",
+            "summary": "CS",
+            "body": "Concept body with enough detail for the validation gate and the top-level concept compatibility path.",
+        },
     }
     result = staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
 
@@ -778,7 +994,13 @@ def test_two_stage_prepare_and_apply(tmp_path: Path):
 
     generation = {
         "source_summary": {"title": "Alpha Docs", "summary": "Summary of alpha docs", "body": "Body content"},
-        "pages": [{"path": "wiki/concepts/alpha/my-concept.md", "title": "My Concept", "type": "concept", "summary": "CS", "body": "CB"}],
+        "pages": [{
+            "path": "wiki/concepts/alpha/my-concept.md",
+            "title": "My Concept",
+            "type": "concept",
+            "summary": "CS",
+            "body": "Concept body with enough detail for the validation gate and the two-stage apply compatibility path.",
+        }],
     }
     result = staged_wiki_ingest(root, "apply", project="alpha", source_name="docs", generation=generation)
     assert result["ok"] is True
@@ -881,12 +1103,13 @@ def test_apply_generation_normalizes_wikilink_targets_to_lowercase(tmp_path: Pat
     staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
 
     generation = {
+        "source_summary": "Wiki link normalization source summary",
         "pages": [{
             "path": "wiki/concepts/alpha/my-concept.md",
             "title": "My Concept",
             "type": "concept",
             "summary": "S",
-            "body": "See [[User-Event-Script]] and [[RESTlet]] for details.",
+            "body": "See [[User-Event-Script]] and [[RESTlet]] for details. Extra prose keeps this generated page above the quality gate.",
         }]
     }
     staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
@@ -906,12 +1129,13 @@ def test_apply_generation_preserves_wikilink_display_text(tmp_path: Path):
     staged_wiki_ingest(root, "prepare_analysis", project="alpha", source_name="docs", source_path=source)
 
     generation = {
+        "source_summary": "Wiki link display text source summary",
         "pages": [{
             "path": "wiki/concepts/alpha/alias-test.md",
             "title": "Alias Test",
             "type": "concept",
             "summary": "S",
-            "body": "Use [[Suitelet|Suitelet Script]] to handle requests.",
+            "body": "Use [[Suitelet|Suitelet Script]] to handle requests. Extra prose keeps this generated page above the quality gate.",
         }]
     }
     staged_wiki_ingest(root, "apply_generation", project="alpha", source_name="docs", generation=generation)
@@ -936,6 +1160,7 @@ def test_apply_generation_does_not_normalize_wikilinks_inside_code_blocks(tmp_pa
         "Inline: `[[Suitelet]]` should not be changed."
     )
     generation = {
+        "source_summary": "Wiki link code block source summary",
         "pages": [{
             "path": "wiki/concepts/alpha/code-test.md",
             "title": "Code Test",

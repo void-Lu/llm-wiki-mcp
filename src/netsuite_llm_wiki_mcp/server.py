@@ -147,6 +147,7 @@ def wiki_ingest_llm_tool(
     language: str = "zh-CN",
     analysis: dict[str, Any] | str | None = None,
     generation: dict[str, Any] | str | None = None,
+    messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return run_staged_wiki_ingest(
         vault_root=vault_root,
@@ -158,6 +159,7 @@ def wiki_ingest_llm_tool(
         language=language,
         analysis=analysis,
         generation=generation,
+        messages=messages,
     )
 
 
@@ -407,9 +409,10 @@ def wiki_ingest_llm(
     language: str = "zh-CN",
     analysis: dict[str, Any] | str | None = None,
     generation: dict[str, Any] | str | None = None,
+    messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Run staged LLM-assisted ingest. Recommended two-stage flow: stage='prepare' (returns prompt) then stage='apply' (writes pages). For source_type='chat', prepare stores raw transcripts under raw/sources/chat/YYYY/MM/DD/<source_name>/ and apply may write wiki/chatlog/YYYY/MM/DD pages. Legacy three-stage (prepare_analysis/prepare_generation/apply_generation) still supported."""
-    return wiki_ingest_llm_tool(vault_root, stage, project, source_name, source_path, source_type, language, analysis, generation)
+    """Run staged LLM-assisted ingest. Recommended two-stage flow: stage='prepare' (returns prompt) then stage='apply' (writes pages). For source_type='chat', either provide source_path to a file/directory OR provide messages (a list of {role, content} dicts) to auto-format a structured transcript snapshot under raw/sources/chat/YYYY/MM/DD/<source_name>/. Apply may write wiki/chatlog/YYYY/MM/DD pages. Legacy three-stage (prepare_analysis/prepare_generation/apply_generation) still supported."""
+    return wiki_ingest_llm_tool(vault_root, stage, project, source_name, source_path, source_type, language, analysis, generation, messages)
 
 
 
@@ -601,15 +604,20 @@ def wiki_ingest_batch(
     action: str = "status",
     tasks: list[dict[str, str]] | None = None,
     task_id: str | None = None,
+    job_id: str | None = None,
     result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Manage persistent ingest queue: enqueue, next, complete, fail, retry, status, cancel, clear_done, reapply, prepare_all, apply_all.
+    """Manage persistent ingest queue: enqueue, next, complete, fail, retry, status, cancel, clear_done, reapply, prepare_all, apply_all, next_prepared, next_generation_job, set_generation, apply_one.
 
     action="reapply": re-apply from cache for pending/failed tasks without re-preparing or calling LLM.
     action="prepare_all": run prepare stage for all pending tasks; marks tasks as "prepared" when LLM response is needed.
     action="apply_all": run apply stage for all prepared tasks (requires generation in task result).
+    action="next_prepared": return one prepared task with prompt for isolated generation.
+    action="next_generation_job": return one isolated page generation job.
+    action="set_generation": store one task/job generation without completing the task.
+    action="apply_one": validate/apply one stored task/job generation.
     """
-    return run_wiki_ingest_batch(vault_root=vault_root, action=action, tasks=tasks, task_id=task_id, result=result)
+    return run_wiki_ingest_batch(vault_root=vault_root, action=action, tasks=tasks, task_id=task_id, job_id=job_id, result=result)
 
 
 def wiki_verify_tool(

@@ -266,6 +266,7 @@ class TestLlmWikiServerTools:
             "language": "zh-CN",
             "analysis": None,
             "generation": None,
+            "messages": None,
         }]
 
     def test_wiki_rescan_tool_delegates_rescan(self, monkeypatch, tmp_path: Path):
