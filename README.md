@@ -84,7 +84,7 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | `wiki_ingest_codegraph` | 将 CodeGraph 快照和机器代码事实同步摄入 raw，并生成项目 source/architecture/pipeline 可读页（不需要 LLM） |
 | `wiki_ingest_llm` | 两阶段 LLM 摄入（推荐）：`prepare`（返回合并 prompt）→ `apply`（写入页面）。旧三阶段 `prepare_analysis` → `prepare_generation` → `apply_generation` 仍兼容 |
 | `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot；如果 manifest 路径与期望 raw dir 不匹配（如目录结构重构后旧路径未同步），自动修复 manifest 路径并在响应中返回 `manifest_repaired` 信息 |
-| `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done / reapply / prepare_all / apply_all。`reapply` 从缓存重新 apply（无需 LLM），含页面完整性检测（`regeneration_needed`、`pages_restored`、`index_refreshed`）；`prepare_all` 批量运行 prepare 并标记 `prepared`；`apply_all` 批量运行 apply 完成 `prepared` → `done` |
+| `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done / reapply / prepare_all / apply_all / next_prepared / next_generation_job / set_generation / apply_one。`prepare_all` 只返回瘦身摘要，完整 prompt 留在队列内；`next_generation_job` 每次返回一个隔离 page generation job；`set_generation` 保存单条生成结果；`apply_one` / `apply_all` 在写 wiki 前执行 generation 结构与质量门禁 |
 
 ### 查询
 
@@ -199,9 +199,28 @@ vault_root/
 当需要一次性摄入大量源文件时，使用 `wiki_ingest_batch` 的批量 action：
 
 1. **入队**：`wiki_ingest_batch(action="enqueue", tasks=[...])` — 批量添加待摄入任务
-2. **批量 prepare**：`wiki_ingest_batch(action="prepare_all")` — 对所有 `pending` 任务运行 prepare，标记为 `prepared`（需要 LLM）或 `done`（源未变化）
-3. **LLM 处理**：对每个 `prepared` 任务，从 `result.prompt` 取 prompt 发送给 LLM，将生成结果存回 `result.generation`
-4. **批量 apply**：`wiki_ingest_batch(action="apply_all")` — 对所有 `prepared` 任务运行 apply，完成页面写入
+2. **批量 prepare**：`wiki_ingest_batch(action="prepare_all")` — 对所有 `pending` 任务运行 prepare，标记为 `prepared`（需要 LLM）或 `done`（源未变化）。批量响应只返回 `task_id`、`status`、`source_hash`、`has_prompt`、`generation_job_count` 等摘要，不返回整批 prompt 正文
+3. **单条取 job**：优先使用 `wiki_ingest_batch(action="next_generation_job")`，每次只取一个 page generation job。兼容旧 source-level 流程时可用 `next_prepared` 取单个 prepared task 和 prompt
+4. **隔离生成**：在独立子代理或新会话中只给当前 job 的 `raw_sources`、`raw_reading_instructions`、`expected_response_schema` 和精简 `context`，不要把其他任务的 prompt/generation/失败历史带入同一模型上下文
+5. **保存 generation**：`wiki_ingest_batch(action="set_generation", task_id="...", job_id="...", result={"generation": ...})` — 只保存单条模型输出，不改变任务终态
+6. **单条或批量 apply**：`wiki_ingest_batch(action="apply_one", task_id="...", job_id="...")` 或 `wiki_ingest_batch(action="apply_all")` — 写入前执行 generation schema / quality gate；通过后写 wiki，失败则标记 `failed`
+
+`status` 也返回瘦身任务摘要：包含 `has_prompt`、`has_generation`、`source_hash`、`generation_hash`、`error_stage`、`validation_errors` 等诊断字段，不返回大段 prompt 或 generation 正文。
+
+### Generation 质量门禁
+
+`wiki_ingest_llm(stage="apply")` 和旧 `apply_generation` 在写任何页面、刷新索引或追加日志前，会先验证 generation payload：
+
+- generation 必须是 JSON object。
+- `source_summary` 必须是 object 或非空字符串。
+- `pages` 必须是 list；允许为空，此时只生成 source index。
+- 非空页面必须包含非空 `path`、`title`、`type`、`summary`、`body`、`sources`。
+- `sources` 必须能归一到 prepared manifest 中的 raw source path。
+- `path` 必须落在允许的 wiki 目录内，不能逃逸项目或 source_type 约束。
+- `type` 只允许 `concept`、`entity`、`pipeline`、`spec`、`plan`、`research`、`troubleshooting`、`chatlog`、`source_index`。
+- `body` 去除空白后至少 80 字符；`summary` 必须是短文本，不能塞入多段正文。
+
+校验失败时不会写页面、不会刷新索引、不会追加 ingest log。返回形态为 `code="generation_schema_invalid"` 和结构化 `errors[]`；batch apply 会把任务标记为 `failed`，记录 `error_stage="validate"`、`validation_errors`、`generation_hash`，但不会在批量响应或 status 中回显坏 generation 正文。
 
 **页面损坏恢复**：当 wiki 页面损坏但 ingest cache 完好时，使用 `wiki_ingest_batch(action="reapply")` 从缓存重新 apply，无需重新 prepare 或调用 LLM。reapply 会检测每页完整性，报告 `regeneration_needed`（需要完整 LLM 重新摄入的页面）和 `pages_restored`（仍然完好的页面数）。
 
@@ -229,6 +248,7 @@ prepare → 读源文件 + 写 raw/sources/<source_type>/ snapshot + 返回合�
 apply   → 写 wiki/concepts/ 或 wiki/projects/ 下的知识页面
   → 写 wiki/sources/ 下镜像目标 wiki 结构的索引溯源页
   → source_type="chat" 且生成 chatlog 时，写 wiki/sources/chatlog/YYYY/MM/DD/<source_name>.md 索引溯源页
+  → 写入前校验 generation：source_summary、pages、页面 path/title/type/summary/body/sources、允许 type、路径安全、body 最低质量和 source manifest 可追溯性
 
 旧三阶段（仍兼容）：
 prepare_analysis   → 返回 analysis prompt
