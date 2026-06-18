@@ -91,9 +91,11 @@ validate_generation_payload(payload, manifest_sources, project, source_type) -> 
 - page 必须包含非空 `path`、`title`、`type`、`summary`、`body`。
 - `sources` 必须非空，且全部来自 prepared manifest。
 - `path` 必须通过现有 `_safe_generated_page_path` 约束。
-- `type` 必须在允许集合内，初始集合为 `concept`、`spec`、`plan`、`research`、`troubleshooting`、`chatlog`、`source_index`。
+- `type` 必须在允许集合内，初始集合为 `concept`、`entity`、`pipeline`、`spec`、`plan`、`research`、`troubleshooting`、`chatlog`、`source_index`。
 - `body` 去除空白后必须达到最低长度，初始阈值建议 80 字符。
 - `summary` 必须是短文本，不能包含多段正文。
+
+`entity` 用于摄入稳定实体，例如业务对象、NetSuite record、脚本、部署、角色、权限、外部系统、表、接口或代码符号。`pipeline` 用于摄入代码逻辑链，例如 SuiteScript 入口到记录读写、搜索、校验、提交、外部 API 调用或后续脚本触发的执行路径。
 
 校验失败时 `_apply_generation` 返回：
 
@@ -160,6 +162,24 @@ enqueue
 ```
 
 关键约束：模型每次只看到当前任务的 prompt、schema 和必要 wiki context，不看到整批任务历史。
+
+## 上下文隔离与子代理
+
+当前 MCP 服务端批量摄入不会自动调用子代理，也不会自己创建新的 LLM 上下文空间。服务端只维护队列、生成 prompt、接收 generation 并写入 wiki；真正的模型调用发生在 MCP 客户端或外部编排层。
+
+因此，`prepare_all`、`next_prepared`、`set_generation`、`apply_one` 的第一阶段目标是减少批量工具响应对当前会话上下文的污染，而不是保证每个 wiki 文档天然运行在新上下文中。
+
+如果需要强隔离，可以在外部编排层增加 “每个 prepared task 一个新子代理或新会话” 的执行模式：
+
+```text
+next_prepared
+  -> spawn isolated worker with only this task prompt/schema
+  -> worker returns generation
+  -> set_generation
+  -> apply_one
+```
+
+该模式属于后续增强，不应放进第一阶段服务端止血修复中。第一阶段服务端只提供适合隔离编排的单任务接口和严格 apply gate。
 
 ## 兼容性
 
