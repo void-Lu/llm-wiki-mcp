@@ -11,6 +11,7 @@ from netsuite_llm_wiki_mcp.server import (
     wiki_init_tool,
     wiki_ingest_codegraph_tool,
     wiki_ingest_llm_tool,
+    wiki_build_source_index_tool,
     wiki_lint_tool,
     wiki_query_debug_tool,
     wiki_query_tool,
@@ -46,6 +47,7 @@ class TestLlmWikiServerTools:
         assert "wiki_status" in registered
         assert "wiki_list_files" in registered
         assert "wiki_read_file" in registered
+        assert "wiki_build_source_index" in registered
 
     def test_wiki_write_note_tool_delegates_to_note_writer(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"
@@ -267,6 +269,33 @@ class TestLlmWikiServerTools:
             "analysis": None,
             "generation": None,
             "messages": None,
+        }]
+
+    def test_wiki_build_source_index_tool_delegates_to_source_index_builder(self, monkeypatch, tmp_path: Path):
+        vault = tmp_path / "wiki-root"
+        payload = {"ok": True, "indexed_count": 2}
+        calls: list[dict[str, object]] = []
+
+        def fake_build(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return payload
+
+        monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_build_source_index", fake_build)
+
+        result = wiki_build_source_index_tool(
+            str(vault),
+            source_root="raw/sources/references/docs",
+            source_name="docs",
+            target_dir="wiki/sources/references/docs",
+            page_size=25,
+            max_headings=7,
+            refresh=False,
+        )
+
+        assert result == payload
+        assert calls == [{
+            "vault_root": str(vault), "source_root": "raw/sources/references/docs", "source_name": "docs",
+            "target_dir": "wiki/sources/references/docs", "page_size": 25, "max_headings": 7, "refresh": False,
         }]
 
     def test_wiki_rescan_tool_delegates_rescan(self, monkeypatch, tmp_path: Path):

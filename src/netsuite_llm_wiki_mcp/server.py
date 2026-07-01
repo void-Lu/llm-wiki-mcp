@@ -27,6 +27,7 @@ from netsuite_llm_wiki_mcp.wiki_query import wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
 from netsuite_llm_wiki_mcp.wiki_research import wiki_research as run_wiki_research
 from netsuite_llm_wiki_mcp.wiki_synthesis import wiki_synthesis as run_wiki_synthesis
+from netsuite_llm_wiki_mcp.wiki_source_index import build_source_index as run_build_source_index
 from netsuite_llm_wiki_mcp.wiki_verify import wiki_verify as run_wiki_verify
 
 mcp = FastMCP("netsuite-llm-wiki-mcp")
@@ -160,6 +161,26 @@ def wiki_ingest_llm_tool(
         analysis=analysis,
         generation=generation,
         messages=messages,
+    )
+
+
+def wiki_build_source_index_tool(
+    vault_root: str,
+    source_root: str,
+    source_name: str,
+    target_dir: str | None = None,
+    page_size: int = 80,
+    max_headings: int = 12,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    return run_build_source_index(
+        vault_root=vault_root,
+        source_root=source_root,
+        source_name=source_name,
+        target_dir=target_dir,
+        page_size=page_size,
+        max_headings=max_headings,
+        refresh=refresh,
     )
 
 
@@ -413,6 +434,23 @@ def wiki_ingest_llm(
 ) -> dict[str, Any]:
     """Run staged LLM-assisted ingest. Recommended two-stage flow: stage='prepare' (returns prompt) then stage='apply' (writes pages). For source_type='chat', either provide source_path to a file/directory OR provide messages (a list of {role, content} dicts) to auto-format a structured transcript snapshot under raw/sources/chat/YYYY/MM/DD/<source_name>/. Apply may write wiki/chatlog/YYYY/MM/DD pages. Legacy three-stage (prepare_analysis/prepare_generation/apply_generation) still supported."""
     return wiki_ingest_llm_tool(vault_root, stage, project, source_name, source_path, source_type, language, analysis, generation, messages)
+
+
+@mcp.tool()
+def wiki_build_source_index(
+    vault_root: str,
+    source_root: str,
+    source_name: str,
+    target_dir: str | None = None,
+    page_size: int = 80,
+    max_headings: int = 12,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    """Build lightweight source_index pages for a raw source tree without LLM analysis."""
+    return wiki_build_source_index_tool(
+        vault_root, source_root, source_name,
+        target_dir=target_dir, page_size=page_size, max_headings=max_headings, refresh=refresh,
+    )
 
 
 

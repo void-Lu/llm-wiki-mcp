@@ -101,6 +101,12 @@ def _safe_segment(value: str | None, missing_code: str, label: str) -> tuple[str
 def _known_or_existing(value: str, known_values: set[str], directory: Path) -> dict[str, Any] | None:
     if value in known_values or directory.is_dir():
         return None
+    # Fallback: discover existing sibling subdirs under the same parent
+    parent = directory.parent
+    if parent.is_dir():
+        existing = {p.name for p in parent.iterdir() if p.is_dir()}
+        if value in existing:
+            return None
     return _error("unknown_subdir", f"unknown subdir: {value}")
 
 
