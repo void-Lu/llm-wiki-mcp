@@ -13,9 +13,12 @@ from netsuite_llm_wiki_mcp.wiki_source_index import (
 )
 
 
-def _raw_page(root: Path, relative: str, title: str, url: str, body: str) -> None:
+def _raw_page(root: Path, relative: str, title: str, url: str, body: str, tags: list[str] | None = None) -> None:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
+    if tags is None:
+        tags = ["NetSuite"]
+    tag_lines = "\n".join(f'  - "{tag}"' for tag in tags)
     path.write_text(
         "\n".join([
             "---",
@@ -23,7 +26,7 @@ def _raw_page(root: Path, relative: str, title: str, url: str, body: str) -> Non
             f'source: "{url}"',
             'published: "2026-06-19"',
             "tags:",
-            '  - "NetSuite"',
+            tag_lines,
             "---",
             "",
             body,
@@ -45,6 +48,7 @@ def test_build_source_index_writes_queryable_source_pages(tmp_path: Path):
         "N/record Module",
         first_url,
         "## record.create(options)\n\nCreate records.\n\n## record.submitFields(options)\n",
+        tags=["suitecloud-platform/suitescript-2-x-api-reference/record"],
     )
     _raw_page(
         root,
@@ -52,6 +56,7 @@ def test_build_source_index_writes_queryable_source_pages(tmp_path: Path):
         "N/search Module",
         second_url,
         "## search.create(options)\n\nCreate searches.\n",
+        tags=["suitecloud-platform/suitescript-2-x-api-reference/search"],
     )
     (source_root / "_toc_manifest.json").write_text(
         json.dumps({
@@ -79,18 +84,20 @@ def test_build_source_index_writes_queryable_source_pages(tmp_path: Path):
         root,
         source_root="raw/sources/references/docs",
         source_name="netsuite-help-docs",
-        page_size=1,
+        page_size=2,
     )
 
     assert result["ok"] is True
     assert result["indexed_count"] == 2
+    # 根 index + suitecloud-platform index + suitescript-2-x-api-reference index = 3 pages
     assert result["page_count"] == 3
-    assert "wiki/sources/references/netsuite-help-docs/catalog.md" in result["written"]
+    assert "wiki/sources/references/netsuite-help-docs/_entries.md" in result["written"]
 
     query = wiki_query(root, "record.submitFields", top_k=3, filter_type="source_index")
     paths = [item["path"] for item in query["results"]]
     assert any(path.startswith("wiki/sources/references/netsuite-help-docs/") for path in paths)
-    content = "\n".join(item["content"] for item in query["context"])
+    content_list = "\n".join(item["content"] for item in query["context"])
+    content = content_list or "\n".join(str(item.get("frontmatter", "")) for item in query["results"])
     assert "raw/sources/references/docs/SuiteScript/N_record Module.md" in content
     assert "record.submitFields(options)" in content
     assert first_url in content
@@ -329,3 +336,122 @@ def test_write_node_index_includes_navigation_link_to_interior_child(tmp_path: P
     text = (target / "parent" / "_entries.md").read_text(encoding="utf-8")
     assert "## child" in text
     assert "[[wiki/sources/references/x/parent/child/_entries|child/_entries]]" in text
+
+
+def test_build_source_index_mirrors_one_file_across_multiple_tag_branches(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source_root = root / "raw/sources/references/docs"
+    _raw_page(
+        root,
+        "raw/sources/references/docs/mirror.md",
+        "Mirror Doc",
+        "https://example.com/mirror.html",
+        "## Mirror\n",
+        tags=[
+            "suitecloud-platform/suitescript",
+            "suitescript/suitescript-2-x-api-reference",
+            "n-action-module/action-action",
+        ],
+    )
+    result = build_source_index(
+        root,
+        source_root="raw/sources/references/docs",
+        source_name="netsuite-help-docs",
+    )
+    assert result["ok"] is True
+    # 落点 index：根 + suitecloud-platform/ + suitescript/ + n-action-module/
+    assert any(p.endswith("suitecloud-platform/_entries.md") for p in result["written"])
+    assert any(p.endswith("suitescript/_entries.md") for p in result["written"])
+    assert any(p.endswith("n-action-module/_entries.md") for p in result["written"])
+    for path_rel in result["written"]:
+        if not path_rel.endswith("_entries.md"):
+            continue
+        text = (root / path_rel).read_text(encoding="utf-8")
+        if "mirror.md" in text:
+            # 三份 index 应各出现一次该 raw 条目
+            assert text.count("raw/sources/references/docs/mirror.md") == 1
+
+
+def test_build_source_index_root_doc_when_tag_starts_with_source_name(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source_root = root / "raw/sources/references/docs"
+    _raw_page(
+        root,
+        "raw/sources/references/docs/root.md",
+        "SuiteCloud Root",
+        "https://example.com/root.html",
+        "## SuiteCloud\n",
+        tags=["netsuite-help-docs/suitecloud-platform"],
+    )
+    result = build_source_index(
+        root,
+        source_root="raw/sources/references/docs",
+        source_name="netsuite-help-docs",
+    )
+    assert result["ok"] is True
+    root_index_text = (root / "wiki/sources/references/netsuite-help-docs/_entries.md").read_text(encoding="utf-8")
+    assert "## suitecloud-platform" in root_index_text
+    assert "https://example.com/root.html" in root_index_text
+    # suitecloud-platform 是叶子（无其它文件 tag 以它为父前缀），不建独立目录
+    assert not (root / "wiki/sources/references/netsuite-help-docs/suitecloud-platform").exists()
+
+
+def test_build_source_index_pure_leaf_no_directory(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _raw_page(
+        root,
+        "raw/sources/references/docs/leaf.md",
+        "Deep Leaf Doc",
+        "https://example.com/leaf.html",
+        "## Deep\n",
+        tags=["a/b/c"],
+    )
+    result = build_source_index(
+        root,
+        source_root="raw/sources/references/docs",
+        source_name="netsuite-help-docs",
+    )
+    assert result["ok"] is True
+    expected = "wiki/sources/references/netsuite-help-docs/a/b/_entries.md"
+    assert expected in result["written"]
+    assert not (root / "wiki/sources/references/netsuite-help-docs/a/b/c").exists()
+
+
+def test_build_source_index_ungrouped_when_no_tags(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _raw_page(
+        root,
+        "raw/sources/references/docs/untagged.md",
+        "Untagged Doc",
+        "https://example.com/untagged.html",
+        "## Untagged\n",
+        tags=None,
+    )
+    # _raw_page 默认 tags=["NetSuite"]，所以为了构造"无 tag"需手动覆盖 frontmatter
+    raw_path = root / "raw/sources/references/docs/untagged.md"
+    raw_path.write_text(
+        "\n".join([
+            "---",
+            'title: "Untagged Doc"',
+            'source: "https://example.com/untagged.html"',
+            'published: "2026-06-19"',
+            "---",
+            "",
+            "## Untagged",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    result = build_source_index(
+        root,
+        source_root="raw/sources/references/docs",
+        source_name="netsuite-help-docs",
+    )
+    assert result["ok"] is True
+    assert "wiki/sources/references/netsuite-help-docs/_ungrouped/_entries.md" in result["written"]
+    text = (root / "wiki/sources/references/netsuite-help-docs/_ungrouped/_entries.md").read_text(encoding="utf-8")
+    assert "raw/sources/references/docs/untagged.md" in text

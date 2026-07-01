@@ -81,11 +81,34 @@ def build_source_index(
     if not clear_result.get("ok"):
         return clear_result
 
-    groups = _group_entries(entries)
+    section_entries, interior_nodes = _build_tag_index_tree(entries, source_name)
+
+    # 确定需要写 index 的节点集合：所有有章节条目落入的父路径并上所有 interior 节点。
+    node_paths: set[tuple[str, ...]] = {parent for parent, _ in section_entries.keys()}
+    node_paths |= interior_nodes
+    # 根 () 始终写一份根 index
+    node_paths.add(())
+
     written: list[str] = []
-    written.extend(_write_group_pages(root, target, target_rel, source_name, source_rel, groups, page_size))
-    catalog_path = _write_catalog_page(root, target, target_rel, source_name, source_rel, entries, groups, written)
-    written.insert(0, catalog_path)
+    group_summary: list[dict[str, Any]] = []
+    for node_path in sorted(node_paths, key=lambda p: (len(p), [seg.casefold() for seg in p])):
+        page_written = _write_node_index(
+            root, target, target_rel, source_name, source_rel,
+            node_path=node_path,
+            section_entries=section_entries,
+            interior_nodes=interior_nodes,
+            page_size=page_size,
+        )
+        written.extend(page_written)
+        total_at_node = sum(
+            len(section_entries.get((node_path, leaf), []))
+            for parent, leaf in section_entries.keys()
+            if parent == node_path
+        )
+        group_summary.append({
+            "tag_path": "/".join(node_path),
+            "count": total_at_node,
+        })
 
     index_result: dict[str, Any] | None = None
     overview_result: dict[str, Any] | None = None
@@ -116,10 +139,7 @@ def build_source_index(
         "indexed_count": len(entries),
         "page_count": len(written),
         "page_size": page_size,
-        "groups": [
-            {"title": title, "count": len(group_entries)}
-            for title, group_entries in groups.items()
-        ],
+        "groups": group_summary,
         "written": written,
         "cleared": clear_result.get("deleted", []),
         "index_result": index_result or {},
@@ -276,18 +296,6 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _group_entries(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for entry in entries:
-        toc_path = entry.get("toc_path") or []
-        title = str(toc_path[1] if len(toc_path) > 1 else toc_path[0] if toc_path else "Ungrouped")
-        grouped[title].append(entry)
-    return {
-        title: sorted(items, key=lambda item: (_toc_sort_key(item), item["title"].casefold(), item["raw_path"].casefold()))
-        for title, items in sorted(grouped.items(), key=lambda pair: pair[0].casefold())
-    }
-
-
 def _toc_sort_key(entry: dict[str, Any]) -> str:
     return " > ".join(str(item) for item in entry.get("toc_path") or [])
 
@@ -383,44 +391,6 @@ def _build_tag_index_tree(
         )
     }
     return section_entries, interior_nodes
-
-
-def _write_group_pages(
-    root: Path,
-    target: Path,
-    target_rel: str,
-    source_name: str,
-    source_rel: str,
-    groups: dict[str, list[dict[str, Any]]],
-    page_size: int,
-) -> list[str]:
-    written: list[str] = []
-    for group_index, (group_title, entries) in enumerate(groups.items(), 1):
-        chunks = [entries[index : index + page_size] for index in range(0, len(entries), page_size)]
-        for chunk_index, chunk in enumerate(chunks, 1):
-            suffix = f"-{chunk_index:02d}" if len(chunks) > 1 else ""
-            filename = f"{group_index:02d}-{slug(group_title)}{suffix}.md"
-            title = f"{source_name}: {group_title}"
-            if len(chunks) > 1:
-                title += f" ({chunk_index}/{len(chunks)})"
-            rel_path = Path(target_rel) / filename
-            body = _group_body(source_name, source_rel, group_title, chunk, len(entries), chunk_index, len(chunks))
-            page = WikiPage(
-                relative_path=rel_path,
-                title=title,
-                frontmatter=_frontmatter(
-                    title=title,
-                    source_name=source_name,
-                    source_rel=source_rel,
-                    summary=f"Lightweight source index for {len(chunk)} {group_title} documents.",
-                    indexed_count=len(chunk),
-                    total_group_count=len(entries),
-                ),
-                body=body,
-            )
-            write_wiki_page(root, page)
-            written.append(rel_path.as_posix())
-    return written
 
 
 def _child_sort_key(child: str) -> str:
@@ -571,67 +541,6 @@ def _node_index_body(
     return "\n".join(lines).rstrip()
 
 
-def _write_catalog_page(
-    root: Path,
-    target: Path,
-    target_rel: str,
-    source_name: str,
-    source_rel: str,
-    entries: list[dict[str, Any]],
-    groups: dict[str, list[dict[str, Any]]],
-    written_pages: list[str],
-) -> str:
-    title = f"{source_name}: Source Catalog"
-    rel_path = Path(target_rel) / "catalog.md"
-    lines = [
-        "This is a lightweight locator index. It records where each raw source document lives and what headings it contains; it does not summarize or replace the source documents.",
-        "",
-        "Use the raw paths below as inputs for targeted `wiki_ingest_llm` runs when a document needs deeper knowledge-page ingestion.",
-        "",
-        "## Coverage",
-        "",
-        f"- Source root: `{source_rel}`",
-        f"- Indexed Markdown files: {len(entries)}",
-        f"- Source index pages: {len(written_pages)}",
-        "",
-        "## Sections",
-        "",
-    ]
-    by_title = _pages_by_group(written_pages)
-    for group_title, group_entries in groups.items():
-        lines.append(f"### {group_title}")
-        lines.append("")
-        lines.append(f"- Documents: {len(group_entries)}")
-        for page in by_title.get(slug(group_title), []):
-            lines.append(f"- Page: [[{Path(page).relative_to(Path(target_rel)).as_posix()}|{Path(page).stem}]]")
-        lines.append("")
-    page = WikiPage(
-        relative_path=rel_path,
-        title=title,
-        frontmatter=_frontmatter(
-            title=title,
-            source_name=source_name,
-            source_rel=source_rel,
-            summary=f"Catalog for {len(entries)} lightweight raw source index entries.",
-            indexed_count=len(entries),
-            total_group_count=len(entries),
-        ),
-        body="\n".join(lines).rstrip(),
-    )
-    write_wiki_page(root, page)
-    return rel_path.as_posix()
-
-
-def _pages_by_group(written_pages: list[str]) -> dict[str, list[str]]:
-    grouped: dict[str, list[str]] = defaultdict(list)
-    for page in written_pages:
-        name = Path(page).stem
-        match = re.match(r"^\d+-(.+?)(?:-\d+)?$", name)
-        key = match.group(1) if match else name
-        grouped[key].append(page)
-    return grouped
-
-
 def _frontmatter(
     title: str,
     source_name: str,
@@ -655,35 +564,6 @@ def _frontmatter(
         "tags": ["netsuite", "source-index", "help-docs"],
         "sources": [source_rel],
     }
-
-
-def _group_body(
-    source_name: str,
-    source_rel: str,
-    group_title: str,
-    entries: list[dict[str, Any]],
-    total_group_count: int,
-    chunk_index: int,
-    chunk_count: int,
-) -> str:
-    lines = [
-        "This page is a lightweight source index for raw documentation. It is intended for query discovery and targeted follow-up ingestion.",
-        "",
-        "## Scope",
-        "",
-        f"- Source name: `{source_name}`",
-        f"- Source root: `{source_rel}`",
-        f"- Section: {group_title}",
-        f"- Documents on this page: {len(entries)}",
-        f"- Documents in section: {total_group_count}",
-        f"- Page chunk: {chunk_index}/{chunk_count}",
-        "",
-        "## Documents",
-        "",
-    ]
-    for index, entry in enumerate(entries, 1):
-        lines.extend(_entry_lines(index, entry))
-    return "\n".join(lines).rstrip()
 
 
 def _entry_lines(index: int, entry: dict[str, Any]) -> list[str]:
