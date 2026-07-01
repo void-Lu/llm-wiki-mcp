@@ -211,3 +211,121 @@ def test_build_tag_index_tree_dedupes_same_raw_path():
     ]
     section_entries, interior = _build_tag_index_tree(entries, "x")
     assert section_entries[(("suitecloud-platform",), "suitescript")] == [entries[0]]
+
+
+def test_write_node_index_creates_nested_directory_and_index_md(tmp_path: Path):
+    from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    target_rel = "wiki/sources/references/netsuite-help-docs"
+    target = root / target_rel
+    target.mkdir(parents=True)
+    source_name = "netsuite-help-docs"
+    source_rel = "raw/sources/references/docs"
+    entries = [
+        {
+            "raw_path": "raw/sources/references/docs/a.md",
+            "title": "A",
+            "source": "https://example.com/a",
+            "toc_path": ["x", "a"],
+            "type": "article",
+            "depth": 2,
+            "published": "2026-06-19",
+            "headings": ["## alpha"],
+            "tags": ["suitecloud-platform/suitescript"],
+            "hash": "0" * 64,
+            "keywords": ["alpha"],
+        },
+    ]
+    section_entries, interior = _build_tag_index_tree(entries, source_name)
+    written = _write_node_index(
+        root, target, target_rel, source_name, source_rel,
+        node_path=("suitecloud-platform",),
+        section_entries=section_entries,
+        interior_nodes=interior,
+        page_size=80,
+    )
+    assert written == ["wiki/sources/references/netsuite-help-docs/suitecloud-platform/index.md"]
+    text = (target / "suitecloud-platform" / "index.md").read_text(encoding="utf-8")
+    assert "## suitescript" in text
+    assert "raw/sources/references/docs/a.md" in text
+    assert "https://example.com/a" in text
+    assert "## alpha" in text
+
+
+def test_write_node_index_paginates_with_index_suffix(tmp_path: Path):
+    from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    target_rel = "wiki/sources/references/x"
+    target = root / target_rel
+    target.mkdir(parents=True)
+    source_rel = "raw/sources/references/x"
+    entries = [
+        {
+            "raw_path": f"raw/sources/references/x/f{i}.md",
+            "title": f"Title {i}",
+            "source": f"https://example.com/f{i}",
+            "toc_path": [],
+            "type": "",
+            "depth": None,
+            "published": "",
+            "headings": [f"## h{i}"],
+            "tags": ["leaf/cat"],
+            "hash": f"{i:064d}",
+            "keywords": [],
+        }
+        for i in range(3)
+    ]
+    section_entries, interior = _build_tag_index_tree(entries, "x")
+    written = _write_node_index(
+        root, target, target_rel, "x", source_rel,
+        node_path=("leaf",),
+        section_entries=section_entries,
+        interior_nodes=interior,
+        page_size=2,
+    )
+    assert set(written) == {
+        "wiki/sources/references/x/leaf/index.md",
+        "wiki/sources/references/x/leaf/index-02.md",
+    }
+
+
+def test_write_node_index_includes_navigation_link_to_interior_child(tmp_path: Path):
+    from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    target_rel = "wiki/sources/references/x"
+    target = root / target_rel
+    target.mkdir(parents=True)
+    source_rel = "raw/sources/references/x"
+    entries = [
+        {
+            "raw_path": "raw/sources/references/x/a.md",
+            "title": "A",
+            "source": "https://example.com/a",
+            "toc_path": [],
+            "type": "",
+            "depth": None,
+            "published": "",
+            "headings": ["## ha"],
+            "tags": ["parent/child/leaf"],
+            "hash": "0" * 64,
+            "keywords": [],
+        },
+    ]
+    section_entries, interior = _build_tag_index_tree(entries, "x")
+    written = _write_node_index(
+        root, target, target_rel, "x", source_rel,
+        node_path=("parent",),
+        section_entries=section_entries,
+        interior_nodes=interior,
+        page_size=80,
+    )
+    assert written == ["wiki/sources/references/x/parent/index.md"]
+    text = (target / "parent" / "index.md").read_text(encoding="utf-8")
+    assert "## child" in text
+    assert "[[wiki/sources/references/x/parent/child/index|child/index]]" in text

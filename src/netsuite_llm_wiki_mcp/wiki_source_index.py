@@ -423,6 +423,154 @@ def _write_group_pages(
     return written
 
 
+def _child_sort_key(child: str) -> str:
+    return child.casefold()
+
+
+def _node_relative_path(node_path: tuple[str, ...]) -> str:
+    return "/".join(node_path)
+
+
+def _node_display_path(node_path: tuple[str, ...], source_name: str) -> str:
+    return _node_relative_path(node_path) or source_name
+
+
+def _write_node_index(
+    root: Path,
+    target: Path,
+    target_rel: str,
+    source_name: str,
+    source_rel: str,
+    node_path: tuple[str, ...],
+    section_entries: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]],
+    interior_nodes: set[tuple[str, ...]],
+    page_size: int,
+) -> list[str]:
+    """Write the index.md (and pagination index-NN.md) for one tree node.
+
+    `node_path` is an absolute tree path tuple (root node is ()).  Children
+    are the unique direct child segments of `node_path`.  For each child we
+    emit a `## {child}` section containing:
+      - any raw entries whose (parent==node_path, leaf==child) landed here
+      - a `-> [[child/.../index|child/.../index]]` navigation row when
+        `(*node_path, child)` is itself an interior node.
+    """
+    children = {
+        leaf for parent, leaf in section_entries.keys() if parent == node_path
+    } | {
+        path[len(node_path)] for path in interior_nodes
+        if len(path) > len(node_path) and path[: len(node_path)] == node_path
+    }
+    children = sorted(children, key=_child_sort_key)
+
+    node_rel_dir = "/".join((*Path(target_rel).parts, *node_path)) if node_path else target_rel
+    section_blocks: list[tuple[str, list[dict[str, Any]], bool, str]] = []
+    for child in children:
+        direct_key = (node_path, child)
+        child_entry_list = list(section_entries.get(direct_key, []))
+        child_entry_list.sort(
+            key=lambda entry: (
+                _toc_sort_key(entry),
+                str(entry["title"]).casefold(),
+                str(entry["raw_path"]).casefold(),
+            )
+        )
+        child_node_path = (*node_path, child)
+        is_child_interior = child_node_path in interior_nodes
+        child_index_rel = f"{node_rel_dir}/{child}/index"
+        section_blocks.append((child, child_entry_list, is_child_interior, child_index_rel))
+
+    if node_path == (_UNGROUPED_MARKER,):
+        section_blocks = [
+            (entry["title"], [entry], False, "")
+            for entry in section_entries.get((node_path, _UNGROUPED_LEAF), [])
+        ]
+        section_blocks.sort(key=lambda block: block[0].casefold())
+
+    grouped_entries = [entry for _, entries, _, _ in section_blocks for entry in entries]
+    chunk_count = max(1, (len(grouped_entries) + page_size - 1) // page_size)
+    written: list[str] = []
+    node_dir = target.joinpath(*node_path) if node_path else target
+    if node_dir.resolve() != target.resolve() and not node_dir.resolve().is_relative_to(target.resolve()):
+        raise WikiWriteError(f"node dir escapes target: {node_dir}")
+
+    entries_cursor = 0
+    per_chunk = max(1, page_size) if page_size else len(grouped_entries)
+    for chunk_index in range(1, chunk_count + 1):
+        filename = "index.md" if chunk_index == 1 else f"index-{chunk_index:02d}.md"
+        rel_path = f"{node_rel_dir}/{filename}"
+        full_path = root / rel_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        # 取当前 chunk：先按 child 顺序填到 page_size
+        chunk_entries: list[dict[str, Any]] = []
+        while entries_cursor < len(grouped_entries) and len(chunk_entries) < per_chunk:
+            chunk_entries.append(grouped_entries[entries_cursor])
+            entries_cursor += 1
+        body = _node_index_body(
+            source_name, source_rel, node_path,
+            section_blocks, chunk_entries, chunk_index, chunk_count,
+        )
+        title_tag = _node_display_path(node_path, source_name)
+        title = f"{source_name}: {title_tag}"
+        if chunk_count > 1:
+            title += f" ({chunk_index}/{chunk_count})"
+        page = WikiPage(
+            relative_path=Path(rel_path),
+            title=title,
+            frontmatter=_frontmatter(
+                title=title,
+                source_name=source_name,
+                source_rel=source_rel,
+                summary=f"Lightweight source index for {title_tag}.",
+                indexed_count=len(chunk_entries),
+                total_group_count=len(grouped_entries),
+                tag_path=_node_relative_path(node_path),
+            ),
+            body=body,
+        )
+        write_wiki_page(root, page)
+        written.append(rel_path)
+    return written
+
+
+def _node_index_body(
+    source_name: str,
+    source_rel: str,
+    node_path: tuple[str, ...],
+    section_blocks: list[tuple[str, list[dict[str, Any]], bool, str]],
+    chunk_entries: list[dict[str, Any]],
+    chunk_index: int,
+    chunk_count: int,
+) -> str:
+    lines = [
+        "This page is a lightweight source index for raw documentation. It is intended for query discovery and targeted follow-up ingestion.",
+        "",
+        "## Scope",
+        "",
+        f"- Source name: `{source_name}`",
+        f"- Source root: `{source_rel}`",
+        f"- Node tag path: `{_node_relative_path(node_path) or '(root)'}`",
+        f"- Documents on this page: {len(chunk_entries)}",
+        f"- Page chunk: {chunk_index}/{chunk_count}",
+        "",
+    ]
+    cursor = 0
+    for child, child_entries, is_child_interior, child_index_rel in section_blocks:
+        child_lines: list[str] = [f"## {child}", ""]
+        chunk_child: list[dict[str, Any]] = []
+        while cursor < len(chunk_entries) and chunk_entries[cursor] in child_entries:
+            chunk_child.append(chunk_entries[cursor])
+            cursor += 1
+        for index, entry in enumerate(chunk_child, 1):
+            child_lines.extend(_entry_lines(index, entry))
+        if is_child_interior:
+            child_lines.append(f"- → [[{child_index_rel}|{child}/index]]")
+            child_lines.append("")
+        if len(child_lines) > 2:
+            lines.extend(child_lines)
+    return "\n".join(lines).rstrip()
+
+
 def _write_catalog_page(
     root: Path,
     target: Path,
@@ -491,6 +639,7 @@ def _frontmatter(
     summary: str,
     indexed_count: int,
     total_group_count: int,
+    tag_path: str = "",
 ) -> dict[str, Any]:
     return {
         "type": "source_index",
@@ -498,6 +647,7 @@ def _frontmatter(
         "generated": True,
         "source_name": source_name,
         "source_root": source_rel,
+        "tag_path": tag_path,
         "index_kind": "lightweight_source_index",
         "indexed_count": indexed_count,
         "total_group_count": total_group_count,
