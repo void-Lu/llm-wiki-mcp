@@ -6,6 +6,11 @@ from pathlib import Path
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query
 from netsuite_llm_wiki_mcp.wiki_source_index import build_source_index
+from netsuite_llm_wiki_mcp.wiki_source_index import (
+    _resolve_tag_path,
+    _entry_tag_paths,
+    _build_tag_index_tree,
+)
 
 
 def _raw_page(root: Path, relative: str, title: str, url: str, body: str) -> None:
@@ -116,3 +121,93 @@ def test_build_source_index_refuses_to_overwrite_manual_pages(tmp_path: Path):
     assert result["ok"] is False
     assert result["code"] == "manual_page_exists"
     assert target.exists()
+
+
+def test_resolve_tag_path_strips_source_name_prefix():
+    assert _resolve_tag_path("netsuite-help-docs/suitecloud-platform", "netsuite-help-docs") == ("suitecloud-platform",)
+    assert _resolve_tag_path("suitecloud-platform/suitescript", "netsuite-help-docs") == ("suitecloud-platform", "suitescript")
+    assert _resolve_tag_path("N/A", "netsuite-help-docs") == ("n", "a")
+    assert _resolve_tag_path("", "netsuite-help-docs") is None
+    assert _resolve_tag_path(None, "netsuite-help-docs") is None
+
+
+def test_resolve_tag_path_drops_dangerous_segments():
+    assert _resolve_tag_path("..", "x") is None
+    assert _resolve_tag_path(".", "x") is None
+    assert _resolve_tag_path("a/../b", "x") == ("a", "b")
+    assert _resolve_tag_path("a\\b", "x") is None
+    assert _resolve_tag_path([1, 2], "x") is None
+
+
+def test_resolve_tag_path_root_marker_when_tag_equals_source_name():
+    assert _resolve_tag_path("netsuite-help-docs", "netsuite-help-docs") == ("netsuite-help-docs",)
+
+
+def test_entry_tag_paths_mirrors_multiple_tags():
+    entry = {
+        "raw_path": "raw/x.md",
+        "tags": [
+            "suitecloud-platform/suitescript",
+            "suitescript/suitescript-2-x-api-reference",
+        ],
+    }
+    paths = _entry_tag_paths(entry, "netsuite-help-docs")
+    assert paths == [
+        ("suitecloud-platform", "suitescript"),
+        ("suitescript", "suitescript-2-x-api-reference"),
+    ]
+
+
+def test_entry_tag_paths_ungrouped_when_no_valid_tags():
+    entry = {"raw_path": "raw/y.md", "tags": []}
+    paths = _entry_tag_paths(entry, "x")
+    assert paths == [("_ungrouped", "<ungrouped>")]
+
+
+def test_build_tag_index_tree_links_chain_through_interior_nodes():
+    entries = [
+        {
+            "raw_path": "raw/a.md",
+            "title": "A",
+            "toc_path": ["t", "a"],
+            "tags": [
+                "suitecloud-platform/suitescript",
+                "suitescript/suitescript-2-x-api-reference",
+                "suitescript-2-x-api-reference/suitescript-2-1-modules",
+                "suitescript-2-1-modules/n-action-module",
+                "n-action-module/action-action",
+            ],
+        },
+    ]
+    section_entries, interior = _build_tag_index_tree(entries, "netsuite-help-docs")
+    # 5 个 tag → 5 个 (parent, leaf) 章节，每个章节唯一一个 entry
+    assert len(section_entries) == 5
+    assert ((("suitecloud-platform",), "suitescript"), entries[0]) in [
+        (k, v[0]) for k, v in section_entries.items()
+    ]
+    # 根、suitecloud-platform、suitescript、suitescript-2-x-api-reference、
+    # suitescript-2-1-modules、n-action-module 均为 interior（有子）
+    for node in [
+        (),
+        ("suitecloud-platform",),
+        ("suitescript",),
+        ("suitescript-2-x-api-reference",),
+        ("suitescript-2-1-modules",),
+        ("n-action-module",),
+    ]:
+        assert node in interior
+    # action-action 是叶子节点，不出现在 interior 集合中
+    assert ("n-action-module", "action-action") not in interior
+
+
+def test_build_tag_index_tree_dedupes_same_raw_path():
+    entries = [
+        {
+            "raw_path": "raw/a.md",
+            "title": "A",
+            "toc_path": [],
+            "tags": ["suitecloud-platform/suitescript", "suitecloud-platform/suitescript"],
+        },
+    ]
+    section_entries, interior = _build_tag_index_tree(entries, "x")
+    assert section_entries[(("suitecloud-platform",), "suitescript")] == [entries[0]]

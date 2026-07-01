@@ -292,6 +292,99 @@ def _toc_sort_key(entry: dict[str, Any]) -> str:
     return " > ".join(str(item) for item in entry.get("toc_path") or [])
 
 
+_UNGROUPED_MARKER = "_ungrouped"
+_UNGROUPED_LEAF = "<ungrouped>"
+
+
+def _resolve_tag_path(raw_tag: Any, source_name: str) -> tuple[str, ...] | None:
+    """Normalize one frontmatter tag string into a tree path tuple.
+
+    Splits on '/', slug-cleans each segment, drops dangerous/empty ones,
+    strips a leading segment equal to source_name, and returns either a
+    >=1 length tuple, the root-marker (slug(source_name),) when the tag
+    equals source_name exactly, or None when no valid segment remains.
+    """
+    if not isinstance(raw_tag, str):
+        return None
+    parts: list[str] = []
+    for seg in raw_tag.split("/"):
+        stripped = seg.strip()
+        if not stripped or stripped in {".", ".."} or "\\" in stripped:
+            continue
+        slug_seg = slug(stripped)
+        if not slug_seg:
+            continue
+        parts.append(slug_seg)
+    if not parts:
+        return None
+    source_slug = slug(source_name).casefold()
+    if parts and parts[0].casefold() == source_slug:
+        parts = parts[1:]
+        if not parts:
+            return (slug(source_name),)
+    return tuple(parts)
+
+
+def _entry_tag_paths(entry: dict[str, Any], source_name: str) -> list[tuple[str, ...]]:
+    """Return all tag tree paths for an entry; mirrors across tags.
+
+    No valid tag → returns [(_UNGROUPED_MARKER, _UNGROUPED_LEAF)] so that the
+    parent ('_ungrouped',) becomes a standalone index carrying each ungrouped
+    raw file as its own `## <title>` section similarly to multi-tag mirroring
+    in tagged nodes.
+    """
+    raw_tags = entry.get("tags") or []
+    paths: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    for raw_tag in raw_tags:
+        path = _resolve_tag_path(raw_tag, source_name)
+        if path is None or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    if not paths:
+        return [(_UNGROUPED_MARKER, _UNGROUPED_LEAF)]
+    return paths
+
+
+def _build_tag_index_tree(
+    entries: list[dict[str, Any]],
+    source_name: str,
+) -> tuple[dict[tuple[tuple[str, ...], str], list[dict[str, Any]]], set[tuple[str, ...]]]:
+    """Build the tag-path index tree.
+
+    Returns:
+        section_entries: maps (parent_path, leaf_segment) -> [entry, ...].
+            Each (entry, path) pair lands in parent=path[:-1]'s index under
+            section `## path[-1]`. Entries are deduped by raw_path per
+            (parent_path, leaf_segment) key.
+        interior_nodes: set of node paths that have at least one child
+            subtree (i.e. appear as a strict prefix of some path), including
+            the root (). Those nodes get a directory + index.md.
+    """
+    section_entries: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = defaultdict(list)
+    all_nodes: set[tuple[str, ...]] = set()
+    for entry in entries:
+        for path in _entry_tag_paths(entry, source_name):
+            for depth in range(len(path) + 1):
+                all_nodes.add(path[:depth])
+            parent = path[:-1]
+            leaf = path[-1]
+            key = (parent, leaf)
+            if not any(e["raw_path"] == entry["raw_path"] for e in section_entries[key]):
+                section_entries[key].append(entry)
+    interior_nodes = {
+        node for node in all_nodes
+        if any(
+            other != node
+            and len(other) > len(node)
+            and other[: len(node)] == node
+            for other in all_nodes
+        )
+    }
+    return section_entries, interior_nodes
+
+
 def _write_group_pages(
     root: Path,
     target: Path,
