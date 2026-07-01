@@ -15,7 +15,7 @@ related_files:
 
 当前 `wiki_build_source_index` 按 `_toc_manifest.json::tree[url].toc_path` 取一级/二级路径做扁平分组，把每个分组渲染成一份独立页（命名 `01-{slug}-NN.md` 平铺在 `target_dir`），并在 `target_dir/catalog.md` 汇总。这种组织方式与原始来源文档 frontmatter 中的 `tags`（形如 `suitecloud-platform/suitescript`、`suitescript-2-1-modules/n-action-module`，本身已是权威的多级分类路径）脱节，目录不直观、无法反映文档自身声明的归属。
 
-目标：**改为以 raw 源文档 frontmatter 的 `tags` 为唯一分组主键，生成一棵以 `source_name` 为隐式根、嵌套反映 tag 路径的多级目录索引树**；每个内节点（有子分支的父类）建目录并写一份 `index.md`，所有叶子（无子分支，无论深度几）一律不建独立目录/index，直接作为父 `index.md` 的 `## {leaf}` 章节。一个文件有多个 tag 时在该树中重复镜像出现。
+目标：**改为以 raw 源文档 frontmatter 的 `tags` 为唯一分组主键，生成一棵以 `source_name` 为隐式根、嵌套反映 tag 路径的多级目录索引树**；每个内节点（有子分支的父类）建目录并写一份 `_entries.md`，所有叶子（无子分支，无论深度几）一律不建独立目录/index，直接作为父 `_entries.md` 的 `## {leaf}` 章节。一个文件有多个 tag 时在该树中重复镜像出现。
 
 ## 2. 关键决策摘要
 
@@ -24,11 +24,11 @@ related_files:
 | 分组主键 | 仅来自每个 raw 文档 frontmatter 的 `tags`（不再读 `toc_path` 作为分组依据） |
 | 单条 tag 语义 | tag 即一条完整路径，沿 `/` 拆段；最后一段为「叶子」，之前各段为「父类路径」 |
 | 文件归属次数 | 文件有 N 条 tag → 在 N 个位置出现（镜像），跨父类不去重 |
-| 树根 | `source_name` 为隐式根，对应 `{target_dir}/index.md`（原 `catalog.md` 改名） |
-| 内节点 | 有子分支的父类 → 建目录 + 写 `index.md`；每份正文按 child 列 `## child` 章节 |
-| 叶子 | 任何树的叶子节点（无子）→ **不建目录、不写独立 index**，仅以 `## leaf` 章节进入父 index.md 的条目 |
+| 树根 | `source_name` 为隐式根，对应 `{target_dir}/_entries.md`（原 `catalog.md` 改名） |
+| 内节点 | 有子分支的父类 → 建目录 + 写 `_entries.md`；每份正文按 child 列 `## child` 章节 |
+| 叶子 | 任何树的叶子节点（无子）→ **不建目录、不写独立 index**，仅以 `## leaf` 章节进入父 _entries.md 的条目 |
 | `source_name` 前缀 | tag 首段 slug 等于 `source_name` 时剥去该段（视为相对根的路径） |
-| 该 tag 即整棵子树的根文档 | 具体说 tag 形如 `{source_name}/{branch}` 的文件 → 进入根 `index.md` 的 `## {branch}` 章节，作为该 branch 子树的根文档入口 |
+| 该 tag 即整棵子树的根文档 | 具体说 tag 形如 `{source_name}/{branch}` 的文件 → 进入根 `_entries.md` 的 `## {branch}` 章节，作为该 branch 子树的根文档入口 |
 | 入口签名 | 完全不变：`build_source_index(vault_root, source_root, source_name, target_dir=None, page_size=80, max_headings=12, refresh=True)` |
 | 查询/索引后处理 | 不改 `wiki_query` / `refresh_indexes` 逻辑 |
 
@@ -57,7 +57,7 @@ related_files:
 1. 沿 `/` 拆段，并对每段做 `slug()` 处理（保留现行 `wiki_paths.slug` 对中文/大小写/特殊字符的行为）。
 2. 丢弃任意等于 `..`、为空、含反斜杠或 `slug()` 后为空的段。
 3. 若整段序列为空 → 视为「无标签」路径 `("_ungrouped",)`。
-4. 若首段（slug 后）等于 `slug(source_name)` → 剥去首段，剩余段作为相对根的路径。剥离后只剩 0 段（tag 恰为 `source_name`）→ 视为「根标记」，文件进入根 `index.md` 的一个虚拟章节 `## {source_name}` 内（罕见，仅为完备性）。
+4. 若首段（slug 后）等于 `slug(source_name)` → 剥去首段，剩余段作为相对根的路径。剥离后只剩 0 段（tag 恰为 `source_name`）→ 视为「根标记」，文件进入根 `_entries.md` 的一个虚拟章节 `## {source_name}` 内（罕见，仅为完备性）。
 5. 剥离后保留的段序列记为该 (entry, tag) 对应的「tree path」`P`（>=1 段）。
 
 ### 3.4 构建索引树
@@ -69,31 +69,31 @@ related_files:
    - **内节点**（interior）：在树里有至少一个子节点（即存在某条 `P` 使得 `P[:k]==节点路径` 且 `len(P)>k`）。
    - **叶子节点**（leaf）：没有任何子节点。
 5. 文件条目的「落点」：对每个 `(entry, P)`：
-   - 落入 `parent(P)` 节点对应的 index.md，作为 `## {P[-1]}` 章节下的一份条目。
+   - 落入 `parent(P)` 节点对应的 _entries.md，作为 `## {P[-1]}` 章节下的一份条目。
    - 例：P=`("suitecloud-platform","suitescript")` → 落入根 index 的 `## suitescript` 章节。
    - 例：P=`("suitescript-2-1-modules","n-action-module","action-action")` → 落入 `n-action-module` index 的 `## action-action` 章。
    - 若同一 `(entry, P)` 因多条 tag 在同一父节点同一 `## leaf` 章节（即 leaf 段也相同）下重复出现 → 按 `raw_path` 去重为一条。
-6. 没有任何有效 tag 的 entry → 落入 `("_ungrouped",)` 路径，写到 `{target_dir}/_ungrouped/index.md`（按 child-less 单节点处理：本身即父，章节为各 raw 条目，无子树导航）。
+6. 没有任何有效 tag 的 entry → 落入 `("_ungrouped",)` 路径，写到 `{target_dir}/_ungrouped/_entries.md`（按 child-less 单节点处理：本身即父，章节为各 raw 条目，无子树导航）。
 
 ### 3.5 输出文件布局
 
 ```
 {target_dir}/                                  # 默认 wiki/sources/references/{slug(source_name)}
-  index.md                                     # 根 index（原 catalog.md，改名），source_name 隐式根
-  _ungrouped/index.md                          # 仅有无 tag 文件时存在
-  suitecloud-platform/index.md                # 父类层为「suitecloud-platform」下的所有 child
-  suitescript/index.md                         # 父类层为「suitescript」
-  suitecloud-platform/suitescript-2-x-api-reference/index.md
-  suitescript-2-1-modules/index.md
-  suitescript-2-1-modules/n-action-module/index.md
+  _entries.md                                     # 根 index（原 catalog.md，改名），source_name 隐式根
+  _ungrouped/_entries.md                          # 仅有无 tag 文件时存在
+  suitecloud-platform/_entries.md                # 父类层为「suitecloud-platform」下的所有 child
+  suitescript/_entries.md                         # 父类层为「suitescript」
+  suitecloud-platform/suitescript-2-x-api-reference/_entries.md
+  suitescript-2-1-modules/_entries.md
+  suitescript-2-1-modules/n-action-module/_entries.md
   ...
 ```
 
 flat、同级一层是常情；父类前缀含多段（tag 本身超过 2 段或剥离后仍 >1 段）时自然嵌套。
 
-### 3.6 index.md 的内容结构（所有 index 通用）
+### 3.6 _entries.md 的内容结构（所有 index 通用）
 
-每份 `index.md`（根或任一内节点）正文：
+每份 `_entries.md`（根或任一内节点）正文：
 
 ```markdown
 ---
@@ -130,13 +130,13 @@ frontmatter:
 ### 3.7 分页规则
 
 - 当一个节点的 raw 条目数 > `page_size` 时分片：
-  - 首页名 `index.md`，后续 `index-02.md`、`index-03.md`…
+  - 首页名 `_entries.md`，后续 `_entries-02.md`、`_entries-03.md`…
   - 每页正文按相同「Scope + 全部 `## child` 章节」骨架；条目按 child 顺序切片填充，保证同一 `## child` 的条目不跨页（若单个 child 的条目数 > `page_size`，则该 child 章节被切到多页的相同 `## child` 标题下，并在章节首行标注分片序号）。
 - 去掉旧的 `01-{slug}-NN.md` 命名前缀。
 
-### 3.8 根 index.md 的特殊处理
+### 3.8 根 _entries.md 的特殊处理
 
-根节点也用统一的 index.md 模板。其 children 即全部深度 1 节点。每个 `## branch`：
+根节点也用统一的 _entries.md 模板。其 children 即全部深度 1 节点。每个 `## branch`：
 - 「根文档条目」即「tag 形如 `{source_name}/{branch}`」的文件（剥离后 P=(branch,)，parent=() 即根），作为该 branch 子树的根节点入口；
 - 若 `branch` 是内节点 → 附 `→ [[{branch}/index|{branch}/index]]`（含子树文档数）。
 - 顶部不再单列「Tag branches」段落（与内节点结构保持一致），根 index 与其他 index 模板完全一致，简化逻辑。
@@ -146,7 +146,7 @@ frontmatter:
 - 写入前递归扫描 `target/**/*.md`：
   - frontmatter 非 `generated: true` → 返回 `{ok:false, code:"manual_page_exists", path, error}`，立即停止；
   - `generated: true` → 删除并加入 `deleted` 列表。
-- 新版 `target` 不再是单层平铺，因此扫描必须用 `rglob("*.md")`（现状已如此），无需修改清理逻辑，能正确清掉旧版 `01-{slug}-01.md` 这类旧页与新版嵌套 `index.md`。
+- 新版 `target` 不再是单层平铺，因此扫描必须用 `rglob("*.md")`（现状已如此），无需修改清理逻辑，能正确清掉旧版 `01-{slug}-01.md` 这类旧页与新版嵌套 `_entries.md`。
 
 ### 3.10 写入流程
 
@@ -155,8 +155,8 @@ frontmatter:
 3. 构造 tag-path 树（§3.4）。
 4. 对每个内节点（含 root 节点）：
    - 计算该节点的 raw 条目集合（按 child 分桶）。
-   - 按 `page_size` 分页 → 写 `index.md` / `index-NN.md`。
-5. 若存在无 tag 文件 → 写 `_ungrouped/index.md`。
+   - 按 `page_size` 分页 → 写 `_entries.md` / `_entries-NN.md`。
+5. 若存在无 tag 文件 → 写 `_ungrouped/_entries.md`。
 6. 收集 `written` 列表（含根 index 与所有内节点 index 与 _ungrouped/index）。
 7. `refresh=True` 时调 `refresh_indexes` → 成功后 `refresh_overview`（沿用）。
 8. `append_log_entry(operation="source_index", paths=written, sources=_source_manifest_paths(...))`（沿用）。
@@ -171,13 +171,13 @@ frontmatter:
 
 `action.Action.md` 的 5 条 tag（剥 `netsuite-help-docs` 前缀后，单条 tag 路径本身深度仍为 2，所以每条 tag 提供一对 (父类, 叶子)，并在树的不同深度形成一条链上的多个父子关系）：
 
-| tag | 剥前缀后 P | 父节点 | 章节标题 | 落点 index.md |
+| tag | 剥前缀后 P | 父节点 | 章节标题 | 落点 _entries.md |
 |---|---|---|---|---|
-| `suitecloud-platform/suitescript` | `(suitecloud-platform, suitescript)` | `(suitecloud-platform,)` | `## suitescript` | `suitecloud-platform/index.md` |
-| `suitescript/suitescript-2-x-api-reference` | `(suitescript, suitescript-2-x-api-reference)` | `(suitescript,)` | `## suitescript-2-x-api-reference` | `suitescript/index.md` |
-| `suitescript-2-x-api-reference/suitescript-2-1-modules` | `(suitescript-2-x-api-reference, suitescript-2-1-modules)` | `(suitescript-2-x-api-reference,)` | `## suitescript-2-1-modules` | `suitescript-2-x-api-reference/index.md` |
-| `suitescript-2-1-modules/n-action-module` | `(suitescript-2-1-modules, n-action-module)` | `(suitescript-2-1-modules,)` | `## n-action-module` | `suitescript-2-1-modules/index.md` |
-| `n-action-module/action-action` | `(n-action-module, action-action)` | `(n-action-module,)` | `## action-action` | `n-action-module/index.md` |
+| `suitecloud-platform/suitescript` | `(suitecloud-platform, suitescript)` | `(suitecloud-platform,)` | `## suitescript` | `suitecloud-platform/_entries.md` |
+| `suitescript/suitescript-2-x-api-reference` | `(suitescript, suitescript-2-x-api-reference)` | `(suitescript,)` | `## suitescript-2-x-api-reference` | `suitescript/_entries.md` |
+| `suitescript-2-x-api-reference/suitescript-2-1-modules` | `(suitescript-2-x-api-reference, suitescript-2-1-modules)` | `(suitescript-2-x-api-reference,)` | `## suitescript-2-1-modules` | `suitescript-2-x-api-reference/_entries.md` |
+| `suitescript-2-1-modules/n-action-module` | `(suitescript-2-1-modules, n-action-module)` | `(suitescript-2-1-modules,)` | `## n-action-module` | `suitescript-2-1-modules/_entries.md` |
+| `n-action-module/action-action` | `(n-action-module, action-action)` | `(n-action-module,)` | `## action-action` | `n-action-module/_entries.md` |
 
 树经合并后形成唯一一条深度链：`() → (suitecloud-platform) → ... `；但每个 tag 自身只贡献「父→叶」一对兄弟关系，文件在该链的不同节点 index 里各自出现一次（共 5 次，与 tag 镜像数一致）。
 
@@ -185,7 +185,7 @@ frontmatter:
 
 `SuiteCloud Supported Records.md` 单 tag `suitecloud-platform/suitecloud-supported-records`：
 - P = `(suitecloud-platform, suitecloud-supported-records)`，父 = `(suitecloud-platform,)`
-- 因没有任何文件 tag 以 `suitecloud-supported-records/...` 开头，`suitecloud-supported-records` 是叶子 → 不建目录，条目直接进 `suitecloud-platform/index.md` 的 `## suitecloud-supported-records` 章节，与 `## suitescript`（来自 action.Action.md 的另一对）是兄弟章节。
+- 因没有任何文件 tag 以 `suitecloud-supported-records/...` 开头，`suitecloud-supported-records` 是叶子 → 不建目录，条目直接进 `suitecloud-platform/_entries.md` 的 `## suitecloud-supported-records` 章节，与 `## suitescript`（来自 action.Action.md 的另一对）是兄弟章节。
 
 ## 5. 兼容性与回归
 
@@ -201,27 +201,27 @@ frontmatter:
 
 1. **`test_build_source_index_writes_queryable_source_pages`**（修改）：
    - 构造两个 raw 页，每页用一个两段 tag，父类不同。
-   - 断言 `page_count == 3`（根 index + 2 个父类 index），`"wiki/sources/references/netsuite-help-docs/index.md"` 在 written 中（原 catalog 路径断言改名为 `index.md`）。
+   - 断言 `page_count == 3`（根 index + 2 个父类 index），`"wiki/sources/references/netsuite-help-docs/_entries.md"` 在 written 中（原 catalog 路径断言改名为 `_entries.md`）。
    - `wiki_query` 可发现性断言全保留（raw_path、heading、url 均出现于 context）。
 
 2. **`test_build_source_index_refuses_to_overwrite_manual_pages`**（保留不变）：
    - 原断言不动；新嵌套写法不改变清理语义。
 
 3. 新增 `test_build_source_index_mirrors_multi_tag_file`：
-   - 单文件 3 条 tag（不同父类）→ 该文件在 3 个父类 index 中各出现一次（搜索每份 index.md 文档体，断言 `raw:` 路径出现 3 次跨不同文件）。
+   - 单文件 3 条 tag（不同父类）→ 该文件在 3 个父类 index 中各出现一次（搜索每份 _entries.md 文档体，断言 `raw:` 路径出现 3 次跨不同文件）。
 
 4. 新增 `test_build_source_index_root_document_when_tag_starts_with_source_name`：
    - 文件 tag = `netsuite-help-docs/suitecloud-platform`，`source_name="netsuite-help-docs"`。
-   - 断言条目写入 `index.md`（根）的 `## suitecloud-platform` 章节，且无 `suitecloud-platform/index.md` 单独目录（如该子树无其他 child）；若再添加一条 tag `suitecloud-platform/xxx` 的文件 → 此时 `suitecloud-platform` 有子，应建 `suitecloud-platform/index.md`，且 `xxx` 作为其 `## xxx` 章节，原 root 文档仍在根 index 的 `## suitecloud-platform` 章节并附导航指向 `suitecloud-platform/index`。
+   - 断言条目写入 `_entries.md`（根）的 `## suitecloud-platform` 章节，且无 `suitecloud-platform/_entries.md` 单独目录（如该子树无其他 child）；若再添加一条 tag `suitecloud-platform/xxx` 的文件 → 此时 `suitecloud-platform` 有子，应建 `suitecloud-platform/_entries.md`，且 `xxx` 作为其 `## xxx` 章节，原 root 文档仍在根 index 的 `## suitecloud-platform` 章节并附导航指向 `suitecloud-platform/index`。
 
 5. 新增 `test_build_source_index_pure_leaf_no_directory`：
-   - 单 tag 形如 `A/B/C` 且无任何文件 tag 以 `A/B/C/` 开头 → 仅在 `A/B/index.md` 的 `## C` 章节出现条目，不存在 `A/B/C/` 目录。
+   - 单 tag 形如 `A/B/C` 且无任何文件 tag 以 `A/B/C/` 开头 → 仅在 `A/B/_entries.md` 的 `## C` 章节出现条目，不存在 `A/B/C/` 目录。
 
 6. 新增 `test_build_source_index_paginates_node_pages`：
-   - 让某节点条目数 > `page_size`，断言生成 `index.md` + `index-02.md`。
+   - 让某节点条目数 > `page_size`，断言生成 `_entries.md` + `_entries-02.md`。
 
 7. 新增 `test_build_source_index_ungrouped_when_no_tags`：
-   - 文件无 tags → `_ungrouped/index.md` 存在且含条目；根 index 与其他 index 不含该条目。
+   - 文件无 tags → `_ungrouped/_entries.md` 存在且含条目；根 index 与其他 index 不含该条目。
 
 新增的覆盖 `tag` 单段（如 `NetSuite`）、多段（深度 >2）解析的单元用例，以及路径安全用例（含 `..`、空段、反斜杠的 tag 应被安全处理或丢弃不抛异常）。
 
@@ -230,7 +230,7 @@ frontmatter:
 - 不增加 `group_by=tags|toc` 可切换参数；旧 `toc` 分组逻辑被本设计替代。
 - 不写「虚拟中间节点」index（仅真实 tag 路径上的内节点才有 index）。
 - 不修改 `wiki_query` / `refresh_indexes` 的过滤或排序语义。
-- 不为索引页做 wikilink enrich（`[[...]]` 仅在 index.md 正文内手写到子节点 index 的导航）。
+- 不为索引页做 wikilink enrich（`[[...]]` 仅在 _entries.md 正文内手写到子节点 index 的导航）。
 - 不引入新的外部依赖。
 
 ## 8. 实施要点（供 writing-plans 展开）

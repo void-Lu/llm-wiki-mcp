@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 `wiki_build_source_index` 的分组主键从 `_toc_manifest` 的 toc_path 改为各 raw 文档 frontmatter 的 `tags`，并产出以 `source_name` 为隐式根、嵌套反映 tag 路径的多级目录索引树；有子分支的内节点建目录 + `index.md`，所有叶子仅作为父 `index.md` 的 `## leaf` 章节出现。
+**Goal:** 把 `wiki_build_source_index` 的分组主键从 `_toc_manifest` 的 toc_path 改为各 raw 文档 frontmatter 的 `tags`，并产出以 `source_name` 为隐式根、嵌套反映 tag 路径的多级目录索引树；有子分支的内节点建目录 + `_entries.md`，所有叶子仅作为父 `_entries.md` 的 `## leaf` 章节出现。
 
 **Architecture:** 复用现有 entry 收集与清理逻辑；仅替换分组与写页两段。新增 `_resolve_tag_path` / `_entry_tag_paths` / `_build_tag_index_tree` / `_write_node_index` 等纯函数；`_write_catalog_page` 改名 `_write_root_index` 与各内节点 index 共用 `_write_node_index`；`_group_entries` / `_write_group_pages` / `_pages_by_group` 删除。
 
@@ -15,7 +15,7 @@
 - 覆盖保护沿用：写入前递归扫描 `target/**/*.md`，遇非 `generated:true` 立即返回 `{ok:false, code:"manual_page_exists", path, error}`。
 - 生成页 frontmatter 必须含 `type="source_index"`、`generated=true`、`source_name`、`source_root`、`tag_path`、`index_kind="lightweight_source_index"`、`indexed_count`、`total_node_count`、`summary`、`tags=["netsuite","source-index","help-docs"]`、`sources=[source_rel]`。
 - 旧 `_toc_manifest.json` 仍读，仅用于「排序辅助 + 正文展示」的 `toc_path` 填充，不参与分组。
-- 旧命名 `01-{slug}-NN.md` 与 `catalog.md` 被新命名 `index.md` / `index-02.md` 取代（删除 catalog 文件名）。
+- 旧命名 `01-{slug}-NN.md` 与 `catalog.md` 被新命名 `_entries.md` / `_entries-02.md` 取代（删除 catalog 文件名）。
 - 返回字段名与现有完全一致；`groups` 项形状变更为 `{"tag_path": <相对根路径，根为空>, "count": N}`。
 - 不修改 `wiki_query` / `refresh_indexes` / `refresh_overview` / `wiki_log` 业务逻辑；不改 `server.py` 工具参数。
 - 测试用 `pytest`，遵循 `tests/conftest.py` 环境隔离约定；不要新增运行时依赖。
@@ -53,7 +53,7 @@
   - `_build_tag_index_tree(entries: list[dict[str, Any]], source_name: str) -> tuple[dict[tuple[str, ...], list[dict[str, Any]]], set[tuple[str, ...]]`
     - 返回 `(section_entries, interior_nodes)`:
       - `section_entries[(parent_path, leaf)] = [entry, ...]`：每条 `(entry, path)` 落入 `parent=path[:-1]` 节点的 `## leaf` 章节，key 同 `(parent, leaf)` 按 `raw_path` 去重。
-      - `interior_nodes`：所有「至少存在一条 path 以其为前缀且更长」的节点路径（含根 `()`），这些节点会建目录 + `index.md`。
+      - `interior_nodes`：所有「至少存在一条 path 以其为前缀且更长」的节点路径（含根 `()`），这些节点会建目录 + `_entries.md`。
 
 - [ ] **Step 1: 在 `tests/test_wiki_source_index.py` 顶部新增纯函数导入与单元测试**
 
@@ -247,7 +247,7 @@ def _build_tag_index_tree(
             (parent_path, leaf_segment) key.
         interior_nodes: set of node paths that have at least one child
             subtree (i.e. appear as a strict prefix of some path), including
-            the root (). Those nodes get a directory + index.md.
+            the root (). Those nodes get a directory + _entries.md.
     """
     section_entries: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = defaultdict(list)
     all_nodes: set[tuple[str, ...]] = set()
@@ -298,7 +298,7 @@ git commit -m "feat(source_index): add tag-path resolver and index tree builder"
 **Interfaces:**
 - Consumes: Task 1 的 `_build_tag_index_tree` 返回值；`wiki_io.write_wiki_page`、`wiki_models.WikiPage`。
 - Produces:
-  - `_write_node_index(root, target, target_rel, source_name, source_rel, node_path, section_entries, interior_nodes, page_size) -> list[str]`：写 `node_path` 对应的目录 + `index.md`（或多页 `index-02.md`），返回写出文件的相对路径列表。`node_path` 是绝对路径元组，根 `()` 写到 `target_rel/index.md`，其它 `(a, b)` 写到 `target_rel/a/b/index.md`。
+  - `_write_node_index(root, target, target_rel, source_name, source_rel, node_path, section_entries, interior_nodes, page_size) -> list[str]`：写 `node_path` 对应的目录 + `_entries.md`（或多页 `_entries-02.md`），返回写出文件的相对路径列表。`node_path` 是绝对路径元组，根 `()` 写到 `target_rel/_entries.md`，其它 `(a, b)` 写到 `target_rel/a/b/_entries.md`。
   - `_child_sort_key(child: str) -> str`：children 排序辅助。
   - 重命名 `_write_catalog_page` 为 `_write_root_index`，删除旧函数。
 
@@ -338,8 +338,8 @@ def test_write_node_index_creates_nested_directory_and_index_md(tmp_path: Path):
         interior_nodes=interior,
         page_size=80,
     )
-    assert written == ["wiki/sources/references/netsuite-help-docs/suitecloud-platform/index.md"]
-    text = (target / "suitecloud-platform" / "index.md").read_text(encoding="utf-8")
+    assert written == ["wiki/sources/references/netsuite-help-docs/suitecloud-platform/_entries.md"]
+    text = (target / "suitecloud-platform" / "_entries.md").read_text(encoding="utf-8")
     assert "## suitescript" in text
     assert "raw/sources/references/docs/a.md" in text
     assert "https://example.com/a" in text
@@ -380,8 +380,8 @@ def test_write_node_index_paginates_with_index_suffix(tmp_path: Path):
         page_size=2,
     )
     assert set(written) == {
-        "wiki/sources/references/x/leaf/index.md",
-        "wiki/sources/references/x/leaf/index-02.md",
+        "wiki/sources/references/x/leaf/_entries.md",
+        "wiki/sources/references/x/leaf/_entries-02.md",
     }
 
 
@@ -417,8 +417,8 @@ def test_write_node_index_includes_navigation_link_to_interior_child(tmp_path: P
         interior_nodes=interior,
         page_size=80,
     )
-    assert written == ["wiki/sources/references/x/parent/index.md"]
-    text = (target / "parent" / "index.md").read_text(encoding="utf-8")
+    assert written == ["wiki/sources/references/x/parent/_entries.md"]
+    text = (target / "parent" / "_entries.md").read_text(encoding="utf-8")
     assert "## child" in text
     assert "[[wiki/sources/references/x/parent/child/index|child/index]]" in text
 ```
@@ -456,7 +456,7 @@ def _write_node_index(
     interior_nodes: set[tuple[str, ...]],
     page_size: int,
 ) -> list[str]:
-    """Write the index.md (and pagination index-NN.md) for one tree node.
+    """Write the _entries.md (and pagination _entries-NN.md) for one tree node.
 
     `node_path` is an absolute tree path tuple (root node is ()).  Children
     are the unique direct child segments of `node_path`.  For each child we
@@ -507,7 +507,7 @@ def _write_node_index(
     entries_cursor = 0
     per_chunk = max(1, page_size) if page_size else len(grouped_entries)
     for chunk_index in range(1, chunk_count + 1):
-        filename = "index.md" if chunk_index == 1 else f"index-{chunk_index:02d}.md"
+        filename = "_entries.md" if chunk_index == 1 else f"index-{chunk_index:02d}.md"
         rel_path = f"{node_rel_dir}/{filename}"
         full_path = root / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -699,7 +699,7 @@ def test_build_source_index_writes_queryable_source_pages(tmp_path: Path):
     assert result["indexed_count"] == 2
     # 根 index + suitecloud-platform index + suitescript-2-x-api-reference index = 3 pages
     assert result["page_count"] == 3
-    assert "wiki/sources/references/netsuite-help-docs/index.md" in result["written"]
+    assert "wiki/sources/references/netsuite-help-docs/_entries.md" in result["written"]
 
     query = wiki_query(root, "record.submitFields", top_k=3, filter_type="source_index")
     paths = [item["path"] for item in query["results"]]
@@ -765,11 +765,11 @@ def test_build_source_index_mirrors_one_file_across_multiple_tag_branches(tmp_pa
     )
     assert result["ok"] is True
     # 落点 index：根 + suitecloud-platform/ + suitescript/ + n-action-module/
-    assert any(p.endswith("suitecloud-platform/index.md") for p in result["written"])
-    assert any(p.endswith("suitescript/index.md") for p in result["written"])
-    assert any(p.endswith("n-action-module/index.md") for p in result["written"])
+    assert any(p.endswith("suitecloud-platform/_entries.md") for p in result["written"])
+    assert any(p.endswith("suitescript/_entries.md") for p in result["written"])
+    assert any(p.endswith("n-action-module/_entries.md") for p in result["written"])
     for path_rel in result["written"]:
-        if not path_rel.endswith("index.md"):
+        if not path_rel.endswith("_entries.md"):
             continue
         text = (root / path_rel).read_text(encoding="utf-8")
         if "mirror.md" in text:
@@ -795,7 +795,7 @@ def test_build_source_index_root_doc_when_tag_starts_with_source_name(tmp_path: 
         source_name="netsuite-help-docs",
     )
     assert result["ok"] is True
-    root_index_text = (root / "wiki/sources/references/netsuite-help-docs/index.md").read_text(encoding="utf-8")
+    root_index_text = (root / "wiki/sources/references/netsuite-help-docs/_entries.md").read_text(encoding="utf-8")
     assert "## suitecloud-platform" in root_index_text
     assert "https://example.com/root.html" in root_index_text
     # suitecloud-platform 是叶子（无其它文件 tag 以它为父前缀），不建独立目录
@@ -819,7 +819,7 @@ def test_build_source_index_pure_leaf_no_directory(tmp_path: Path):
         source_name="netsuite-help-docs",
     )
     assert result["ok"] is True
-    expected = "wiki/sources/references/netsuite-help-docs/a/b/index.md"
+    expected = "wiki/sources/references/netsuite-help-docs/a/b/_entries.md"
     assert expected in result["written"]
     assert not (root / "wiki/sources/references/netsuite-help-docs/a/b/c").exists()
 
@@ -856,8 +856,8 @@ def test_build_source_index_ungrouped_when_no_tags(tmp_path: Path):
         source_name="netsuite-help-docs",
     )
     assert result["ok"] is True
-    assert "wiki/sources/references/netsuite-help-docs/_ungrouped/index.md" in result["written"]
-    text = (root / "wiki/sources/references/netsuite-help-docs/_ungrouped/index.md").read_text(encoding="utf-8")
+    assert "wiki/sources/references/netsuite-help-docs/_ungrouped/_entries.md" in result["written"]
+    text = (root / "wiki/sources/references/netsuite-help-docs/_ungrouped/_entries.md").read_text(encoding="utf-8")
     assert "raw/sources/references/docs/untagged.md" in text
 ```
 
@@ -1015,9 +1015,9 @@ git commit -m "feat(source_index): rewrite build pipeline to nested tag index tr
 
 Source documents are grouped by their frontmatter ``tags`` (treated as
 ``parent/leaf`` tree paths); each interior tag-path node receives a nested
-``index.md`` (paginated as ``index-02.md`` ...), and pure leaves appear only
+``_entries.md`` (paginated as ``_entries-02.md`` ...), and pure leaves appear only
 as ``## {leaf}`` sections inside the parent index. The source_name acts as
-the implicit root and gets ``{target_dir}/index.md``.
+the implicit root and gets ``{target_dir}/_entries.md``.
 """
 ```
 
@@ -1044,8 +1044,8 @@ git commit -m "docs(server): update wiki_build_source_index description for nest
 - §3.3 tag 规范化与剥离 → Task 1 `_resolve_tag_path`。
 - §3.4 构建索引树 → Task 1 `_build_tag_index_tree`，包含 source_name prefix 剥离、`_ungrouped` 路径、`## leaf` 章节归属、按 raw_path 去重、节点 interior/leaf 判定。
 - §3.5 输出布局 → Task 2/3 `_write_node_index`。
-- §3.6 index.md 内容结构 → Task 2 `_node_index_body`、`_frontmatter` 含 `tag_path`。
-- §3.7 分页规则 → Task 2 `_write_node_index` 多页 `index-NN.md` + Task 2 测 `test_write_node_index_paginates_with_index_suffix`。
+- §3.6 _entries.md 内容结构 → Task 2 `_node_index_body`、`_frontmatter` 含 `tag_path`。
+- §3.7 分页规则 → Task 2 `_write_node_index` 多页 `_entries-NN.md` + Task 2 测 `test_write_node_index_paginates_with_index_suffix`。
 - §3.8 根 index → Task 2/3 走 `_write_node_index(node_path=())`，统一模板；不再单列 catalog。
 - §3.9 清理与覆盖保护 → 不动 `_clear_existing_generated_pages`；测试 `test_build_source_index_refuses_to_overwrite_manual_pages` 保留通过。
 - §3.10 写入流程 → Task 3 主流程。

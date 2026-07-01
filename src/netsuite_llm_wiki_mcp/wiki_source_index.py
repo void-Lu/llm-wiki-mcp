@@ -446,13 +446,13 @@ def _write_node_index(
     interior_nodes: set[tuple[str, ...]],
     page_size: int,
 ) -> list[str]:
-    """Write the index.md (and pagination index-NN.md) for one tree node.
+    """Write the _entries.md (and pagination _entries-NN.md) for one tree node.
 
     `node_path` is an absolute tree path tuple (root node is ()).  Children
     are the unique direct child segments of `node_path`.  For each child we
     emit a `## {child}` section containing:
       - any raw entries whose (parent==node_path, leaf==child) landed here
-      - a `-> [[child/.../index|child/.../index]]` navigation row when
+      - a `-> [[child/.../_entries|child/.../_entries]]` navigation row when
         `(*node_path, child)` is itself an interior node.
     """
     children = {
@@ -477,7 +477,7 @@ def _write_node_index(
         )
         child_node_path = (*node_path, child)
         is_child_interior = child_node_path in interior_nodes
-        child_index_rel = f"{node_rel_dir}/{child}/index"
+        child_index_rel = f"{node_rel_dir}/{child}/_entries"
         section_blocks.append((child, child_entry_list, is_child_interior, child_index_rel))
 
     if node_path == (_UNGROUPED_MARKER,):
@@ -497,7 +497,7 @@ def _write_node_index(
     entries_cursor = 0
     per_chunk = max(1, page_size) if page_size else len(grouped_entries)
     for chunk_index in range(1, chunk_count + 1):
-        filename = "index.md" if chunk_index == 1 else f"index-{chunk_index:02d}.md"
+        filename = "_entries.md" if chunk_index == 1 else f"_entries-{chunk_index:02d}.md"
         rel_path = f"{node_rel_dir}/{filename}"
         full_path = root / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -564,7 +564,7 @@ def _node_index_body(
         for index, entry in enumerate(chunk_child, 1):
             child_lines.extend(_entry_lines(index, entry))
         if is_child_interior:
-            child_lines.append(f"- → [[{child_index_rel}|{child}/index]]")
+            child_lines.append(f"- → [[{child_index_rel}|{child}/_entries]]")
             child_lines.append("")
         if len(child_lines) > 2:
             lines.extend(child_lines)

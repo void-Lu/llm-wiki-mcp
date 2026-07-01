@@ -213,7 +213,7 @@ def test_build_tag_index_tree_dedupes_same_raw_path():
     assert section_entries[(("suitecloud-platform",), "suitescript")] == [entries[0]]
 
 
-def test_write_node_index_creates_nested_directory_and_index_md(tmp_path: Path):
+def test_write_node_index_creates_nested_directory_and_entries_md(tmp_path: Path):
     from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
 
     root = tmp_path / "vault"
@@ -246,15 +246,15 @@ def test_write_node_index_creates_nested_directory_and_index_md(tmp_path: Path):
         interior_nodes=interior,
         page_size=80,
     )
-    assert written == ["wiki/sources/references/netsuite-help-docs/suitecloud-platform/index.md"]
-    text = (target / "suitecloud-platform" / "index.md").read_text(encoding="utf-8")
+    assert written == ["wiki/sources/references/netsuite-help-docs/suitecloud-platform/_entries.md"]
+    text = (target / "suitecloud-platform" / "_entries.md").read_text(encoding="utf-8")
     assert "## suitescript" in text
     assert "raw/sources/references/docs/a.md" in text
     assert "https://example.com/a" in text
     assert "## alpha" in text
 
 
-def test_write_node_index_paginates_with_index_suffix(tmp_path: Path):
+def test_write_node_index_paginates_with_entries_suffix(tmp_path: Path):
     from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
 
     root = tmp_path / "vault"
@@ -288,8 +288,8 @@ def test_write_node_index_paginates_with_index_suffix(tmp_path: Path):
         page_size=2,
     )
     assert set(written) == {
-        "wiki/sources/references/x/leaf/index.md",
-        "wiki/sources/references/x/leaf/index-02.md",
+        "wiki/sources/references/x/leaf/_entries.md",
+        "wiki/sources/references/x/leaf/_entries-02.md",
     }
 
 
@@ -325,7 +325,7 @@ def test_write_node_index_includes_navigation_link_to_interior_child(tmp_path: P
         interior_nodes=interior,
         page_size=80,
     )
-    assert written == ["wiki/sources/references/x/parent/index.md"]
-    text = (target / "parent" / "index.md").read_text(encoding="utf-8")
+    assert written == ["wiki/sources/references/x/parent/_entries.md"]
+    text = (target / "parent" / "_entries.md").read_text(encoding="utf-8")
     assert "## child" in text
-    assert "[[wiki/sources/references/x/parent/child/index|child/index]]" in text
+    assert "[[wiki/sources/references/x/parent/child/_entries|child/_entries]]" in text
