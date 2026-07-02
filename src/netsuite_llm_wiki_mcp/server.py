@@ -446,7 +446,14 @@ def wiki_build_source_index(
     max_headings: int = 12,
     refresh: bool = True,
 ) -> dict[str, Any]:
-    """Build lightweight source_index pages for a raw source tree without LLM analysis."""
+    """Build lightweight source_index pages for a raw source tree without LLM analysis.
+
+    Source documents are grouped by their frontmatter ``tags`` (treated as
+    ``parent/leaf`` tree paths); each interior tag-path node receives a nested
+    ``_entries.md`` (paginated as ``_entries-02.md`` ...), and pure leaves appear only
+    as ``## {leaf}`` sections inside the parent index. The source_name acts as
+    the implicit root and gets ``{target_dir}/_entries.md``.
+    """
     return wiki_build_source_index_tool(
         vault_root, source_root, source_name,
         target_dir=target_dir, page_size=page_size, max_headings=max_headings, refresh=refresh,
