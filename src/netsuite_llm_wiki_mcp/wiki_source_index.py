@@ -457,28 +457,36 @@ def _write_node_index(
         ]
         section_blocks.sort(key=lambda block: block[0].casefold())
 
-    grouped_entries = [entry for _, entries, _, _ in section_blocks for entry in entries]
+    # Build the flat grouped_entries and per-section [start, end) global offsets
+    # into that flat list. Offsets are computed over the FINAL section_blocks
+    # (i.e. after the ungrouped override above), so they match what will render.
+    grouped_entries: list[dict[str, Any]] = []
+    section_offsets: list[tuple[int, int]] = []
+    running = 0
+    for _, entries, _, _ in section_blocks:
+        start = running
+        grouped_entries.extend(entries)
+        running += len(entries)
+        section_offsets.append((start, running))
+
     chunk_count = max(1, (len(grouped_entries) + page_size - 1) // page_size)
     written: list[str] = []
     node_dir = target.joinpath(*node_path) if node_path else target
     if node_dir.resolve() != target.resolve() and not node_dir.resolve().is_relative_to(target.resolve()):
         raise WikiWriteError(f"node dir escapes target: {node_dir}")
 
-    entries_cursor = 0
     per_chunk = max(1, page_size) if page_size else len(grouped_entries)
     for chunk_index in range(1, chunk_count + 1):
         filename = "_entries.md" if chunk_index == 1 else f"_entries-{chunk_index:02d}.md"
         rel_path = f"{node_rel_dir}/{filename}"
         full_path = root / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
-        # 取当前 chunk：先按 child 顺序填到 page_size
-        chunk_entries: list[dict[str, Any]] = []
-        while entries_cursor < len(grouped_entries) and len(chunk_entries) < per_chunk:
-            chunk_entries.append(grouped_entries[entries_cursor])
-            entries_cursor += 1
+        chunk_start = (chunk_index - 1) * per_chunk
+        chunk_end = min(chunk_start + per_chunk, len(grouped_entries))
         body = _node_index_body(
             source_name, source_rel, node_path,
-            section_blocks, chunk_entries, chunk_index, chunk_count,
+            section_blocks, section_offsets, grouped_entries,
+            chunk_start, chunk_end, chunk_index, chunk_count,
         )
         title_tag = _node_display_path(node_path, source_name)
         title = f"{source_name}: {title_tag}"
@@ -492,7 +500,7 @@ def _write_node_index(
                 source_name=source_name,
                 source_rel=source_rel,
                 summary=f"Lightweight source index for {title_tag}.",
-                indexed_count=len(chunk_entries),
+                indexed_count=chunk_end - chunk_start,
                 total_group_count=len(grouped_entries),
                 tag_path=_node_relative_path(node_path),
             ),
@@ -508,7 +516,10 @@ def _node_index_body(
     source_rel: str,
     node_path: tuple[str, ...],
     section_blocks: list[tuple[str, list[dict[str, Any]], bool, str]],
-    chunk_entries: list[dict[str, Any]],
+    section_offsets: list[tuple[int, int]],
+    grouped_entries: list[dict[str, Any]],
+    chunk_start: int,
+    chunk_end: int,
     chunk_index: int,
     chunk_count: int,
 ) -> str:
@@ -520,17 +531,21 @@ def _node_index_body(
         f"- Source name: `{source_name}`",
         f"- Source root: `{source_rel}`",
         f"- Node tag path: `{_node_relative_path(node_path) or '(root)'}`",
-        f"- Documents on this page: {len(chunk_entries)}",
+        f"- Documents on this page: {chunk_end - chunk_start}",
         f"- Page chunk: {chunk_index}/{chunk_count}",
         "",
     ]
-    cursor = 0
-    for child, child_entries, is_child_interior, child_index_rel in section_blocks:
+    for (child, child_entries, is_child_interior, child_index_rel), (section_start, section_end) in zip(section_blocks, section_offsets):
         child_lines: list[str] = [f"## {child}", ""]
-        chunk_child: list[dict[str, Any]] = []
-        while cursor < len(chunk_entries) and chunk_entries[cursor] in child_entries:
-            chunk_child.append(chunk_entries[cursor])
-            cursor += 1
+        # Slice this child's contribution by intersecting its [section_start, section_end)
+        # with the chunk's [chunk_start, chunk_end) range — index-based, NOT `in`.
+        # This is the fix for the same-parent-sibling-mirror bug: an entry dict
+        # mirrored into two sibling children is `==` to itself, so the old
+        # `chunk_entries[cursor] in child_entries` allocation matched the wrong
+        # sibling's list and swallowed the second sibling's section.
+        slice_start = max(section_start, chunk_start)
+        slice_end = min(section_end, chunk_end)
+        chunk_child = grouped_entries[slice_start:slice_end] if slice_end > slice_start else []
         for index, entry in enumerate(chunk_child, 1):
             child_lines.extend(_entry_lines(index, entry))
         if is_child_interior:

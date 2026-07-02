@@ -455,3 +455,40 @@ def test_build_source_index_ungrouped_when_no_tags(tmp_path: Path):
     assert "wiki/sources/references/netsuite-help-docs/_ungrouped/_entries.md" in result["written"]
     text = (root / "wiki/sources/references/netsuite-help-docs/_ungrouped/_entries.md").read_text(encoding="utf-8")
     assert "raw/sources/references/docs/untagged.md" in text
+
+
+def test_build_source_index_same_file_mirrored_into_sibling_children_with_small_page_size(tmp_path: Path):
+    """Fix for final-review Important finding: a single file mirrored into TWO
+    sibling children of the SAME parent node must NOT lose one child's section
+    when page_size splits chunks across section boundaries. The old
+    `chunk_entries[cursor] in child_entries` allocation silently swallowed the
+    second sibling's section because the same entry dict is `==` to its own copy.
+    """
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _raw_page(
+        root,
+        "raw/sources/references/docs/mirror-sibling.md",
+        "Mirror Sibling Doc",
+        "https://example.com/mirror-sibling.html",
+        "## Mirror Sibling\n",
+        tags=["parent/child-a", "parent/child-b"],
+    )
+    # page_size=1 forces the section boundary across chunks
+    result = build_source_index(
+        root,
+        source_root="raw/sources/references/docs",
+        source_name="netsuite-help-docs",
+        page_size=1,
+    )
+    assert result["ok"] is True
+    # parent node should get an _entries.md (and possibly pagination pages)
+    parent_paths = [p for p in result["written"] if "parent/_entries" in p]
+    assert parent_paths, "expected at least one parent/_entries page"
+    combined = "\n".join(
+        (root / p).read_text(encoding="utf-8") for p in parent_paths
+    )
+    assert "## child-a" in combined
+    assert "## child-b" in combined
+    # mirror entry must appear once per child section across the node pages
+    assert combined.count("raw/sources/references/docs/mirror-sibling.md") == 2
