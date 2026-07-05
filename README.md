@@ -38,17 +38,47 @@ server 按以下顺序解析 wiki 根目录（vault）：
 2. 环境变量 `NETSUITE_LLM_WIKI_VAULT_ROOT`
 3. 全局配置 `config.yaml` → `default_vault`
 
-`config.yaml` 位于 `netsuite-llm-wiki-mcp` 的平台用户配置目录：
+**推荐方式**：将 vault 绝对路径存入系统环境变量 `NETSUITE_LLM_WIKI_VAULT_ROOT`，配置文件中只使用变量引用，避免硬编码绝对路径。
+
+`config.yaml` 位于 `netsuite-llm-wiki-mcp` 的平台用户配置目录（可选，环境变量优先）：
 
 - Windows: `%APPDATA%\\netsuite-llm-wiki-mcp\\config.yaml`
 - macOS: `~/Library/Application Support/netsuite-llm-wiki-mcp/config.yaml`
 - Linux: `${XDG_CONFIG_HOME:-~/.config}/netsuite-llm-wiki-mcp/config.yaml`
 
+也可以用 `netsuite-llm-wiki-mcp init --vault <name> --root <path> --default` 写入 `config.yaml`。
+
 开发和测试时，可以用 `NETSUITE_LLM_WIKI_CONFIG_DIR` 和 `NETSUITE_LLM_WIKI_USER_DATA_DIR` 覆盖配置/数据目录。
 
 ### MCP 客户端配置
 
-添加到你的 MCP 客户端配置中（例如 Claude Code 的 `settings.json`）。`<path-to-netsuite-llm-wiki-mcp>` 替换为本仓库路径；客户端会通过 `uv` 在该目录运行 server：
+#### VS Code / GitHub Copilot（推荐）
+
+在项目根目录创建 `.vscode/mcp.json`，使用 `${workspaceFolder}` 和 `${env:NETSUITE_LLM_WIKI_VAULT_ROOT}` 变量：
+
+```json
+{
+  "servers": {
+    "netsuite-wiki": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${workspaceFolder}",
+        "run",
+        "netsuite-llm-wiki-mcp-server"
+      ],
+      "env": {
+        "NETSUITE_LLM_WIKI_VAULT_ROOT": "${env:NETSUITE_LLM_WIKI_VAULT_ROOT}"
+      }
+    }
+  }
+}
+```
+
+#### Claude Code / Claude Desktop
+
+添加到你的 MCP 客户端配置中（如 `settings.json` 或 `claude_desktop_config.json`）。推荐用环境变量传递 vault 路径：
 
 ```json
 {
@@ -60,7 +90,10 @@ server 按以下顺序解析 wiki 根目录（vault）：
         "<path-to-netsuite-llm-wiki-mcp>",
         "run",
         "netsuite-llm-wiki-mcp-server"
-      ]
+      ],
+      "env": {
+        "NETSUITE_LLM_WIKI_VAULT_ROOT": "<your-vault-path>"
+      }
     }
   }
 }
