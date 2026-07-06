@@ -52,9 +52,24 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 ### MCP 客户端配置
 
+本 server 的安装目录和 vault 根路径都通过环境变量传递，避免在配置文件里硬编码绝对路径，也避免依赖 `${workspaceFolder}`（在别的工作区打开时会解析错）。先在系统（或用户）环境变量里设置一次：
+
+| 变量 | 含义 | 示例（Windows） |
+|------|------|-----------------|
+| `NETSUITE_LLM_WIKI_MCP_DIR` | 本仓库（MCP server 安装目录）的绝对路径 | `c:\Users\<you>\VSCodeProjects\netsuite-llm-wiki-mcp` |
+| `NETSUITE_LLM_WIKI_VAULT_ROOT` | Obsidian wiki vault 的绝对路径 | `c:\Users\<you>\Documents\Obsidian Vault\codingwork` |
+
+设好后再用各客户端对应的变量引用语法取值。三家客户端的变量替换语法不同：
+
+| 客户端 | 配置文件 | 变量语法 |
+|--------|----------|----------|
+| VS Code / GitHub Copilot | 项目根 `.vscode/mcp.json` | `${env:VAR}` |
+| Claude Code | 项目根 `.mcp.json` 或 `~/.claude.json` 的 `mcpServers` | `${VAR}` |
+| Codex | `~/.codex/config.toml` | `$VAR` |
+
 #### VS Code / GitHub Copilot（推荐）
 
-在项目根目录创建 `.vscode/mcp.json`，使用 `${workspaceFolder}` 和 `${env:NETSUITE_LLM_WIKI_VAULT_ROOT}` 变量：
+在项目根目录创建 `.vscode/mcp.json`（[本仓库已提供](.vscode/mcp.json)）：
 
 ```json
 {
@@ -64,7 +79,7 @@ server 按以下顺序解析 wiki 根目录（vault）：
       "command": "uv",
       "args": [
         "--directory",
-        "${workspaceFolder}",
+        "${env:NETSUITE_LLM_WIKI_MCP_DIR}",
         "run",
         "netsuite-llm-wiki-mcp-server"
       ],
@@ -78,7 +93,7 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 #### Claude Code / Claude Desktop
 
-添加到你的 MCP 客户端配置中（如 `settings.json` 或 `claude_desktop_config.json`）。推荐用环境变量传递 vault 路径：
+添加到你的 MCP 客户端配置中（项目根 `.mcp.json`、`~/.claude.json` 或 `claude_desktop_config.json`）。Claude Code 用 `${VAR}` 语法从环境变量取值：
 
 ```json
 {
@@ -87,17 +102,32 @@ server 按以下顺序解析 wiki 根目录（vault）：
       "command": "uv",
       "args": [
         "--directory",
-        "<path-to-netsuite-llm-wiki-mcp>",
+        "${NETSUITE_LLM_WIKI_MCP_DIR}",
         "run",
         "netsuite-llm-wiki-mcp-server"
       ],
       "env": {
-        "NETSUITE_LLM_WIKI_VAULT_ROOT": "<your-vault-path>"
+        "NETSUITE_LLM_WIKI_VAULT_ROOT": "${NETSUITE_LLM_WIKI_VAULT_ROOT}"
       }
     }
   }
 }
 ```
+
+#### Codex
+
+在 `~/.codex/config.toml` 里用 `$VAR` 语法从环境变量取值：
+
+```toml
+[mcp_servers.netsuite-wiki]
+command = "uv"
+args = ["--directory", "$NETSUITE_LLM_WIKI_MCP_DIR", "run", "netsuite-llm-wiki-mcp-server"]
+
+[mcp_servers.netsuite-wiki.env]
+NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
+```
+
+> 三种配置都只引用环境变量，不包含任何工作区相关路径或绝对路径，可以原样复制到任意工作区使用。
 
 ## 工具
 
