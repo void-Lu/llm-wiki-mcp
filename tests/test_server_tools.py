@@ -39,15 +39,38 @@ class TestLlmWikiServerTools:
 
         assert registered.isdisjoint(deprecated)
 
-    def test_registered_tools_include_wiki_write_note(self):
+    def test_registered_tools_match_public_surface(self):
         registered = {tool.name for tool in mcp._tool_manager.list_tools()}
 
-        assert "wiki_write_note" in registered
-        assert "wiki_synthesis" in registered
-        assert "wiki_status" in registered
-        assert "wiki_list_files" in registered
-        assert "wiki_read_file" in registered
-        assert "wiki_build_source_index" in registered
+        kept = {
+            "wiki_init",
+            "wiki_status",
+            "wiki_read_file",
+            "wiki_ingest_codegraph",
+            "wiki_ingest_llm",
+            "wiki_build_source_index",
+            "wiki_rescan",
+            "wiki_ingest_batch",
+            "wiki_query",
+            "wiki_lint",
+            "wiki_enrich",
+            "wiki_write_note",
+            "wiki_delete_source",
+            "wiki_verify",
+            "wiki_page_merge",
+        }
+        cut = {
+            "wiki_list_files",
+            "wiki_changelog",
+            "wiki_query_debug",
+            "wiki_dedup",
+            "wiki_insights",
+            "wiki_gap",
+            "wiki_research",
+            "wiki_synthesis",
+        }
+        assert registered == kept
+        assert registered.isdisjoint(cut)
 
     def test_wiki_write_note_tool_delegates_to_note_writer(self, monkeypatch, tmp_path: Path):
         vault = tmp_path / "wiki-root"

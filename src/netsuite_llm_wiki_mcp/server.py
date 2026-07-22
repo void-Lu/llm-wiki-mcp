@@ -9,23 +9,19 @@ from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note as run_write_no
 from netsuite_llm_wiki_mcp.page_merge import apply_page_merge as run_apply_page_merge
 from netsuite_llm_wiki_mcp.page_merge import prepare_body_merge as run_prepare_body_merge
 from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
-from netsuite_llm_wiki_mcp.wiki_dedup import wiki_dedup as run_wiki_dedup
 from netsuite_llm_wiki_mcp.wiki_delete import wiki_delete_source as run_wiki_delete_source
 from netsuite_llm_wiki_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
 from netsuite_llm_wiki_mcp.wiki_files import wiki_list_files as run_wiki_list_files
 from netsuite_llm_wiki_mcp.wiki_files import wiki_read_file as run_wiki_read_file
 from netsuite_llm_wiki_mcp.wiki_files import wiki_status as run_wiki_status
-from netsuite_llm_wiki_mcp.wiki_gap import wiki_gap as run_wiki_gap
 from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
 from netsuite_llm_wiki_mcp.wiki_ingest import rescan_source as run_rescan_source
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
-from netsuite_llm_wiki_mcp.wiki_insights import wiki_insights as run_wiki_insights
 from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint as run_wiki_lint
 from netsuite_llm_wiki_mcp.wiki_log import parse_log_entries as run_parse_log_entries
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
-from netsuite_llm_wiki_mcp.wiki_research import wiki_research as run_wiki_research
 from netsuite_llm_wiki_mcp.wiki_synthesis import wiki_synthesis as run_wiki_synthesis
 from netsuite_llm_wiki_mcp.wiki_source_index import build_source_index as run_build_source_index
 from netsuite_llm_wiki_mcp.wiki_verify import wiki_verify as run_wiki_verify
@@ -330,17 +326,6 @@ def wiki_status(vault_root: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def wiki_list_files(
-    vault_root: str,
-    root_name: str = "wiki",
-    recursive: bool = True,
-    max_files: int | None = None,
-) -> dict[str, Any]:
-    """List public wiki files under wiki/ and raw/sources/ without exposing runtime state."""
-    return wiki_list_files_tool(vault_root, root_name, recursive, max_files)
-
-
-@mcp.tool()
 def wiki_read_file(
     vault_root: str,
     path: str,
@@ -404,19 +389,6 @@ def wiki_query(
         filter_type,
         filter_tags,
     )
-
-
-@mcp.tool()
-def wiki_query_debug(
-    vault_root: str,
-    question: str,
-    project: str | None = None,
-    top_k: int = 8,
-    max_graph_hops: int = 2,
-    include_raw_sources: bool = False,
-) -> dict[str, Any]:
-    """Explain wiki query scoring and graph-expansion reasons."""
-    return wiki_query_debug_tool(vault_root, question, project, top_k, max_graph_hops, include_raw_sources)
 
 
 @mcp.tool()
@@ -484,12 +456,6 @@ def wiki_lint(
 ) -> dict[str, Any]:
     """Check LLM Wiki structure and run staged semantic health reviews."""
     return wiki_lint_tool(vault_root, stage, project, semantic_review, language)
-
-
-@mcp.tool()
-def wiki_changelog(vault_root: str, limit: int = 10) -> dict[str, Any]:
-    """Return recent wiki log entries as structured data."""
-    return wiki_changelog_tool(vault_root, limit)
 
 
 @mcp.tool()
@@ -579,27 +545,6 @@ def wiki_page_merge(
 
 
 @mcp.tool()
-def wiki_dedup(
-    vault_root: str,
-    stage: str = "detect",
-    groups: list[dict[str, Any]] | str | None = None,
-    not_duplicates: list[list[str]] | None = None,
-) -> dict[str, Any]:
-    """Detect and merge duplicate wiki pages. Stages: detect → confirm → merge."""
-    return run_wiki_dedup(vault_root=vault_root, stage=stage, groups=groups, not_duplicates=not_duplicates)
-
-
-@mcp.tool()
-def wiki_insights(
-    vault_root: str,
-    project: str | None = None,
-    limit: int = 10,
-) -> dict[str, Any]:
-    """Analyze wiki graph structure: find orphans, bridges, and surprising connections."""
-    return run_wiki_insights(vault_root=vault_root, project=project, limit=limit)
-
-
-@mcp.tool()
 def wiki_delete_source(
     vault_root: str,
     project: str,
@@ -608,39 +553,6 @@ def wiki_delete_source(
 ) -> dict[str, Any]:
     """Delete a source and cascade-clean derived wiki pages and cross-references."""
     return run_wiki_delete_source(vault_root=vault_root, project=project, source_name=source_name, dry_run=dry_run)
-
-
-@mcp.tool()
-def wiki_research(
-    vault_root: str,
-    topic: str,
-    stage: str = "prepare",
-    search_results: list[dict[str, str]] | None = None,
-    synthesis: str | None = None,
-    language: str = "zh-CN",
-    project: str | None = None,
-) -> dict[str, Any]:
-    """Deep research: synthesize web search results into a wiki page. Stages: prepare → apply."""
-    return run_wiki_research(
-        vault_root=vault_root, topic=topic, stage=stage,
-        search_results=search_results, synthesis=synthesis,
-        language=language, project=project,
-    )
-
-
-@mcp.tool()
-def wiki_synthesis(
-    vault_root: str,
-    question: str,
-    stage: str = "prepare",
-    context_pages: list[dict[str, Any]] | None = None,
-    synthesis: str | None = None,
-    title: str | None = None,
-    project: str | None = None,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    """Persist a valuable query answer or analysis as a project researches page. Stages: prepare → apply."""
-    return wiki_synthesis_tool(vault_root, question, stage, context_pages, synthesis, title, project, language)
 
 
 @mcp.tool()
@@ -687,18 +599,6 @@ def wiki_verify(
 ) -> dict[str, Any]:
     """Verify generated wiki pages against raw sources for faithfulness. Two-stage: prepare (returns LLM prompt) then apply (records results)."""
     return wiki_verify_tool(vault_root, stage, project, page_path, verification_result, language)
-
-
-@mcp.tool()
-def wiki_gap(
-    vault_root: str,
-    stage: str = "analyze",
-    project: str | None = None,
-    taxonomy: list[str] | None = None,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    """Analyze wiki coverage gaps: find missing concepts, shallow pages, dangling links, and uningested sources. Stages: analyze (report gaps), suggest (recommend actions)."""
-    return run_wiki_gap(vault_root=vault_root, stage=stage, project=project, taxonomy=taxonomy, language=language)
 
 
 def main() -> None:

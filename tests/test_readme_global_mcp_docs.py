@@ -26,7 +26,9 @@ def test_repository_mcp_config_has_no_absolute_paths():
 
     text = mcp_json.read_text(encoding="utf-8")
     assert "C:\\" not in text and "D:\\" not in text and "F:\\" not in text
-    assert "NETSUITE_LLM_WIKI_VAULT_ROOT" not in text
+    # vault root 与 server 安装目录都通过环境变量引用传入，不硬编码绝对路径
+    assert "${env:NETSUITE_LLM_WIKI_VAULT_ROOT}" in text
+    assert "${env:NETSUITE_LLM_WIKI_MCP_DIR}" in text
 
 
 def test_repository_does_not_ship_vault_sources_yaml():

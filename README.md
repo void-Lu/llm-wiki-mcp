@@ -136,7 +136,6 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 | 工具 | 说明 |
 |------|------|
 | `wiki_status` | 返回 vault 结构诊断、ingest queue 计数、版本和 CodeGraph 可用性；不会创建或修改 vault |
-| `wiki_list_files` | 只列出公开路径 `wiki/` 和 `raw/sources/` 下的文件，支持 `root_name="wiki"|"sources"|"all"`、递归和数量限制 |
 | `wiki_read_file` | 只读取 `wiki/` 或 `raw/sources/` 下的文本文件，拒绝绝对路径、路径穿越、运行时私有目录和非文本扩展，并按字节数截断 |
 
 ### 摄入
@@ -145,7 +144,8 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 |------|------|
 | `wiki_init` | 在 Obsidian vault 中创建 wiki 目录结构 |
 | `wiki_ingest_codegraph` | 将 CodeGraph 快照和机器代码事实同步摄入 raw，并生成项目 source/architecture/pipeline 可读页（不需要 LLM） |
-| `wiki_ingest_llm` | 两阶段 LLM 摄入（推荐）：`prepare`（返回合并 prompt）→ `apply`（写入页面）。旧三阶段 `prepare_analysis` → `prepare_generation` → `apply_generation` 仍兼容 |
+| `wiki_ingest_llm` | 两阶段 LLM 摄入（推荐）：`prepare`（返回合并 prompt）-> `apply`（写入页面）。旧三阶段 `prepare_analysis` -> `prepare_generation` -> `apply_generation` 仍兼容 |
+| `wiki_build_source_index` | 为 raw source 树构建轻量 source_index 索引页（不需要 LLM）：按 frontmatter `tags` 的 `parent/leaf` 树路径分组，内节点生成嵌套 `_entries.md`（分页为 `_entries-02.md` ...），纯叶节点作为父索引内的 `## {leaf}` 段落；`source_name` 作为隐式根节点 |
 | `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot；如果 manifest 路径与期望 raw dir 不匹配（如目录结构重构后旧路径未同步），自动修复 manifest 路径并在响应中返回 `manifest_repaired` 信息 |
 | `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done / reapply / prepare_all / apply_all / next_prepared / next_generation_job / set_generation / apply_one。`prepare_all` 只返回瘦身摘要，完整 prompt 留在队列内；`next_generation_job` 每次返回一个隔离 page generation job；`set_generation` 保存单条生成结果；`apply_one` / `apply_all` 在写 wiki 前执行 generation 结构与质量门禁 |
 
@@ -153,30 +153,25 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 | 工具 | 说明 |
 |------|------|
-| `wiki_query` | 关键词 + CJK bigram 搜索 → 图扩展 → 按上下文预算输出；结果包含标题匹配和嵌入图片元数据 |
-| `wiki_query_debug` | 与查询相同，但返回每个结果的分数和图扩展原因 |
+| `wiki_query` | 关键词 + CJK bigram 搜索 -> 图扩展 -> 按上下文预算输出；结果包含标题匹配和嵌入图片元数据 |
 
 ### 维护
 
 | 工具 | 说明 |
 |------|------|
 | `wiki_lint` | 结构健康检查和分阶段语义审查：frontmatter、断链、source 可追溯性、cache 完整性、孤立页面、矛盾、过期声明、缺失概念 |
-| `wiki_enrich` | 两阶段 wikilink 富化：prepare（返回 LLM prompt）→ apply（插入链接） |
+| `wiki_enrich` | 两阶段 wikilink 富化：prepare（返回 LLM prompt）-> apply（插入链接） |
 | `wiki_page_merge` | 合并页面：frontmatter union + 锁定字段保护 + 可选 LLM 正文合并 |
-| `wiki_dedup` | 重复页检测和合并：detect → confirm → merge（三阶段） |
-| `wiki_insights` | 图谱洞察：孤立页面、桥接节点、意外跨类型连接、Louvain 社区 |
 | `wiki_delete_source` | 删除 source 并级联清理：派生页面、交叉引用、cache；多 source 生成页会被保留，并移除被删除的 source |
-| `wiki_verify` | 两阶段 grounding check：从 `wiki/sources/` 索引页出发，读取关联的 raw source 和生成页，返回 faithfulness 校验 prompt → `apply` 记录结果 |
-| `wiki_gap` | 覆盖缺口分析：`analyze`（扫描浅页面、悬空链接、未摄入源、分类法缺失）→ `suggest`（推荐具体补充动作和工具） |
-| `wiki_changelog` | 最近的 wiki log 条目 |
+| `wiki_verify` | 两阶段 grounding check：从 `wiki/sources/` 索引页出发，读取关联的 raw source 和生成页，返回 faithfulness 校验 prompt -> `apply` 记录结果 |
 
-### 研究与笔记
+### 笔记
 
 | 工具 | 说明 |
 |------|------|
-| `wiki_research` | 深度研究综合：搜索结果 + `purpose.md` / `wiki/overview.md` / `wiki/index.md` → LLM 综合 → `wiki/queries/` 页面 |
-| `wiki_synthesis` | 将有价值的查询答案或分析保存为项目内 `wiki/projects/<project>/researches/` 页面：`prepare` → `apply` |
 | `wiki_write_note` | 写入人工整理的 wiki note；替代旧的 `save_obsidian_note` 公开工具名 |
+
+> 以下工具的代码仍保留在仓库中，但未通过 MCP 注册公开：`wiki_list_files`、`wiki_changelog`、`wiki_query_debug`、`wiki_dedup`、`wiki_insights`、`wiki_gap`、`wiki_research`、`wiki_synthesis`。如需恢复，在 `server.py` 重新添加 `@mcp.tool()` 即可。
 
 ## Wiki 结构
 
@@ -252,8 +247,8 @@ vault_root/
    - 外部爬虫或人工收集的 MD 文件 → `raw/sources/references/` 或 `raw/sources/file/` → `wiki_ingest_llm(stage="prepare")` → `wiki_ingest_llm(stage="apply")`
 3. 用 `wiki_verify` 校验生成页面是否忠实于原始来源。
 4. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。
-5. 通过 `wiki_research` / `wiki_synthesis` / `wiki_write_note`，把有价值的研究、对比、查询答案和人工整理内容写回 `wiki/queries/`、`wiki/projects/<project>/researches/`、`wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/` 或 `wiki/concepts/`。
-6. 用 `wiki_lint`、`wiki_enrich`、`wiki_dedup`、`wiki_insights` 和 `wiki_changelog` 保持图谱健康；使用 `wiki_lint(stage="prepare_semantic_review")` → `wiki_lint(stage="apply_semantic_review")` 进行 LLM 辅助的矛盾、过期声明和缺失概念审查。
+5. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
+6. 用 `wiki_lint` 和 `wiki_enrich` 保持图谱健康；使用 `wiki_lint(stage="prepare_semantic_review")` -> `wiki_lint(stage="apply_semantic_review")` 进行 LLM 辅助的矛盾、过期声明和缺失概念审查。
 
 对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
 
