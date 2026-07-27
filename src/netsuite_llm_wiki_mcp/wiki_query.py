@@ -13,6 +13,11 @@ _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _STRUCTURAL_PAGE_NAMES = {"index.md", "log.md", "overview.md"}
 DEFAULT_TOP_K = 10
 _PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
+RANKING_VERSION = "lexical-length-normalized-graph-capped-v1"
+_SCORE_PRECISION = 12
+_GRAPH_SCORE_RATIO_CAP = 0.15
+_PURE_GRAPH_SCORE_CAP = 0.75
+_MAX_GRAPH_EXPANSIONS_PER_SEED = 64
 _STOPWORDS = {
     "a",
     "an",
@@ -45,6 +50,44 @@ _STOPWORDS = {
 }
 
 
+@dataclass(frozen=True)
+class CandidateSignals:
+    """Lexical contributions kept separate from graph and optional vector signals."""
+
+    total: float
+    fields: dict[str, float]
+    exact_matches: tuple[dict[str, str], ...]
+
+
+@dataclass
+class RankBreakdown:
+    """Internal explanation data exposed only by ``wiki_query_debug``."""
+
+    lexical_fields: dict[str, float] = field(default_factory=dict)
+    lexical_exact_matches: list[dict[str, str]] = field(default_factory=list)
+    graph_reasons: list[dict[str, Any]] = field(default_factory=list)
+    fusion_total: float = 0.0
+    rank: int = 0
+
+    def as_debug_dict(self, candidate: QueryCandidate) -> dict[str, Any]:
+        return {
+            "lexical": {
+                "total": candidate.keyword_score,
+                "fields": dict(self.lexical_fields),
+                "exact_matches": list(self.lexical_exact_matches),
+            },
+            "graph": {
+                "total": candidate.graph_score,
+                "reasons": list(self.graph_reasons),
+            },
+            "fusion": {
+                "total": self.fusion_total,
+                "vector": candidate.vector_score,
+            },
+            "rank": self.rank,
+        }
+
+
 @dataclass
 class QueryCandidate:
     path: Path
@@ -56,10 +99,11 @@ class QueryCandidate:
     keyword_score: float = 0.0
     vector_score: float = 0.0
     graph_score: float = 0.0
+    rank_breakdown: RankBreakdown = field(default_factory=RankBreakdown)
 
     @property
     def total_score(self) -> float:
-        return self.keyword_score + self.vector_score + self.graph_score
+        return _stable_score(self.keyword_score + self.vector_score + self.graph_score)
 
 
 @dataclass(frozen=True)
@@ -67,6 +111,14 @@ class Graph:
     neighbors: dict[str, set[str]]
     sources: dict[str, set[str]]
     types: dict[str, str]
+
+
+@dataclass
+class QueryExecution:
+    result: dict[str, Any]
+    selected: list[QueryCandidate]
+    candidate_count: int
+    filtered_out: int
 
 
 def wiki_query(
@@ -86,9 +138,48 @@ def wiki_query(
     filter_type: str | None = None,
     filter_tags: list[str] | None = None,
 ) -> dict[str, Any]:
+    return _execute_query(
+        vault_root=vault_root,
+        question=question,
+        project=project,
+        top_k=top_k,
+        include_content=include_content,
+        context_window_tokens=context_window_tokens,
+        include_context_pack=include_context_pack,
+        chat_history=chat_history,
+        language=language,
+        enable_vector=enable_vector,
+        vector_config=vector_config,
+        max_graph_hops=max_graph_hops,
+        include_raw_sources=include_raw_sources,
+        filter_type=filter_type,
+        filter_tags=filter_tags,
+        collect_debug=False,
+    ).result
+
+
+def _execute_query(
+    vault_root: str | Path,
+    question: str,
+    project: str | None,
+    top_k: int,
+    include_content: bool,
+    context_window_tokens: int,
+    include_context_pack: bool,
+    chat_history: list[dict[str, str]] | None,
+    language: str,
+    enable_vector: bool,
+    vector_config: dict[str, Any] | None,
+    max_graph_hops: int,
+    include_raw_sources: bool,
+    filter_type: str | None,
+    filter_tags: list[str] | None,
+    collect_debug: bool,
+) -> QueryExecution:
     root = Path(vault_root).expanduser().resolve()
     tokens = _tokens(question)
-    candidates = _candidate_pages(root, include_raw_sources=include_raw_sources)
+    all_candidates = _candidate_pages(root, include_raw_sources=include_raw_sources)
+    candidates = all_candidates
     if project:
         candidates = [candidate for candidate in candidates if _in_project_scope(candidate.rel, project)]
     if filter_type:
@@ -101,22 +192,33 @@ def wiki_query(
 
     scored: dict[str, QueryCandidate] = {}
     for candidate in candidates:
-        score = _keyword_score(candidate, tokens, question, token_weights)
+        signals = _keyword_signals(candidate, tokens, question, token_weights)
         if project and candidate.rel.startswith(f"wiki/projects/{project}/"):
-            score += 5
-        if score > 0:
-            candidate.keyword_score = score
+            signals = _with_lexical_adjustment(signals, "project_scope", 5.0)
+        candidate.keyword_score = signals.total
+        candidate.rank_breakdown.lexical_fields = dict(signals.fields)
+        candidate.rank_breakdown.lexical_exact_matches = list(signals.exact_matches)
+        if candidate.keyword_score > 0:
             scored[candidate.rel] = candidate
 
     vector_warnings = _apply_optional_vector_stage(scored, enable_vector, vector_config)
-    _apply_graph_expansion(scored, candidates, graph, max_graph_hops=max_graph_hops)
+    _apply_graph_expansion(
+        scored,
+        candidates,
+        graph,
+        max_graph_hops=max_graph_hops,
+        collect_reasons=collect_debug,
+    )
 
     selected = sorted(scored.values(), key=lambda item: (-item.total_score, item.rel))[:top_k]
+    for rank, candidate in enumerate(selected, 1):
+        candidate.rank_breakdown.rank = rank
+        candidate.rank_breakdown.fusion_total = candidate.total_score
     results = [_result_item(candidate, tokens) for candidate in selected]
     context = _legacy_context(selected, tokens, include_content)
     context_pack = _context_pack(root, selected, question, context_window_tokens, chat_history or [], language) if include_context_pack else None
 
-    return {
+    result = {
         "ok": True,
         "question": question,
         "project": project or "",
@@ -126,7 +228,10 @@ def wiki_query(
         "budget": context_pack.get("budget") if context_pack else {},
         "citations": context_pack.get("citations") if context_pack else [item["citation"] for item in context],
         "pipeline": {
+            "stage_0_candidate_count": len(all_candidates),
+            "stage_0_filtered_out": len(all_candidates) - len(candidates),
             "stage_1_keyword_hits": sum(1 for item in scored.values() if item.keyword_score > 0),
+            "stage_1_ranking_version": RANKING_VERSION,
             "stage_1_raw_sources_included": include_raw_sources,
             "stage_1_5_vector_enabled": enable_vector,
             "stage_1_5_vector_warnings": vector_warnings,
@@ -137,6 +242,12 @@ def wiki_query(
         },
         "policy": "Answer from the numbered context pages and cite sources as [1], [2], etc.",
     }
+    return QueryExecution(
+        result=result,
+        selected=selected,
+        candidate_count=len(all_candidates),
+        filtered_out=len(all_candidates) - len(candidates),
+    )
 
 
 def wiki_query_debug(
@@ -147,30 +258,48 @@ def wiki_query_debug(
     max_graph_hops: int = 2,
     include_raw_sources: bool = False,
 ) -> dict[str, Any]:
-    result = wiki_query(
+    execution = _execute_query(
         vault_root=vault_root,
         question=question,
         project=project,
         top_k=top_k,
         include_content=False,
+        context_window_tokens=16_000,
         include_context_pack=False,
+        chat_history=None,
+        language="zh-CN",
+        enable_vector=False,
+        vector_config=None,
         max_graph_hops=max_graph_hops,
         include_raw_sources=include_raw_sources,
+        filter_type=None,
+        filter_tags=None,
+        collect_debug=True,
     )
-    root = Path(vault_root).expanduser().resolve()
-    graph = _build_graph(root)
-    graph_reasons: dict[str, list[dict[str, Any]]] = {}
-    selected_paths = [item["path"] for item in result["results"]]
-    seed_paths = [item["path"] for item in result["results"] if item["scores"]["keyword"] > 0]
-    for path in selected_paths:
-        reasons: list[dict[str, Any]] = []
-        for seed in seed_paths:
-            if seed == path:
-                continue
-            reasons.extend(_relationship_reasons(seed, path, graph))
-        if reasons:
-            graph_reasons[path] = reasons
-    return {**result, "graph_reasons": graph_reasons}
+    graph_reasons = {
+        candidate.rel: list(candidate.rank_breakdown.graph_reasons)
+        for candidate in execution.selected
+        if candidate.rank_breakdown.graph_reasons
+    }
+    return {
+        **execution.result,
+        "graph_reasons": graph_reasons,
+        "ranking_debug": {
+            "ranking_version": RANKING_VERSION,
+            "stage_candidates": execution.candidate_count,
+            "filter_rejections": execution.filtered_out,
+            "parameters": {
+                "max_graph_hops": max_graph_hops,
+                "max_graph_expansions_per_seed": _MAX_GRAPH_EXPANSIONS_PER_SEED,
+                "graph_score_ratio_cap": _GRAPH_SCORE_RATIO_CAP,
+                "pure_graph_score_cap": _PURE_GRAPH_SCORE_CAP,
+            },
+            "results": [
+                {"path": candidate.rel, **candidate.rank_breakdown.as_debug_dict(candidate)}
+                for candidate in execution.selected
+            ],
+        },
+    }
 
 
 def _relationship_reasons(left: str, right: str, graph: Graph) -> list[dict[str, Any]]:
@@ -275,37 +404,93 @@ def _tokens(text: str) -> list[str]:
 
 
 def _keyword_score(candidate: QueryCandidate, tokens: list[str], query: str = "", token_weights: dict[str, float] | None = None) -> float:
+    """Compatibility helper for callers that only need the lexical total."""
+
+    return _keyword_signals(candidate, tokens, query, token_weights).total
+
+
+def _keyword_signals(
+    candidate: QueryCandidate,
+    tokens: list[str],
+    query: str = "",
+    token_weights: dict[str, float] | None = None,
+) -> CandidateSignals:
+    """Score lexical fields without letting repeated long-body terms dominate.
+
+    This is ranking experiment 1 from task 05.  Paths, titles, stems, and
+    frontmatter retain their established field weights.  Only body token
+    counts are divided by the square root of their character length, so an
+    exact title/path still outranks a term repeated across a generated source
+    index page.
+    """
     if not tokens:
-        return 0.0
+        return CandidateSignals(total=0.0, fields={}, exact_matches=())
     weights = token_weights or {token: 1.0 for token in tokens}
     body = candidate.body.casefold()
     frontmatter = str(candidate.frontmatter).casefold()
     rel = candidate.rel.casefold()
     title = candidate.title.casefold()
     stem = candidate.path.stem.casefold().replace("-", " ").replace("_", " ")
-    score = 0.0
+    fields = {"body": 0.0, "path": 0.0, "frontmatter": 0.0, "title": 0.0, "stem": 0.0, "phrase": 0.0}
+    exact_matches: list[dict[str, str]] = []
     for token in tokens:
         weight = weights.get(token, 1.0)
-        score += body.count(token) * weight
-        score += rel.count(token) * weight
-        score += frontmatter.count(token) * 0.5 * weight
+        body_matches = body.count(token)
+        fields["body"] += _length_normalized_count(body_matches, len(body)) * weight
+        fields["path"] += rel.count(token) * weight
+        fields["frontmatter"] += frontmatter.count(token) * 0.5 * weight
         if token in title:
-            score += 15 * weight
+            fields["title"] += 15 * weight
+            exact_matches.append({"field": "title", "value": token})
         if token in stem:
-            score += 8 * weight
+            fields["stem"] += 8 * weight
+            exact_matches.append({"field": "stem", "value": token})
     phrase = query.casefold().strip()
     phrase_weight = sum(weights.get(token, 1.0) for token in tokens) / len(tokens)
     if phrase:
         if title == phrase:
-            score += 120 * phrase_weight
+            fields["phrase"] += 120 * phrase_weight
+            exact_matches.append({"field": "title", "value": phrase})
         elif phrase in title:
-            score += 50 * phrase_weight
+            fields["phrase"] += 50 * phrase_weight
+            exact_matches.append({"field": "title_contains", "value": phrase})
         if stem == phrase:
-            score += 80 * phrase_weight
+            fields["phrase"] += 80 * phrase_weight
+            exact_matches.append({"field": "stem", "value": phrase})
         elif phrase in stem:
-            score += 25 * phrase_weight
-        score += min(body.count(phrase), 5) * 4 * phrase_weight
-    return score
+            fields["phrase"] += 25 * phrase_weight
+            exact_matches.append({"field": "stem_contains", "value": phrase})
+        phrase_count = body.count(phrase)
+        if phrase_count:
+            fields["phrase"] += min(phrase_count, 5) * 4 * phrase_weight
+            exact_matches.append({"field": "body_phrase", "value": phrase})
+    stable_fields = {field: _stable_score(value) for field, value in fields.items()}
+    return CandidateSignals(
+        total=_stable_score(sum(stable_fields.values())),
+        fields=stable_fields,
+        exact_matches=tuple(exact_matches),
+    )
+
+
+def _length_normalized_count(matches: int, field_length: int) -> float:
+    """Use a deterministic body-length adjustment for token frequency."""
+
+    if matches <= 0:
+        return 0.0
+    return matches / math.sqrt(max(field_length, 1))
+
+
+def _with_lexical_adjustment(signals: CandidateSignals, field: str, adjustment: float) -> CandidateSignals:
+    fields = {**signals.fields, field: _stable_score(signals.fields.get(field, 0.0) + adjustment)}
+    return CandidateSignals(
+        total=_stable_score(sum(fields.values())),
+        fields=fields,
+        exact_matches=signals.exact_matches,
+    )
+
+
+def _stable_score(score: float) -> float:
+    return round(score, _SCORE_PRECISION)
 
 
 def _token_weights(candidates: list[QueryCandidate], tokens: list[str]) -> dict[str, float]:
@@ -338,7 +523,7 @@ def _build_graph(root: Path) -> Graph:
         pages = [
             path
             for path in sorted(wiki.rglob("*.md"))
-            if path.name not in _STRUCTURAL_PAGE_NAMES
+            if not _is_structural_page(path)
             and path.relative_to(root).parts[:2] != ("wiki", "archives")
         ]
     by_rel = {path.relative_to(root).as_posix(): path for path in pages}
@@ -385,27 +570,80 @@ def _wikilink_targets(body: str, path: Path, root: Path, by_rel: dict[str, Path]
     return targets
 
 
-def _apply_graph_expansion(scored: dict[str, QueryCandidate], all_candidates: list[QueryCandidate], graph: Graph, max_graph_hops: int) -> None:
+def _apply_graph_expansion(
+    scored: dict[str, QueryCandidate],
+    all_candidates: list[QueryCandidate],
+    graph: Graph,
+    max_graph_hops: int,
+    *,
+    collect_reasons: bool,
+) -> None:
+    """Add bounded graph evidence without bypassing public query filters."""
+
     candidates_by_rel = {candidate.rel: candidate for candidate in all_candidates}
-    seeds = [rel for rel, candidate in scored.items() if candidate.source_kind == "wiki"]
+    seeds = sorted(rel for rel, candidate in scored.items() if candidate.source_kind == "wiki")
     for seed in seeds:
-        frontier = {seed}
+        frontier = {seed: seed}
         visited = {seed}
+        expansions = 0
         for hop in range(1, max_graph_hops + 1):
-            next_frontier: set[str] = set()
-            for rel in frontier:
-                next_frontier.update(graph.neighbors.get(rel, set()) - visited)
+            next_frontier: dict[str, str] = {}
+            for via in sorted(frontier):
+                for rel in sorted(graph.neighbors.get(via, set()) - visited):
+                    # ``all_candidates`` is already scoped by project/type/tag
+                    # filters.  Do not permit an excluded graph page to bridge
+                    # to a result that would otherwise be unreachable.
+                    if rel in candidates_by_rel and rel not in next_frontier:
+                        next_frontier[rel] = via
+            remaining = _MAX_GRAPH_EXPANSIONS_PER_SEED - expansions
+            if remaining <= 0:
+                break
+            expanded_paths = sorted(next_frontier)[:remaining]
             decay = 1 / hop
-            for rel in next_frontier:
+            for rel in expanded_paths:
                 candidate = candidates_by_rel.get(rel)
                 if candidate is None:
                     continue
-                candidate.graph_score += _relationship_score(seed, rel, graph) * decay
-                scored.setdefault(rel, candidate)
-            visited.update(next_frontier)
-            frontier = next_frontier
+                relationship_reasons = _relationship_reasons(seed, rel, graph) if collect_reasons else []
+                relationship_score = sum(float(reason["score"]) for reason in relationship_reasons)
+                if not collect_reasons:
+                    relationship_score = _relationship_score(seed, rel, graph)
+                raw_contribution = relationship_score * decay
+                graph_cap = _graph_score_cap(candidate)
+                applied = max(0.0, min(raw_contribution, graph_cap - candidate.graph_score))
+                if collect_reasons:
+                    if not relationship_reasons:
+                        relationship_reasons = [{"kind": "graph_path", "source": seed, "target": rel, "score": 0.0}]
+                    candidate.rank_breakdown.graph_reasons.extend(
+                        {**reason, "hop": hop, "via": next_frontier[rel]}
+                        for reason in relationship_reasons
+                    )
+                    candidate.rank_breakdown.graph_reasons.append(
+                        {
+                            "kind": "graph_expansion",
+                            "source": seed,
+                            "target": rel,
+                            "via": next_frontier[rel],
+                            "hop": hop,
+                            "score": _stable_score(applied),
+                            "raw_contribution": _stable_score(raw_contribution),
+                            "cap": _stable_score(graph_cap),
+                        }
+                    )
+                if applied > 0:
+                    candidate.graph_score = _stable_score(candidate.graph_score + applied)
+                    scored.setdefault(rel, candidate)
+            expansions += len(expanded_paths)
+            visited.update(expanded_paths)
+            frontier = {rel: next_frontier[rel] for rel in expanded_paths}
             if not frontier:
                 break
+
+
+def _graph_score_cap(candidate: QueryCandidate) -> float:
+    if candidate.keyword_score > 0:
+        return _stable_score(candidate.keyword_score * _GRAPH_SCORE_RATIO_CAP)
+    return _PURE_GRAPH_SCORE_CAP
 
 
 def _relationship_score(left: str, right: str, graph: Graph) -> float:

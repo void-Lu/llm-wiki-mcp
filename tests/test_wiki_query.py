@@ -245,6 +245,7 @@ def test_wiki_query_debug_explains_graph_reasons(tmp_path: Path):
     refresh_indexes(root)
 
     result = wiki_query_debug(root, "needle", top_k=3)
+    normal_result = wiki_query(root, "needle", top_k=3, include_content=False, include_context_pack=False)
 
     assert result["ok"] is True
     paths = [item["path"] for item in result["results"]]
@@ -252,6 +253,15 @@ def test_wiki_query_debug_explains_graph_reasons(tmp_path: Path):
     reasons = result["graph_reasons"]["wiki/concepts/neighbor.md"]
     assert {reason["kind"] for reason in reasons} >= {"direct_wikilink", "shared_source", "same_type"}
     assert all("score" in reason for reason in reasons)
+    debug = result["ranking_debug"]
+    assert debug["ranking_version"] == result["pipeline"]["stage_1_ranking_version"]
+    neighbor_debug = next(item for item in debug["results"] if item["path"] == "wiki/concepts/neighbor.md")
+    neighbor = next(item for item in result["results"] if item["path"] == "wiki/concepts/neighbor.md")
+    assert set(neighbor_debug) >= {"lexical", "graph", "fusion", "rank"}
+    assert neighbor_debug["graph"]["total"] == neighbor["scores"]["graph"]
+    assert 0 < neighbor["scores"]["graph"] <= debug["parameters"]["pure_graph_score_cap"]
+    assert "ranking_debug" not in normal_result
+    assert all("rank_breakdown" not in item for item in normal_result["results"])
 
 
 def test_wiki_query_returns_budgeted_context_pack(tmp_path: Path):
@@ -370,6 +380,51 @@ def test_wiki_query_prioritizes_exact_title_phrase_over_body_repetition(tmp_path
 
     assert result["results"][0]["path"] == "wiki/concepts/invoice-approval.md"
     assert result["results"][0]["scores"]["keyword"] > result["results"][1]["scores"]["keyword"]
+
+
+def test_wiki_query_length_normalization_keeps_exact_title_above_generated_body(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/3d-secure.md", "3D Secure Payment Authentication", "short reference", type="concept")
+    _write(
+        root,
+        "wiki/sources/help-noise.md",
+        "Commerce index",
+        "3d secure payment authentication commerce web stores " * 4_000,
+        type="source_index",
+    )
+    refresh_indexes(root)
+
+    result = wiki_query(root, "3D Secure Payment Authentication", top_k=2, include_content=False)
+
+    assert [item["path"] for item in result["results"]] == [
+        "wiki/concepts/3d-secure.md",
+        "wiki/sources/help-noise.md",
+    ]
+    assert result["results"][0]["scores"]["keyword"] > result["results"][1]["scores"]["keyword"]
+
+
+def test_wiki_query_uses_path_tie_break_and_keeps_graph_inside_filters(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/zeta.md", "Zeta", "stable tie needle", type="concept")
+    _write(root, "wiki/concepts/alpha.md", "Alpha", "stable tie needle", type="concept")
+    _write(root, "wiki/concepts/seed.md", "Seed", "unique bridge needle [[projects/alpha/specs/bridge.md]]", type="concept")
+    _write(root, "wiki/projects/alpha/specs/bridge.md", "Bridge", "[[reachable.md]]", type="spec")
+    _write(root, "wiki/concepts/reachable.md", "Reachable", "no lexical evidence", type="concept")
+    refresh_indexes(root)
+
+    first = wiki_query(root, "stable tie needle", top_k=2, include_content=False)
+    second = wiki_query(root, "stable tie needle", top_k=2, include_content=False)
+    filtered = wiki_query(root, "unique bridge needle", top_k=5, filter_type="concept", include_content=False)
+
+    assert [item["path"] for item in first["results"]] == [
+        "wiki/concepts/alpha.md",
+        "wiki/concepts/zeta.md",
+    ]
+    assert [item["path"] for item in second["results"]] == [item["path"] for item in first["results"]]
+    assert "wiki/projects/alpha/specs/bridge.md" not in [item["path"] for item in filtered["results"]]
+    assert "wiki/concepts/reachable.md" not in [item["path"] for item in filtered["results"]]
 
 
 def test_wiki_query_excludes_structural_pages_from_results(tmp_path: Path):

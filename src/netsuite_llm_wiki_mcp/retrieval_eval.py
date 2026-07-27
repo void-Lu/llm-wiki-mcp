@@ -14,11 +14,19 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
-from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query
+from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, RANKING_VERSION, wiki_query
 
 
 RETRIEVAL_EVAL_SCHEMA_VERSION = 1
 _ALLOWED_FILTERS = {"project", "filter_type", "filter_tags"}
+_COMPARISON_METRICS = (
+    "recall_at_k_macro",
+    "mrr_at_k_macro",
+    "ndcg_at_k_macro",
+    "no_answer_false_positive_rate",
+    "filter_correctness",
+    "p95_latency_ms",
+)
 
 
 class RetrievalEvalError(ValueError):
@@ -184,6 +192,7 @@ def run_retrieval_evaluation(
     repeats: int = 1,
     measure_context_budget: bool = True,
     context_budget_case_limit: int | None = None,
+    experiment_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute the public query API only; this function never mutates the vault."""
     if top_k <= 0:
@@ -286,6 +295,8 @@ def run_retrieval_evaluation(
             "abstention_threshold": dataset.manifest.abstention_threshold,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "runtime_provenance": RUNTIME_PROVENANCE.to_public_dict(),
+            "ranking": {"version": RANKING_VERSION},
+            "experiment": _normalise_experiment_metadata(experiment_metadata),
             "parameters": {
                 "top_k": top_k,
                 "include_content": False,
@@ -328,6 +339,8 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     metadata = report["metadata"]
     metrics = report["metrics"]
+    ranking_metadata = metadata.get("ranking")
+    ranking_version = ranking_metadata.get("version", "legacy-unversioned") if isinstance(ranking_metadata, Mapping) else "legacy-unversioned"
     lines = [
         "# 检索评测报告",
         "",
@@ -335,6 +348,7 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         f"- `top_k`：{metadata['parameters']['top_k']}",
         f"- 语料指纹：`{metadata['vault_fingerprint']['value']}`（{metadata['vault_fingerprint']['file_count']} 个 wiki 文件）",
         f"- 运行版本：`{metadata['runtime_provenance']['package_version']}` / `{metadata['runtime_provenance']['revision']}`",
+        f"- 排名版本：`{ranking_version}`",
         "",
         "## 指标",
         "",
@@ -352,6 +366,65 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
     for case in report["cases"]:
         first_path = case["ranked_paths"][0] if case["ranked_paths"] else "（无结果）"
         lines.append(f"- `{case['id']}`：首项 `{first_path}`；过滤器 {'通过' if case['filter_correct'] else '失败'}")
+    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"json": str(json_path), "markdown": str(markdown_path)}
+
+
+def compare_retrieval_reports(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Compare two reports from the same frozen dataset and vault fingerprint.
+
+    The function intentionally does not decide a release gate: P95 is
+    environment-sensitive, while the caller owns the task-specific thresholds.
+    It supplies reproducible deltas and per-case win/tie/loss evidence instead.
+    """
+
+    baseline_metadata = _mapping(baseline.get("metadata"), "baseline_invalid", "baseline metadata must be an object")
+    candidate_metadata = _mapping(candidate.get("metadata"), "candidate_invalid", "candidate metadata must be an object")
+    _require_comparable_reports(baseline_metadata, candidate_metadata)
+    baseline_metrics = _mapping(baseline.get("metrics"), "baseline_invalid", "baseline metrics must be an object")
+    candidate_metrics = _mapping(candidate.get("metrics"), "candidate_invalid", "candidate metrics must be an object")
+    baseline_cases = _cases_by_id(baseline, "baseline_invalid")
+    candidate_cases = _cases_by_id(candidate, "candidate_invalid")
+    if baseline_cases.keys() != candidate_cases.keys():
+        raise RetrievalEvalError("baseline_incompatible", "baseline and candidate cases must have identical IDs")
+
+    metric_deltas = {
+        metric: _metric_delta(baseline_metrics.get(metric), candidate_metrics.get(metric))
+        for metric in _COMPARISON_METRICS
+    }
+    return {
+        "schema_version": RETRIEVAL_EVAL_SCHEMA_VERSION,
+        "baseline": _report_identity(baseline_metadata),
+        "candidate": _report_identity(candidate_metadata),
+        "metric_deltas": metric_deltas,
+        "cases": [
+            _compare_case(case_id, baseline_cases[case_id], candidate_cases[case_id])
+            for case_id in sorted(baseline_cases)
+        ],
+    }
+
+
+def write_retrieval_comparison(comparison: Mapping[str, Any], output_dir: str | Path) -> dict[str, str]:
+    """Persist a compact, reviewable comparison alongside candidate reports."""
+
+    target = Path(output_dir).expanduser().resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    json_path = target / "retrieval-comparison.json"
+    markdown_path = target / "retrieval-comparison.md"
+    json_path.write_text(json.dumps(comparison, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    deltas = _mapping(comparison.get("metric_deltas"), "comparison_invalid", "comparison metric_deltas must be an object")
+    lines = [
+        "# 检索评测对比",
+        "",
+        f"- 基线数据集：`{comparison['baseline']['dataset_id']}`（revision `{comparison['baseline']['dataset_revision']}`）",
+        f"- 候选排名版本：`{comparison['candidate']['ranking_version']}`",
+        "",
+        "## 指标差值（candidate - baseline）",
+        "",
+    ]
+    lines.extend(f"- `{metric}`：{_format_delta(deltas.get(metric))}" for metric in _COMPARISON_METRICS)
+    lines.extend(["", "## Case 对比", ""])
+    lines.extend(f"- `{case['id']}`：{case['outcome']}" for case in comparison["cases"])
     markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"json": str(json_path), "markdown": str(markdown_path)}
 
@@ -497,3 +570,102 @@ def _mean_or_none(values: Sequence[float]) -> float | None:
 
 def _format_metric(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.4f}"
+
+
+def _normalise_experiment_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, Mapping):
+        raise RetrievalEvalError("invalid_experiment_metadata", "experiment metadata must be an object")
+    try:
+        # Round-trip both verifies JSON report compatibility and makes the
+        # stored metadata independent of caller-owned mutable containers.
+        value = json.loads(json.dumps(dict(metadata), ensure_ascii=False, sort_keys=True))
+    except (TypeError, ValueError) as exc:
+        raise RetrievalEvalError("invalid_experiment_metadata", "experiment metadata must be JSON serializable") from exc
+    if not isinstance(value, dict):
+        raise RetrievalEvalError("invalid_experiment_metadata", "experiment metadata must be an object")
+    return value
+
+
+def _require_comparable_reports(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
+    for key in ("dataset_id", "dataset_revision"):
+        if baseline.get(key) != candidate.get(key):
+            raise RetrievalEvalError("baseline_incompatible", f"baseline and candidate differ on {key}")
+    baseline_fingerprint = _mapping(baseline.get("vault_fingerprint"), "baseline_invalid", "baseline vault fingerprint must be an object")
+    candidate_fingerprint = _mapping(candidate.get("vault_fingerprint"), "candidate_invalid", "candidate vault fingerprint must be an object")
+    if baseline_fingerprint.get("value") != candidate_fingerprint.get("value"):
+        raise RetrievalEvalError("baseline_incompatible", "baseline and candidate vault fingerprints differ")
+    baseline_parameters = _mapping(baseline.get("parameters"), "baseline_invalid", "baseline parameters must be an object")
+    candidate_parameters = _mapping(candidate.get("parameters"), "candidate_invalid", "candidate parameters must be an object")
+    if baseline_parameters.get("top_k") != candidate_parameters.get("top_k"):
+        raise RetrievalEvalError("baseline_incompatible", "baseline and candidate top_k values differ")
+
+
+def _report_identity(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    fingerprint = _mapping(metadata.get("vault_fingerprint"), "report_invalid", "report vault fingerprint must be an object")
+    ranking_raw = metadata.get("ranking", {})
+    ranking = _mapping(ranking_raw, "report_invalid", "report ranking must be an object")
+    experiment = metadata.get("experiment", {})
+    if not isinstance(experiment, Mapping):
+        raise RetrievalEvalError("report_invalid", "report experiment metadata must be an object")
+    return {
+        "dataset_id": metadata.get("dataset_id"),
+        "dataset_revision": metadata.get("dataset_revision"),
+        "vault_fingerprint": fingerprint.get("value"),
+        "ranking_version": ranking.get("version", "legacy-unversioned"),
+        "parent_baseline_id": experiment.get("parent_baseline_id"),
+    }
+
+
+def _cases_by_id(report: Mapping[str, Any], code: str) -> dict[str, Mapping[str, Any]]:
+    raw_cases = report.get("cases")
+    if not isinstance(raw_cases, list):
+        raise RetrievalEvalError(code, "report cases must be a list")
+    cases: dict[str, Mapping[str, Any]] = {}
+    for raw_case in raw_cases:
+        case = _mapping(raw_case, code, "report case must be an object")
+        case_id = _nonempty_string(case.get("id"), code, "report case id must be a string")
+        if case_id in cases:
+            raise RetrievalEvalError(code, f"duplicate report case id: {case_id}")
+        cases[case_id] = case
+    return cases
+
+
+def _compare_case(case_id: str, baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
+    baseline_metrics = _mapping(baseline.get("metrics"), "baseline_invalid", "baseline case metrics must be an object")
+    candidate_metrics = _mapping(candidate.get("metrics"), "candidate_invalid", "candidate case metrics must be an object")
+    deltas = {
+        metric: _metric_delta(baseline_metrics.get(metric), candidate_metrics.get(metric))
+        for metric in ("recall", "mrr", "ndcg")
+    }
+    recall_delta = deltas["recall"]
+    if recall_delta is not None and recall_delta > 0:
+        outcome = "win"
+    elif recall_delta is not None and recall_delta < 0:
+        outcome = "loss"
+    else:
+        secondary = [delta for metric, delta in deltas.items() if metric != "recall" and delta is not None]
+        if secondary and all(delta >= 0 for delta in secondary) and any(delta > 0 for delta in secondary):
+            outcome = "win"
+        elif secondary and all(delta <= 0 for delta in secondary) and any(delta < 0 for delta in secondary):
+            outcome = "loss"
+        else:
+            outcome = "tie"
+    return {"id": case_id, "outcome": outcome, "metric_deltas": deltas}
+
+
+def _metric_delta(baseline: object, candidate: object) -> float | None:
+    if baseline is None or candidate is None:
+        return None
+    if isinstance(baseline, bool) or isinstance(candidate, bool) or not isinstance(baseline, (int, float)) or not isinstance(candidate, (int, float)):
+        raise RetrievalEvalError("report_invalid", "comparison metrics must be numeric or null")
+    return float(candidate) - float(baseline)
+
+
+def _format_delta(value: object) -> str:
+    if value is None:
+        return "N/A"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RetrievalEvalError("comparison_invalid", "comparison delta must be numeric or null")
+    return f"{float(value):+.4f}"
