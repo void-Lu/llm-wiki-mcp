@@ -276,6 +276,7 @@ class TestLlmWikiServerTools:
             "language": "zh-CN",
             "enable_vector": False,
             "vector_config": None,
+            "retrieval_mode": "hybrid",
             "max_graph_hops": 2,
             "include_raw_sources": False,
             "filter_type": None,
@@ -380,6 +381,11 @@ class TestLlmWikiServerTools:
             "top_k": 3,
             "max_graph_hops": 1,
             "include_raw_sources": True,
+            "enable_vector": False,
+            "vector_config": None,
+            "retrieval_mode": "hybrid",
+            "filter_type": None,
+            "filter_tags": None,
         }]
 
     def test_wiki_ingest_codegraph_tool_delegates_codegraph_ingest(self, monkeypatch, tmp_path: Path):

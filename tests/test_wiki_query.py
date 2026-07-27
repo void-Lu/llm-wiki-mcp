@@ -6,7 +6,10 @@ from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
 from netsuite_llm_wiki_mcp.wiki_models import WikiPage
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.vector_index import VectorIndexStore
+from netsuite_llm_wiki_mcp.vector_provider import DeterministicFakeProvider
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query, wiki_query_debug
+import netsuite_llm_wiki_mcp.wiki_query as wiki_query_module
 
 
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
@@ -313,6 +316,62 @@ def test_wiki_query_vector_stage_is_optional_warning(tmp_path: Path):
 
     assert result["pipeline"]["stage_1_5_vector_enabled"] is True
     assert result["pipeline"]["stage_1_5_vector_warnings"][0]["code"] == "vector_config_missing"
+
+
+def test_wiki_query_vector_recall_is_independent_and_rrf_debuggable(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/lexical.md", "Lexical Match", "expense report keyword", type="concept")
+    _write(root, "wiki/concepts/semantic.md", "Semantic Match", "accounts payable operations", type="concept")
+    refresh_indexes(root)
+    model = tmp_path / "local-bge-m3"
+    model.mkdir()
+    provider = DeterministicFakeProvider(
+        {
+            "expense automation": [1, 0, 0, 0],
+            "accounts payable operations": [1, 0, 0, 0],
+        }
+    )
+    store = VectorIndexStore(root)
+    records = wiki_query_module.vector_index_records(root)
+    store.build(records, provider, include_raw_sources=False)
+    monkeypatch.setattr(wiki_query_module, "LocalBgeM3Provider", lambda *args, **kwargs: provider)
+    config = {"provider": "local_bge_m3", "model_path": str(model), "rrf_k": 60}
+
+    result = wiki_query(root, "expense automation", top_k=3, include_content=False, include_context_pack=False, enable_vector=True, vector_config=config)
+    debug = wiki_query_debug(root, "expense automation", top_k=3, enable_vector=True, vector_config=config)
+
+    semantic = next(item for item in result["results"] if item["path"] == "wiki/concepts/semantic.md")
+    semantic_debug = next(item for item in debug["ranking_debug"]["results"] if item["path"] == semantic["path"])
+    assert semantic["scores"]["keyword"] == 0
+    assert semantic["scores"]["vector"] > 0
+    assert result["pipeline"]["stage_1_5_vector_status"]["state"] == "ready"
+    assert semantic_debug["vector"]["rank"] is not None
+    assert semantic_debug["fusion"]["rrf_contribution"] > 0
+
+
+def test_wiki_query_never_builds_missing_vector_index_or_exposes_raw_when_disabled(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/visible.md", "Visible", "ordinary content", type="concept")
+    raw = root / "raw/sources/private.txt"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("raw semantic content", encoding="utf-8")
+    model = tmp_path / "local-bge-m3"
+    model.mkdir()
+
+    result = wiki_query(
+        root,
+        "raw semantic",
+        include_content=False,
+        include_context_pack=False,
+        enable_vector=True,
+        vector_config={"provider": "local_bge_m3", "model_path": str(model)},
+    )
+
+    assert not (root / ".llm-wiki/vector-index").exists()
+    assert result["pipeline"]["stage_1_5_vector_warnings"][0]["code"] == "index_missing"
+    assert all(not item["path"].startswith("raw/") for item in result["results"])
 
 
 def test_wiki_query_idf_weights_rare_terms_higher(tmp_path: Path):

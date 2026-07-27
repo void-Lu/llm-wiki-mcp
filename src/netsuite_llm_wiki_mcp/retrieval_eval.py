@@ -193,6 +193,8 @@ def run_retrieval_evaluation(
     measure_context_budget: bool = True,
     context_budget_case_limit: int | None = None,
     experiment_metadata: Mapping[str, Any] | None = None,
+    retrieval_mode: str = "lexical",
+    vector_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute the public query API only; this function never mutates the vault."""
     if top_k <= 0:
@@ -201,12 +203,16 @@ def run_retrieval_evaluation(
         raise RetrievalEvalError("invalid_repeats", "repeats must be greater than zero")
     if context_budget_case_limit is not None and context_budget_case_limit < 0:
         raise RetrievalEvalError("invalid_context_budget_case_limit", "context_budget_case_limit must be non-negative")
+    if retrieval_mode not in {"lexical", "vector", "hybrid"}:
+        raise RetrievalEvalError("invalid_retrieval_mode", "retrieval_mode must be lexical, vector, or hybrid")
+    if retrieval_mode != "lexical" and not vector_config:
+        raise RetrievalEvalError("vector_config_missing", "vector and hybrid evaluation require a local vector configuration")
     root = Path(vault_root).expanduser().resolve()
     validate_dataset_paths(dataset, root)
 
     # Warm the interpreter and parser without treating it as a latency sample.
     first = dataset.cases[0]
-    _query_case(root, first, top_k=top_k, include_context_pack=False)
+    _query_case(root, first, top_k=top_k, include_context_pack=False, retrieval_mode=retrieval_mode, vector_config=vector_config)
 
     cases: list[dict[str, Any]] = []
     latency_samples: list[float] = []
@@ -225,7 +231,7 @@ def run_retrieval_evaluation(
         rankings: list[list[str]] = []
         for _ in range(repeats):
             started = time.perf_counter()
-            result = _query_case(root, case, top_k=top_k, include_context_pack=False)
+            result = _query_case(root, case, top_k=top_k, include_context_pack=False, retrieval_mode=retrieval_mode, vector_config=vector_config)
             elapsed_ms = (time.perf_counter() - started) * 1_000
             latency_samples.append(elapsed_ms)
             rankings.append([str(item["path"]) for item in result["results"]])
@@ -259,7 +265,7 @@ def run_retrieval_evaluation(
 
         budget: dict[str, Any] | None = None
         if measure_context_budget and (context_budget_case_limit is None or case_index < context_budget_case_limit):
-            context_result = _query_case(root, case, top_k=top_k, include_context_pack=True)
+            context_result = _query_case(root, case, top_k=top_k, include_context_pack=True, retrieval_mode=retrieval_mode, vector_config=vector_config)
             budget = dict(context_result["budget"])
             used = sum(int(value) for value in budget.get("used", {}).values())
             budget["used_total"] = used
@@ -304,6 +310,8 @@ def run_retrieval_evaluation(
                 "repeats": repeats,
                 "measure_context_budget": measure_context_budget,
                 "context_budget_case_limit": context_budget_case_limit,
+                "retrieval_mode": retrieval_mode,
+                "vector_enabled": retrieval_mode != "lexical",
             },
             "vault_fingerprint": vault_fingerprint(root),
         },
@@ -495,13 +503,24 @@ def _parse_filters(raw: object, case_id: str) -> dict[str, Any]:
     return filters
 
 
-def _query_case(root: Path, case: RetrievalEvalCase, *, top_k: int, include_context_pack: bool) -> dict[str, Any]:
+def _query_case(
+    root: Path,
+    case: RetrievalEvalCase,
+    *,
+    top_k: int,
+    include_context_pack: bool,
+    retrieval_mode: str = "lexical",
+    vector_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     return wiki_query(
         root,
         case.query,
         top_k=top_k,
         include_content=False,
         include_context_pack=include_context_pack,
+        enable_vector=retrieval_mode != "lexical",
+        vector_config=dict(vector_config) if vector_config is not None else None,
+        retrieval_mode=retrieval_mode,
         project=case.filters.get("project"),
         filter_type=case.filters.get("filter_type"),
         filter_tags=case.filters.get("filter_tags"),

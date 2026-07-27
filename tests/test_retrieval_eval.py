@@ -11,7 +11,10 @@ import pytest
 
 from netsuite_llm_wiki_mcp.retrieval_eval import (
     Relevance,
+    RetrievalEvalCase,
+    RetrievalEvalDataset,
     RetrievalEvalError,
+    RetrievalEvalManifest,
     calculate_ranking_metrics,
     compare_retrieval_reports,
     load_retrieval_dataset,
@@ -21,6 +24,12 @@ from netsuite_llm_wiki_mcp.retrieval_eval import (
     write_retrieval_eval_report,
     write_retrieval_comparison,
 )
+from netsuite_llm_wiki_mcp.vector_index import VectorIndexStore
+from netsuite_llm_wiki_mcp.vector_provider import DeterministicFakeProvider
+from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
+from netsuite_llm_wiki_mcp.wiki_models import WikiPage
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
+import netsuite_llm_wiki_mcp.wiki_query as wiki_query_module
 
 
 _FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "retrieval"
@@ -37,6 +46,54 @@ def _copy_dataset(tmp_path: Path) -> Path:
     shutil.copy2(_FIXTURE_ROOT / "fixture.jsonl", dataset)
     shutil.copy2(_FIXTURE_ROOT / "fixture.manifest.json", tmp_path / "fixture.manifest.json")
     return dataset
+
+
+def test_vector_and_hybrid_evaluation_improve_zero_lexical_recall_without_metric_regression(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = tmp_path / "vault"
+    create_wiki_root(vault)
+    path = Path("wiki/concepts/semantic.md")
+    write_wiki_page(
+        vault,
+        WikiPage(path, {"title": "Semantic result", "generated": True, "type": "concept"}, "Semantic result", "accounts payable operations"),
+        overwrite_generated_only=False,
+    )
+    model = tmp_path / "local-bge-m3"
+    model.mkdir()
+    provider = DeterministicFakeProvider(
+        {
+            "expense automation": [1, 0, 0, 0],
+            "accounts payable operations": [1, 0, 0, 0],
+        }
+    )
+    store = VectorIndexStore(vault)
+    store.build(wiki_query_module.vector_index_records(vault), provider, include_raw_sources=False)
+    monkeypatch.setattr(wiki_query_module, "LocalBgeM3Provider", lambda *args, **kwargs: provider)
+    dataset = RetrievalEvalDataset(
+        RetrievalEvalManifest("vector-ablation", "1", 0.5),
+        (
+            RetrievalEvalCase(
+                "semantic-only",
+                "expense automation",
+                (Relevance(path.as_posix(), 3),),
+                {},
+                True,
+                "en",
+                (),
+                "semantic recall fixture",
+            ),
+        ),
+    )
+    config = {"provider": "local_bge_m3", "model_path": str(model)}
+
+    lexical = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="lexical")
+    vector = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="vector", vector_config=config)
+    hybrid = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="hybrid", vector_config=config)
+
+    assert lexical["metrics"]["recall_at_k_macro"] == 0.0
+    assert vector["metrics"]["recall_at_k_macro"] == 1.0
+    assert hybrid["metrics"]["recall_at_k_macro"] > lexical["metrics"]["recall_at_k_macro"]
+    assert hybrid["metrics"]["mrr_at_k_macro"] >= lexical["metrics"]["mrr_at_k_macro"]
+    assert hybrid["metrics"]["ndcg_at_k_macro"] >= lexical["metrics"]["ndcg_at_k_macro"]
 
 
 def test_ranking_metrics_match_hand_calculation() -> None:

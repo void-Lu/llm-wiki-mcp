@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from netsuite_llm_wiki_mcp.vector_index import DEFAULT_RRF_K, VectorIndexError, VectorIndexStore, VectorRecord, parse_vector_settings
+from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProviderError
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
 from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
 
@@ -13,7 +17,7 @@ _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _STRUCTURAL_PAGE_NAMES = {"index.md", "log.md", "overview.md"}
 DEFAULT_TOP_K = 10
 _PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
-RANKING_VERSION = "lexical-length-normalized-graph-capped-v1"
+RANKING_VERSION = "lexical-vector-rrf-graph-capped-v1"
 _SCORE_PRECISION = 12
 _GRAPH_SCORE_RATIO_CAP = 0.15
 _PURE_GRAPH_SCORE_CAP = 0.75
@@ -66,6 +70,9 @@ class RankBreakdown:
     lexical_fields: dict[str, float] = field(default_factory=dict)
     lexical_exact_matches: list[dict[str, str]] = field(default_factory=list)
     graph_reasons: list[dict[str, Any]] = field(default_factory=list)
+    lexical_rank: int | None = None
+    vector_rank: int | None = None
+    rrf_contribution: float = 0.0
     fusion_total: float = 0.0
     rank: int = 0
 
@@ -73,8 +80,13 @@ class RankBreakdown:
         return {
             "lexical": {
                 "total": candidate.keyword_score,
+                "rank": self.lexical_rank,
                 "fields": dict(self.lexical_fields),
                 "exact_matches": list(self.lexical_exact_matches),
+            },
+            "vector": {
+                "score": candidate.vector_score,
+                "rank": self.vector_rank,
             },
             "graph": {
                 "total": candidate.graph_score,
@@ -82,7 +94,7 @@ class RankBreakdown:
             },
             "fusion": {
                 "total": self.fusion_total,
-                "vector": candidate.vector_score,
+                "rrf_contribution": self.rrf_contribution,
             },
             "rank": self.rank,
         }
@@ -98,12 +110,13 @@ class QueryCandidate:
     source_kind: str = "wiki"
     keyword_score: float = 0.0
     vector_score: float = 0.0
+    fusion_score: float = 0.0
     graph_score: float = 0.0
     rank_breakdown: RankBreakdown = field(default_factory=RankBreakdown)
 
     @property
     def total_score(self) -> float:
-        return _stable_score(self.keyword_score + self.vector_score + self.graph_score)
+        return _stable_score(self.fusion_score + self.graph_score)
 
 
 @dataclass(frozen=True)
@@ -137,6 +150,7 @@ def wiki_query(
     include_raw_sources: bool = False,
     filter_type: str | None = None,
     filter_tags: list[str] | None = None,
+    retrieval_mode: str = "hybrid",
 ) -> dict[str, Any]:
     return _execute_query(
         vault_root=vault_root,
@@ -150,6 +164,7 @@ def wiki_query(
         language=language,
         enable_vector=enable_vector,
         vector_config=vector_config,
+        retrieval_mode=retrieval_mode,
         max_graph_hops=max_graph_hops,
         include_raw_sources=include_raw_sources,
         filter_type=filter_type,
@@ -170,12 +185,15 @@ def _execute_query(
     language: str,
     enable_vector: bool,
     vector_config: dict[str, Any] | None,
+    retrieval_mode: str,
     max_graph_hops: int,
     include_raw_sources: bool,
     filter_type: str | None,
     filter_tags: list[str] | None,
     collect_debug: bool,
 ) -> QueryExecution:
+    if retrieval_mode not in {"lexical", "vector", "hybrid"}:
+        raise ValueError("retrieval_mode must be lexical, vector, or hybrid")
     root = Path(vault_root).expanduser().resolve()
     tokens = _tokens(question)
     all_candidates = _candidate_pages(root, include_raw_sources=include_raw_sources)
@@ -198,10 +216,21 @@ def _execute_query(
         candidate.keyword_score = signals.total
         candidate.rank_breakdown.lexical_fields = dict(signals.fields)
         candidate.rank_breakdown.lexical_exact_matches = list(signals.exact_matches)
-        if candidate.keyword_score > 0:
+        if candidate.keyword_score > 0 and retrieval_mode != "vector":
+            candidate.fusion_score = candidate.keyword_score
             scored[candidate.rel] = candidate
 
-    vector_warnings = _apply_optional_vector_stage(scored, enable_vector, vector_config)
+    vector_enabled = enable_vector and retrieval_mode != "lexical"
+    vector_warnings, vector_status = _apply_optional_vector_stage(
+        root,
+        all_candidates,
+        candidates,
+        scored,
+        vector_enabled,
+        vector_config,
+        question,
+        include_raw_sources=include_raw_sources,
+    )
     _apply_graph_expansion(
         scored,
         candidates,
@@ -213,7 +242,7 @@ def _execute_query(
     selected = sorted(scored.values(), key=lambda item: (-item.total_score, item.rel))[:top_k]
     for rank, candidate in enumerate(selected, 1):
         candidate.rank_breakdown.rank = rank
-        candidate.rank_breakdown.fusion_total = candidate.total_score
+        candidate.rank_breakdown.fusion_total = candidate.fusion_score
     results = [_result_item(candidate, tokens) for candidate in selected]
     context = _legacy_context(selected, tokens, include_content)
     context_pack = _context_pack(root, selected, question, context_window_tokens, chat_history or [], language) if include_context_pack else None
@@ -233,8 +262,10 @@ def _execute_query(
             "stage_1_keyword_hits": sum(1 for item in scored.values() if item.keyword_score > 0),
             "stage_1_ranking_version": RANKING_VERSION,
             "stage_1_raw_sources_included": include_raw_sources,
-            "stage_1_5_vector_enabled": enable_vector,
+            "stage_1_5_vector_enabled": vector_enabled,
+            "stage_1_5_retrieval_mode": retrieval_mode,
             "stage_1_5_vector_warnings": vector_warnings,
+            "stage_1_5_vector_status": vector_status,
             "stage_2_graph_hops": max_graph_hops,
             "stage_2_graph_hits": sum(1 for item in scored.values() if item.graph_score > 0),
             "stage_3_context_window_tokens": context_window_tokens,
@@ -257,6 +288,11 @@ def wiki_query_debug(
     top_k: int = DEFAULT_TOP_K,
     max_graph_hops: int = 2,
     include_raw_sources: bool = False,
+    enable_vector: bool = False,
+    vector_config: dict[str, Any] | None = None,
+    retrieval_mode: str = "hybrid",
+    filter_type: str | None = None,
+    filter_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     execution = _execute_query(
         vault_root=vault_root,
@@ -268,12 +304,13 @@ def wiki_query_debug(
         include_context_pack=False,
         chat_history=None,
         language="zh-CN",
-        enable_vector=False,
-        vector_config=None,
+        enable_vector=enable_vector,
+        vector_config=vector_config,
+        retrieval_mode=retrieval_mode,
         max_graph_hops=max_graph_hops,
         include_raw_sources=include_raw_sources,
-        filter_type=None,
-        filter_tags=None,
+        filter_type=filter_type,
+        filter_tags=filter_tags,
         collect_debug=True,
     )
     graph_reasons = {
@@ -293,6 +330,7 @@ def wiki_query_debug(
                 "max_graph_expansions_per_seed": _MAX_GRAPH_EXPANSIONS_PER_SEED,
                 "graph_score_ratio_cap": _GRAPH_SCORE_RATIO_CAP,
                 "pure_graph_score_cap": _PURE_GRAPH_SCORE_CAP,
+                "rrf_k": _debug_rrf_k(vector_config),
             },
             "results": [
                 {"path": candidate.rel, **candidate.rank_breakdown.as_debug_dict(candidate)}
@@ -508,12 +546,119 @@ def _search_text(candidate: QueryCandidate) -> str:
     return "\n".join([candidate.rel, candidate.title, str(candidate.frontmatter), candidate.body]).casefold()
 
 
-def _apply_optional_vector_stage(scored: dict[str, QueryCandidate], enable_vector: bool, vector_config: dict[str, Any] | None) -> list[dict[str, str]]:
+def _apply_optional_vector_stage(
+    root: Path,
+    index_candidates: list[QueryCandidate],
+    candidates: list[QueryCandidate],
+    scored: dict[str, QueryCandidate],
+    enable_vector: bool,
+    vector_config: dict[str, Any] | None,
+    question: str,
+    *,
+    include_raw_sources: bool,
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """Run independent vector recall without allowing it to mutate an index."""
+
     if not enable_vector:
-        return []
+        return [], {"state": "disabled"}
     if not vector_config:
-        return [{"code": "vector_config_missing", "message": "vector search was requested but vector_config was not provided"}]
-    return [{"code": "vector_backend_not_configured", "message": "optional vector search is not initialized in this MCP server yet; keyword and graph stages were used"}]
+        return [
+            {"code": "vector_config_missing", "message": "vector search was requested but vector_config was not provided"}
+        ], {"state": "unconfigured"}
+    try:
+        settings = parse_vector_settings(root, vector_config)
+        if settings.model_path is None:
+            raise VectorIndexError("model_missing", "a local model_path is required when vector search is enabled")
+        store = VectorIndexStore(root, settings.index_path)
+        index_records = _vector_records(index_candidates)
+        status = store.status(index_records, include_raw_sources=include_raw_sources)
+        if not status.get("ok") or status.get("state") != "fresh":
+            code = str(status.get("code") or "index_stale")
+            return [{"code": code, "message": "vector index is unavailable; keyword and graph stages were used"}], status
+        provider = LocalBgeM3Provider(
+            settings.model_path,
+            device=settings.device,
+            batch_size=settings.batch_size,
+            max_sequence_length=settings.max_sequence_length,
+        )
+        store.validate_provider(provider.identity(), include_raw_sources=include_raw_sources)
+    except (VectorIndexError, VectorProviderError) as exc:
+        code = exc.code
+        return [{"code": code, "message": "vector retrieval is unavailable; keyword and graph stages were used"}], {"state": "unavailable", "code": code}
+
+    return _vector_recall(
+        question,
+        candidates,
+        scored,
+        settings=settings,
+        store=store,
+        provider=provider,
+    )
+
+
+def _vector_recall(
+    question: str,
+    candidates: list[QueryCandidate],
+    scored: dict[str, QueryCandidate],
+    *,
+    settings: Any,
+    store: VectorIndexStore,
+    provider: LocalBgeM3Provider,
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    results = store.search(
+        provider.embed_query(question),
+        allowed_paths={candidate.rel for candidate in candidates},
+        limit=settings.candidate_limit,
+    )
+    candidates_by_rel = {candidate.rel: candidate for candidate in candidates}
+    lexical_ranked = sorted(scored.values(), key=lambda candidate: (-candidate.keyword_score, candidate.rel))
+    for rank, candidate in enumerate(lexical_ranked, 1):
+        candidate.rank_breakdown.lexical_rank = rank
+    for result in results:
+        candidate = candidates_by_rel[result.path]
+        candidate.vector_score = result.score
+        candidate.rank_breakdown.vector_rank = result.rank
+        scored.setdefault(candidate.rel, candidate)
+    for candidate in scored.values():
+        lexical = candidate.rank_breakdown.lexical_rank
+        vector = candidate.rank_breakdown.vector_rank
+        contribution = (1.0 / (settings.rrf_k + lexical) if lexical else 0.0) + (1.0 / (settings.rrf_k + vector) if vector else 0.0)
+        candidate.rank_breakdown.rrf_contribution = _stable_score(contribution)
+        candidate.fusion_score = candidate.rank_breakdown.rrf_contribution
+    return [], {"state": "ready", "candidate_count": len(results), "rrf_k": settings.rrf_k}
+
+
+def _vector_records(candidates: list[QueryCandidate]) -> list[VectorRecord]:
+    records: list[VectorRecord] = []
+    for candidate in candidates:
+        content = {"title": candidate.title, "body": candidate.body, "frontmatter": candidate.frontmatter}
+        serialized = json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+        records.append(
+            VectorRecord(
+                path=candidate.rel,
+                content_hash=hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+                text=f"{candidate.title}\n{candidate.body}",
+                source_kind=candidate.source_kind,
+            )
+        )
+    return records
+
+
+def vector_index_records(vault_root: str | Path, *, include_raw_sources: bool = False) -> list[VectorRecord]:
+    """Return the complete eligible corpus for explicit index lifecycle actions."""
+
+    root = Path(vault_root).expanduser().resolve()
+    return _vector_records(_candidate_pages(root, include_raw_sources=include_raw_sources))
+
+
+def _debug_rrf_k(vector_config: dict[str, Any] | None) -> int:
+    if not vector_config or isinstance(vector_config.get("rrf_k"), bool):
+        return DEFAULT_RRF_K
+    try:
+        value = int(vector_config["rrf_k"])
+    except (KeyError, TypeError, ValueError):
+        return DEFAULT_RRF_K
+    return value if 1 <= value <= 10_000 else DEFAULT_RRF_K
 
 
 def _build_graph(root: Path) -> Graph:
@@ -641,8 +786,8 @@ def _apply_graph_expansion(
 
 
 def _graph_score_cap(candidate: QueryCandidate) -> float:
-    if candidate.keyword_score > 0:
-        return _stable_score(candidate.keyword_score * _GRAPH_SCORE_RATIO_CAP)
+    if candidate.fusion_score > 0:
+        return _stable_score(candidate.fusion_score * _GRAPH_SCORE_RATIO_CAP)
     return _PURE_GRAPH_SCORE_CAP
 
 

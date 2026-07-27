@@ -205,6 +205,18 @@ def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys:
     assert Path(output["reports"]["markdown"]).is_file()
 
 
+def test_vector_status_is_read_only_and_reports_missing_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    vault = _make_vault(tmp_path / "vault")
+
+    exit_code = main(["vector", "status", "--vault", str(vault)])
+
+    assert exit_code == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["code"] == "index_missing"
+    assert output["local_provider"] == {"available": False, "code": "model_missing"}
+    assert not (vault / ".llm-wiki" / "vector-index").exists()
+
+
 def test_pyproject_exposes_cli_without_preload_script():
     text = Path("pyproject.toml").read_text(encoding="utf-8")
 

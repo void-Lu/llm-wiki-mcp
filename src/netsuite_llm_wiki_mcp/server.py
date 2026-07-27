@@ -99,6 +99,7 @@ def wiki_query_tool(
     include_raw_sources: bool = False,
     filter_type: str | None = None,
     filter_tags: list[str] | None = None,
+    retrieval_mode: str = "hybrid",
 ) -> dict[str, Any]:
     return run_wiki_query(
         vault_root=vault_root,
@@ -112,6 +113,7 @@ def wiki_query_tool(
         language=language,
         enable_vector=enable_vector,
         vector_config=vector_config,
+        retrieval_mode=retrieval_mode,
         max_graph_hops=max_graph_hops,
         include_raw_sources=include_raw_sources,
         filter_type=filter_type,
@@ -126,6 +128,11 @@ def wiki_query_debug_tool(
     top_k: int = DEFAULT_TOP_K,
     max_graph_hops: int = 2,
     include_raw_sources: bool = False,
+    enable_vector: bool = False,
+    vector_config: dict[str, Any] | None = None,
+    retrieval_mode: str = "hybrid",
+    filter_type: str | None = None,
+    filter_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     return run_wiki_query_debug(
         vault_root=vault_root,
@@ -134,6 +141,11 @@ def wiki_query_debug_tool(
         top_k=top_k,
         max_graph_hops=max_graph_hops,
         include_raw_sources=include_raw_sources,
+        enable_vector=enable_vector,
+        vector_config=vector_config,
+        retrieval_mode=retrieval_mode,
+        filter_type=filter_type,
+        filter_tags=filter_tags,
     )
 
 
@@ -373,6 +385,7 @@ def wiki_query(
     include_raw_sources: bool = False,
     filter_type: str | None = None,
     filter_tags: list[str] | None = None,
+    retrieval_mode: str = "hybrid",
 ) -> dict[str, Any]:
     """Query persisted wiki pages and return a budgeted context pack."""
     return wiki_query_tool(
@@ -391,6 +404,7 @@ def wiki_query(
         include_raw_sources,
         filter_type,
         filter_tags,
+        retrieval_mode,
     )
 
 

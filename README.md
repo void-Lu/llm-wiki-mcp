@@ -2,12 +2,14 @@
 
 一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。代码事实来自 CodeGraph；其他内容都通过 MCP 工具进行摄入、查询和维护。
 
-不使用 embedding，不使用向量数据库，不使用 Chroma。只有 Markdown、YAML frontmatter 和 `[[wikilinks]]`。
+默认不使用 embedding 或向量数据库；关键词、图检索和 `[[wikilinks]]` 始终可独立运行。需要语义召回时可显式启用本地 BGE-M3 索引，绝不自动下载模型或向外部服务发送 vault 内容。
 
 ## 安装
 
 ```bash
 uv sync --extra dev
+# 只有需要本地向量检索时才安装；不会下载任何模型
+uv sync --extra dev --extra vector
 ```
 
 本仓库提交了 `uv.lock`；开发时优先使用 `uv sync --extra dev` 创建/同步 `.venv`，并安装 `dev` 可选依赖。
@@ -29,6 +31,10 @@ uv run python -m netsuite_llm_wiki_mcp.server
 uv run netsuite-llm-wiki-mcp init --vault <name> --root <path> --default
 uv run netsuite-llm-wiki-mcp status
 uv run netsuite-llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir>
+uv run netsuite-llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir> --retrieval-mode hybrid --vector-model-path <local-bge-m3-path>
+uv run netsuite-llm-wiki-mcp vector status --vault <path>
+uv run netsuite-llm-wiki-mcp vector build --vault <path> --model-path <local-bge-m3-path>
+uv run netsuite-llm-wiki-mcp vector update --vault <path> --model-path <local-bge-m3-path>
 ```
 
 ## 配置
@@ -157,6 +163,31 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 | `wiki_query` | 关键词 + CJK bigram 搜索 -> 图扩展 -> 按上下文预算输出；默认最多返回 10 个候选，结果包含标题匹配和嵌入图片元数据 |
 
 `retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共 `wiki_query`，输出 JSON 与 Markdown 报告。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
+
+### 可选本地向量检索
+
+向量检索默认关闭。唯一支持的 provider 是本地 `local_bge_m3`；模型目录由调用方显式提供，加载时启用离线模式和 `local_files_only`，缺模型或未安装 `vector` extra 时只会结构化降级到关键词/图结果。为使 BGE-M3 的 CPU 全量建库可控，文档 embedding 默认上限为 256 tokens（可用 `max_sequence_length` 或 CLI 的 `--max-sequence-length` 显式调整）；该值是索引身份的一部分，改变后必须执行 full build。
+
+先通过 `vector build` 显式构建索引；`wiki_query` 从不构建、更新索引或下载模型。索引保存于 vault 的 `.llm-wiki/vector-index/`，仅含相对路径、内容哈希、元数据和归一化向量，不保存正文。默认 `include_raw_sources=false`，这会同时约束建库、更新和查询。
+
+启用查询时传入：
+
+```python
+wiki_query(
+    vault_root,
+    "如何自动化应付账款处理？",
+    enable_vector=True,
+    vector_config={
+        "provider": "local_bge_m3",
+        "model_path": "<本地-bge-m3-目录>",
+        "candidate_limit": 50,
+        "rrf_k": 60,
+        "max_sequence_length": 256,
+    },
+)
+```
+
+关键词和向量从完整合格语料独立召回，然后以 RRF 融合，最后才应用有界图增强。`wiki_query_debug` 可显示词法/向量 rank、RRF 贡献和图贡献；普通响应保留兼容字段，并在 `pipeline` 中报告向量索引状态或降级原因。
 
 ### 维护
 
