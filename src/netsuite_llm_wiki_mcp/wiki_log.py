@@ -1,42 +1,66 @@
 from __future__ import annotations
 
 import re
+import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from netsuite_llm_wiki_mcp.redaction import redact_sensitive_text
+from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_limits import (
+    HARD_PAGE_BYTES,
+    MAX_LOG_ENTRIES,
+    TARGET_LOG_ENTRIES,
+    TARGET_PAGE_BYTES,
+    partition_rendered_units,
+    render_units,
+    utf8_size,
+)
 from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 
 _LOG_HEADING_RE = re.compile(r"^## \[([^\]]+)\] (\S+) \| (.+)$")
+_INDEX_PAGE_RE = re.compile(r"^index(?:-\d{2,})?\.md$")
 
 
 def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, object]:
+    """Append one complete log record while keeping every generated log bounded."""
+
     root = Path(vault_root)
     log_path = root / "wiki" / "log.md"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    if not log_path.exists():
-        log_path.write_text("# Log\n\n", encoding="utf-8")
+    timestamp = entry.timestamp or _now()
+    block = _render_log_entry(entry, timestamp)
+    preamble, blocks = _read_log_blocks(log_path, "# Log")
+    archived_paths: list[Path] = []
 
-    timestamp = entry.timestamp or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    operation = redact_sensitive_text(entry.operation)
-    title = redact_sensitive_text(entry.title)
-    project = redact_sensitive_text(entry.project)
-    status = redact_sensitive_text(entry.status)
-    lines = [
-        f"## [{timestamp}] {operation} | {title}",
-        f"- project: {project}",
-        f"- status: {status}",
-        "- paths:",
-        *_indented_items(entry.paths),
-        "- sources:",
-        *_indented_items(entry.sources),
-        "",
-    ]
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write("\n".join(lines) + "\n")
-    _enforce_log_limit(root, log_path, "wiki-log", record_archive=True)
-    return {"ok": True, "path": "wiki/log.md"}
+    if utf8_size(_join_log_blocks(preamble, [block])) > TARGET_PAGE_BYTES:
+        detail = _render_archive_detail(block)
+        if utf8_size(detail) > HARD_PAGE_BYTES:
+            return {
+                "ok": False,
+                "code": "log_entry_too_large",
+                "error": "log entry cannot fit into a bounded archive page",
+                "path": "wiki/log.md",
+            }
+        detail_path = _write_archive_text(root, timestamp, detail, prefix="log")
+        archived_paths.append(detail_path)
+        block = _render_archive_summary(entry, timestamp, detail_path.relative_to(root).as_posix())
+
+    next_blocks = [*blocks, block]
+    keep, overflow = _rotate_blocks(preamble, next_blocks)
+    if overflow:
+        archived_paths.extend(_write_archived_log_blocks(root, "wiki-log", overflow))
+    _atomic_write(log_path, _join_log_blocks(preamble, keep))
+
+    for archive_path in archived_paths:
+        _append_archive_log(root, archive_path)
+    _write_archive_index(root)
+    return {
+        "ok": True,
+        "path": "wiki/log.md",
+        "archived": [path.relative_to(root).as_posix() for path in archived_paths],
+    }
 
 
 def read_recent_log_entries(vault_root: str | Path, limit: int = 5) -> list[str]:
@@ -51,34 +75,33 @@ def parse_log_entries(vault_root: str | Path, limit: int = 10) -> list[dict[str,
     log_path = Path(vault_root) / "wiki" / "log.md"
     if not log_path.exists():
         return []
-    lines = log_path.read_text(encoding="utf-8").splitlines()
-    entries: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    current_field: str = ""
-    for line in lines:
-        match = _LOG_HEADING_RE.match(line)
-        if match:
-            if current is not None:
-                entries.append(current)
-            current = {
-                "timestamp": match.group(1),
-                "operation": match.group(2),
-                "title": match.group(3),
-                "project": "",
-                "status": "",
-                "paths": [],
-                "sources": [],
-            }
-            current_field = ""
-            continue
-        if current is None:
-            continue
+    _, blocks = _split_log_blocks(log_path.read_text(encoding="utf-8"))
+    entries = [_parse_log_block(block) for block in blocks]
+    return list(reversed(entries[-limit:]))
+
+
+def _parse_log_block(block: str) -> dict[str, Any]:
+    lines = block.splitlines()
+    match = _LOG_HEADING_RE.match(lines[0]) if lines else None
+    if not match:
+        return {"timestamp": "", "operation": "", "title": "", "project": "", "status": "", "paths": [], "sources": []}
+    entry: dict[str, Any] = {
+        "timestamp": match.group(1),
+        "operation": match.group(2),
+        "title": match.group(3),
+        "project": "",
+        "status": "",
+        "paths": [],
+        "sources": [],
+    }
+    current_field = ""
+    for line in lines[1:]:
         stripped = line.strip()
         if stripped.startswith("- project:"):
-            current["project"] = stripped[len("- project:"):].strip()
+            entry["project"] = stripped[len("- project:"):].strip()
             current_field = ""
         elif stripped.startswith("- status:"):
-            current["status"] = stripped[len("- status:"):].strip()
+            entry["status"] = stripped[len("- status:"):].strip()
             current_field = ""
         elif stripped == "- paths:":
             current_field = "paths"
@@ -87,10 +110,48 @@ def parse_log_entries(vault_root: str | Path, limit: int = 10) -> list[dict[str,
         elif stripped.startswith("- ") and current_field:
             value = stripped[2:].strip()
             if value != "none":
-                current[current_field].append(value)
-    if current is not None:
-        entries.append(current)
-    return list(reversed(entries[-limit:]))
+                entry[current_field].append(value)
+    return entry
+
+
+def _render_log_entry(entry: WikiLogEntry, timestamp: str) -> str:
+    operation = redact_sensitive_text(entry.operation)
+    title = redact_sensitive_text(entry.title)
+    project = redact_sensitive_text(entry.project)
+    status = redact_sensitive_text(entry.status)
+    return "\n".join([
+        f"## [{timestamp}] {operation} | {title}",
+        f"- project: {project}",
+        f"- status: {status}",
+        "- paths:",
+        *_indented_items(entry.paths),
+        "- sources:",
+        *_indented_items(entry.sources),
+    ])
+
+
+def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: str) -> str:
+    operation = _bounded_text(redact_sensitive_text(entry.operation), 256)
+    title = _bounded_text(redact_sensitive_text(entry.title), 1_024)
+    project = _bounded_text(redact_sensitive_text(entry.project), 1_024)
+    status = _bounded_text(redact_sensitive_text(entry.status), 1_024)
+    return "\n".join([
+        f"## [{timestamp}] {operation} | {title}",
+        f"- project: {project}",
+        f"- status: {status} (details archived)",
+        f"- detail: [[{archive_rel.removeprefix('wiki/')}|Full record]]",
+        "- paths:",
+        f"  - {len(entry.paths)} paths archived",
+        "- sources:",
+        f"  - {len(entry.sources)} sources archived",
+    ])
+
+
+def _render_archive_detail(block: str) -> str:
+    return render_units(
+        "---\ntype: log_archive\ngenerated: true\narchived: true\n---\n\n# Log archive",
+        [block],
+    )
 
 
 def _indented_items(items: list[str]) -> list[str]:
@@ -99,25 +160,44 @@ def _indented_items(items: list[str]) -> list[str]:
     return [f"  - {redact_sensitive_text(item)}" for item in items]
 
 
-def _enforce_log_limit(root: Path, log_path: Path, source_log_name: str, record_archive: bool) -> None:
-    """Archive oldest entries when the log exceeds *max_entries*.
+def _read_log_blocks(log_path: Path, default_preamble: str) -> tuple[str, list[str]]:
+    if not log_path.exists():
+        return default_preamble, []
+    preamble, blocks = _split_log_blocks(log_path.read_text(encoding="utf-8"))
+    return preamble or default_preamble, blocks
 
-    When the log exceeds 200 entries the oldest 100 are moved to an
-    archive file so each archive batch is a meaningful chunk rather than
-    a single-entry fragment.
-    """
-    max_entries = 200
-    keep_after_archive = 100
-    text = log_path.read_text(encoding="utf-8")
-    preamble, blocks = _split_log_blocks(text)
-    if len(blocks) <= max_entries:
+
+def _rotate_blocks(preamble: str, blocks: list[str]) -> tuple[list[str], list[str]]:
+    """Move only oldest whole blocks until both active limits are satisfied."""
+
+    if len(blocks) <= MAX_LOG_ENTRIES and utf8_size(_join_log_blocks(preamble, blocks)) <= TARGET_PAGE_BYTES:
+        return blocks, []
+
+    if len(blocks) > MAX_LOG_ENTRIES:
+        keep = blocks[-TARGET_LOG_ENTRIES:]
+        overflow = blocks[:-TARGET_LOG_ENTRIES]
+    else:
+        keep = list(blocks)
+        overflow = []
+    while keep and utf8_size(_join_log_blocks(preamble, keep)) > TARGET_PAGE_BYTES:
+        overflow.append(keep.pop(0))
+    return keep, overflow
+
+
+def _enforce_log_limit(root: Path, log_path: Path, source_log_name: str, record_archive: bool) -> None:
+    """Compatibility entry point for bounded rotation of either active log."""
+
+    default_preamble = "# Log" if log_path.name == "log.md" and log_path.parent.name != "archives" else "# Archives Log"
+    preamble, blocks = _read_log_blocks(log_path, default_preamble)
+    keep, overflow = _rotate_blocks(preamble, blocks)
+    if not overflow:
         return
-    overflow = blocks[: len(blocks) - keep_after_archive]
-    keep = blocks[len(blocks) - keep_after_archive :]
-    log_path.write_text(_join_log_blocks(preamble, keep), encoding="utf-8")
-    archive_path = _write_archived_log_blocks(root, source_log_name, overflow)
+    archive_paths = _write_archived_log_blocks(root, source_log_name, overflow)
+    _atomic_write(log_path, _join_log_blocks(preamble, keep))
     if record_archive:
-        _append_archive_log(root, archive_path)
+        for archive_path in archive_paths:
+            _append_archive_log(root, archive_path)
+    _write_archive_index(root)
 
 
 def _split_log_blocks(text: str) -> tuple[str, list[str]]:
@@ -141,42 +221,67 @@ def _split_log_blocks(text: str) -> tuple[str, list[str]]:
 
 
 def _join_log_blocks(preamble: str, blocks: list[str]) -> str:
-    parts = [preamble] if preamble else []
-    parts.extend(blocks)
-    return "\n\n".join(part for part in parts if part).rstrip() + "\n\n"
+    return render_units(preamble, blocks)
 
 
-def _write_archived_log_blocks(root: Path, source_log_name: str, blocks: list[str]) -> Path:
-    year, month, day = _archive_date_parts(blocks)
-    archive_dir = root / "wiki" / "archives" / year / month / day / "log"
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    sequence = len(list(archive_dir.glob(f"{source_log_name}-*.md"))) + 1
-    archive_path = archive_dir / f"{source_log_name}-{sequence:03d}.md"
-    archive_path.write_text("---\narchived: true\ntags:\n- archived\n---\n\n" + "\n\n".join(blocks).rstrip() + "\n", encoding="utf-8")
+def _write_archived_log_blocks(root: Path, source_log_name: str, blocks: list[str]) -> list[Path]:
+    grouped: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for block in blocks:
+        grouped[_archive_month_parts(block)].append(block)
+    written: list[Path] = []
+    for (year, month), group in sorted(grouped.items()):
+        header = "---\ntype: log_archive\ngenerated: true\narchived: true\n---\n\n# Log archive"
+        pages, oversized = partition_rendered_units(group, header, target_bytes=TARGET_PAGE_BYTES)
+        for page_blocks in pages:
+            written.append(_write_archive_text(root, f"{year}-{month}-01T00:00:00Z", render_units(header, page_blocks), prefix=_archive_prefix(source_log_name)))
+        for block in oversized:
+            detail = render_units(header, [block])
+            if utf8_size(detail) > HARD_PAGE_BYTES:
+                raise ValueError("archived log entry cannot fit into a bounded page")
+            written.append(_write_archive_text(root, f"{year}-{month}-01T00:00:00Z", detail, prefix=_archive_prefix(source_log_name)))
+    return written
+
+
+def _archive_prefix(source_log_name: str) -> str:
+    return "log" if source_log_name == "wiki-log" else source_log_name
+
+
+def _write_archive_text(root: Path, timestamp: str, text: str, prefix: str) -> Path:
+    year, month = _archive_month_parts_from_timestamp(timestamp)
+    archive_dir = root / "wiki" / "archives" / "log" / year / month
+    sequence = _next_archive_sequence(archive_dir, prefix)
+    archive_path = archive_dir / f"{prefix}-{sequence:03d}.md"
+    _atomic_write(archive_path, text)
     return archive_path
 
 
-def _archive_date_parts(blocks: list[str]) -> tuple[str, str, str]:
-    for block in blocks:
-        first_line = block.splitlines()[0] if block.splitlines() else ""
-        match = _LOG_HEADING_RE.match(first_line)
-        if match:
-            date_part = match.group(1)[:10]
-            if re.match(r"\d{4}-\d{2}-\d{2}", date_part):
-                year, month, day = date_part.split("-")
-                return year, month, day
+def _next_archive_sequence(archive_dir: Path, prefix: str) -> int:
+    if not archive_dir.exists():
+        return 1
+    pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)\.md$")
+    values = [int(match.group(1)) for path in archive_dir.glob(f"{prefix}-*.md") if (match := pattern.match(path.name))]
+    return max(values, default=0) + 1
+
+
+def _archive_month_parts(block: str) -> tuple[str, str]:
+    first_line = block.splitlines()[0] if block.splitlines() else ""
+    match = _LOG_HEADING_RE.match(first_line)
+    return _archive_month_parts_from_timestamp(match.group(1) if match else "")
+
+
+def _archive_month_parts_from_timestamp(timestamp: str) -> tuple[str, str]:
+    match = re.match(r"(\d{4})-(\d{2})", timestamp)
+    if match:
+        return match.group(1), match.group(2)
     now = datetime.now(timezone.utc)
-    return f"{now.year:04d}", f"{now.month:02d}", f"{now.day:02d}"
+    return f"{now.year:04d}", f"{now.month:02d}"
 
 
 def _append_archive_log(root: Path, archive_path: Path) -> None:
     archive_log = root / "wiki" / "archives" / "log.md"
-    archive_log.parent.mkdir(parents=True, exist_ok=True)
-    if not archive_log.exists():
-        archive_log.write_text("# Archives Log\n\n", encoding="utf-8")
-    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    timestamp = _now()
     rel = archive_path.relative_to(root).as_posix()
-    lines = [
+    block = "\n".join([
         f"## [{timestamp}] archive_log | Archived wiki log entries",
         "- project: ",
         "- status: ok",
@@ -184,8 +289,98 @@ def _append_archive_log(root: Path, archive_path: Path) -> None:
         f"  - {rel}",
         "- sources:",
         "  - wiki/log.md",
-        "",
-    ]
-    with archive_log.open("a", encoding="utf-8") as handle:
-        handle.write("\n".join(lines) + "\n")
-    _enforce_log_limit(root, archive_log, "archives-log", record_archive=False)
+    ])
+    preamble, blocks = _read_log_blocks(archive_log, "# Archives Log")
+    keep, overflow = _rotate_blocks(preamble, [*blocks, block])
+    if overflow:
+        _write_archived_log_blocks(root, "archives-log", overflow)
+    _atomic_write(archive_log, _join_log_blocks(preamble, keep))
+
+
+def _write_archive_index(root: Path) -> None:
+    directory = root / "wiki" / "archives" / "log"
+    target = directory / "index.md"
+    if target.exists() and not _is_generated_page(target):
+        return
+    entries = []
+    if directory.exists():
+        for path in sorted(directory.rglob("*.md")):
+            if _INDEX_PAGE_RE.match(path.name):
+                continue
+            rel = path.relative_to(directory).as_posix()
+            entries.append(f"- [[{rel}|{path.stem}]]")
+    base_header = "---\ntype: index\ngenerated: true\nnavigation: true\n---\n\n# Log archives"
+    pages, oversized = partition_rendered_units(entries or ["- 无"], base_header, _index_footer_placeholder(), TARGET_PAGE_BYTES)
+    if oversized:
+        raise ValueError("archive index entry cannot fit into a bounded page")
+    pages = pages or [["- 无"]]
+    contents: dict[Path, str] = {}
+    for number, units in enumerate(pages, 1):
+        filename = "index.md" if number == 1 else f"index-{number:02d}.md"
+        header = base_header if len(pages) == 1 else f"{base_header}\n\nPage {number}/{len(pages)}"
+        contents[directory / filename] = render_units(header, units, _index_footer(number, len(pages)))
+    if any(path.exists() and not _is_generated_page(path) for path in contents):
+        return
+    _atomic_write_many(contents)
+    for path in directory.glob("index-*.md"):
+        if path not in contents and _is_generated_page(path):
+            path.unlink()
+
+
+def _index_footer_placeholder() -> str:
+    return "← [[index-9999.md|Previous]] · [[index-9999.md|Next]]"
+
+
+def _index_footer(number: int, total: int) -> str:
+    links = []
+    if number > 1:
+        previous = "index.md" if number == 2 else f"index-{number - 1:02d}.md"
+        links.append(f"← [[{previous}|Previous]]")
+    if number < total:
+        links.append(f"[[index-{number + 1:02d}.md|Next]] →")
+    return " · ".join(links)
+
+
+def _is_generated_page(path: Path) -> bool:
+    if not path.exists():
+        return False
+    frontmatter, _ = split_frontmatter(path.read_text(encoding="utf-8"))
+    return frontmatter.get("generated") is True
+
+
+def _atomic_write_many(contents: dict[Path, str]) -> None:
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for target, text in contents.items():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            temporary.write_text(text, encoding="utf-8")
+            staged.append((target, temporary))
+        for target, temporary in staged:
+            temporary.replace(target)
+    finally:
+        for _, temporary in staged:
+            if temporary.exists():
+                temporary.unlink()
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    _atomic_write_many({path: text})
+
+
+def _bounded_text(text: str, max_bytes: int) -> str:
+    if utf8_size(text) <= max_bytes:
+        return text
+    result: list[str] = []
+    used = 0
+    for character in text:
+        size = utf8_size(character)
+        if used + size + utf8_size("…") > max_bytes:
+            break
+        result.append(character)
+        used += size
+    return "".join(result) + "…"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

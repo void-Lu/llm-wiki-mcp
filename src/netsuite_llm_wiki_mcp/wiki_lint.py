@@ -11,6 +11,7 @@ import yaml
 
 from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
+from netsuite_llm_wiki_mcp.wiki_limits import HARD_PAGE_BYTES
 from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 from netsuite_llm_wiki_mcp.wikilinks import table_wikilink_alias_pipe_lines, wikilink_targets
@@ -63,7 +64,7 @@ _OLD_PATHS = (
 
 def wiki_lint(
     vault_root: str | Path,
-    max_page_bytes: int = 200_000,
+    max_page_bytes: int = HARD_PAGE_BYTES,
     stage: str = "structure",
     project: str | None = None,
     semantic_review: str | None = None,

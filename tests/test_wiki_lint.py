@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from pathlib import Path
 
 from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
 from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint
+from netsuite_llm_wiki_mcp.wiki_limits import HARD_PAGE_BYTES
 from netsuite_llm_wiki_mcp.wiki_models import WikiPage
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
@@ -34,6 +36,10 @@ def test_wiki_lint_reports_missing_required_structure(tmp_path: Path):
     assert result["ok"] is False
     assert "missing_required_file" in codes
     assert "missing_required_directory" in codes
+
+
+def test_wiki_lint_default_limit_uses_shared_capacity_contract():
+    assert inspect.signature(wiki_lint).parameters["max_page_bytes"].default == HARD_PAGE_BYTES
 
 
 def test_wiki_lint_reports_missing_frontmatter_and_generated_sources(tmp_path: Path):

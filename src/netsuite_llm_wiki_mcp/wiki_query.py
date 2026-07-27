@@ -11,6 +11,7 @@ from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
 
 _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _STRUCTURAL_PAGE_NAMES = {"index.md", "log.md", "overview.md"}
+_PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
 _STOPWORDS = {
     "a",
     "an",
@@ -193,7 +194,7 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False) -> list[Quer
     wiki = root / "wiki"
     if wiki.exists():
         for path in sorted(wiki.rglob("*.md")):
-            if path.name in _STRUCTURAL_PAGE_NAMES:
+            if _is_structural_page(path):
                 continue
             if path.relative_to(root).parts[:2] == ("wiki", "archives"):
                 continue
@@ -204,6 +205,17 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False) -> list[Quer
             if path.is_file() and path.suffix.lower() in {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}:
                 candidates.append(_raw_candidate(path, root))
     return candidates
+
+
+def _is_structural_page(path: Path) -> bool:
+    """Exclude generated navigation without hiding source-index content leaves."""
+
+    if path.name in _STRUCTURAL_PAGE_NAMES:
+        return True
+    if not _PAGED_NAVIGATION_PAGE_RE.match(path.name):
+        return False
+    frontmatter, _ = split_frontmatter(path.read_text(encoding="utf-8"))
+    return frontmatter.get("generated") is True and frontmatter.get("navigation") is True
 
 
 def _in_project_scope(rel: str, project: str) -> bool:

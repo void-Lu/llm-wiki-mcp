@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import re
+import uuid
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_limits import (
+    MAX_NAVIGATION_ENTRIES,
+    TARGET_PAGE_BYTES,
+    partition_rendered_units,
+    render_units,
+)
 
 _TOP_LEVEL_GROUPS = (
     ("Projects", Path("wiki/projects")),
@@ -25,6 +33,7 @@ _PROJECT_GROUPS = (
     ("Troubleshooting", "troubleshooting"),
     ("Researches", "researches"),
 )
+_SOURCES_NAVIGATION_PAGE_RE = re.compile(r"^index(?:-\d{2,})?\.md$")
 
 
 def refresh_indexes(vault_root: str | Path) -> dict[str, Any]:
@@ -129,7 +138,170 @@ def _write_chatlog_index(root: Path) -> list[str] | dict[str, Any]:
 
 
 def _write_sources_index(root: Path) -> list[str] | dict[str, Any]:
-    return _write_section_index(root, Path("wiki/sources"), "Sources")
+    sources_root = root / "wiki" / "sources"
+    sources_root.mkdir(parents=True, exist_ok=True)
+    contents: dict[Path, str] = {}
+    result = _collect_sources_navigation(root, sources_root, title="Sources", contents=contents)
+    if result is not None:
+        return result
+    return _write_generated_navigation_pages(root, contents)
+
+
+def _collect_sources_navigation(
+    root: Path,
+    directory: Path,
+    title: str,
+    contents: dict[Path, str],
+) -> dict[str, Any] | None:
+    """Build bounded navigation pages for one sources directory only.
+
+    Source-index leaves own their existing ``index.md`` / ``_entries*.md``
+    navigation.  This writer only creates the directory hierarchy around them,
+    so a high-volume source tree cannot be flattened back into its root page.
+    """
+
+    target = directory / "index.md"
+    if _is_source_index_leaf(target):
+        return None
+    if _is_manual_page(target):
+        return _manual_page_error(target, root)
+
+    entries: list[tuple[str, str]] = []
+    for path in sorted(directory.glob("*.md")):
+        if _is_sources_navigation_page(path):
+            continue
+        frontmatter, heading = _read_page_metadata(path)
+        page_title = str(frontmatter.get("title") or heading or path.stem)
+        summary = str(frontmatter.get("summary") or "").strip()
+        line = f"- [[{path.name}|{page_title}]]"
+        if summary:
+            line += f" — {summary}"
+        entries.append((path.name.casefold(), line))
+
+    for child in sorted(path for path in directory.iterdir() if path.is_dir()):
+        result = _collect_sources_navigation(root, child, title=child.name, contents=contents)
+        if result is not None:
+            return result
+        child_index = child / "index.md"
+        if child_index.exists() or child_index in contents:
+            rel = child_index.relative_to(directory).as_posix()
+            entries.append((f"{child.name.casefold()}/", f"- [[{rel}|{child.name}]]"))
+
+    pages = _render_sources_navigation_pages(title, [line for _, line in sorted(entries)])
+    for number, text in enumerate(pages, 1):
+        page = directory / ("index.md" if number == 1 else f"index-{number:02d}.md")
+        if _is_manual_page(page):
+            return _manual_page_error(page, root)
+        contents[page] = text
+    return None
+
+
+def _render_sources_navigation_pages(title: str, entries: list[str]) -> list[str]:
+    header = "\n".join(
+        [
+            "---",
+            "type: index",
+            "generated: true",
+            "navigation: true",
+            "---",
+            "",
+            f"# {title}",
+        ]
+    )
+    placeholder = "← [[index-9999.md|Previous]] · [[index-9999.md|Next]] →"
+    units = entries or ["- 无"]
+    groups, oversized = partition_rendered_units(
+        units,
+        header,
+        placeholder,
+        TARGET_PAGE_BYTES,
+        max_units=MAX_NAVIGATION_ENTRIES,
+    )
+    if oversized:
+        raise ValueError("sources navigation entry cannot fit into a bounded page")
+    groups = groups or [["- 无"]]
+    total = len(groups)
+    rendered: list[str] = []
+    for number, group in enumerate(groups, 1):
+        page_header = header if total == 1 else f"{header}\n\nPage {number}/{total}"
+        links: list[str] = []
+        if number > 1:
+            previous = "index.md" if number == 2 else f"index-{number - 1:02d}.md"
+            links.append(f"← [[{previous}|Previous]]")
+        if number < total:
+            links.append(f"[[index-{number + 1:02d}.md|Next]] →")
+        rendered.append(render_units(page_header, group, " · ".join(links)))
+    return rendered
+
+
+def _write_generated_navigation_pages(root: Path, contents: dict[Path, str]) -> list[str]:
+    staged: list[tuple[Path, Path]] = []
+    backups: list[tuple[Path, Path]] = []
+    new_targets = {target for target in contents if not target.exists()}
+    by_directory: dict[Path, set[Path]] = {}
+    for target in contents:
+        by_directory.setdefault(target.parent, set()).add(target)
+    stale_pages = [
+        stale
+        for directory, keep in by_directory.items()
+        for stale in directory.glob("index-*.md")
+        if stale not in keep and _is_sources_navigation_page(stale)
+    ]
+    try:
+        for target, text in contents.items():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            temporary.write_text(text, encoding="utf-8")
+            staged.append((target, temporary))
+        for target, temporary in staged:
+            if target.exists():
+                backup = target.with_name(f".{target.name}.{uuid.uuid4().hex}.bak")
+                target.replace(backup)
+                backups.append((target, backup))
+            temporary.replace(target)
+        for stale in stale_pages:
+            backup = stale.with_name(f".{stale.name}.{uuid.uuid4().hex}.bak")
+            stale.replace(backup)
+            backups.append((stale, backup))
+    except BaseException:
+        # Files are individually atomic, but the navigation set is not.  Move
+        # replaced pages back before surfacing a commit failure so callers never
+        # observe a mixture of old and new pagination links.
+        for target in new_targets:
+            if target.exists():
+                target.unlink()
+        for target, backup in reversed(backups):
+            if target.exists():
+                target.unlink()
+            if backup.exists():
+                backup.replace(target)
+        raise
+    else:
+        for _, backup in backups:
+            backup.unlink(missing_ok=True)
+    finally:
+        for _, temporary in staged:
+            if temporary.exists():
+                temporary.unlink()
+    return [target.relative_to(root).as_posix() for target in sorted(contents)]
+
+
+def _is_source_index_leaf(path: Path) -> bool:
+    if not path.exists():
+        return False
+    frontmatter, _ = _read_page_metadata(path)
+    return frontmatter.get("type") == "source_index"
+
+
+def _is_sources_navigation_page(path: Path) -> bool:
+    if not _SOURCES_NAVIGATION_PAGE_RE.match(path.name):
+        return False
+    if path.name == "index.md":
+        return True
+    if not path.exists():
+        return False
+    frontmatter, _ = _read_page_metadata(path)
+    return frontmatter.get("generated") is True and frontmatter.get("navigation") is True
 
 
 def _write_queries_index(root: Path) -> list[str] | dict[str, Any]:

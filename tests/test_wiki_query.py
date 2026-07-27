@@ -361,6 +361,26 @@ def test_wiki_query_excludes_structural_pages_from_results(tmp_path: Path):
     assert "wiki/index.md" not in paths
     assert "wiki/overview.md" not in paths
 
+
+def test_wiki_query_excludes_generated_navigation_but_keeps_source_index_entries(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/sources/index-02.md", "Navigation", "navigation needle", type="index", navigation=True)
+    _write(
+        root,
+        "wiki/sources/provider/_entries.md",
+        "Source Leaf",
+        "source index needle",
+        type="source_index",
+        index_kind="lightweight_source_index",
+    )
+
+    result = wiki_query(root, "needle", top_k=5)
+
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/sources/index-02.md" not in paths
+    assert "wiki/sources/provider/_entries.md" in paths
+
 def test_wiki_query_graph_expands_escaped_table_wikilinks(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
