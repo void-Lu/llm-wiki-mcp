@@ -114,7 +114,15 @@ def wiki_lint(
                 elif not isinstance(source_values, list):
                     source_values = []
                 for source in source_values:
-                    if str(source).startswith("raw/") and not (root / str(source)).is_file():
+                    source_text = str(source)
+                    source_path = root / source_text
+                    source_exists = source_path.is_file()
+                    if (
+                        frontmatter.get("type") == "source_index"
+                        and frontmatter.get("index_kind") == "lightweight_source_index"
+                    ):
+                        source_exists = source_exists or source_path.is_dir()
+                    if source_text.startswith("raw/") and not source_exists:
                         issues.append(_issue("source_missing", f"source path does not exist: {source}", rel))
             if len(text.encode("utf-8")) > max_page_bytes:
                 issues.append(_issue("oversized_page", "page exceeds configured size threshold", rel))

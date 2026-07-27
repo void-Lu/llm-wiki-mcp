@@ -127,6 +127,96 @@ def test_wiki_lint_reports_missing_generated_raw_source(tmp_path: Path):
     assert any(issue["code"] == "source_missing" and issue["path"] == "wiki/projects/alpha/architecture/script.md" for issue in result["issues"])
 
 
+def test_wiki_lint_accepts_existing_raw_directory_for_source_index(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source_dir = root / "raw/sources/references/docs"
+    source_dir.mkdir(parents=True)
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/sources/references/docs/_entries.md"),
+            {
+                "title": "Docs",
+                "type": "source_index",
+                "index_kind": "lightweight_source_index",
+                "generated": True,
+                "sources": ["raw/sources/references/docs"],
+            },
+            "Docs",
+            "Body",
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root)
+
+    assert not any(
+        issue["code"] == "source_missing"
+        and issue["path"] == "wiki/sources/references/docs/_entries.md"
+        for issue in result["issues"]
+    )
+
+
+def test_wiki_lint_reports_missing_raw_directory_for_source_index(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/sources/references/docs/_entries.md"),
+            {
+                "title": "Docs",
+                "type": "source_index",
+                "index_kind": "lightweight_source_index",
+                "generated": True,
+                "sources": ["raw/sources/references/docs"],
+            },
+            "Docs",
+            "Body",
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root)
+
+    assert any(
+        issue["code"] == "source_missing"
+        and issue["path"] == "wiki/sources/references/docs/_entries.md"
+        for issue in result["issues"]
+    )
+
+
+def test_wiki_lint_rejects_raw_directory_for_non_source_index(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source_dir = root / "raw/sources/references/docs"
+    source_dir.mkdir(parents=True)
+    write_wiki_page(
+        root,
+        WikiPage(
+            Path("wiki/projects/alpha/architecture/script.md"),
+            {
+                "title": "Script",
+                "type": "architecture",
+                "generated": True,
+                "sources": ["raw/sources/references/docs"],
+            },
+            "Script",
+            "Body",
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root)
+
+    assert any(
+        issue["code"] == "source_missing"
+        and issue["path"] == "wiki/projects/alpha/architecture/script.md"
+        for issue in result["issues"]
+    )
+
+
 def test_wiki_lint_reports_cache_manifest_missing_path(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

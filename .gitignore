@@ -75,3 +75,7 @@ htmlcov/
 
 # Model cache (downloaded automatically)
 .cache/
+.agents
+.codex
+.github
+.trellis

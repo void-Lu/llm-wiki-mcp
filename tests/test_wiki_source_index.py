@@ -338,6 +338,90 @@ def test_write_node_index_includes_navigation_link_to_interior_child(tmp_path: P
     assert "[[wiki/sources/references/x/parent/child/_entries|child/_entries]]" in text
 
 
+def test_write_node_index_paginates_interior_child_navigation(tmp_path: Path):
+    from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    target_rel = "wiki/sources/references/x"
+    target = root / target_rel
+    target.mkdir(parents=True)
+    interior_nodes = {()}
+    interior_nodes.update((f"child-{index}",) for index in range(5))
+
+    written = _write_node_index(
+        root,
+        target,
+        target_rel,
+        "x",
+        "raw/sources/references/x",
+        node_path=(),
+        section_entries={},
+        interior_nodes=interior_nodes,
+        page_size=2,
+    )
+
+    assert written == [
+        "wiki/sources/references/x/_entries.md",
+        "wiki/sources/references/x/_entries-02.md",
+        "wiki/sources/references/x/_entries-03.md",
+    ]
+    pages = [(root / path).read_text(encoding="utf-8") for path in written]
+    combined = "\n".join(pages)
+    assert [page.count("- → [[") for page in pages] == [2, 2, 1]
+    for index in range(5):
+        assert combined.count(f"|child-{index}/_entries]]") == 1
+
+
+def test_write_node_index_paginates_mixed_entries_and_navigation(tmp_path: Path):
+    from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    target_rel = "wiki/sources/references/x"
+    target = root / target_rel
+    target.mkdir(parents=True)
+    entries = [
+        {
+            "raw_path": f"raw/sources/references/x/f{index}.md",
+            "title": f"Title {index}",
+            "source": f"https://example.com/f{index}",
+            "toc_path": [],
+            "type": "",
+            "depth": None,
+            "published": "",
+            "headings": [],
+            "tags": ["child/leaf"],
+            "hash": f"{index:064d}",
+            "keywords": [],
+        }
+        for index in range(3)
+    ]
+
+    written = _write_node_index(
+        root,
+        target,
+        target_rel,
+        "x",
+        "raw/sources/references/x",
+        node_path=(),
+        section_entries={((), "child"): entries},
+        interior_nodes={(), ("child",)},
+        page_size=2,
+    )
+
+    assert written == [
+        "wiki/sources/references/x/_entries.md",
+        "wiki/sources/references/x/_entries-02.md",
+    ]
+    combined = "\n".join(
+        (root / path).read_text(encoding="utf-8") for path in written
+    )
+    assert combined.count("|child/_entries]]") == 1
+    for entry in entries:
+        assert combined.count(entry["raw_path"]) == 1
+
+
 def test_build_source_index_mirrors_one_file_across_multiple_tag_branches(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
