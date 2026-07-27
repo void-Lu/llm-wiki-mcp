@@ -170,6 +170,66 @@ def test_wiki_query_graph_expands_by_sources_and_wikilinks(tmp_path: Path):
     assert neighbor["scores"]["graph"] > 0
 
 
+def test_wiki_query_graph_uses_markdown_code_context_semantics(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/seed.md",
+        "Seed Page",
+        (
+            "unique needle links to [[neighbor.md]].\n\n"
+            "`[[inline-example.md]]`\n\n"
+            "~~~markdown\n[[fenced-example.md]]\n~~~"
+        ),
+        type="concept",
+    )
+    _write(root, "wiki/concepts/neighbor.md", "Neighbor", "ordinary neighbor", type="concept")
+    _write(root, "wiki/concepts/inline-example.md", "Inline Example", "not related", type="concept")
+    _write(root, "wiki/concepts/fenced-example.md", "Fenced Example", "not related", type="concept")
+    refresh_indexes(root)
+
+    result = wiki_query(root, "unique needle", top_k=5)
+
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/neighbor.md" in paths
+    assert "wiki/concepts/inline-example.md" not in paths
+    assert "wiki/concepts/fenced-example.md" not in paths
+
+
+def test_wiki_query_archived_page_is_not_a_graph_bridge(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/seed.md",
+        "Seed Page",
+        "unique needle links to [[bridge]].",
+        type="concept",
+    )
+    _write(root, "wiki/concepts/distant.md", "Distant", "unrelated content", type="concept")
+    archived = root / "wiki/archives/stale/2026/07/27/wiki/concepts/bridge.md"
+    archived.parent.mkdir(parents=True, exist_ok=True)
+    archived.write_text(
+        "---\n"
+        "title: Archived Bridge\n"
+        "type: concept\n"
+        "generated: true\n"
+        "archived: true\n"
+        "---\n\n"
+        "# Archived Bridge\n\n"
+        "[[distant]]\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = wiki_query(root, "unique needle", top_k=5, max_graph_hops=2)
+
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/distant.md" not in paths
+    assert all(not path.startswith("wiki/archives/") for path in paths)
+
+
 def test_wiki_query_debug_explains_graph_reasons(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

@@ -97,6 +97,37 @@ def test_wiki_lint_reports_broken_wikilink_and_old_directories(tmp_path: Path):
     assert "old_structure_present" in codes
 
 
+def test_wiki_lint_ignores_code_context_wikilinks_but_reports_body_link(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_wiki_page(
+        root,
+        WikiPage(
+            relative_path=Path("wiki/concepts/source.md"),
+            frontmatter={"generated": False, "type": "concept"},
+            title="Source",
+            body=(
+                "`[[inline-missing]]`\n\n"
+                "````markdown\n"
+                "[[fenced-missing]]\n"
+                "```\n"
+                "[[still-fenced-missing]]\n"
+                "````\n\n"
+                "\\[[escaped-missing]]\n\n"
+                "正文 [[body-missing]]."
+            ),
+        ),
+        overwrite_generated_only=False,
+    )
+
+    result = wiki_lint(root)
+
+    broken = [issue for issue in result["issues"] if issue["code"] == "broken_wikilink"]
+    assert [issue["message"] for issue in broken] == [
+        "wikilink target does not exist: body-missing"
+    ]
+
+
 def test_wiki_lint_reports_index_entry_missing_target(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

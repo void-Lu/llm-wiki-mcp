@@ -320,7 +320,14 @@ def _apply_optional_vector_stage(scored: dict[str, QueryCandidate], enable_vecto
 
 def _build_graph(root: Path) -> Graph:
     wiki = root / "wiki"
-    pages = [path for path in sorted(wiki.rglob("*.md")) if path.name not in _STRUCTURAL_PAGE_NAMES] if wiki.exists() else []
+    pages = []
+    if wiki.exists():
+        pages = [
+            path
+            for path in sorted(wiki.rglob("*.md"))
+            if path.name not in _STRUCTURAL_PAGE_NAMES
+            and path.relative_to(root).parts[:2] != ("wiki", "archives")
+        ]
     by_rel = {path.relative_to(root).as_posix(): path for path in pages}
     by_stem: dict[str, list[str]] = {}
     for rel, path in by_rel.items():
