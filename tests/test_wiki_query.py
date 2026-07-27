@@ -269,6 +269,30 @@ def test_wiki_query_returns_budgeted_context_pack(tmp_path: Path):
     assert "prior question" in pack["chat_history"]
 
 
+def test_default_top_k_is_ten_and_explicit_eight_preserves_prefix_scores(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    for index in range(12):
+        _write(
+            root,
+            f"wiki/concepts/result-{index}.md",
+            f"Result {index}",
+            f"shared retrieval term {index}",
+            type="concept",
+        )
+    refresh_indexes(root)
+
+    default_result = wiki_query(root, "shared retrieval term", include_content=False, context_window_tokens=4000)
+    explicit_eight = wiki_query(root, "shared retrieval term", top_k=8, include_content=False, context_window_tokens=4000)
+
+    assert len(default_result["results"]) == 10
+    assert [(item["path"], item["score"], item["scores"]) for item in explicit_eight["results"]] == [
+        (item["path"], item["score"], item["scores"]) for item in default_result["results"][:8]
+    ]
+    budget = default_result["budget"]
+    assert sum(budget["used"].values()) <= budget["total"]
+
+
 def test_wiki_query_vector_stage_is_optional_warning(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

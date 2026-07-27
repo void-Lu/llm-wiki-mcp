@@ -21,7 +21,7 @@ from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_w
 from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint as run_wiki_lint
 from netsuite_llm_wiki_mcp.wiki_log import parse_log_entries as run_parse_log_entries
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
-from netsuite_llm_wiki_mcp.wiki_query import wiki_query as run_wiki_query
+from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
 from netsuite_llm_wiki_mcp.wiki_synthesis import wiki_synthesis as run_wiki_synthesis
 from netsuite_llm_wiki_mcp.wiki_source_index import build_source_index as run_build_source_index
@@ -87,7 +87,7 @@ def wiki_query_tool(
     vault_root: str,
     question: str,
     project: str | None = None,
-    top_k: int = 8,
+    top_k: int = DEFAULT_TOP_K,
     include_content: bool = True,
     context_window_tokens: int = 16_000,
     include_context_pack: bool = True,
@@ -123,7 +123,7 @@ def wiki_query_debug_tool(
     vault_root: str,
     question: str,
     project: str | None = None,
-    top_k: int = 8,
+    top_k: int = DEFAULT_TOP_K,
     max_graph_hops: int = 2,
     include_raw_sources: bool = False,
 ) -> dict[str, Any]:
@@ -361,7 +361,7 @@ def wiki_query(
     vault_root: str,
     question: str,
     project: str | None = None,
-    top_k: int = 8,
+    top_k: int = DEFAULT_TOP_K,
     include_content: bool = True,
     context_window_tokens: int = 16_000,
     include_context_pack: bool = True,

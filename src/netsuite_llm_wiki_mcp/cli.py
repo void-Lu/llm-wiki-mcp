@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from netsuite_llm_wiki_mcp.platform_paths import global_config_path
+from netsuite_llm_wiki_mcp.retrieval_eval import (
+    RetrievalEvalError,
+    load_retrieval_dataset,
+    run_retrieval_evaluation,
+    write_retrieval_eval_report,
+)
 from netsuite_llm_wiki_mcp.runtime_config import RuntimeConfig, RuntimeConfigError, resolve_runtime_config, write_global_config
+from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K
 
 
 def _runtime_payload(runtime: RuntimeConfig) -> dict[str, Any]:
@@ -54,6 +61,16 @@ def _build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Print resolved runtime diagnostics.")
     status_parser.add_argument("--root", help="Optional vault root override for diagnostics.")
 
+    evaluation_parser = subparsers.add_parser("retrieval-eval", help="Run a read-only retrieval evaluation dataset.")
+    evaluation_parser.add_argument("--vault", required=True, help="Path to the vault to query without modifying it.")
+    evaluation_parser.add_argument("--dataset", required=True, help="Path to the retrieval evaluation JSONL cases.")
+    evaluation_parser.add_argument("--manifest", help="Optional JSON manifest path; defaults beside the dataset.")
+    evaluation_parser.add_argument("--output-dir", required=True, help="Directory for retrieval-eval.json and retrieval-eval.md.")
+    evaluation_parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help=f"Candidate limit (default: {DEFAULT_TOP_K}).")
+    evaluation_parser.add_argument("--repeats", type=int, default=1, help="Repeats per case for deterministic ranking checks.")
+    evaluation_parser.add_argument("--no-context-budget", action="store_true", help="Skip the separate context budget measurement pass.")
+    evaluation_parser.add_argument("--context-budget-case-limit", type=int, default=1, help="Number of leading cases measured in the separate context budget pass (default: 1).")
+
     subparsers.add_parser("server", help="Run the MCP server.")
     return parser
 
@@ -98,6 +115,29 @@ def _run_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_retrieval_eval(args: argparse.Namespace) -> int:
+    dataset = load_retrieval_dataset(args.dataset, args.manifest)
+    report = run_retrieval_evaluation(
+        args.vault,
+        dataset,
+        top_k=args.top_k,
+        repeats=args.repeats,
+        measure_context_budget=not args.no_context_budget,
+        context_budget_case_limit=args.context_budget_case_limit,
+    )
+    reports = write_retrieval_eval_report(report, args.output_dir)
+    _print_json(
+        {
+            "ok": True,
+            "dataset_id": report["metadata"]["dataset_id"],
+            "dataset_revision": report["metadata"]["dataset_revision"],
+            "metrics": report["metrics"],
+            "reports": reports,
+        }
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -113,8 +153,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_init(args)
         if args.command == "status":
             return _run_status(args)
+        if args.command == "retrieval-eval":
+            return _run_retrieval_eval(args)
     except RuntimeConfigError as exc:
         _print_json(_error_payload(exc.code, str(exc), config_path=exc.config_path))
+        return 2
+    except RetrievalEvalError as exc:
+        _print_json(_error_payload(exc.code, str(exc)))
         return 2
     except ValueError as exc:
         _print_json(_error_payload("invalid_config", str(exc)))

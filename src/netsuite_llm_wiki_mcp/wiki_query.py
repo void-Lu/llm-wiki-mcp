@@ -11,6 +11,7 @@ from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
 
 _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _STRUCTURAL_PAGE_NAMES = {"index.md", "log.md", "overview.md"}
+DEFAULT_TOP_K = 10
 _PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
 _STOPWORDS = {
     "a",
@@ -72,7 +73,7 @@ def wiki_query(
     vault_root: str | Path,
     question: str,
     project: str | None = None,
-    top_k: int = 8,
+    top_k: int = DEFAULT_TOP_K,
     include_content: bool = True,
     context_window_tokens: int = 16_000,
     include_context_pack: bool = True,
@@ -142,7 +143,7 @@ def wiki_query_debug(
     vault_root: str | Path,
     question: str,
     project: str | None = None,
-    top_k: int = 8,
+    top_k: int = DEFAULT_TOP_K,
     max_graph_hops: int = 2,
     include_raw_sources: bool = False,
 ) -> dict[str, Any]:

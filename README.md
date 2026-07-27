@@ -28,6 +28,7 @@ uv run python -m netsuite_llm_wiki_mcp.server
 ```bash
 uv run netsuite-llm-wiki-mcp init --vault <name> --root <path> --default
 uv run netsuite-llm-wiki-mcp status
+uv run netsuite-llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir>
 ```
 
 ## 配置
@@ -153,7 +154,9 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 | 工具 | 说明 |
 |------|------|
-| `wiki_query` | 关键词 + CJK bigram 搜索 -> 图扩展 -> 按上下文预算输出；结果包含标题匹配和嵌入图片元数据 |
+| `wiki_query` | 关键词 + CJK bigram 搜索 -> 图扩展 -> 按上下文预算输出；默认最多返回 10 个候选，结果包含标题匹配和嵌入图片元数据 |
+
+`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共 `wiki_query`，输出 JSON 与 Markdown 报告。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
 ### 维护
 

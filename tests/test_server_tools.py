@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 import pytest
@@ -16,11 +17,18 @@ from netsuite_llm_wiki_mcp.server import (
     wiki_lint_tool,
     wiki_query_debug_tool,
     wiki_query_tool,
+    wiki_query as mcp_wiki_query,
     wiki_rescan_tool,
     wiki_synthesis_tool,
     wiki_write_note,
     wiki_write_note_tool,
 )
+
+
+def test_query_tool_defaults_are_centrally_ten() -> None:
+    assert inspect.signature(wiki_query_tool).parameters["top_k"].default == 10
+    assert inspect.signature(wiki_query_debug_tool).parameters["top_k"].default == 10
+    assert inspect.signature(mcp_wiki_query).parameters["top_k"].default == 10
 
 
 class TestLlmWikiServerTools:

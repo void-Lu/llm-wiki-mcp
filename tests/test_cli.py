@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,37 @@ def test_server_subcommand_delegates_to_server_main(monkeypatch: pytest.MonkeyPa
 
     assert main(["server"]) == 0
     assert calls == ["server"]
+
+
+def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    fixture_root = Path(__file__).parent / "fixtures" / "retrieval"
+    vault = tmp_path / "vault"
+    shutil.copytree(fixture_root / "vault", vault)
+    dataset = tmp_path / "fixture.jsonl"
+    shutil.copy2(fixture_root / "fixture.jsonl", dataset)
+    shutil.copy2(fixture_root / "fixture.manifest.json", tmp_path / "fixture.manifest.json")
+    output_dir = tmp_path / "reports"
+
+    exit_code = main(
+        [
+            "retrieval-eval",
+            "--vault",
+            str(vault),
+            "--dataset",
+            str(dataset),
+            "--output-dir",
+            str(output_dir),
+            "--repeats",
+            "2",
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["metrics"]["recall_at_k_macro"] == 1.0
+    assert Path(output["reports"]["json"]).is_file()
+    assert Path(output["reports"]["markdown"]).is_file()
 
 
 def test_pyproject_exposes_cli_without_preload_script():
