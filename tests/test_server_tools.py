@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.server import (
     _build_filters,
     mcp,
@@ -23,6 +24,12 @@ from netsuite_llm_wiki_mcp.server import (
 
 
 class TestLlmWikiServerTools:
+    def test_mcp_initialization_version_matches_runtime_provenance(self):
+        options = mcp._mcp_server.create_initialization_options()
+
+        assert options.server_name == "netsuite-llm-wiki-mcp"
+        assert options.server_version == RUNTIME_PROVENANCE.server_version
+
     def test_registered_tools_exclude_deprecated_tools(self):
         deprecated = {
             "index_vault",

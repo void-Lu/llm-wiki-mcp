@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_files import wiki_list_files, wiki_read_file, wiki_status
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
@@ -26,7 +27,19 @@ def test_wiki_status_reports_structure_and_queue_counts(tmp_path: Path):
     assert result["initialized"] is True
     assert result["missing_required_paths"] == []
     assert result["queue"]["counts"] == {"pending": 1, "failed": 1, "done": 1}
-    assert "version" in result
+    assert result["version"] == RUNTIME_PROVENANCE.package_version
+    assert result["runtime"] == RUNTIME_PROVENANCE.to_public_dict()
+    assert set(result["runtime"]) == {
+        "package_version",
+        "revision",
+        "dirty",
+        "revision_source",
+        "started_at",
+        "provenance_incomplete",
+        "warnings",
+    }
+    assert "path" not in result["runtime"]
+    assert "pid" not in result["runtime"]
 
 
 def test_wiki_status_reports_missing_structure_without_creating_it(tmp_path: Path):

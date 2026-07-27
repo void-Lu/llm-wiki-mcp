@@ -1,6 +1,7 @@
 [build-system]
 requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+build-backend = "build_backend"
+backend-path = ["."]
 
 [project]
 name = "netsuite-llm-wiki-mcp"
@@ -38,6 +39,10 @@ netsuite-llm-wiki-mcp-server = "netsuite_llm_wiki_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.cmdclass]
+build_py = "build_backend.BuildPy"
+sdist = "build_backend.Sdist"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

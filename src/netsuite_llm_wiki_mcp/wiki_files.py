@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import shutil
-from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_paths import DEFAULT_FILES, TOP_LEVEL_DIRS
 
 DEFAULT_MAX_FILES = 2_000
@@ -45,7 +45,8 @@ def wiki_status(vault_root: str | Path) -> dict[str, Any]:
         "missing_required_paths": missing,
         "queue": _queue_status(root),
         "codegraph": _codegraph_status(),
-        "version": _package_version(),
+        "version": RUNTIME_PROVENANCE.package_version,
+        "runtime": RUNTIME_PROVENANCE.to_public_dict(),
     }
 
 
@@ -133,13 +134,6 @@ def _queue_status(root: Path) -> dict[str, Any]:
 def _codegraph_status() -> dict[str, Any]:
     executable = shutil.which("codegraph") or shutil.which("codegraph.cmd")
     return {"available": executable is not None, "executable": executable or ""}
-
-
-def _package_version() -> str:
-    try:
-        return metadata.version("netsuite-llm-wiki-mcp")
-    except metadata.PackageNotFoundError:
-        return "unknown"
 
 
 def _public_roots(root: Path, root_name: str) -> list[Path] | None:

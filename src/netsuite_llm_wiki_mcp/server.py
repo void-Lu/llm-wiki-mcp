@@ -8,6 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note as run_write_note
 from netsuite_llm_wiki_mcp.page_merge import apply_page_merge as run_apply_page_merge
 from netsuite_llm_wiki_mcp.page_merge import prepare_body_merge as run_prepare_body_merge
+from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
 from netsuite_llm_wiki_mcp.wiki_delete import wiki_delete_source as run_wiki_delete_source
 from netsuite_llm_wiki_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
@@ -27,6 +28,8 @@ from netsuite_llm_wiki_mcp.wiki_source_index import build_source_index as run_bu
 from netsuite_llm_wiki_mcp.wiki_verify import wiki_verify as run_wiki_verify
 
 mcp = FastMCP("netsuite-llm-wiki-mcp")
+# MCP Python SDK 1.x exposes the version on its low-level Server, not FastMCP.
+mcp._mcp_server.version = RUNTIME_PROVENANCE.server_version
 
 
 def wiki_init_tool(vault_root: str) -> dict[str, Any]:

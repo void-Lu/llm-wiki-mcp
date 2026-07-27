@@ -13,7 +13,9 @@ from netsuite_llm_wiki_mcp.git_utils import (
     format_git_commit,
     get_git_branch,
     get_git_commit,
+    get_git_dirty,
     get_git_info,
+    get_git_revision,
     is_git_dirty,
 )
 
@@ -80,6 +82,31 @@ class TestGetGitCommit:
 
 
 # ---------------------------------------------------------------------------
+# get_git_revision
+# ---------------------------------------------------------------------------
+
+
+class TestGetGitRevision:
+    def test_returns_full_sha_on_success(self) -> None:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
+            revision = "a" * 40
+            mock_run.return_value = _successful_run(f"{revision}\n")
+
+            result = get_git_revision(SAMPLE_DIR)
+
+            assert result == revision
+            args = mock_run.call_args[0][0]
+            assert args[-2:] == ["rev-parse", "HEAD"]
+            assert "--short" not in args
+
+    def test_returns_empty_on_failure(self) -> None:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
+            mock_run.return_value = _failed_run()
+
+            assert get_git_revision(SAMPLE_DIR) == ""
+
+
+# ---------------------------------------------------------------------------
 # is_git_dirty
 # ---------------------------------------------------------------------------
 
@@ -108,6 +135,16 @@ class TestIsGitDirty:
             mock_run.side_effect = FileNotFoundError("git not found")
             result = is_git_dirty(SAMPLE_DIR)
             assert result is False
+
+
+class TestGetGitDirty:
+    def test_distinguishes_clean_from_unavailable(self) -> None:
+        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
+            mock_run.return_value = _successful_run("")
+            assert get_git_dirty(SAMPLE_DIR) is False
+
+            mock_run.side_effect = FileNotFoundError("git not found")
+            assert get_git_dirty(SAMPLE_DIR) is None
 
 
 # ---------------------------------------------------------------------------

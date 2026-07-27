@@ -41,49 +41,31 @@ def get_git_commit(path: Path) -> str:
         Short commit SHA (~7 chars), or empty string if not in a git repo
         or git is not available.
     """
-    git_dir = _resolve_git_dir(path)
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(git_dir), "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return ""
-    except FileNotFoundError:
-        logger.warning("git command not found on this system")
-        return ""
-    except subprocess.SubprocessError:
-        return ""
+    return _run_git(path, "rev-parse", "--short", "HEAD") or ""
 
 
-def is_git_dirty(path: Path) -> bool:
-    """Check if the git repo containing path has uncommitted changes.
+def get_git_revision(path: Path) -> str:
+    """Get the full commit revision for the git repo containing path."""
+    return _run_git(path, "rev-parse", "HEAD") or ""
+
+
+def get_git_dirty(path: Path) -> bool | None:
+    """Return dirty state, or None when Git state cannot be determined.
 
     Args:
         path: Path to a file or directory within a git repo.
 
     Returns:
-        True if there are uncommitted changes, False if clean or not in a git repo.
+        True if there are uncommitted changes, False if clean, or None when
+        the path is not in a Git repo or Git is unavailable.
     """
-    git_dir = _resolve_git_dir(path)
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(git_dir), "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return bool(result.stdout.strip())
-        return False
-    except FileNotFoundError:
-        logger.warning("git command not found on this system")
-        return False
-    except subprocess.SubprocessError:
-        return False
+    output = _run_git(path, "status", "--porcelain")
+    return None if output is None else bool(output)
+
+
+def is_git_dirty(path: Path) -> bool:
+    """Check if a Git worktree is dirty, preserving the legacy bool API."""
+    return bool(get_git_dirty(path))
 
 
 def get_git_branch(path: Path) -> str:
@@ -95,22 +77,7 @@ def get_git_branch(path: Path) -> str:
     Returns:
         Branch name, or empty string if not in a git repo or git not available.
     """
-    git_dir = _resolve_git_dir(path)
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(git_dir), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return ""
-    except FileNotFoundError:
-        logger.warning("git command not found on this system")
-        return ""
-    except subprocess.SubprocessError:
-        return ""
+    return _run_git(path, "rev-parse", "--abbrev-ref", "HEAD") or ""
 
 
 def get_git_info(path: Path) -> GitInfo:
@@ -143,3 +110,22 @@ def format_git_commit(commit: str, dirty: bool) -> str:
     if dirty:
         return f"{commit}+dirty"
     return commit
+
+
+def _run_git(path: Path, *arguments: str) -> str | None:
+    git_dir = _resolve_git_dir(path)
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(git_dir), *arguments],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        logger.warning("git command not found on this system")
+        return None
+    except subprocess.SubprocessError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
