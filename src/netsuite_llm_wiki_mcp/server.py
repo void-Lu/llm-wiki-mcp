@@ -328,33 +328,51 @@ def _build_filters(
     return filters
 
 
+def _resolve_vault_root(
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+) -> str:
+    """Accept both snake_case and camelCase vault_root for MCP client compatibility.
+
+    Some MCP clients (e.g. VS Code Copilot) convert snake_case parameter names
+    to camelCase when forwarding tool arguments.  This helper lets every tool
+    accept either spelling transparently.
+    """
+    resolved = vault_root or vaultRoot
+    if not resolved:
+        raise ValueError("vault_root (or vaultRoot) is required")
+    return resolved
+
+
 @mcp.tool()
-def wiki_init(vault_root: str) -> dict[str, Any]:
+def wiki_init(vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Create the confirmed external Obsidian LLM Wiki structure."""
-    return wiki_init_tool(vault_root)
+    return wiki_init_tool(_resolve_vault_root(vault_root, vaultRoot))
 
 
 @mcp.tool()
-def wiki_status(vault_root: str) -> dict[str, Any]:
+def wiki_status(vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Return vault diagnostics, queue counts, version, and CodeGraph availability."""
-    return wiki_status_tool(vault_root)
+    return wiki_status_tool(_resolve_vault_root(vault_root, vaultRoot))
 
 
 @mcp.tool()
 def wiki_read_file(
-    vault_root: str,
-    path: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    path: str = "",
     max_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Read a text file under wiki/ or raw/sources/ with path and size limits."""
-    return wiki_read_file_tool(vault_root, path, max_bytes)
+    return wiki_read_file_tool(_resolve_vault_root(vault_root, vaultRoot), path, max_bytes)
 
 
 @mcp.tool()
 def wiki_ingest_codegraph(
-    vault_root: str,
-    project: str,
-    source_name: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    project: str = "",
+    source_name: str = "",
     query: str = "project code overview",
     codegraph_project_path: str | None = None,
     include_extensions: list[str] | None = None,
@@ -362,7 +380,7 @@ def wiki_ingest_codegraph(
 ) -> dict[str, Any]:
     """Ingest CodeGraph symbols and code facts into the LLM Wiki (synchronous, no LLM needed)."""
     return wiki_ingest_codegraph_tool(
-        vault_root, project, source_name, query, codegraph_project_path,
+        _resolve_vault_root(vault_root, vaultRoot), project, source_name, query, codegraph_project_path,
         include_extensions=include_extensions,
         profile=profile,
     )
@@ -370,8 +388,9 @@ def wiki_ingest_codegraph(
 
 @mcp.tool()
 def wiki_query(
-    vault_root: str,
-    question: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    question: str = "",
     project: str | None = None,
     top_k: int = DEFAULT_TOP_K,
     include_content: bool = True,
@@ -389,7 +408,7 @@ def wiki_query(
 ) -> dict[str, Any]:
     """Query persisted wiki pages and return a budgeted context pack."""
     return wiki_query_tool(
-        vault_root,
+        _resolve_vault_root(vault_root, vaultRoot),
         question,
         project,
         top_k,
@@ -410,10 +429,11 @@ def wiki_query(
 
 @mcp.tool()
 def wiki_ingest_llm(
-    vault_root: str,
-    stage: str,
-    project: str,
-    source_name: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    stage: str = "",
+    project: str = "",
+    source_name: str = "",
     source_path: str | None = None,
     source_type: str = "file",
     language: str = "zh-CN",
@@ -422,14 +442,15 @@ def wiki_ingest_llm(
     messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run staged LLM-assisted ingest. Recommended two-stage flow: stage='prepare' (returns prompt) then stage='apply' (writes pages). For source_type='chat', either provide source_path to a file/directory OR provide messages (a list of {role, content} dicts) to auto-format a structured transcript snapshot under raw/sources/chat/YYYY/MM/DD/<source_name>/. Apply may write wiki/chatlog/YYYY/MM/DD pages. Legacy three-stage (prepare_analysis/prepare_generation/apply_generation) still supported."""
-    return wiki_ingest_llm_tool(vault_root, stage, project, source_name, source_path, source_type, language, analysis, generation, messages)
+    return wiki_ingest_llm_tool(_resolve_vault_root(vault_root, vaultRoot), stage, project, source_name, source_path, source_type, language, analysis, generation, messages)
 
 
 @mcp.tool()
 def wiki_build_source_index(
-    vault_root: str,
-    source_root: str,
-    source_name: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    source_root: str = "",
+    source_name: str = "",
     target_dir: str | None = None,
     page_size: int = 80,
     max_headings: int = 12,
@@ -444,7 +465,7 @@ def wiki_build_source_index(
     the implicit root and gets ``{target_dir}/_entries.md``.
     """
     return wiki_build_source_index_tool(
-        vault_root, source_root, source_name,
+        _resolve_vault_root(vault_root, vaultRoot), source_root, source_name,
         target_dir=target_dir, page_size=page_size, max_headings=max_headings, refresh=refresh,
     )
 
@@ -452,27 +473,29 @@ def wiki_build_source_index(
 
 @mcp.tool()
 def wiki_rescan(
-    vault_root: str,
-    project: str,
-    source_name: str,
-    source_path: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    project: str = "",
+    source_name: str = "",
+    source_path: str = "",
     source_type: str = "file",
     language: str = "zh-CN",
 ) -> dict[str, Any]:
     """Rescan a local source, persist snapshots/cache, and report whether it changed."""
-    return wiki_rescan_tool(vault_root, project, source_name, source_path, source_type, language)
+    return wiki_rescan_tool(_resolve_vault_root(vault_root, vaultRoot), project, source_name, source_path, source_type, language)
 
 
 @mcp.tool()
 def wiki_lint(
-    vault_root: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
     stage: str = "structure",
     project: str | None = None,
     semantic_review: str | None = None,
     language: str = "zh-CN",
 ) -> dict[str, Any]:
     """Check LLM Wiki structure and run staged semantic health reviews."""
-    return wiki_lint_tool(vault_root, stage, project, semantic_review, language)
+    return wiki_lint_tool(_resolve_vault_root(vault_root, vaultRoot), stage, project, semantic_review, language)
 
 
 @mcp.tool()
@@ -534,26 +557,28 @@ def wiki_write_note(
 
 @mcp.tool()
 def wiki_enrich(
-    vault_root: str,
-    page_path: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    page_path: str = "",
     stage: str = "prepare",
     links: list[dict[str, str]] | str | None = None,
 ) -> dict[str, Any]:
     """Enrich a wiki page with [[wikilinks]] to existing pages. Two stages: prepare returns a prompt, apply writes links."""
-    return run_wiki_enrich(vault_root=vault_root, page_path=page_path, stage=stage, links=links)
+    return run_wiki_enrich(vault_root=_resolve_vault_root(vault_root, vaultRoot), page_path=page_path, stage=stage, links=links)
 
 
 @mcp.tool()
 def wiki_page_merge(
-    vault_root: str,
-    page_path: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    page_path: str = "",
     incoming_frontmatter: dict[str, Any] | None = None,
     incoming_body: str = "",
     merged_body: str | None = None,
 ) -> dict[str, Any]:
     """Merge incoming content into an existing generated wiki page, preserving locked fields and unioning array fields."""
     return run_apply_page_merge(
-        vault_root=vault_root,
+        vault_root=_resolve_vault_root(vault_root, vaultRoot),
         page_path=page_path,
         incoming_frontmatter=incoming_frontmatter or {},
         incoming_body=incoming_body,
@@ -563,18 +588,20 @@ def wiki_page_merge(
 
 @mcp.tool()
 def wiki_delete_source(
-    vault_root: str,
-    project: str,
-    source_name: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    project: str = "",
+    source_name: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Delete a source and cascade-clean derived wiki pages and cross-references."""
-    return run_wiki_delete_source(vault_root=vault_root, project=project, source_name=source_name, dry_run=dry_run)
+    return run_wiki_delete_source(vault_root=_resolve_vault_root(vault_root, vaultRoot), project=project, source_name=source_name, dry_run=dry_run)
 
 
 @mcp.tool()
 def wiki_ingest_batch(
-    vault_root: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
     action: str = "status",
     tasks: list[dict[str, str]] | None = None,
     task_id: str | None = None,
@@ -591,7 +618,7 @@ def wiki_ingest_batch(
     action="set_generation": store one task/job generation without completing the task.
     action="apply_one": validate/apply one stored task/job generation.
     """
-    return run_wiki_ingest_batch(vault_root=vault_root, action=action, tasks=tasks, task_id=task_id, job_id=job_id, result=result)
+    return run_wiki_ingest_batch(vault_root=_resolve_vault_root(vault_root, vaultRoot), action=action, tasks=tasks, task_id=task_id, job_id=job_id, result=result)
 
 
 def wiki_verify_tool(
@@ -607,15 +634,16 @@ def wiki_verify_tool(
 
 @mcp.tool()
 def wiki_verify(
-    vault_root: str,
-    stage: str,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+    stage: str = "",
     project: str | None = None,
     page_path: str | None = None,
     verification_result: dict[str, Any] | str | None = None,
     language: str = "zh-CN",
 ) -> dict[str, Any]:
     """Verify generated wiki pages against raw sources for faithfulness. Two-stage: prepare (returns LLM prompt) then apply (records results)."""
-    return wiki_verify_tool(vault_root, stage, project, page_path, verification_result, language)
+    return wiki_verify_tool(_resolve_vault_root(vault_root, vaultRoot), stage, project, page_path, verification_result, language)
 
 
 def main() -> None:
