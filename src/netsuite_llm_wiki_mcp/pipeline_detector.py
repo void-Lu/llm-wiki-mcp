@@ -206,7 +206,7 @@ class PipelineDetector:
             lowered = candidate.lower()
             if lowered in known_files:
                 return known_files[lowered]
-            if (self.project_path / candidate).is_file():
+            if self.project_path is not None and (self.project_path / candidate).is_file():
                 return candidate
             suffix = f"/{lowered}"
             matches = [original for key, original in known_files.items() if key.endswith(suffix)]

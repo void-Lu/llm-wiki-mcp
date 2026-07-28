@@ -73,3 +73,16 @@ def test_local_only_settings_reject_credential_fields_and_external_provider(tmp_
         parse_vector_settings(tmp_path, {"api_key": "never-accepted"})
     with pytest.raises(VectorIndexError, match="local_bge_m3"):
         parse_vector_settings(tmp_path, {"provider": "remote"})
+
+
+def test_parse_vector_settings_applies_defaults_and_bounds(tmp_path: Path) -> None:
+    settings = parse_vector_settings(tmp_path, None)
+    assert settings.candidate_limit == 50
+    assert settings.rrf_k == 60
+    assert settings.min_vector_score == 0.5
+    custom = parse_vector_settings(tmp_path, {"rrf_k": 30, "min_vector_score": 0.3, "candidate_limit": 20})
+    assert custom.rrf_k == 30
+    assert custom.min_vector_score == 0.3
+    assert custom.candidate_limit == 20
+    with pytest.raises(VectorIndexError, match="min_vector_score"):
+        parse_vector_settings(tmp_path, {"min_vector_score": 2.0})

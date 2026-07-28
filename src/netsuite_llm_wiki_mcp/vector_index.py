@@ -19,6 +19,7 @@ from netsuite_llm_wiki_mcp.vector_provider import VectorProvider, VectorProvider
 VECTOR_INDEX_SCHEMA_VERSION = 1
 DEFAULT_VECTOR_CANDIDATE_LIMIT = 50
 DEFAULT_RRF_K = 60
+DEFAULT_MIN_VECTOR_SCORE = 0.5
 
 _DOCUMENT_READ_CACHE: dict[str, tuple[tuple[int, int], list[dict[str, object]]]] = {}
 _DOCUMENT_READ_CACHE_LOCK = threading.Lock()
@@ -52,6 +53,7 @@ class VectorSettings:
     index_path: Path
     candidate_limit: int
     rrf_k: int
+    min_vector_score: float
     device: str
     batch_size: int
     max_sequence_length: int
@@ -83,6 +85,7 @@ def parse_vector_settings(vault_root: str | Path, config: dict[str, Any] | None)
         index_path=index_path,
         candidate_limit=_bounded_int(values.get("candidate_limit"), DEFAULT_VECTOR_CANDIDATE_LIMIT, 1, 500, "candidate_limit"),
         rrf_k=_bounded_int(values.get("rrf_k"), DEFAULT_RRF_K, 1, 10_000, "rrf_k"),
+        min_vector_score=_bounded_float(values.get("min_vector_score"), DEFAULT_MIN_VECTOR_SCORE, -1.0, 1.0, "min_vector_score"),
         device=str(values.get("device") or "cpu"),
         batch_size=_bounded_int(values.get("batch_size"), 16, 1, 256, "batch_size"),
         max_sequence_length=_bounded_int(values.get("max_sequence_length"), 256, 64, 8192, "max_sequence_length"),
@@ -107,9 +110,23 @@ def _bounded_int(value: object, default: int, minimum: int, maximum: int, name: 
     if isinstance(value, bool):
         raise VectorIndexError("vector_config_invalid", f"{name} must be an integer")
     try:
-        parsed = int(value)
+        parsed = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
         raise VectorIndexError("vector_config_invalid", f"{name} must be an integer") from exc
+    if not minimum <= parsed <= maximum:
+        raise VectorIndexError("vector_config_invalid", f"{name} must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _bounded_float(value: object, default: float, minimum: float, maximum: float, name: str) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise VectorIndexError("vector_config_invalid", f"{name} must be a number")
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise VectorIndexError("vector_config_invalid", f"{name} must be a number") from exc
     if not minimum <= parsed <= maximum:
         raise VectorIndexError("vector_config_invalid", f"{name} must be between {minimum} and {maximum}")
     return parsed
@@ -226,7 +243,7 @@ class VectorIndexStore:
         limit: int,
     ) -> list[VectorSearchResult]:
         manifest = self._read_manifest()
-        dimensions = int(manifest["dimensions"])
+        dimensions = int(manifest["dimensions"])  # type: ignore[arg-type]
         if len(query_vector) != dimensions:
             raise VectorIndexError("index_incompatible", "query embedding dimensions do not match the index")
         scored = []

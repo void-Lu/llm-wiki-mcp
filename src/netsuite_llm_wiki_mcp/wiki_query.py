@@ -17,7 +17,7 @@ _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _STRUCTURAL_PAGE_NAMES = {"index.md", "log.md", "overview.md"}
 DEFAULT_TOP_K = 10
 _PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
-RANKING_VERSION = "lexical-vector-rrf-graph-capped-v1"
+RANKING_VERSION = "lexical-vector-rrf-graph-capped-v2"
 _SCORE_PRECISION = 12
 _GRAPH_SCORE_RATIO_CAP = 0.15
 _PURE_GRAPH_SCORE_CAP = 0.75
@@ -610,6 +610,9 @@ def _vector_recall(
         allowed_paths={candidate.rel for candidate in candidates},
         limit=settings.candidate_limit,
     )
+    # Drop weak vector matches so that nonsensical queries do not produce
+    # false-positive results.  Keyword and graph candidates are unaffected.
+    results = [result for result in results if result.score >= settings.min_vector_score]
     candidates_by_rel = {candidate.rel: candidate for candidate in candidates}
     lexical_ranked = sorted(scored.values(), key=lambda candidate: (-candidate.keyword_score, candidate.rel))
     for rank, candidate in enumerate(lexical_ranked, 1):
@@ -624,7 +627,13 @@ def _vector_recall(
         vector = candidate.rank_breakdown.vector_rank
         contribution = (1.0 / (settings.rrf_k + lexical) if lexical else 0.0) + (1.0 / (settings.rrf_k + vector) if vector else 0.0)
         candidate.rank_breakdown.rrf_contribution = _stable_score(contribution)
-        candidate.fusion_score = candidate.rank_breakdown.rrf_contribution
+        # Scale RRF to a 0–2 range comparable to keyword scores (max raw RRF
+        # is 2/(rrf_k+1); multiplying by (rrf_k+1) maps it to 2.0), then add
+        # it to the existing fusion_score. In hybrid mode this preserves the
+        # keyword signal that graph expansion depends on, while in vector-only
+        # mode the base is 0 so fusion_score becomes the scaled RRF alone.
+        scaled_rrf = _stable_score(contribution * (settings.rrf_k + 1))
+        candidate.fusion_score = _stable_score(candidate.fusion_score + scaled_rrf)
     return [], {"state": "ready", "candidate_count": len(results), "rrf_k": settings.rrf_k}
 
 
@@ -786,8 +795,14 @@ def _apply_graph_expansion(
 
 
 def _graph_score_cap(candidate: QueryCandidate) -> float:
-    if candidate.fusion_score > 0:
-        return _stable_score(candidate.fusion_score * _GRAPH_SCORE_RATIO_CAP)
+    # Use the strongest relevance signal as the graph cap base. In lexical
+    # mode fusion_score equals keyword_score; in hybrid mode fusion_score
+    # is keyword_score + scaled_rrf. Considering keyword_score and
+    # vector_score explicitly keeps graph expansion proportional even when
+    # the fusion_score has been reduced by rank-fusion scaling.
+    base = max(candidate.fusion_score, candidate.keyword_score, candidate.vector_score)
+    if base > 0:
+        return _stable_score(base * _GRAPH_SCORE_RATIO_CAP)
     return _PURE_GRAPH_SCORE_CAP
 
 

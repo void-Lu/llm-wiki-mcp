@@ -51,7 +51,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### 查询与图谱能力
 
-[wiki_query.py](src/netsuite_llm_wiki_mcp/wiki_query.py) 不使用向量库；主路径是关键词/CJK bigram 命中 → wikilink、shared source、common neighbor、same type 图扩展 → token budget 裁剪 → numbered citation context pack。`enable_vector` 目前只返回未配置警告，不应重新引入 Chroma、embedding 或 `.rag-index` 主路径。
+[wiki_query.py](src/netsuite_llm_wiki_mcp/wiki_query.py) 主路径是关键词/CJK bigram 命中 → wikilink、shared source、common neighbor、same type 图扩展 → token budget 裁剪 → numbered citation context pack。可选的本地混合向量检索（`enable_vector=true` + `vector` extra + 显式 `vector build`）在词法和向量独立召回后使用 RRF 融合（缩放后叠加到 `fusion_score`），再加图扩展；默认关闭，不引入 Chroma、`.rag-index` 或外部 embedding 主路径。
 
 [wikilinks.py](src/netsuite_llm_wiki_mcp/wikilinks.py) 提供 wikilink 格式化和解析工具函数：`format_wikilink`（含表格内 `\| 转义）、`normalize_wikilink_targets`（小写化 + 表格别名处理）、`wikilink_targets`、`split_wikilink_inner`、`table_wikilink_alias_pipe_lines` 等。enrich、query 等模块统一使用此模块处理 wikilink，不内嵌正则。
 

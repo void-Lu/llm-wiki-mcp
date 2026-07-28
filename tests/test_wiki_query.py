@@ -350,6 +350,46 @@ def test_wiki_query_vector_recall_is_independent_and_rrf_debuggable(tmp_path: Pa
     assert semantic_debug["fusion"]["rrf_contribution"] > 0
 
 
+def test_wiki_query_min_vector_score_filters_weak_matches(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/strong.md", "Strong Match", "strong semantic match content", type="concept")
+    _write(root, "wiki/concepts/weak.md", "Weak Match", "weak semantic match content", type="concept")
+    refresh_indexes(root)
+    model = tmp_path / "local-bge-m3"
+    model.mkdir()
+    provider = DeterministicFakeProvider(
+        {
+            "test query": [1, 0, 0, 0],
+            "strong semantic match": [1, 0, 0, 0],
+            "weak semantic match": [3, 95, 0, 0],
+        }
+    )
+    store = VectorIndexStore(root)
+    records = wiki_query_module.vector_index_records(root)
+    store.build(records, provider, include_raw_sources=False)
+    monkeypatch.setattr(wiki_query_module, "LocalBgeM3Provider", lambda *args, **kwargs: provider)
+    base_config = {"provider": "local_bge_m3", "model_path": str(model)}
+
+    # Default min_vector_score=0.5 filters out the weak match (cosine ≈ 0.03).
+    result_default = wiki_query(
+        root, "test query", top_k=10, include_content=False, include_context_pack=False,
+        enable_vector=True, vector_config=dict(base_config),
+    )
+    paths_default = {item["path"] for item in result_default["results"]}
+    assert "wiki/concepts/strong.md" in paths_default
+    assert "wiki/concepts/weak.md" not in paths_default
+
+    # min_vector_score=0.0 lets the weak match through.
+    result_open = wiki_query(
+        root, "test query", top_k=10, include_content=False, include_context_pack=False,
+        enable_vector=True, vector_config={**base_config, "min_vector_score": 0.0},
+    )
+    paths_open = {item["path"] for item in result_open["results"]}
+    assert "wiki/concepts/strong.md" in paths_open
+    assert "wiki/concepts/weak.md" in paths_open
+
+
 def test_wiki_query_never_builds_missing_vector_index_or_exposes_raw_when_disabled(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

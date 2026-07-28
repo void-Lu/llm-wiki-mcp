@@ -15,10 +15,10 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 
-_LOCAL_MODEL_CACHE: dict[tuple[str, str, int], tuple[object, "VectorProviderIdentity"]] = {}
+_LOCAL_MODEL_CACHE: dict[tuple[str, str, int], tuple[Any, "VectorProviderIdentity"]] = {}
 _LOCAL_MODEL_CACHE_LOCK = threading.Lock()
 
 
@@ -130,7 +130,7 @@ class LocalBgeM3Provider:
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
-        model = self._load_model()
+        model: Any = self._load_model()
         encoded = model.encode(
             list(texts),
             batch_size=self.batch_size,
