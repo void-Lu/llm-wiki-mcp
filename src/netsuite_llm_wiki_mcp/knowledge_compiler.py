@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,8 +23,26 @@ SCHEMA_VERSION = 1
 CAPSULE_SCHEMA = {"title": "string", "summary": "string", "aliases": ["string"], "keywords": ["string"], "coverage": ["string"], "body": "string", "uncertainties": ["string"]}
 
 
+def filesystem_path(path: str | Path) -> Path:
+    """Return a Windows long-path-safe representation at filesystem boundaries.
+
+    Vault source trees can legitimately exceed ``MAX_PATH`` because their raw
+    provenance preserves the source hierarchy.  Keep relative logical paths in
+    queue/index metadata, but use the extended-length form for OS access.
+    """
+    resolved = Path(path).expanduser().resolve()
+    if os.name != "nt":
+        return resolved
+    value = str(resolved)
+    if value.startswith("\\\\?\\"):
+        return resolved
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    return Path("\\\\?\\" + value)
+
+
 def file_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(filesystem_path(path).read_bytes()).hexdigest()
 
 
 def capsule_path(raw_path: str | Path) -> Path:
@@ -39,7 +58,9 @@ def capsule_path(raw_path: str | Path) -> Path:
 
 class KnowledgeCompiler:
     def __init__(self, vault_root: str | Path):
-        self.root = Path(vault_root).expanduser().resolve()
+        # One normalized root keeps all compiler source/hash/read/write calls
+        # long-path safe without leaking extended paths into stored metadata.
+        self.root = filesystem_path(vault_root)
         self.queue = GenerationQueue(self.root)
         self.dependencies = KnowledgeDependencies(self.root)
 
@@ -70,6 +91,29 @@ class KnowledgeCompiler:
         return result
 
     def apply_capsule(self, job_id: str, lease_token: str, result: Mapping[str, Any]) -> dict[str, Any]:
+        return self._apply_capsule(job_id, lease_token, result, refresh=True)
+
+    def apply_capsules(self, capsules: list[tuple[str, str, Mapping[str, Any]]]) -> dict[str, Any]:
+        """Apply independent capsule jobs and rebuild navigation once at batch end.
+
+        Each job still performs its own lease, source hash, target CAS,
+        dependency and audit-log transition.  A rejected job is isolated from
+        the remaining jobs and is never reported as applied.
+        """
+        results: list[dict[str, Any]] = []
+        applied = False
+        for job_id, lease_token, result in capsules:
+            outcome = self._apply_capsule(job_id, lease_token, result, refresh=False)
+            results.append({"job_id": job_id, **outcome})
+            applied = applied or bool(outcome.get("ok"))
+        navigation = refresh_indexes(self.root) if applied else {"ok": True, "written": []}
+        return {
+            "ok": all(item.get("ok") for item in results) and bool(navigation.get("ok")),
+            "results": results,
+            "navigation": navigation,
+        }
+
+    def _apply_capsule(self, job_id: str, lease_token: str, result: Mapping[str, Any], *, refresh: bool) -> dict[str, Any]:
         job = self.queue.get(job_id)
         if job is None:
             return {"ok": False, "code": "job_not_found"}
@@ -105,10 +149,13 @@ class KnowledgeCompiler:
             return {"ok": False, "code": exc.code, "error": str(exc)}
         new_hash = file_hash(target)
         self.dependencies.update_page(job["target_path"], new_hash, {source_path: source_hash}, generated=True)
-        navigation = refresh_indexes(self.root)
+        navigation = refresh_indexes(self.root) if refresh else None
         append_log_entry(self.root, WikiLogEntry(operation="capsule", title=page.title, paths=[job["target_path"]], sources=[source_path], project="", status="ok"))
         completed = self.queue.complete(job_id, lease_token, content_hash)
-        return {"ok": bool(completed.get("ok")), "path": job["target_path"], "idempotent": completed.get("idempotent", False), "navigation": navigation}
+        response = {"ok": bool(completed.get("ok")), "path": job["target_path"], "idempotent": completed.get("idempotent", False)}
+        if refresh:
+            response["navigation"] = navigation
+        return response
 
     def raw_changed(self, raw_path: str | Path) -> dict[str, Any]:
         rel = Path(raw_path).as_posix()
@@ -187,7 +234,7 @@ class KnowledgeCompiler:
         return {"ok": True, "sources": sources}
 
     def _prompt(self, rel: Path, source: Path) -> str:
-        text = source.read_text(encoding="utf-8", errors="ignore")[:50_000]
+        text = filesystem_path(source).read_text(encoding="utf-8", errors="ignore")[:50_000]
         return f"Create a concise Chinese source capsule. Preserve English terms, headings, APIs, field IDs, enums and exact errors. Source: {rel.as_posix()}\n\n{text}"
 
     @staticmethod

@@ -28,6 +28,7 @@ class EmbeddingSettings:
     enabled: bool = False
     provider: str = "local_bge_m3"
     model_path: Path | None = None
+    index_path: Path | None = None
     device: str = "cpu"
     batch_size: int = 16
     max_sequence_length: int = 256

@@ -82,3 +82,14 @@ htmlcov/
 /.netsuite-mcp/logs/
 /.vscode/mcp.json
 /.mcp.json
+.pytest-tmp-capsule-batch-root
+.pytest-tmp-eval-longpath-root
+.pytest-tmp-knowledge-compiler-root
+.pytest-tmp-long-eval
+.pytest-tmp-knowledge-compiler
+.pytest-tmp-batch-capsules
+tests/fixtures
+!tests/fixtures/
+!tests/fixtures/retrieval/
+!tests/fixtures/retrieval/v2_40/
+!tests/fixtures/retrieval/v2_40/**

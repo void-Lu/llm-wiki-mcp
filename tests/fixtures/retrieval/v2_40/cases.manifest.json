@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "dataset_id": "netsuite-help-docs-v2-capsules",
+  "revision": "2026-07-31.2",
+  "abstention_threshold": 0.5,
+  "source_baseline": "v2-historical-source-index-probe/retrieval-eval.json",
+  "case_count": 40,
+  "answerable_count": 36,
+  "no_answer_count": 4,
+  "label_type": "source_capsule"
+}

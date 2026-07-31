@@ -45,6 +45,19 @@ def test_active_store_build_search_update_delete_and_reconcile(tmp_path: Path, m
     assert not store.search_fts("custbody_invoice_id")
 
 
+def test_chat_projection_uses_a_full_session_locator_and_never_uses_year_as_project(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(root, "raw/sources/chat/2026/07/31/session/a.md", "# Review\n\nprovisional approval")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+
+    page = store.page_candidates()[0]
+
+    assert page["session_id"] == "2026/07/31/session"
+    assert page["project"] == "unknown"
+    assert page["occurred_at"]
+
+
 def test_failed_staged_build_keeps_the_previous_searchable_store(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "vault"
     _write(root, "wiki/concepts/a.md", "# A\n\nprevious content")

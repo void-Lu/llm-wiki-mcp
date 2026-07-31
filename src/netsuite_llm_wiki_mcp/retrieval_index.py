@@ -240,11 +240,21 @@ class RetrievalIndexStore:
         with self._connection(readonly=True) as connection:
             rows = connection.execute("""
                 SELECT pages.path, pages.title, pages.frontmatter_json, pages.source_kind,
+                       pages.corpus, pages.project, pages.session_id, pages.occurred_at,
+                       pages.redacted_content_hash,
                        group_concat(passages.text, char(10) || char(10))
                 FROM pages JOIN passages ON passages.page_path = pages.path
                 GROUP BY pages.path ORDER BY pages.path
             """).fetchall()
-        return [{"path": row[0], "title": row[1], "frontmatter": json.loads(row[2]), "source_kind": row[3], "body": row[4]} for row in rows]
+        return [
+            {
+                "path": row[0], "title": row[1], "frontmatter": json.loads(row[2]),
+                "source_kind": row[3], "corpus": row[4], "project": row[5],
+                "session_id": row[6], "occurred_at": row[7],
+                "content_hash": row[8], "body": row[9],
+            }
+            for row in rows
+        ]
 
     def vector_records(self) -> list[dict[str, str]]:
         """Return only passage metadata/text required by explicit vector lifecycle."""
@@ -265,7 +275,16 @@ class RetrievalIndexStore:
     def _connect(self, path: Path | None = None, *, readonly: bool = False) -> sqlite3.Connection:
         target = path or self.path
         if readonly:
-            connection = sqlite3.connect(f"file:{target.as_posix()}?mode=ro", uri=True)
+            # SQLite URI authorities do not accept Windows' ``\\?\\`` prefix.
+            # The database itself is under the short .llm-wiki path, so remove
+            # only that transport prefix while retaining the compiler's
+            # long-path-safe root for vault traversal.
+            uri_target = str(target)
+            if uri_target.startswith("\\\\?\\UNC\\"):
+                uri_target = "\\\\" + uri_target[len("\\\\?\\UNC\\"):]
+            elif uri_target.startswith("\\\\?\\"):
+                uri_target = uri_target[len("\\\\?\\"):]
+            connection = sqlite3.connect(f"file:{Path(uri_target).as_posix()}?mode=ro", uri=True)
         else:
             connection = sqlite3.connect(target)
         connection.execute("PRAGMA foreign_keys=ON")
@@ -355,7 +374,9 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
     if is_chat:
         parts = rel.split("/")
         frontmatter = dict(frontmatter)
-        frontmatter.setdefault("project", parts[3] if len(parts) > 3 else "")
+        # Chat storage is date/session based, not project based.  Never label
+        # a date segment as a project in public historical evidence.
+        frontmatter.setdefault("project", "unknown")
     occurred_at = str(frontmatter.get("occurred_at") or frontmatter.get("date") or datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat())
     return IndexedPage(rel, str(frontmatter.get("title") or path.stem), redacted_body, frontmatter, "history" if is_chat else "knowledge", "low" if is_chat else "high", "active" if scope == "active" else "archived", "raw_chat" if is_chat else str(frontmatter.get("type") or "wiki"), redacted.original_hash, redacted.redacted_hash, stat.st_mtime_ns, stat.st_size, _chat_session(rel) if is_chat else "", occurred_at)
 
@@ -376,4 +397,6 @@ def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:
 
 def _chat_session(relative_path: str) -> str:
     parts = relative_path.split("/")
-    return "/".join(parts[4:-1]) if len(parts) > 5 else ""
+    # Preserve the complete date/session locator after ``.../chat/`` so the
+    # citation can lead an operator back to one concrete chat session.
+    return "/".join(parts[3:-1]) if len(parts) > 4 else ""

@@ -65,7 +65,10 @@ def _effective_scope(scope: str, intent: str) -> tuple[str, tuple[str, ...]]:
 
 def _is_source_index(path: str, frontmatter: dict[str, Any]) -> bool:
     page_type = str(frontmatter.get("type") or "").casefold()
-    return page_type in {"source_index", "source-index"} or path.endswith("/index.md") and "/sources/" in path and "/capsules/" not in path
+    return (
+        page_type in {"source_index", "source-index", "index", "source_summary"}
+        or path.endswith("/index.md") and "/sources/" in path and "/capsules/" not in path
+    )
 
 
 def _eligible(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, scope: str) -> bool:
@@ -78,7 +81,7 @@ def _eligible(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, scope: st
     if _is_source_index(hit.page_path, fm):
         return False
     history = hit.corpus == "history" or hit.source_kind in {"raw_chat", "legacy_chatlog"}
-    return scope == "all" or (scope == "history") or (scope == "knowledge" and not history) or scope == "archive"
+    return scope == "all" or (scope == "history" and history) or (scope == "knowledge" and not history) or scope == "archive"
 
 
 def _matches_request(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, project: str | None, filters: QueryFilters) -> bool:
@@ -96,7 +99,7 @@ def _matches_request(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, pr
 
 
 def _authority_bonus(hit: PassageHit, intent: str, scope: str, metadata: dict[str, dict[str, Any]]) -> float:
-    values = {"formal_knowledge": 0.35, "concept": 0.35, "entity": 0.35, "project": 0.30, "capsule": 0.15, "raw": 0.0, "raw_chat": -0.15}
+    values = {"formal_knowledge": 0.35, "concept": 0.35, "entity": 0.35, "project": 0.23, "capsule": 0.22, "raw": 0.0, "raw_chat": -0.15}
     if hit.corpus == "history" or hit.source_kind == "raw_chat":
         authority = "raw_chat"
     elif "/capsules/" in hit.page_path or hit.source_kind == "capsule":
@@ -118,6 +121,64 @@ def _authority_bonus(hit: PassageHit, intent: str, scope: str, metadata: dict[st
 
 def _heading(hit: PassageHit) -> str:
     return " / ".join(hit.heading_path) if hit.heading_path else hit.title
+
+
+def _title_overlap_bonus(hit: PassageHit, question: str) -> float:
+    """Reward a specific title match over a broad semantic project match."""
+    question_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", question) if len(term) > 1}
+    title_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", hit.title) if len(term) > 1}
+    if not question_terms or not title_terms:
+        return 0.0
+    return 0.15 * len(question_terms & title_terms) / len(question_terms)
+
+
+def _citation_metadata(hit: PassageHit, provenance: dict[str, dict[str, str]]) -> dict[str, str]:
+    """Expose the minimum traceability fields for low-authority chat evidence."""
+    if hit.corpus != "history" and hit.source_kind not in {"raw_chat", "legacy_chatlog"}:
+        return {}
+    return {
+        key: value
+        for key, value in provenance.get(hit.page_path, {}).items()
+        if key in {"session_id", "occurred_at", "project", "content_hash"} and value
+    }
+
+
+def _title_candidates(
+    store: RetrievalIndexStore,
+    metadata: dict[str, dict[str, Any]],
+    question: str,
+    *,
+    scope: str,
+    project: str | None,
+    filters: QueryFilters,
+    limit: int = 10,
+) -> list[PassageHit]:
+    """Add bounded title/provenance signals from existing DB projections."""
+    terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", question) if len(term) > 1}
+    if not terms:
+        return []
+    candidates: list[tuple[int, str]] = []
+    for page in store.page_candidates():
+        path = str(page["path"])
+        frontmatter = metadata.get(path, {})
+        title_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", str(page["title"])) if len(term) > 1}
+        sources = frontmatter.get("sources") or ()
+        source_values = sources if isinstance(sources, (list, tuple)) else [sources]
+        provenance_terms = {
+            term.casefold()
+            for value in source_values
+            if isinstance(value, str)
+            for term in re.findall(r"[\w一-鿿]+", value)
+            if len(term) > 1
+        }
+        overlap = len(terms & (title_terms | provenance_terms))
+        if not overlap:
+            continue
+        probe = PassageHit("", path, str(page["title"]), (), "", 0.0, str(page.get("corpus") or "active"), str(page.get("authority") or ""), str(page.get("source_kind") or ""))
+        if _eligible(probe, metadata, scope=scope) and _matches_request(probe, metadata, project=project, filters=filters):
+            candidates.append((overlap, path))
+    paths = [path for _overlap, path in sorted(candidates, key=lambda item: (-item[0], item[1]))[:limit]]
+    return store.passages_for_pages(paths, limit_per_page=1)
 
 
 def _vector_hits(root: Path, question: str, embedding: EmbeddingSettings | None, *, scope: str) -> tuple[dict[str, tuple[int, float]], list[str]]:
@@ -165,18 +226,35 @@ def _graph_expand(
     for page in store.page_candidates():
         path = str(page["path"])
         frontmatter = metadata.get(path, {})
+        probe = PassageHit(
+            "",
+            path,
+            str(page["title"]),
+            (),
+            "",
+            0.0,
+            str(page.get("corpus") or "active"),
+            str(page.get("authority") or ""),
+            str(page.get("source_kind") or ""),
+        )
         lifecycle = str(frontmatter.get("lifecycle") or frontmatter.get("lifecycle_status") or "active")
-        if not path.startswith("wiki/") or lifecycle in {"superseded", "deprecated", "archived"} or _is_source_index(path, frontmatter):
+        if (
+            not path.startswith("wiki/")
+            or lifecycle in {"superseded", "deprecated", "archived"}
+            or _is_source_index(path, frontmatter)
+            or not _eligible(probe, metadata, scope=scope)
+            or not _matches_request(probe, metadata, project=project, filters=filters)
+        ):
             continue
-        if project and not (path.startswith(f"wiki/projects/{project}/") or str(frontmatter.get("project") or "") == project):
-            continue
-        if filters.type and str(frontmatter.get("type") or "") != filters.type:
-            continue
-        tags = frontmatter.get("tags") or []
-        tag_values = set(tags if isinstance(tags, list) else [tags])
-        if filters.tags and not set(filters.tags) & tag_values:
-            continue
-        candidates.append(QueryCandidate(root / path, path, str(page["title"]), str(page["body"]), dict(frontmatter)))
+        candidates.append(
+            QueryCandidate(
+                path=root / path,
+                rel=path,
+                title=str(page["title"]),
+                body=str(page["body"]),
+                frontmatter=dict(frontmatter),
+            )
+        )
     by_path = {candidate.rel: candidate for candidate in candidates}
     scored = {path: by_path[path] for path in seed_scores if path in by_path}
     for path, candidate in scored.items():
@@ -239,6 +317,8 @@ def run_query_v2(
     embedding: EmbeddingSettings | None = None,
     telemetry: TelemetrySettings | None = None,
     debug: bool = False,
+    include_context_pack: bool = True,
+    retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid",
 ) -> dict[str, Any]:
     """Read only existing passage/vector projections and return compact context."""
     started = time.perf_counter()
@@ -246,6 +326,12 @@ def run_query_v2(
         return {"ok": False, "code": "missing_question", "error": "question is required"}
     if not 1 <= top_k <= 100:
         return {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 100"}
+    if retrieval_mode not in {"lexical", "vector", "hybrid"}:
+        return {
+            "ok": False,
+            "code": "invalid_retrieval_mode",
+            "error": "retrieval_mode must be lexical, vector, or hybrid",
+        }
     filters = filters or QueryFilters()
     intent = classify_intent(question)
     effective_scope, scope_rules = _effective_scope(scope, intent)
@@ -256,20 +342,34 @@ def run_query_v2(
         return {"ok": True, "question": question, "scope": scope, "results": [], "context_pack": {"passages": [], "citations": [], "budget": {"total": min(hard_budget_tokens, 4_000), "used": 0}}, "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}}}
 
     metadata: dict[str, dict[str, Any]] = {}
+    provenance: dict[str, dict[str, str]] = {}
     for item in store.page_candidates():
         frontmatter = item.get("frontmatter")
-        metadata[str(item["path"])] = dict(frontmatter) if isinstance(frontmatter, dict) else dict()
+        path = str(item["path"])
+        metadata[path] = dict(frontmatter) if isinstance(frontmatter, dict) else dict()
+        provenance[path] = {
+            key: str(item.get(key) or "")
+            for key in ("session_id", "occurred_at", "project", "content_hash")
+        }
     try:
-        fts = store.search_fts(question, limit=50, project=project, page_type=filters.type, tags=list(filters.tags))
+        fts = (
+            store.search_fts(question, limit=50, project=project, page_type=filters.type, tags=list(filters.tags))
+            if retrieval_mode != "vector"
+            else []
+        )
     except RetrievalIndexError as exc:
         fts = []
         status = {**status, "code": exc.code}
-    vector, vector_warnings = _vector_hits(root, question, embedding, scope=effective_scope)
+    vector, vector_warnings = (
+        _vector_hits(root, question, embedding, scope=effective_scope)
+        if retrieval_mode != "lexical"
+        else ({}, [])
+    )
     ranked: dict[str, dict[str, Any]] = {}
     for rank, hit in enumerate(fts, 1):
         if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
-        item = ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": rank, "vector_rank": None, "vector_score": 0.0})
+        item = ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": rank, "title_rank": None, "vector_rank": None, "vector_score": 0.0})
         item["fts_rank"] = rank
     # A vector hit is identified by passage ID.  Load its existing retrieval
     # projection rather than scanning Markdown, so vector-only recall remains
@@ -277,7 +377,10 @@ def run_query_v2(
     for hit in store.load_passages(vector):
         if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
-        ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "vector_rank": None, "vector_score": 0.0})
+        ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0})
+    for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters), 1):
+        ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": rank, "vector_rank": None, "vector_score": 0.0})
+        ranked[hit.passage_id]["title_rank"] = rank
     for item in ranked.values():
         vector_data = vector.get(item["hit"].passage_id)
         if vector_data:
@@ -285,9 +388,13 @@ def run_query_v2(
     scored: list[dict[str, Any]] = []
     for item in ranked.values():
         hit = item["hit"]
-        rrf = (1 / (RRF_K + item["fts_rank"]) if item["fts_rank"] else 0.0) + (1 / (RRF_K + item["vector_rank"]) if item["vector_rank"] else 0.0)
+        rrf = (
+            (1 / (RRF_K + item["fts_rank"]) if item["fts_rank"] else 0.0)
+            + (1 / (RRF_K + item["title_rank"]) if item["title_rank"] else 0.0)
+            + (1 / (RRF_K + item["vector_rank"]) if item["vector_rank"] else 0.0)
+        )
         exact = int(question.casefold() in {hit.title.casefold(), hit.page_path.casefold()})
-        total = round(rrf * (RRF_K + 1) + _authority_bonus(hit, intent, effective_scope, metadata) + exact * 0.5, 12)
+        total = round(rrf * (RRF_K + 1) + _authority_bonus(hit, intent, effective_scope, metadata) + _title_overlap_bonus(hit, question) + exact * 0.5, 12)
         scored.append({**item, "score": total, "rrf": rrf, "exact": bool(exact), "graph_score": 0.0, "graph_reasons": []})
     graph_candidates, graph_passages = _graph_expand(
         root, store, metadata, scope=effective_scope, project=project, filters=filters,
@@ -301,11 +408,34 @@ def run_query_v2(
             existing_by_path[path]["score"] = round(existing_by_path[path]["score"] + candidate.graph_score, 12)
     for hit in graph_passages:
         candidate = graph_candidates[hit.page_path]
-        scored.append({"hit": hit, "fts_rank": None, "vector_rank": None, "vector_score": 0.0, "rrf": 0.0, "exact": False, "graph_score": candidate.graph_score, "graph_reasons": list(candidate.rank_breakdown.graph_reasons), "score": candidate.total_score})
+        scored.append({"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0, "rrf": 0.0, "exact": False, "graph_score": candidate.graph_score, "graph_reasons": list(candidate.rank_breakdown.graph_reasons), "score": candidate.total_score})
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
-    selected = scored[:top_k]
-    passages = [ContextPassage(item["hit"].passage_id, item["hit"].page_path, _heading(item["hit"]), item["hit"].text, item["score"], "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge") for item in selected]
-    packed: dict[str, Any] = pack_context(passages, hard_limit=hard_budget_tokens, intent=intent)
+    # Retrieval is passage-first, but the public result list and compact pack
+    # must not repeat the same document merely because several of its passages
+    # matched.  Keep the highest ranked passage for each page deterministically.
+    selected: list[dict[str, Any]] = []
+    selected_paths: set[str] = set()
+    for item in scored:
+        page_path = item["hit"].page_path
+        if page_path in selected_paths:
+            continue
+        selected.append(item)
+        selected_paths.add(page_path)
+        if len(selected) >= top_k:
+            break
+    passages = [
+        ContextPassage(
+            item["hit"].passage_id,
+            item["hit"].page_path,
+            _heading(item["hit"]),
+            item["hit"].text,
+            item["score"],
+            "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge",
+            _citation_metadata(item["hit"], provenance),
+        )
+        for item in selected
+    ]
+    packed: dict[str, Any] = pack_context(passages, hard_limit=hard_budget_tokens, intent=intent) if include_context_pack else {"passages": [], "citations": [], "budget": {"total": min(hard_budget_tokens, 16_000), "used": 0, "omitted": 0}}
     stale = any(str(metadata.get(item["hit"].page_path, {}).get("freshness") or "") in {"stale", "review_required"} for item in selected)
     sources: list[str] = []
     for item in selected:
@@ -313,7 +443,7 @@ def run_query_v2(
         values = raw_sources if isinstance(raw_sources, (list, tuple)) else [raw_sources]
         sources.extend(str(path) for path in values if isinstance(path, str))
     fallback = decide_fallback(intent=intent, top_score=selected[0]["score"] if selected else 0.0, eligible_formal_count=sum(item["hit"].corpus != "history" for item in selected), citation_count=len(packed["citations"]), stale=stale, source_paths=sources)
-    fallback_evidence = _fallback_passages(root, store, metadata, question, fallback.level, fallback.allowed_source_paths)
+    fallback_evidence = _fallback_passages(root, store, metadata, question, fallback.level, fallback.allowed_source_paths) if include_context_pack else []
     if fallback_evidence:
         before = int(packed["budget"]["used"])
         packed = pack_context([*passages, *fallback_evidence], hard_limit=hard_budget_tokens, intent=intent)
@@ -322,11 +452,34 @@ def run_query_v2(
     else:
         fallback_payload = fallback.as_dict()
         fallback_payload["added_token_usage"] = 0
-    results = [{"path": item["hit"].page_path, "heading": _heading(item["hit"]), "snippet": item["hit"].text[:240], "score": item["score"], "scores": {"fts": item["hit"].score, "vector": item["vector_score"], "rrf": item["rrf"], "graph": item["graph_score"]}} for item in selected]
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "archive" if effective_scope == "archive" else "active", "authority": "formal>capsule>raw>history", "intent": intent, "counters": {"fts_hits": len(fts), "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": [*filter(None, scope_rules), *vector_warnings], "fallback": fallback_payload}
+    results = [{"path": item["hit"].page_path, "heading": _heading(item["hit"]), "snippet": item["hit"].text[:240], "score": item["score"], "scores": {"fts": item["hit"].score, "vector": item["vector_score"], "rrf": item["rrf"], "graph": item["graph_score"]}, "source_kind": item["hit"].source_kind, "metadata": {"type": metadata.get(item["hit"].page_path, {}).get("type"), "tags": metadata.get(item["hit"].page_path, {}).get("tags", [])}} for item in selected]
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "archive" if effective_scope == "archive" else "active", "authority": "formal>capsule>raw>history", "intent": intent, "retrieval_mode": retrieval_mode, "counters": {"fts_hits": len(fts), "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": [*filter(None, scope_rules), *vector_warnings], "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000
     if telemetry is None or telemetry.enabled:
         QueryTelemetry(root).record(question=question, scope=scope, project=project, passage_ids=[item["hit"].passage_id for item in selected], fallback_level=fallback.level, token_count=int(packed["budget"]["used"]), latency_ms=elapsed, retention_days=(telemetry.retention_days if telemetry else 90))
     return {"ok": True, "question": question, "scope": scope, "project": project or "", "results": results, "context_pack": packed, "pipeline": pipeline}
+
+
+def legacy_response_from_v2(payload: dict[str, Any]) -> dict[str, Any]:
+    """Render a deprecated legacy context from the already-selected V2 pack.
+
+    This adapter intentionally performs no retrieval or reranking: legacy and
+    compact callers therefore cite the identical selected-results set.
+    """
+    result = dict(payload)
+    context_pack = payload.get("context_pack")
+    passages = context_pack.get("passages", []) if isinstance(context_pack, dict) else []
+    result["context"] = [
+        {
+            "citation": item.get("citation", ""),
+            "path": item.get("path", ""),
+            "title": item.get("heading", ""),
+            "content": item.get("content", ""),
+        }
+        for item in passages
+        if isinstance(item, dict)
+    ]
+    result.setdefault("warnings", []).append("legacy_response_adapter_v2_selected_results")
+    return result

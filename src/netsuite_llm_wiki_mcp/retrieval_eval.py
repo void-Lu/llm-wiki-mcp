@@ -11,10 +11,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, RANKING_VERSION, wiki_query
+from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, RANKING_POLICY_VERSION, run_query_v2
+from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings, TelemetrySettings
+from netsuite_llm_wiki_mcp.vector_index import parse_vector_settings
+from netsuite_llm_wiki_mcp.knowledge_compiler import filesystem_path
 
 
 RETRIEVAL_EVAL_SCHEMA_VERSION = 1
@@ -115,7 +119,7 @@ def load_retrieval_dataset(
 
 def validate_dataset_paths(dataset: RetrievalEvalDataset, vault_root: str | Path) -> None:
     """Ensure labels point at files inside the supplied vault without reading bodies."""
-    root = Path(vault_root).expanduser().resolve()
+    root = filesystem_path(vault_root)
     if not root.is_dir():
         raise RetrievalEvalError("vault_missing", f"vault root is not a directory: {root}")
     for case in dataset.cases:
@@ -138,7 +142,10 @@ def calculate_ranking_metrics(
     if top_k <= 0:
         raise RetrievalEvalError("invalid_top_k", "top_k must be greater than zero")
     grades = {item.path: item.grade for item in relevant}
-    ranked = list(ranked_paths[:top_k])
+    # A ranking evaluates documents, not repeated passages from the same
+    # document. Keep first occurrence so malformed or legacy callers cannot
+    # inflate Recall or nDCG by returning one relevant path repeatedly.
+    ranked = list(dict.fromkeys(ranked_paths))[:top_k]
     hits = [path for path in ranked if path in grades]
     relevant_total = len(grades)
     if not relevant_total:
@@ -166,7 +173,7 @@ def percentile_95(values: Sequence[float]) -> float:
 
 def vault_fingerprint(vault_root: str | Path) -> dict[str, Any]:
     """Hash queryable wiki files by relative path and content without exposing either."""
-    root = Path(vault_root).expanduser().resolve()
+    root = filesystem_path(vault_root)
     wiki = root / "wiki"
     digest = hashlib.sha256()
     count = 0
@@ -193,8 +200,10 @@ def run_retrieval_evaluation(
     measure_context_budget: bool = True,
     context_budget_case_limit: int | None = None,
     experiment_metadata: Mapping[str, Any] | None = None,
-    retrieval_mode: str = "lexical",
+    retrieval_mode: Literal["lexical", "vector", "hybrid"] = "lexical",
     vector_config: Mapping[str, Any] | None = None,
+    query_version: str = "v2",
+    scope: Literal["auto", "knowledge", "history", "all", "archive"] = "knowledge",
 ) -> dict[str, Any]:
     """Execute the public query API only; this function never mutates the vault."""
     if top_k <= 0:
@@ -207,12 +216,16 @@ def run_retrieval_evaluation(
         raise RetrievalEvalError("invalid_retrieval_mode", "retrieval_mode must be lexical, vector, or hybrid")
     if retrieval_mode != "lexical" and not vector_config:
         raise RetrievalEvalError("vector_config_missing", "vector and hybrid evaluation require a local vector configuration")
-    root = Path(vault_root).expanduser().resolve()
+    if query_version not in {"v1", "v2"}:
+        raise RetrievalEvalError("invalid_query_version", "query_version must be v1 or v2")
+    if scope not in {"auto", "knowledge", "history", "all", "archive"}:
+        raise RetrievalEvalError("invalid_scope", "scope must be auto, knowledge, history, all, or archive")
+    root = filesystem_path(vault_root)
     validate_dataset_paths(dataset, root)
 
     # Warm the interpreter and parser without treating it as a latency sample.
     first = dataset.cases[0]
-    _query_case(root, first, top_k=top_k, include_context_pack=False, retrieval_mode=retrieval_mode, vector_config=vector_config)
+    _query_case(root, first, top_k=top_k, include_context_pack=False, retrieval_mode=retrieval_mode, vector_config=vector_config, query_version=query_version, scope=scope)
 
     cases: list[dict[str, Any]] = []
     latency_samples: list[float] = []
@@ -235,7 +248,7 @@ def run_retrieval_evaluation(
         rankings: list[list[str]] = []
         for _ in range(repeats):
             started = time.perf_counter()
-            result = _query_case(root, case, top_k=top_k, include_context_pack=False, retrieval_mode=retrieval_mode, vector_config=vector_config)
+            result = _query_case(root, case, top_k=top_k, include_context_pack=False, retrieval_mode=retrieval_mode, vector_config=vector_config, query_version=query_version, scope=scope)
             elapsed_ms = (time.perf_counter() - started) * 1_000
             latency_samples.append(elapsed_ms)
             rankings.append([str(item["path"]) for item in result["results"]])
@@ -269,9 +282,11 @@ def run_retrieval_evaluation(
 
         budget: dict[str, Any] | None = None
         if measure_context_budget and (context_budget_case_limit is None or case_index < context_budget_case_limit):
-            context_result = _query_case(root, case, top_k=top_k, include_context_pack=True, retrieval_mode=retrieval_mode, vector_config=vector_config)
-            budget = dict(context_result["budget"])
-            used = sum(int(value) for value in budget.get("used", {}).values())
+            context_result = _query_case(root, case, top_k=top_k, include_context_pack=True, retrieval_mode=retrieval_mode, vector_config=vector_config, query_version=query_version, scope=scope)
+            raw_budget = context_result.get("budget") or context_result.get("context_pack", {}).get("budget", {})
+            budget = dict(raw_budget)
+            raw_used = budget.get("used", {})
+            used = int(raw_used) if isinstance(raw_used, int) else sum(int(value) for value in raw_used.values())
             budget["used_total"] = used
             budget["within_budget"] = used <= int(budget.get("total", 0))
             if not budget["within_budget"]:
@@ -322,7 +337,7 @@ def run_retrieval_evaluation(
             "abstention_threshold": dataset.manifest.abstention_threshold,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "runtime_provenance": RUNTIME_PROVENANCE.to_public_dict(),
-            "ranking": {"version": RANKING_VERSION},
+            "ranking": {"version": RANKING_POLICY_VERSION if query_version == "v2" else RANKING_VERSION},
             "experiment": _normalise_experiment_metadata(experiment_metadata),
             "parameters": {
                 "top_k": top_k,
@@ -333,6 +348,8 @@ def run_retrieval_evaluation(
                 "context_budget_case_limit": context_budget_case_limit,
                 "retrieval_mode": retrieval_mode,
                 "vector_enabled": retrieval_mode != "lexical",
+                "query_version": query_version,
+                "scope": scope,
             },
             "query_v2": {
                 "scope_authority_lifecycle": scope_contracts,
@@ -540,9 +557,28 @@ def _query_case(
     *,
     top_k: int,
     include_context_pack: bool,
-    retrieval_mode: str = "lexical",
+    retrieval_mode: Literal["lexical", "vector", "hybrid"] = "lexical",
     vector_config: Mapping[str, Any] | None = None,
+    query_version: str = "v2",
+    scope: Literal["auto", "knowledge", "history", "all", "archive"] = "knowledge",
 ) -> dict[str, Any]:
+    if query_version == "v2":
+        embedding: EmbeddingSettings | None = None
+        if retrieval_mode != "lexical":
+            settings = parse_vector_settings(root, dict(vector_config or {}))
+            embedding = EmbeddingSettings(enabled=True, provider=settings.provider, model_path=settings.model_path, index_path=settings.index_path, device=settings.device, batch_size=settings.batch_size, max_sequence_length=settings.max_sequence_length, candidate_limit=settings.candidate_limit, rrf_k=settings.rrf_k, min_vector_score=settings.min_vector_score)
+        return run_query_v2(
+            root,
+            case.query,
+            scope=scope,
+            project=case.filters.get("project"),
+            filters=QueryFilters(case.filters.get("filter_type"), tuple(case.filters.get("filter_tags") or ())),
+            top_k=top_k,
+            embedding=embedding,
+            telemetry=TelemetrySettings(enabled=False),
+            include_context_pack=include_context_pack,
+            retrieval_mode=retrieval_mode,
+        )
     return wiki_query(
         root,
         case.query,
@@ -561,7 +597,7 @@ def _query_case(
 def _results_match_filters(results: Sequence[Mapping[str, Any]], filters: Mapping[str, Any]) -> bool:
     for item in results:
         path = str(item["path"])
-        frontmatter = item.get("frontmatter")
+        frontmatter = item.get("frontmatter") or item.get("metadata")
         if not isinstance(frontmatter, Mapping):
             return False
         if "project" in filters and not _in_project_scope(path, str(filters["project"])):
@@ -571,7 +607,7 @@ def _results_match_filters(results: Sequence[Mapping[str, Any]], filters: Mappin
         if "filter_tags" in filters:
             raw_tags = frontmatter.get("tags", [])
             tags = raw_tags if isinstance(raw_tags, list) else [raw_tags]
-            if not set(filters["filter_tags"]) & {str(tag) for tag in tags}:
+            if not set(filters["filter_tags"]).issubset({str(tag) for tag in tags}):
                 return False
     return True
 

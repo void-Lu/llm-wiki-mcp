@@ -152,7 +152,7 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 worker profile 只会额外注册 `wiki_generation`。init/config、batch ingest/reconcile、vector build/rebuild、lint/verify/debug/evaluation、purge 和 migration 只保留在 CLI/admin 边界。
 
-`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共查询契约，输出 JSON 与 Markdown 报告。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
+`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共查询契约，输出 JSON 与 Markdown 报告。默认 `--query-version v2`，只读取已构建的 passage/vector index，且关闭查询遥测；用 `--query-version v1` 生成可比的 legacy baseline，`--scope` 控制 V2 corpus。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
 ### 可选本地向量检索
 

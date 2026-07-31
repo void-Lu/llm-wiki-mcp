@@ -23,7 +23,7 @@ from netsuite_llm_wiki_mcp.ingest_service import ingest_file as run_ingest_file
 from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
-from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, run_query_v2
+from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
 from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
 from netsuite_llm_wiki_mcp.archive_service import ArchiveService
 
@@ -185,6 +185,8 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
         embedding=settings.embedding,
         telemetry=resolution.resolved.settings.telemetry,
     )
+    if settings.context.response_mode == "legacy":
+        result = legacy_response_from_v2(result)
     return attach_warnings(result, resolution.warnings)
 
 

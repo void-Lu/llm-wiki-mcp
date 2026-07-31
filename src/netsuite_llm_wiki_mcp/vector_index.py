@@ -108,7 +108,7 @@ def vector_settings_from_embedding(vault_root: str | Path, embedding: EmbeddingS
     return VectorSettings(
         provider=embedding.provider,
         model_path=embedding.model_path,
-        index_path=default_vector_index_path(root),
+        index_path=embedding.index_path or default_vector_index_path(root),
         candidate_limit=embedding.candidate_limit,
         rrf_k=embedding.rrf_k,
         min_vector_score=embedding.min_vector_score,

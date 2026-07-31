@@ -194,6 +194,8 @@ def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys:
             str(output_dir),
             "--repeats",
             "2",
+            "--query-version",
+            "v1",
         ]
     )
 

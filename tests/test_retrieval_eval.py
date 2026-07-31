@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 from copy import deepcopy
 from dataclasses import replace
@@ -23,8 +24,11 @@ from netsuite_llm_wiki_mcp.retrieval_eval import (
     validate_dataset_paths,
     write_retrieval_eval_report,
     write_retrieval_comparison,
+    _results_match_filters,
 )
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexStore
+from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
+from netsuite_llm_wiki_mcp.knowledge_compiler import filesystem_path
 from netsuite_llm_wiki_mcp.vector_provider import DeterministicFakeProvider
 from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
 from netsuite_llm_wiki_mcp.wiki_models import WikiPage
@@ -33,6 +37,7 @@ import netsuite_llm_wiki_mcp.wiki_query as wiki_query_module
 
 
 _FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "retrieval"
+_V2_40_FIXTURE_ROOT = _FIXTURE_ROOT / "v2_40"
 
 
 def _copy_vault(tmp_path: Path) -> Path:
@@ -48,14 +53,100 @@ def _copy_dataset(tmp_path: Path) -> Path:
     return dataset
 
 
+def _copy_v2_40_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Copy the reviewed capsule-only fixture so each evaluation stays isolated."""
+    vault = tmp_path / "v2-40-vault"
+    shutil.copytree(_V2_40_FIXTURE_ROOT / "vault", vault)
+    dataset = tmp_path / "v2-40-cases.jsonl"
+    manifest = tmp_path / "v2-40-cases.manifest.json"
+    shutil.copy2(_V2_40_FIXTURE_ROOT / "cases.jsonl", dataset)
+    shutil.copy2(_V2_40_FIXTURE_ROOT / "cases.manifest.json", manifest)
+    return vault, dataset, manifest
+
+
 def test_v2_report_fields_mark_missing_frozen_comparison_unproven(tmp_path: Path) -> None:
     vault = _copy_vault(tmp_path)
+    RetrievalIndexStore(vault).build(RetrievalIndexStore(vault).iter_vault_pages())
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
     report = run_retrieval_evaluation(vault, dataset, measure_context_budget=True, context_budget_case_limit=1)
     assert report["metadata"]["query_v2"]["comparison_status"] == "unproven_without_frozen_v2_baseline"
     assert report["metadata"]["query_v2"]["cold_start_latency_ms"] is None
     assert "warm_p95_latency_ms" in report["metrics"]
     assert "fallback_reason_distribution" in report["metrics"]
+
+
+def test_v2_evaluator_reads_existing_passage_store_without_telemetry_write(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    create_wiki_root(vault)
+    page = Path("wiki/concepts/invoice.md")
+    write_wiki_page(vault, WikiPage(page, {"title": "Invoice", "generated": True, "type": "concept"}, "Invoice", "invoice approval workflow"), overwrite_generated_only=False)
+    RetrievalIndexStore(vault).build(RetrievalIndexStore(vault).iter_vault_pages())
+    dataset = RetrievalEvalDataset(RetrievalEvalManifest("v2", "1", 0.0), (RetrievalEvalCase("invoice", "invoice approval", (Relevance(page.as_posix(), 3),), {}, True, "en", (), ""),))
+    report = run_retrieval_evaluation(vault, dataset, measure_context_budget=False)
+    assert report["metadata"]["parameters"]["query_version"] == "v2"
+    assert report["metrics"]["recall_at_k_macro"] == 1.0
+    assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
+
+
+def test_reviewed_v2_forty_case_fixture_runs_v1_v2_lexical_ablation(tmp_path: Path) -> None:
+    """Keep the approved 40-case label set executable in ordinary CI."""
+    vault, dataset_path, manifest_path = _copy_v2_40_fixture(tmp_path)
+    dataset = load_retrieval_dataset(dataset_path, manifest_path)
+
+    assert len(dataset.cases) == 40
+    assert sum(case.answerable for case in dataset.cases) == 36
+    assert sum(not case.answerable for case in dataset.cases) == 4
+    assert len(list((vault / "wiki" / "sources" / "capsules").glob("*.md"))) == 36
+    assert not (vault / "raw").exists()
+    validate_dataset_paths(dataset, vault)
+
+    reports = {
+        version: run_retrieval_evaluation(
+            vault,
+            dataset,
+            query_version=version,
+            retrieval_mode="lexical",
+            measure_context_budget=False,
+        )
+        for version in ("v1", "v2")
+    }
+
+    for version, report in reports.items():
+        assert report["metadata"]["parameters"]["query_version"] == version
+        assert report["metadata"]["parameters"]["retrieval_mode"] == "lexical"
+        assert report["metadata"]["vault_fingerprint"]["file_count"] == 36
+        assert report["metrics"]["relevant_total"] == 36
+        assert report["metrics"]["no_answer_cases"] == 4
+        assert report["metrics"]["latency_sample_count"] == 40
+        assert all(len(case["ranking_runs"]) == 1 for case in report["cases"])
+
+    comparison = compare_retrieval_reports(reports["v1"], reports["v2"])
+    assert comparison["baseline"]["vault_fingerprint"] == comparison["candidate"]["vault_fingerprint"]
+    assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
+
+
+def test_v2_vector_evaluation_uses_the_requested_vault_relative_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = tmp_path / "vault"
+    create_wiki_root(vault)
+    path = Path("wiki/concepts/semantic.md")
+    write_wiki_page(vault, WikiPage(path, {"title": "Semantic", "generated": True, "type": "concept"}, "Semantic", "accounts payable operations"), overwrite_generated_only=False)
+    RetrievalIndexStore(vault).build(RetrievalIndexStore(vault).iter_vault_pages())
+    provider = DeterministicFakeProvider({"expense automation": [1, 0, 0, 0], "accounts payable operations": [1, 0, 0, 0]})
+    index_path = vault / ".llm-wiki" / "v2-eval"
+    VectorIndexStore(vault, index_path).build(wiki_query_module.vector_index_records(vault), provider, include_raw_sources=False)
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.query_pipeline.LocalBgeM3Provider", lambda *_args, **_kwargs: provider)
+    dataset = RetrievalEvalDataset(RetrievalEvalManifest("v2-vector", "1", 0.5), (RetrievalEvalCase("semantic", "expense automation", (Relevance(path.as_posix(), 3),), {}, True, "en", (), ""),))
+
+    report = run_retrieval_evaluation(
+        vault,
+        dataset,
+        measure_context_budget=False,
+        retrieval_mode="vector",
+        query_version="v2",
+        vector_config={"model_path": str(tmp_path / "model"), "index_path": str(index_path.relative_to(vault))},
+    )
+
+    assert report["metrics"]["recall_at_k_macro"] == 1.0
 
 
 def test_vector_and_hybrid_evaluation_improve_zero_lexical_recall_without_metric_regression(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,9 +186,9 @@ def test_vector_and_hybrid_evaluation_improve_zero_lexical_recall_without_metric
     )
     config = {"provider": "local_bge_m3", "model_path": str(model)}
 
-    lexical = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="lexical")
-    vector = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="vector", vector_config=config)
-    hybrid = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="hybrid", vector_config=config)
+    lexical = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="lexical", query_version="v1")
+    vector = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="vector", vector_config=config, query_version="v1")
+    hybrid = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="hybrid", vector_config=config, query_version="v1")
 
     assert lexical["metrics"]["recall_at_k_macro"] == 0.0
     assert vector["metrics"]["recall_at_k_macro"] == 1.0
@@ -123,6 +214,24 @@ def test_ranking_metrics_match_hand_calculation() -> None:
         "relevant_total": 2,
     }
     assert percentile_95([1.0, 2.0, 3.0, 4.0, 5.0]) == 5.0
+
+
+def test_ranking_metrics_deduplicate_repeated_document_paths() -> None:
+    relevant = [Relevance("wiki/concepts/invoice.md", 3)]
+
+    metrics = calculate_ranking_metrics(
+        ["wiki/concepts/invoice.md", "wiki/concepts/invoice.md"],
+        relevant,
+    )
+
+    assert metrics == {"recall": 1.0, "mrr": 1.0, "ndcg": 1.0, "hits": 1, "relevant_total": 1}
+
+
+def test_filter_evaluation_requires_every_requested_tag() -> None:
+    results = [{"path": "wiki/concepts/invoice.md", "metadata": {"tags": ["finance"]}}]
+
+    assert _results_match_filters(results, {"filter_tags": ["finance"]})
+    assert not _results_match_filters(results, {"filter_tags": ["finance", "approval"]})
 
 
 def test_loader_rejects_invalid_grade_duplicate_id_and_filters(tmp_path: Path) -> None:
@@ -156,11 +265,29 @@ def test_path_validation_rejects_missing_relevant_page(tmp_path: Path) -> None:
         validate_dataset_paths(load_retrieval_dataset(dataset_path), _copy_vault(tmp_path))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended-length paths are platform-specific")
+def test_path_validation_accepts_existing_long_relevant_page(tmp_path: Path) -> None:
+    relative = Path("wiki/sources/references")
+    for index in range(9):
+        relative /= f"deep-capsule-provenance-segment-{index:02d}-with-descriptive-name"
+    relative /= "capsules/source.md"
+    target = filesystem_path(tmp_path / relative)
+    target.parent.mkdir(parents=True)
+    target.write_text("# capsule\n", encoding="utf-8")
+    assert len(str(tmp_path / relative)) > 260
+    dataset = RetrievalEvalDataset(
+        RetrievalEvalManifest("long-path", "1", 0.5),
+        (RetrievalEvalCase("long-path", "capsule", (Relevance(relative.as_posix(), 3),), {}, True, "en", (), ""),),
+    )
+
+    validate_dataset_paths(dataset, tmp_path)
+
+
 def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tmp_path: Path) -> None:
     vault = _copy_vault(tmp_path)
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
 
-    report = run_retrieval_evaluation(vault, dataset, repeats=2)
+    report = run_retrieval_evaluation(vault, dataset, repeats=2, query_version="v1")
 
     assert report["metadata"]["parameters"]["top_k"] == 10
     assert report["metadata"]["vault_fingerprint"]["file_count"] == 4
@@ -192,7 +319,7 @@ def test_no_answer_without_results_is_not_a_false_positive_at_zero_threshold(tmp
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
     zero_threshold_dataset = replace(dataset, manifest=replace(dataset.manifest, abstention_threshold=0.0))
 
-    report = run_retrieval_evaluation(vault, zero_threshold_dataset, measure_context_budget=False)
+    report = run_retrieval_evaluation(vault, zero_threshold_dataset, measure_context_budget=False, query_version="v1")
 
     no_answer = next(case for case in report["cases"] if case["id"] == "no-answer")
     assert no_answer["ranked_paths"] == []
@@ -203,7 +330,7 @@ def test_context_budget_case_limit_samples_the_requested_prefix(tmp_path: Path) 
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
     vault = _copy_vault(tmp_path)
 
-    report = run_retrieval_evaluation(vault, dataset, context_budget_case_limit=1)
+    report = run_retrieval_evaluation(vault, dataset, context_budget_case_limit=1, query_version="v1")
 
     assert report["metadata"]["parameters"]["context_budget_case_limit"] == 1
     assert report["metrics"]["context_budget"] == {
@@ -213,19 +340,20 @@ def test_context_budget_case_limit_samples_the_requested_prefix(tmp_path: Path) 
         "within_budget": True,
     }
     with pytest.raises(RetrievalEvalError, match="must be non-negative"):
-        run_retrieval_evaluation(vault, dataset, context_budget_case_limit=-1)
+        run_retrieval_evaluation(vault, dataset, context_budget_case_limit=-1, query_version="v1")
 
 
 def test_evaluation_records_experiment_metadata_and_compares_case_outcomes(tmp_path: Path) -> None:
     vault = _copy_vault(tmp_path)
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
-    baseline = run_retrieval_evaluation(vault, dataset, measure_context_budget=False)
+    baseline = run_retrieval_evaluation(vault, dataset, measure_context_budget=False, query_version="v1")
     candidate = deepcopy(
         run_retrieval_evaluation(
             vault,
             dataset,
             measure_context_budget=False,
-            experiment_metadata={
+                query_version="v1",
+                experiment_metadata={
                 "parent_baseline_id": "baseline-2026-07-27",
                 "changed_item": "body_length_normalization",
                 "parameters": {"body_length_exponent": 0.5},
