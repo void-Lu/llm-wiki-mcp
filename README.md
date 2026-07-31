@@ -152,7 +152,7 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 worker profile 只会额外注册 `wiki_generation`。init/config、batch ingest/reconcile、vector build/rebuild、lint/verify/debug/evaluation、purge 和 migration 只保留在 CLI/admin 边界。
 
-`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共 `wiki_query`，输出 JSON 与 Markdown 报告。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
+`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共查询契约，输出 JSON 与 Markdown 报告。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
 ### 可选本地向量检索
 
@@ -170,7 +170,9 @@ wiki_query(
 )
 ```
 
-关键词和向量从完整合格语料独立召回，然后以 RRF 融合，最后才应用有界图增强。`wiki_query_debug` 可显示词法/向量 rank、RRF 贡献和图贡献；普通响应保留兼容字段，并在 `pipeline` 中报告向量索引状态或降级原因。
+Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，先做 passage FTS/vector 召回，再以 RRF 和有界强-seed graph 扩展排序；source index、superseded 与 deprecated 页面不会进入正文。需要精确原文、低覆盖或 stale 证据时，`pipeline.fallback` 会说明原因，并且只追加已声明 source 的 capsule 或相关 raw passage，绝不返回整份 raw。
+
+回滚只修改 vault 配置的 `retrieval.query_version`：默认 `v2`；在兼容排障期设为 `v1` 会使用旧 façade 并返回 `query_v1_legacy_feature_flag` warning。该开关属于启动时配置快照，不能由 MCP query 参数覆盖。
 
 使用 `netsuite-llm-wiki-mcp config validate|show|set-retrieval|set-privacy|set-telemetry|set-archive` 管理配置。配置修改在重启 MCP runtime 后生效；普通 MCP 调用不能修改脱敏、保留期、archive/purge 或索引路径。
 

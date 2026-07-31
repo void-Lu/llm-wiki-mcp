@@ -45,6 +45,7 @@ class ContextSettings:
 @dataclass(frozen=True)
 class RetrievalSettings:
     lexical_enabled: bool = True
+    query_version: Literal["v1", "v2"] = "v2"
     embedding: EmbeddingSettings = EmbeddingSettings()
     context: ContextSettings = ContextSettings()
 
@@ -220,7 +221,10 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     if not isinstance(root, str) or not root:
         raise RuntimeConfigError(f"vaults.{name}.root is required", code="invalid_config", config_path=path)
     retrieval_raw = _mapping(raw.get("retrieval", {}), "retrieval", path)
-    _unknown_keys(retrieval_raw, {"lexical_enabled", "embedding", "context"}, "retrieval", path)
+    _unknown_keys(retrieval_raw, {"lexical_enabled", "query_version", "embedding", "context"}, "retrieval", path)
+    query_version = retrieval_raw.get("query_version", "v2")
+    if query_version not in {"v1", "v2"}:
+        raise RuntimeConfigError("retrieval.query_version must be v1 or v2", code="invalid_config", config_path=path)
     context_raw = _mapping(retrieval_raw.get("context", {}), "retrieval.context", path)
     _unknown_keys(context_raw, {"response_mode", "hard_budget_tokens"}, "retrieval.context", path)
     response_mode = context_raw.get("response_mode", "context_pack")
@@ -249,6 +253,7 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
         root=_resolve_required_absolute_path(root, description=f"global config {path} value vaults.{name}.root"),
         retrieval=RetrievalSettings(
             lexical_enabled=_bool(retrieval_raw.get("lexical_enabled"), True, "retrieval.lexical_enabled", path),
+            query_version=query_version,
             embedding=_decode_embedding(retrieval_raw.get("embedding", {}), path),
             context=ContextSettings(response_mode=response_mode, hard_budget_tokens=_integer(context_raw.get("hard_budget_tokens"), 16_000, 512, 200_000, "retrieval.context.hard_budget_tokens", path)),
         ),
@@ -347,6 +352,7 @@ class ConfigRegistry:
             "tool_profile": self.config.tool_profile,
             "retrieval": {
                 "lexical_enabled": settings.retrieval.lexical_enabled,
+                "query_version": settings.retrieval.query_version,
                 "embedding": {
                     "enabled": settings.retrieval.embedding.enabled,
                     "provider": settings.retrieval.embedding.provider,

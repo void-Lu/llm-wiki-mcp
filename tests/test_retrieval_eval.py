@@ -48,6 +48,16 @@ def _copy_dataset(tmp_path: Path) -> Path:
     return dataset
 
 
+def test_v2_report_fields_mark_missing_frozen_comparison_unproven(tmp_path: Path) -> None:
+    vault = _copy_vault(tmp_path)
+    dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
+    report = run_retrieval_evaluation(vault, dataset, measure_context_budget=True, context_budget_case_limit=1)
+    assert report["metadata"]["query_v2"]["comparison_status"] == "unproven_without_frozen_v2_baseline"
+    assert report["metadata"]["query_v2"]["cold_start_latency_ms"] is None
+    assert "warm_p95_latency_ms" in report["metrics"]
+    assert "fallback_reason_distribution" in report["metrics"]
+
+
 def test_vector_and_hybrid_evaluation_improve_zero_lexical_recall_without_metric_regression(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = tmp_path / "vault"
     create_wiki_root(vault)

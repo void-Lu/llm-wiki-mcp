@@ -225,6 +225,10 @@ def run_retrieval_evaluation(
     no_answer_false_positives = 0
     filter_failures = 0
     budget_violations: list[str] = []
+    fallback_cases = 0
+    fallback_reasons: dict[str, int] = {}
+    packed_token_samples: list[int] = []
+    scope_contracts: list[dict[str, object]] = []
 
     for case_index, case in enumerate(dataset.cases):
         query_runs: list[dict[str, Any]] = []
@@ -272,6 +276,23 @@ def run_retrieval_evaluation(
             budget["within_budget"] = used <= int(budget.get("total", 0))
             if not budget["within_budget"]:
                 budget_violations.append(case.id)
+            packed_token_samples.append(used)
+
+        pipeline = result.get("pipeline", {})
+        fallback = pipeline.get("fallback", {}) if isinstance(pipeline, Mapping) else {}
+        fallback_level = str(fallback.get("level", "legacy")) if isinstance(fallback, Mapping) else "legacy"
+        if fallback_level not in {"none", "legacy"}:
+            fallback_cases += 1
+        if isinstance(fallback, Mapping):
+            for reason in fallback.get("reasons", []):
+                fallback_reasons[str(reason)] = fallback_reasons.get(str(reason), 0) + 1
+        scope_contracts.append({
+            "id": case.id,
+            "scope": pipeline.get("scope", "legacy") if isinstance(pipeline, Mapping) else "legacy",
+            "corpus": pipeline.get("corpus", "active") if isinstance(pipeline, Mapping) else "active",
+            "authority": pipeline.get("authority", "legacy") if isinstance(pipeline, Mapping) else "legacy",
+            "fallback_level": fallback_level,
+        })
 
         cases.append(
             {
@@ -288,7 +309,7 @@ def run_retrieval_evaluation(
                 "filter_correct": filter_correct,
                 "context_budget": budget,
                 "pipeline": result["pipeline"],
-                "warnings": result["pipeline"]["stage_1_5_vector_warnings"],
+                "warnings": result["pipeline"].get("stage_1_5_vector_warnings", result["pipeline"].get("warnings", [])),
                 "result_summary": [_result_summary(item) for item in result["results"]],
             }
         )
@@ -313,6 +334,11 @@ def run_retrieval_evaluation(
                 "retrieval_mode": retrieval_mode,
                 "vector_enabled": retrieval_mode != "lexical",
             },
+            "query_v2": {
+                "scope_authority_lifecycle": scope_contracts,
+                "cold_start_latency_ms": None,
+                "comparison_status": "unproven_without_frozen_v2_baseline",
+            },
             "vault_fingerprint": vault_fingerprint(root),
         },
         "metrics": {
@@ -326,6 +352,11 @@ def run_retrieval_evaluation(
             "filter_correctness": 1.0 - (filter_failures / len(cases)),
             "filter_failures": filter_failures,
             "p95_latency_ms": percentile_95(latency_samples),
+            "warm_p95_latency_ms": percentile_95(latency_samples),
+            "cold_start_latency_ms": None,
+            "fallback_rate": fallback_cases / len(cases),
+            "fallback_reason_distribution": fallback_reasons,
+            "packed_token_median": _median(packed_token_samples),
             "latency_sample_count": len(latency_samples),
             "context_budget": {
                 "measured_cases": sum(1 for case in cases if case["context_budget"] is not None),
@@ -585,6 +616,14 @@ def _normalise_relative_path(value: object, case_id: str) -> str:
 
 def _mean_or_none(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
+
+
+def _median(values: Sequence[int]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    return float(ordered[middle]) if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def _format_metric(value: float | None) -> str:

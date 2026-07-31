@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -23,6 +23,7 @@ from netsuite_llm_wiki_mcp.ingest_service import ingest_file as run_ingest_file
 from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
+from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, run_query_v2
 from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
 from netsuite_llm_wiki_mcp.archive_service import ArchiveService
 
@@ -134,8 +135,11 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
     return attach_warnings(status, resolution.warnings)
 
 
+QueryScope = Literal["auto", "knowledge", "history", "all", "archive"]
+
+
 @_register
-def wiki_query(question: str, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, scope: str = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, vector_config: dict[str, Any] | None = None) -> dict[str, Any]:
+def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Query a vault using its immutable retrieval and context profile."""
     if scope not in {"auto", "knowledge", "history", "all", "archive"}:
         return {"ok": False, "code": "invalid_scope", "error": "scope must be auto, knowledge, history, all, or archive"}
@@ -151,23 +155,37 @@ def wiki_query(question: str, vault: str | None = None, vault_root: str | None =
     filter_values = filters or {}
     if not isinstance(filter_values, dict) or set(filter_values) - {"type", "tags"}:
         return {"ok": False, "code": "invalid_filters", "error": "filters may only contain type and tags"}
-    tags = filter_values.get("tags")
-    if tags is not None and (not isinstance(tags, list) or not all(isinstance(item, str) for item in tags)):
-        return {"ok": False, "code": "invalid_filters", "error": "filters.tags must be a list of strings"}
-    warnings = list(resolution.warnings)
-    if vector_config is not None:
-        warnings.append("deprecated_vector_config")
-    result = run_wiki_query(
-        str(resolution.root), question, project, top_k,
-        include_content=True,
-        context_window_tokens=settings.context.hard_budget_tokens,
-        include_context_pack=settings.context.response_mode == "context_pack",
-        enable_vector=settings.embedding.enabled,
-        vector_config=vector_config,
-        filter_type=filter_values.get("type"), filter_tags=tags, scope="archive" if scope == "archive" else "active",
+    try:
+        typed_filters = QueryFilters.from_mapping(filter_values)
+    except ValueError as exc:
+        return {"ok": False, "code": "invalid_filters", "error": str(exc)}
+    if settings.query_version == "v1":
+        legacy = run_wiki_query(
+            resolution.root, question, project, top_k,
+            include_content=True,
+            context_window_tokens=settings.context.hard_budget_tokens,
+            include_context_pack=settings.context.response_mode == "context_pack",
+            enable_vector=settings.embedding.enabled,
+            vector_settings=vector_settings_from_embedding(resolution.root, settings.embedding),
+            filter_type=typed_filters.type,
+            filter_tags=list(typed_filters.tags),
+            scope="archive" if scope == "archive" else "active",
+        )
+        legacy["scope"] = scope
+        legacy.setdefault("warnings", []).append("query_v1_legacy_feature_flag")
+        return attach_warnings(legacy, resolution.warnings)
+    result = run_query_v2(
+        resolution.root,
+        question,
+        scope=scope,
+        project=project,
+        filters=typed_filters,
+        top_k=top_k,
+        hard_budget_tokens=settings.context.hard_budget_tokens,
+        embedding=settings.embedding,
+        telemetry=resolution.resolved.settings.telemetry,
     )
-    result["scope"] = scope
-    return attach_warnings(result, warnings)
+    return attach_warnings(result, resolution.warnings)
 
 
 @_register

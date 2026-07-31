@@ -209,6 +209,30 @@ class RetrievalIndexStore:
             rows = connection.execute(f"SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json, passages.text, 0.0, pages.corpus, pages.authority, pages.source_kind FROM passages JOIN pages ON pages.path=passages.page_path WHERE passages.passage_id IN ({marks}) ORDER BY passages.page_path, passages.ordinal", values).fetchall()
         return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8]) for row in rows]
 
+    def passages_for_pages(self, page_paths: Iterable[str], *, limit_per_page: int = 1) -> list[PassageHit]:
+        """Return bounded passage projections for already-selected pages.
+
+        This is deliberately a read-only selection helper for graph and
+        fallback stages; it never substitutes a whole Markdown page body.
+        """
+        paths = sorted(set(page_paths))
+        if not paths or not self.path.exists() or limit_per_page <= 0:
+            return []
+        marks = ",".join("?" for _ in paths)
+        sql = f"""
+            SELECT passage_id, page_path, title, heading_path_json, text, corpus, authority, source_kind
+            FROM (
+                SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
+                       passages.text, passages.ordinal, pages.corpus, pages.authority, pages.source_kind,
+                       ROW_NUMBER() OVER (PARTITION BY passages.page_path ORDER BY passages.ordinal) AS row_number
+                FROM passages JOIN pages ON pages.path = passages.page_path
+                WHERE passages.page_path IN ({marks})
+            ) WHERE row_number <= ? ORDER BY page_path, row_number
+        """
+        with self._connection(readonly=True) as connection:
+            rows = connection.execute(sql, [*paths, limit_per_page]).fetchall()
+        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], 0.0, row[5], row[6], row[7]) for row in rows]
+
     def page_candidates(self) -> list[dict[str, object]]:
         """Load query projections from the DB without re-reading source files."""
         if not self.path.exists():

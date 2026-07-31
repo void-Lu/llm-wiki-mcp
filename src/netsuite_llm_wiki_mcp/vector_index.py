@@ -48,6 +48,7 @@ class VectorSearchResult:
     path: str
     score: float
     rank: int
+    passage_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -286,10 +287,12 @@ class VectorIndexStore:
                 continue
             vector = _vector_from_document(document)
             score = round(sum(left * right for left, right in zip(query_vector, vector, strict=True)), 12)
-            scored.append((path, score))
+            scored.append((path, passage_id, score))
         return [
-            VectorSearchResult(path=path, score=score, rank=rank)
-            for rank, (path, score) in enumerate(sorted(scored, key=lambda item: (-item[1], item[0]))[:limit], 1)
+            VectorSearchResult(path=path, passage_id=passage_id, score=score, rank=rank)
+            for rank, (path, passage_id, score) in enumerate(
+                sorted(scored, key=lambda item: (-item[2], item[0], item[1]))[:limit], 1
+            )
         ]
 
     def validate_provider(self, identity: VectorProviderIdentity, *, include_raw_sources: bool) -> None:
