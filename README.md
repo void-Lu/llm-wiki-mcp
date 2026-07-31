@@ -138,74 +138,41 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 ## 工具
 
-### 诊断与文件
+默认 core profile 只注册以下 7 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。
 
 | 工具 | 说明 |
 |------|------|
-| `wiki_status` | 返回 vault 结构诊断、ingest queue 计数、版本和 CodeGraph 可用性；不会创建或修改 vault |
-| `wiki_read_file` | 只读取 `wiki/` 或 `raw/sources/` 下的文本文件，拒绝绝对路径、路径穿越、运行时私有目录和非文本扩展，并按字节数截断 |
+| `wiki_status` | 聚合逻辑 vault、检索配置、active/archive index、generation queue、版本与运行身份；不回显绝对路径、模型路径、凭据或脱敏规则正文。`detail=summary|indexes|generation|archive` 只改变只读展示范围。 |
+| `wiki_ingest` | 为一个明确 source 准备摄入；目录/batch/reconcile 由 CLI 或 worker 执行。 |
+| `wiki_write_note` | 仅创建人工知识页，已有目标不会被覆盖。 |
+| `wiki_update` | 对既有页面执行 `preview|apply` 受控更新。 |
+| `wiki_query` | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；模型、预算、索引和隐私策略全部来自启动时配置快照。 |
+| `wiki_archive` | 归档生命周期的 `plan|apply` 公开入口；不提供 purge。 |
+| `wiki_restore` | 不可变归档包的 `plan|apply` 恢复入口。 |
 
-### 摄入
-
-| 工具 | 说明 |
-|------|------|
-| `wiki_init` | 在 Obsidian vault 中创建 wiki 目录结构 |
-| `wiki_ingest_codegraph` | 将 CodeGraph 快照和机器代码事实同步摄入 raw，并生成项目 source/architecture/pipeline 可读页（不需要 LLM） |
-| `wiki_ingest_llm` | 两阶段 LLM 摄入（推荐）：`prepare`（返回合并 prompt）-> `apply`（写入页面）。旧三阶段 `prepare_analysis` -> `prepare_generation` -> `apply_generation` 仍兼容 |
-| `wiki_build_source_index` | 为 raw source 树构建轻量 source_index 索引页（不需要 LLM）：按 frontmatter `tags` 的 `parent/leaf` 树路径分组，内节点生成嵌套 `_entries.md`（分页为 `_entries-02.md` ...），纯叶节点作为父索引内的 `## {leaf}` 段落；`source_name` 作为隐式根节点 |
-| `wiki_rescan` | 重新扫描 source；如果 SHA256 未变化则跳过，如果变化则刷新 raw snapshot；如果 manifest 路径与期望 raw dir 不匹配（如目录结构重构后旧路径未同步），自动修复 manifest 路径并在响应中返回 `manifest_repaired` 信息 |
-| `wiki_ingest_batch` | 持久化摄入队列：enqueue / next / complete / fail / retry / cancel / clear_done / reapply / prepare_all / apply_all / next_prepared / next_generation_job / set_generation / apply_one。`prepare_all` 只返回瘦身摘要，完整 prompt 留在队列内；`next_generation_job` 每次返回一个隔离 page generation job；`set_generation` 保存单条生成结果；`apply_one` / `apply_all` 在写 wiki 前执行 generation 结构与质量门禁 |
-
-### 查询
-
-| 工具 | 说明 |
-|------|------|
-| `wiki_query` | 关键词 + CJK bigram 搜索 -> 图扩展 -> 按上下文预算输出；默认最多返回 10 个候选，结果包含标题匹配和嵌入图片元数据 |
+worker profile 只会额外注册 `wiki_generation`。init/config、batch ingest/reconcile、vector build/rebuild、lint/verify/debug/evaluation、purge 和 migration 只保留在 CLI/admin 边界。
 
 `retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共 `wiki_query`，输出 JSON 与 Markdown 报告。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
 ### 可选本地向量检索
 
-向量检索默认关闭。唯一支持的 provider 是本地 `local_bge_m3`；模型目录由调用方显式提供，加载时启用离线模式和 `local_files_only`，缺模型或未安装 `vector` extra 时只会结构化降级到关键词/图结果。为使 BGE-M3 的 CPU 全量建库可控，文档 embedding 默认上限为 256 tokens（可用 `max_sequence_length` 或 CLI 的 `--max-sequence-length` 显式调整）；该值是索引身份的一部分，改变后必须执行 full build。
+向量检索默认关闭。唯一支持的 provider 是本地 `local_bge_m3`；模型目录在 `config set-retrieval` 写入用户级配置，加载时启用离线模式和 `local_files_only`，缺模型或未安装 `vector` extra 时只会结构化降级到关键词/图结果。为使 BGE-M3 的 CPU 全量建库可控，文档 embedding 默认上限为 256 tokens；该值是索引身份的一部分，改变后必须执行 full build。
 
 先通过 `vector build` 显式构建索引；`wiki_query` 从不构建、更新索引或下载模型。索引保存于 vault 的 `.llm-wiki/vector-index/`，仅含相对路径、内容哈希、元数据和归一化向量，不保存正文。默认 `include_raw_sources=false`，这会同时约束建库、更新和查询。
 
-启用查询时传入：
+配置本地模型后，普通查询不再传模型或索引参数：
 
 ```python
 wiki_query(
-    vault_root,
-    "如何自动化应付账款处理？",
-    enable_vector=True,
-    vector_config={
-        "provider": "local_bge_m3",
-        "model_path": "<本地-bge-m3-目录>",
-        "candidate_limit": 50,
-        "rrf_k": 60,
-        "max_sequence_length": 256,
-    },
+    question="如何自动化应付账款处理？",
+    vault="homework",
+    scope="knowledge",
 )
 ```
 
 关键词和向量从完整合格语料独立召回，然后以 RRF 融合，最后才应用有界图增强。`wiki_query_debug` 可显示词法/向量 rank、RRF 贡献和图贡献；普通响应保留兼容字段，并在 `pipeline` 中报告向量索引状态或降级原因。
 
-### 维护
-
-| 工具 | 说明 |
-|------|------|
-| `wiki_lint` | 结构健康检查和分阶段语义审查：frontmatter、断链、source 可追溯性、cache 完整性、孤立页面、矛盾、过期声明、缺失概念 |
-| `wiki_enrich` | 两阶段 wikilink 富化：prepare（返回 LLM prompt）-> apply（插入链接） |
-| `wiki_page_merge` | 合并页面：frontmatter union + 锁定字段保护 + 可选 LLM 正文合并 |
-| `wiki_delete_source` | 删除 source 并级联清理：派生页面、交叉引用、cache；多 source 生成页会被保留，并移除被删除的 source |
-| `wiki_verify` | 两阶段 grounding check：从 `wiki/sources/` 索引页出发，读取关联的 raw source 和生成页，返回 faithfulness 校验 prompt -> `apply` 记录结果 |
-
-### 笔记
-
-| 工具 | 说明 |
-|------|------|
-| `wiki_write_note` | 写入人工整理的 wiki note；替代旧的 `save_obsidian_note` 公开工具名 |
-
-> 以下工具的代码仍保留在仓库中，但未通过 MCP 注册公开：`wiki_list_files`、`wiki_changelog`、`wiki_query_debug`、`wiki_dedup`、`wiki_insights`、`wiki_gap`、`wiki_research`、`wiki_synthesis`。如需恢复，在 `server.py` 重新添加 `@mcp.tool()` 即可。
+使用 `netsuite-llm-wiki-mcp config validate|show|set-retrieval|set-privacy|set-telemetry|set-archive` 管理配置。配置修改在重启 MCP runtime 后生效；普通 MCP 调用不能修改脱敏、保留期、archive/purge 或索引路径。
 
 ## Wiki 结构
 

@@ -12,7 +12,7 @@ from netsuite_llm_wiki_mcp.retrieval_eval import (
     run_retrieval_evaluation,
     write_retrieval_eval_report,
 )
-from netsuite_llm_wiki_mcp.runtime_config import RuntimeConfig, RuntimeConfigError, resolve_runtime_config, write_global_config
+from netsuite_llm_wiki_mcp.runtime_config import ConfigRegistry, RuntimeConfig, RuntimeConfigError, resolve_runtime_config, write_global_config
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexError, VectorIndexStore, parse_vector_settings
 from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProviderError, local_provider_readiness
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, vector_index_records
@@ -62,6 +62,36 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Print resolved runtime diagnostics.")
     status_parser.add_argument("--root", help="Optional vault root override for diagnostics.")
+
+    config_parser = subparsers.add_parser("config", help="Validate, display, and update user-level runtime configuration.")
+    config_actions = config_parser.add_subparsers(dest="config_action", required=True)
+    config_actions.add_parser("validate", help="Validate config.yaml without changing it.")
+    config_show = config_actions.add_parser("show", help="Show a redacted configuration snapshot.")
+    config_show.add_argument("--vault", help="Logical vault name; defaults to default_vault.")
+    retrieval = config_actions.add_parser("set-retrieval", help="Set local retrieval settings for a logical vault.")
+    retrieval.add_argument("--vault", required=True)
+    retrieval.add_argument("--model-path", required=True)
+    retrieval.add_argument("--device", default="cpu")
+    retrieval.add_argument("--batch-size", type=int, default=16)
+    retrieval.add_argument("--max-sequence-length", type=int, default=256)
+    retrieval.add_argument("--candidate-limit", type=int, default=50)
+    retrieval.add_argument("--rrf-k", type=int, default=60)
+    retrieval.add_argument("--min-vector-score", type=float, default=0.5)
+    privacy = config_actions.add_parser("set-privacy", help="Set privacy policy (redaction rules are never echoed by status).")
+    privacy.add_argument("--vault", required=True)
+    privacy.add_argument("--redaction-rule-version", default="v1")
+    privacy.add_argument("--pii-policy", choices=("preserve", "redact"), default="preserve")
+    privacy.add_argument("--disable-credential-redaction", action="store_true")
+    telemetry = config_actions.add_parser("set-telemetry", help="Set bounded query telemetry retention.")
+    telemetry.add_argument("--vault", required=True)
+    telemetry.add_argument("--retention-days", type=int, required=True)
+    telemetry.add_argument("--disable", action="store_true")
+    archive = config_actions.add_parser("set-archive", help="Set archive index/snapshot/purge policy.")
+    archive.add_argument("--vault", required=True)
+    archive.add_argument("--snapshot-ttl-days", type=int, default=7)
+    archive.add_argument("--archive-index-disabled", action="store_true")
+    archive.add_argument("--automatic-purge", action="store_true")
+    archive.add_argument("--purge-after-days", type=int)
 
     evaluation_parser = subparsers.add_parser("retrieval-eval", help="Run a read-only retrieval evaluation dataset.")
     evaluation_parser.add_argument("--vault", required=True, help="Path to the vault to query without modifying it.")
@@ -129,6 +159,38 @@ def _run_status(args: argparse.Namespace) -> int:
         return 2
 
     _print_json(payload)
+    return 0
+
+
+def _run_config(args: argparse.Namespace) -> int:
+    registry = ConfigRegistry.from_file(global_config_path())
+    if args.config_action == "validate":
+        _print_json({"ok": True, "config_path": str(registry.config_path), "schema_version": registry.config.schema_version})
+        return 0
+    if args.config_action == "show":
+        resolved = registry.resolve_vault(args.vault)
+        _print_json({"ok": True, "config_path": str(registry.config_path), "config": registry.public_status(resolved)})
+        return 0
+    resolved = registry.resolve_vault(args.vault)
+    if args.config_action == "set-retrieval":
+        profile = {
+            "embedding": {
+                "enabled": True, "provider": "local_bge_m3", "model_path": args.model_path, "device": args.device,
+                "batch_size": args.batch_size, "max_sequence_length": args.max_sequence_length,
+                "candidate_limit": args.candidate_limit, "rrf_k": args.rrf_k, "min_vector_score": args.min_vector_score,
+            }
+        }
+        write_global_config(registry.config_path, vault_name=resolved.name, vault_root=resolved.root, make_default=False, retrieval=profile)
+    elif args.config_action == "set-privacy":
+        write_global_config(registry.config_path, vault_name=resolved.name, vault_root=resolved.root, make_default=False, privacy={"credential_redaction_enabled": not args.disable_credential_redaction, "redaction_rule_version": args.redaction_rule_version, "pii_policy": args.pii_policy})
+    elif args.config_action == "set-telemetry":
+        write_global_config(registry.config_path, vault_name=resolved.name, vault_root=resolved.root, make_default=False, telemetry={"enabled": not args.disable, "retention_days": args.retention_days, "store_query_body": False})
+    elif args.config_action == "set-archive":
+        write_global_config(registry.config_path, vault_name=resolved.name, vault_root=resolved.root, make_default=False, archive={"archive_index_enabled": not args.archive_index_disabled, "index_snapshot_ttl_days": args.snapshot_ttl_days, "automatic_purge": args.automatic_purge, "purge_after_days": args.purge_after_days})
+    else:
+        raise ValueError(f"unknown config action: {args.config_action}")
+    updated = ConfigRegistry.from_file(registry.config_path).resolve_vault(resolved.name)
+    _print_json({"ok": True, "config_path": str(registry.config_path), "config": ConfigRegistry.from_file(registry.config_path).public_status(updated), "restart_required": True})
     return 0
 
 
@@ -220,6 +282,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_init(args)
         if args.command == "status":
             return _run_status(args)
+        if args.command == "config":
+            return _run_config(args)
         if args.command == "retrieval-eval":
             return _run_retrieval_eval(args)
         if args.command == "vector":

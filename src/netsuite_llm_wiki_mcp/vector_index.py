@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
+from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings
 from netsuite_llm_wiki_mcp.vector_provider import VectorProvider, VectorProviderError, VectorProviderIdentity
 
 VECTOR_INDEX_SCHEMA_VERSION = 1
@@ -89,6 +90,26 @@ def parse_vector_settings(vault_root: str | Path, config: dict[str, Any] | None)
         device=str(values.get("device") or "cpu"),
         batch_size=_bounded_int(values.get("batch_size"), 16, 1, 256, "batch_size"),
         max_sequence_length=_bounded_int(values.get("max_sequence_length"), 256, 64, 8192, "max_sequence_length"),
+    )
+
+
+def vector_settings_from_embedding(vault_root: str | Path, embedding: EmbeddingSettings) -> VectorSettings:
+    """Project a validated runtime snapshot into query/index settings.
+
+    This is intentionally separate from ``parse_vector_settings``: the latter
+    is only the compatibility decoder for the deprecated per-call object.
+    """
+    root = Path(vault_root).expanduser().resolve()
+    return VectorSettings(
+        provider=embedding.provider,
+        model_path=embedding.model_path,
+        index_path=default_vector_index_path(root),
+        candidate_limit=embedding.candidate_limit,
+        rrf_k=embedding.rrf_k,
+        min_vector_score=embedding.min_vector_score,
+        device=embedding.device,
+        batch_size=embedding.batch_size,
+        max_sequence_length=embedding.max_sequence_length,
     )
 
 

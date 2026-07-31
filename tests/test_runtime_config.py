@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
 from netsuite_llm_wiki_mcp.runtime_config import (
+    ConfigRegistry,
     RuntimeConfigError,
     _normalize_storage_hash_path,
     resolve_runtime_config,
@@ -217,6 +219,7 @@ def test_write_global_config_creates_expected_schema(tmp_path: Path):
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert raw == {
+        "schema_version": 1,
         "default_vault": "homework",
         "vaults": {
             "homework": {
@@ -224,3 +227,66 @@ def test_write_global_config_creates_expected_schema(tmp_path: Path):
             }
         },
     }
+
+
+def test_registry_decodes_profiles_and_redacts_public_status(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path / "vault")
+    model = tmp_path / "model"
+    model.mkdir()
+    config_path = tmp_path / "config" / "config.yaml"
+    write_global_config(
+        config_path,
+        vault_name="primary",
+        vault_root=vault,
+        retrieval={"embedding": {"enabled": True, "model_path": str(model), "candidate_limit": 80}},
+        telemetry={"retention_days": 30},
+        archive={"index_snapshot_ttl_days": 14},
+    )
+    registry = ConfigRegistry.from_file(config_path)
+    resolved = registry.resolve_vault()
+    status: dict[str, Any] = registry.public_status(resolved)
+
+    assert resolved.settings.retrieval.embedding.candidate_limit == 80
+    assert status["telemetry"]["retention_days"] == 30
+    assert "model_path" not in status["retrieval"]["embedding"]
+    assert status["archive"]["automatic_purge"] is False
+
+
+@pytest.mark.parametrize(
+    ("patch", "code"),
+    [
+        ({"unknown": True}, "unknown_config_field"),
+        ({"retrieval": {"embedding": {"provider": "remote"}}}, "vector_provider_unsupported"),
+        ({"retrieval": {"embedding": {"api_key": "secret"}}}, "unknown_config_field"),
+        ({"retrieval": {"embedding": {"device": 42}}}, "invalid_config"),
+        ({"privacy": {"redaction_rule_version": "token=secret"}}, "invalid_config"),
+        ({"telemetry": {"retention_days": 0}}, "invalid_config"),
+        ({"telemetry": {"store_query_body": True}}, "invalid_config"),
+    ],
+)
+def test_registry_rejects_unknown_unsafe_and_out_of_range_profile_fields(tmp_path: Path, patch: dict[str, object], code: str) -> None:
+    vault = _make_vault(tmp_path / "vault")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "default_vault": "primary", "vaults": {"primary": {"root": str(vault), **patch}}}), encoding="utf-8")
+    with pytest.raises(RuntimeConfigError) as exc_info:
+        ConfigRegistry.from_file(config_path)
+    assert exc_info.value.code == code
+
+
+def test_registry_rejects_enabled_missing_local_model(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path / "vault")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"schema_version": 1, "default_vault": "primary", "vaults": {"primary": {"root": str(vault), "retrieval": {"embedding": {"enabled": True, "model_path": str(tmp_path / "missing-model")}}}}}), encoding="utf-8")
+    with pytest.raises(RuntimeConfigError) as exc_info:
+        ConfigRegistry.from_file(config_path)
+    assert exc_info.value.code == "model_missing"
+
+
+def test_registry_snapshot_vaults_cannot_be_mutated(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path / "vault")
+    config_path = tmp_path / "config.yaml"
+    write_global_config(config_path, vault_name="primary", vault_root=vault)
+
+    registry = ConfigRegistry.from_file(config_path)
+    with pytest.raises(TypeError):
+        registry.config.vaults["other"] = registry.config.vaults["primary"]  # type: ignore[index]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -8,642 +9,251 @@ from mcp.server.fastmcp import FastMCP
 from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note as run_write_note
 from netsuite_llm_wiki_mcp.page_merge import apply_page_merge as run_apply_page_merge
 from netsuite_llm_wiki_mcp.page_merge import prepare_body_merge as run_prepare_body_merge
+from netsuite_llm_wiki_mcp.runtime_config import (
+    ConfigRegistry,
+    ResolvedVault,
+    RuntimeConfigError,
+    VAULT_ROOT_ENV,
+    VaultSettings,
+)
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
-from netsuite_llm_wiki_mcp.wiki_delete import wiki_delete_source as run_wiki_delete_source
-from netsuite_llm_wiki_mcp.wiki_enrich import wiki_enrich as run_wiki_enrich
-from netsuite_llm_wiki_mcp.wiki_files import wiki_list_files as run_wiki_list_files
-from netsuite_llm_wiki_mcp.wiki_files import wiki_read_file as run_wiki_read_file
 from netsuite_llm_wiki_mcp.wiki_files import wiki_status as run_wiki_status
-from netsuite_llm_wiki_mcp.wiki_ingest import ingest_codegraph as run_ingest_codegraph
-from netsuite_llm_wiki_mcp.wiki_ingest import rescan_source as run_rescan_source
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
-from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint as run_wiki_lint
-from netsuite_llm_wiki_mcp.wiki_log import parse_log_entries as run_parse_log_entries
-from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
-from netsuite_llm_wiki_mcp.wiki_query import wiki_query_debug as run_wiki_query_debug
-from netsuite_llm_wiki_mcp.wiki_synthesis import wiki_synthesis as run_wiki_synthesis
-from netsuite_llm_wiki_mcp.wiki_source_index import build_source_index as run_build_source_index
-from netsuite_llm_wiki_mcp.wiki_verify import wiki_verify as run_wiki_verify
+from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
 
+
+@dataclass(frozen=True)
+class ToolVaultResolution:
+    root: Path
+    logical_name: str
+    resolved: ResolvedVault
+    warnings: tuple[str, ...] = ()
+
+
+def _load_registry() -> ConfigRegistry:
+    # Configuration is an immutable startup snapshot. It is deliberately not
+    # reloaded by individual MCP requests.
+    return ConfigRegistry.from_file()
+
+
+CONFIG_REGISTRY = _load_registry()
 mcp = FastMCP("netsuite-llm-wiki-mcp")
-# MCP Python SDK 1.x exposes the version on its low-level Server, not FastMCP.
 mcp._mcp_server.version = RUNTIME_PROVENANCE.server_version
 
 
-def wiki_init_tool(vault_root: str) -> dict[str, Any]:
-    paths = create_wiki_root(vault_root)
-    return {"ok": True, "vault_root": str(paths.root)}
+def attach_warnings(payload: dict[str, Any], warnings: tuple[str, ...] | list[str]) -> dict[str, Any]:
+    if not warnings:
+        return payload
+    result = dict(payload)
+    result["warnings"] = [*result.get("warnings", []), *warnings]
+    return result
+
+
+def _legacy_vault(value: str, registry: ConfigRegistry) -> ToolVaultResolution:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise RuntimeConfigError("legacy vault_root must be an absolute path", code="invalid_vault_root", config_path=registry.config_path)
+    root = path.resolve()
+    name = next((item.name for item in registry.config.vaults.values() if item.root == root), root.name)
+    settings = registry.config.vaults.get(name)
+    resolved = ResolvedVault(name, root, settings if settings is not None else VaultSettings(name, root), "legacy")
+    return ToolVaultResolution(root, name, resolved, ("deprecated_vault_root",))
+
+
+def resolve_tool_vault(*, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, registry: ConfigRegistry | None = None) -> ToolVaultResolution:
+    """Resolve all public vault selectors in one place with no silent precedence."""
+    active_registry = registry or CONFIG_REGISTRY
+    legacy_values = [value for value in (vault_root, vaultRoot) if value]
+    if len(set(legacy_values)) > 1:
+        raise RuntimeConfigError("vault_root and vaultRoot disagree", code="ambiguous_vault_selector", config_path=active_registry.config_path)
+    if vault and legacy_values:
+        raise RuntimeConfigError("vault cannot be combined with vault_root", code="ambiguous_vault_selector", config_path=active_registry.config_path)
+    if legacy_values:
+        return _legacy_vault(legacy_values[0], active_registry)
+    resolved = active_registry.resolve_vault(vault)
+    return ToolVaultResolution(resolved.root, resolved.name, resolved)
+
+
+def _tool_error(exc: RuntimeConfigError) -> dict[str, Any]:
+    return {"ok": False, "code": exc.code, "error": str(exc)}
+
+
+def _resolve_vault_root(vault_root: str | None = None, vaultRoot: str | None = None) -> str:
+    """Deprecated internal shim retained for CLI/internal callers only."""
+    return str(resolve_tool_vault(vault_root=vault_root, vaultRoot=vaultRoot).root)
 
 
 def wiki_status_tool(vault_root: str) -> dict[str, Any]:
+    """Domain-level status helper; it intentionally accepts an explicit root."""
     return run_wiki_status(vault_root)
 
 
-def wiki_list_files_tool(
-    vault_root: str,
-    root_name: str = "wiki",
-    recursive: bool = True,
-    max_files: int | None = None,
-) -> dict[str, Any]:
-    return run_wiki_list_files(
-        vault_root=vault_root,
-        root_name=root_name,
-        recursive=recursive,
-        max_files=max_files,
-    )
+def wiki_query_tool(vault_root: str, question: str, project: str | None = None, top_k: int = DEFAULT_TOP_K, include_content: bool = True, context_window_tokens: int = 16_000, include_context_pack: bool = True, chat_history: list[dict[str, str]] | None = None, language: str = "zh-CN", enable_vector: bool = False, vector_config: dict[str, Any] | None = None, max_graph_hops: int = 2, include_raw_sources: bool = False, filter_type: str | None = None, filter_tags: list[str] | None = None, retrieval_mode: str = "hybrid") -> dict[str, Any]:
+    """Compatibility helper for internal callers; not an MCP schema."""
+    return run_wiki_query(vault_root=vault_root, question=question, project=project, top_k=top_k, include_content=include_content, context_window_tokens=context_window_tokens, include_context_pack=include_context_pack, chat_history=chat_history, language=language, enable_vector=enable_vector, vector_config=vector_config, max_graph_hops=max_graph_hops, include_raw_sources=include_raw_sources, filter_type=filter_type, filter_tags=filter_tags, retrieval_mode=retrieval_mode)
 
 
-def wiki_read_file_tool(
-    vault_root: str,
-    path: str,
-    max_bytes: int | None = None,
-) -> dict[str, Any]:
-    return run_wiki_read_file(vault_root=vault_root, path=path, max_bytes=max_bytes)
+def wiki_write_note_tool(*, note_type: str, title: str, content: str, vault_root: str, **kwargs: Any) -> dict[str, Any]:
+    return run_write_note(note_type=note_type, title=title, content=content, vault_root=vault_root, **kwargs)
 
 
-def wiki_ingest_codegraph_tool(
-    vault_root: str,
-    project: str,
-    source_name: str,
-    query: str = "project code overview",
-    codegraph_project_path: str | None = None,
-    include_extensions: list[str] | None = None,
-    profile: str = "generic",
-) -> dict[str, Any]:
-    return run_ingest_codegraph(
-        vault_root=vault_root,
-        project=project,
-        source_name=source_name,
-        query=query,
-        codegraph_project_path=codegraph_project_path,
-        include_extensions=include_extensions,
-        profile=profile,
-    )
+def _register(function: Any) -> Any:
+    return mcp.tool()(function)
 
 
-def wiki_query_tool(
-    vault_root: str,
-    question: str,
-    project: str | None = None,
-    top_k: int = DEFAULT_TOP_K,
-    include_content: bool = True,
-    context_window_tokens: int = 16_000,
-    include_context_pack: bool = True,
-    chat_history: list[dict[str, str]] | None = None,
-    language: str = "zh-CN",
-    enable_vector: bool = False,
-    vector_config: dict[str, Any] | None = None,
-    max_graph_hops: int = 2,
-    include_raw_sources: bool = False,
-    filter_type: str | None = None,
-    filter_tags: list[str] | None = None,
-    retrieval_mode: str = "hybrid",
-) -> dict[str, Any]:
-    return run_wiki_query(
-        vault_root=vault_root,
-        question=question,
-        project=project,
-        top_k=top_k,
-        include_content=include_content,
-        context_window_tokens=context_window_tokens,
-        include_context_pack=include_context_pack,
-        chat_history=chat_history,
-        language=language,
-        enable_vector=enable_vector,
+@_register
+def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+    """Return read-only health, index and policy status for a logical vault."""
+    if detail not in {"summary", "indexes", "generation", "archive"}:
+        return {"ok": False, "code": "invalid_status_detail", "error": "detail must be summary, indexes, generation, or archive"}
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    status = dict(wiki_status_tool(str(resolution.root)))
+    status.pop("vault_root", None)
+    codegraph = status.get("codegraph")
+    if isinstance(codegraph, dict):
+        codegraph.pop("executable", None)
+    status["vault"] = resolution.logical_name
+    status["config"] = CONFIG_REGISTRY.public_status(resolution.resolved)
+    archive_index = resolution.root / ".llm-wiki" / "archive-index.sqlite3"
+    status["archive_index"] = {
+        "enabled": resolution.resolved.settings.archive.archive_index_enabled,
+        "state": "ready" if archive_index.exists() else "missing",
+    }
+    if detail == "indexes":
+        status = {key: status[key] for key in ("ok", "vault", "vector", "config", "version", "runtime") if key in status}
+    elif detail == "generation":
+        status = {key: status[key] for key in ("ok", "vault", "queue", "config", "version", "runtime") if key in status}
+    elif detail == "archive":
+        status = {key: status[key] for key in ("ok", "vault", "archive_index", "config", "version", "runtime") if key in status}
+    return attach_warnings(status, resolution.warnings)
+
+
+@_register
+def wiki_query(question: str, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, scope: str = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, vector_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Query a vault using its immutable retrieval and context profile."""
+    if scope not in {"auto", "knowledge", "history", "all", "archive"}:
+        return {"ok": False, "code": "invalid_scope", "error": "scope must be auto, knowledge, history, all, or archive"}
+    if not question:
+        return {"ok": False, "code": "missing_question", "error": "question is required"}
+    if top_k < 1 or top_k > 100:
+        return {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 100"}
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    settings = resolution.resolved.settings.retrieval
+    filter_values = filters or {}
+    if not isinstance(filter_values, dict) or set(filter_values) - {"type", "tags"}:
+        return {"ok": False, "code": "invalid_filters", "error": "filters may only contain type and tags"}
+    tags = filter_values.get("tags")
+    if tags is not None and (not isinstance(tags, list) or not all(isinstance(item, str) for item in tags)):
+        return {"ok": False, "code": "invalid_filters", "error": "filters.tags must be a list of strings"}
+    warnings = list(resolution.warnings)
+    if vector_config is not None:
+        warnings.append("deprecated_vector_config")
+    result = wiki_query_tool(
+        str(resolution.root), question, project, top_k,
+        include_content=True,
+        context_window_tokens=settings.context.hard_budget_tokens,
+        include_context_pack=settings.context.response_mode == "context_pack",
+        enable_vector=settings.embedding.enabled,
         vector_config=vector_config,
-        retrieval_mode=retrieval_mode,
-        max_graph_hops=max_graph_hops,
-        include_raw_sources=include_raw_sources,
-        filter_type=filter_type,
-        filter_tags=filter_tags,
+        filter_type=filter_values.get("type"), filter_tags=tags,
     )
+    result["scope"] = scope
+    return attach_warnings(result, warnings)
 
 
-def wiki_query_debug_tool(
-    vault_root: str,
-    question: str,
-    project: str | None = None,
-    top_k: int = DEFAULT_TOP_K,
-    max_graph_hops: int = 2,
-    include_raw_sources: bool = False,
-    enable_vector: bool = False,
-    vector_config: dict[str, Any] | None = None,
-    retrieval_mode: str = "hybrid",
-    filter_type: str | None = None,
-    filter_tags: list[str] | None = None,
-) -> dict[str, Any]:
-    return run_wiki_query_debug(
-        vault_root=vault_root,
-        question=question,
-        project=project,
-        top_k=top_k,
-        max_graph_hops=max_graph_hops,
-        include_raw_sources=include_raw_sources,
-        enable_vector=enable_vector,
-        vector_config=vector_config,
-        retrieval_mode=retrieval_mode,
-        filter_type=filter_type,
-        filter_tags=filter_tags,
-    )
-
-
-def wiki_ingest_llm_tool(
-    vault_root: str,
-    stage: str,
-    project: str,
-    source_name: str,
-    source_path: str | None = None,
-    source_type: str = "file",
-    language: str = "zh-CN",
-    analysis: dict[str, Any] | str | None = None,
-    generation: dict[str, Any] | str | None = None,
-    messages: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    return run_staged_wiki_ingest(
-        vault_root=vault_root,
-        stage=stage,
-        project=project,
-        source_name=source_name,
-        source_path=source_path,
-        source_type=source_type,
-        language=language,
-        analysis=analysis,
-        generation=generation,
-        messages=messages,
-    )
-
-
-def wiki_build_source_index_tool(
-    vault_root: str,
-    source_root: str,
-    source_name: str,
-    target_dir: str | None = None,
-    page_size: int = 80,
-    max_headings: int = 12,
-    refresh: bool = True,
-) -> dict[str, Any]:
-    return run_build_source_index(
-        vault_root=vault_root,
-        source_root=source_root,
-        source_name=source_name,
-        target_dir=target_dir,
-        page_size=page_size,
-        max_headings=max_headings,
-        refresh=refresh,
-    )
-
-
-
-def wiki_rescan_tool(
-    vault_root: str,
-    project: str,
-    source_name: str,
-    source_path: str,
-    source_type: str = "file",
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    return run_rescan_source(
-        vault_root=vault_root,
-        project=project,
-        source_name=source_name,
-        source_path=source_path,
-        source_type=source_type,
-        language=language,
-    )
-
-
-
-def wiki_lint_tool(
-    vault_root: str,
-    stage: str = "structure",
-    project: str | None = None,
-    semantic_review: str | None = None,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    return run_wiki_lint(
-        vault_root=vault_root,
-        stage=stage,
-        project=project,
-        semantic_review=semantic_review,
-        language=language,
-    )
-
-
-def wiki_synthesis_tool(
-    vault_root: str,
-    question: str,
-    stage: str = "prepare",
-    context_pages: list[dict[str, Any]] | None = None,
-    synthesis: str | None = None,
-    title: str | None = None,
-    project: str | None = None,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    return run_wiki_synthesis(
-        vault_root=vault_root,
-        question=question,
-        stage=stage,
-        context_pages=context_pages,
-        synthesis=synthesis,
-        title=title,
-        project=project,
-        language=language,
-    )
-
-
-def wiki_changelog_tool(vault_root: str, limit: int = 10) -> dict[str, Any]:
-    entries = run_parse_log_entries(vault_root, limit=limit)
-    return {"ok": True, "entries": entries, "count": len(entries)}
-
-
-def wiki_write_note_tool(
-    note_type: str,
-    title: str,
-    content: str,
-    project: str | None = None,
-    domain: str | None = None,
-    related_script_types: list[str] | None = None,
-    script_type: str | None = None,
-    object_type: str | None = None,
-    related_objects: list[str] | None = None,
-    related_scripts: list[str] | None = None,
-    tags: list[str] | None = None,
-    zentao_urls: list[str] | None = None,
-    decision_status: str | None = None,
-    status: str | None = None,
-    filename: str | None = None,
-    overwrite: bool = False,
-    auto_index: bool = True,
-    vault_root: str | None = None,
-) -> dict[str, Any]:
-    return run_write_note(
-        note_type=note_type,
-        title=title,
-        content=content,
-        project=project,
-        domain=domain,
-        related_script_types=related_script_types,
-        script_type=script_type,
-        object_type=object_type,
-        related_objects=related_objects,
-        related_scripts=related_scripts,
-        tags=tags,
-        zentao_urls=zentao_urls,
-        decision_status=decision_status,
-        status=status,
-        filename=filename,
-        overwrite=overwrite,
-        auto_index=auto_index,
-        vault_root=vault_root,
-    )
-
-
-def _build_filters(
-    project: str | None,
-    script_type: str | None,
-    related_objects: str | None,
-    related_scripts: str | None,
-    object_type: str | None,
-    status: str | None,
-    source_kind: str | None = None,
-    source_name: str | None = None,
-    content_type: str | None = None,
-) -> dict[str, Any]:
-    filters: dict[str, Any] = {}
-    for key, value in {
-        "project": project,
-        "script_type": script_type,
-        "related_objects": related_objects,
-        "related_scripts": related_scripts,
-        "object_type": object_type,
-        "status": status,
-        "source_kind": source_kind,
-        "source_name": source_name,
-        "type": content_type,
-    }.items():
-        if value:
-            filters[key] = value
-    return filters
-
-
-def _resolve_vault_root(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-) -> str:
-    """Accept both snake_case and camelCase vault_root for MCP client compatibility.
-
-    Some MCP clients (e.g. VS Code Copilot) convert snake_case parameter names
-    to camelCase when forwarding tool arguments.  This helper lets every tool
-    accept either spelling transparently.
-    """
-    resolved = vault_root or vaultRoot
-    if not resolved:
-        raise ValueError("vault_root (or vaultRoot) is required")
-    return resolved
-
-
-@mcp.tool()
-def wiki_init(vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
-    """Create the confirmed external Obsidian LLM Wiki structure."""
-    return wiki_init_tool(_resolve_vault_root(vault_root, vaultRoot))
-
-
-@mcp.tool()
-def wiki_status(vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
-    """Return vault diagnostics, queue counts, version, and CodeGraph availability."""
-    return wiki_status_tool(_resolve_vault_root(vault_root, vaultRoot))
-
-
-@mcp.tool()
-def wiki_read_file(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    path: str = "",
-    max_bytes: int | None = None,
-) -> dict[str, Any]:
-    """Read a text file under wiki/ or raw/sources/ with path and size limits."""
-    return wiki_read_file_tool(_resolve_vault_root(vault_root, vaultRoot), path, max_bytes)
-
-
-@mcp.tool()
-def wiki_ingest_codegraph(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    project: str = "",
-    source_name: str = "",
-    query: str = "project code overview",
-    codegraph_project_path: str | None = None,
-    include_extensions: list[str] | None = None,
-    profile: str = "generic",
-) -> dict[str, Any]:
-    """Ingest CodeGraph symbols and code facts into the LLM Wiki (synchronous, no LLM needed)."""
-    return wiki_ingest_codegraph_tool(
-        _resolve_vault_root(vault_root, vaultRoot), project, source_name, query, codegraph_project_path,
-        include_extensions=include_extensions,
-        profile=profile,
-    )
-
-
-@mcp.tool()
-def wiki_query(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    question: str = "",
-    project: str | None = None,
-    top_k: int = DEFAULT_TOP_K,
-    include_content: bool = True,
-    context_window_tokens: int = 16_000,
-    include_context_pack: bool = True,
-    chat_history: list[dict[str, str]] | None = None,
-    language: str = "zh-CN",
-    enable_vector: bool = False,
-    vector_config: dict[str, Any] | None = None,
-    max_graph_hops: int = 2,
-    include_raw_sources: bool = False,
-    filter_type: str | None = None,
-    filter_tags: list[str] | None = None,
-    retrieval_mode: str = "hybrid",
-) -> dict[str, Any]:
-    """Query persisted wiki pages and return a budgeted context pack."""
-    return wiki_query_tool(
-        _resolve_vault_root(vault_root, vaultRoot),
-        question,
-        project,
-        top_k,
-        include_content,
-        context_window_tokens,
-        include_context_pack,
-        chat_history,
-        language,
-        enable_vector,
-        vector_config,
-        max_graph_hops,
-        include_raw_sources,
-        filter_type,
-        filter_tags,
-        retrieval_mode,
-    )
-
-
-@mcp.tool()
-def wiki_ingest_llm(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    stage: str = "",
-    project: str = "",
-    source_name: str = "",
-    source_path: str | None = None,
-    source_type: str = "file",
-    language: str = "zh-CN",
-    analysis: dict[str, Any] | str | None = None,
-    generation: dict[str, Any] | str | None = None,
-    messages: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Run staged LLM-assisted ingest. Recommended two-stage flow: stage='prepare' (returns prompt) then stage='apply' (writes pages). For source_type='chat', either provide source_path to a file/directory OR provide messages (a list of {role, content} dicts) to auto-format a structured transcript snapshot under raw/sources/chat/YYYY/MM/DD/<source_name>/. Apply may write wiki/chatlog/YYYY/MM/DD pages. Legacy three-stage (prepare_analysis/prepare_generation/apply_generation) still supported."""
-    return wiki_ingest_llm_tool(_resolve_vault_root(vault_root, vaultRoot), stage, project, source_name, source_path, source_type, language, analysis, generation, messages)
-
-
-@mcp.tool()
-def wiki_build_source_index(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    source_root: str = "",
-    source_name: str = "",
-    target_dir: str | None = None,
-    page_size: int = 80,
-    max_headings: int = 12,
-    refresh: bool = True,
-) -> dict[str, Any]:
-    """Build lightweight source_index pages for a raw source tree without LLM analysis.
-
-    Source documents are grouped by their frontmatter ``tags`` (treated as
-    ``parent/leaf`` tree paths); each interior tag-path node receives a nested
-    ``_entries.md`` (paginated as ``_entries-02.md`` ...), and pure leaves appear only
-    as ``## {leaf}`` sections inside the parent index. The source_name acts as
-    the implicit root and gets ``{target_dir}/_entries.md``.
-    """
-    return wiki_build_source_index_tool(
-        _resolve_vault_root(vault_root, vaultRoot), source_root, source_name,
-        target_dir=target_dir, page_size=page_size, max_headings=max_headings, refresh=refresh,
-    )
-
-
-
-@mcp.tool()
-def wiki_rescan(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    project: str = "",
-    source_name: str = "",
-    source_path: str = "",
-    source_type: str = "file",
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    """Rescan a local source, persist snapshots/cache, and report whether it changed."""
-    return wiki_rescan_tool(_resolve_vault_root(vault_root, vaultRoot), project, source_name, source_path, source_type, language)
-
-
-@mcp.tool()
-def wiki_lint(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    stage: str = "structure",
-    project: str | None = None,
-    semantic_review: str | None = None,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    """Check LLM Wiki structure and run staged semantic health reviews."""
-    return wiki_lint_tool(_resolve_vault_root(vault_root, vaultRoot), stage, project, semantic_review, language)
-
-
-@mcp.tool()
-def wiki_write_note(
-    title: str,
-    content: str,
-    note_type: str | None = None,
-    noteType: str | None = None,
-    project: str | None = None,
-    domain: str | None = None,
-    related_script_types: list[str] | None = None,
-    relatedScriptTypes: list[str] | None = None,
-    script_type: str | None = None,
-    scriptType: str | None = None,
-    object_type: str | None = None,
-    objectType: str | None = None,
-    related_objects: list[str] | None = None,
-    relatedObjects: list[str] | None = None,
-    related_scripts: list[str] | None = None,
-    relatedScripts: list[str] | None = None,
-    tags: list[str] | None = None,
-    zentao_urls: list[str] | None = None,
-    zentaoUrls: list[str] | None = None,
-    decision_status: str | None = None,
-    decisionStatus: str | None = None,
-    status: str | None = None,
-    filename: str | None = None,
-    overwrite: bool = False,
-    auto_index: bool = True,
-    autoIndex: bool | None = None,
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-) -> dict[str, Any]:
-    """Write a human-curated note into the wiki. Supports spec, plan, troubleshooting, researches, and knowledge note types."""
-    resolved_note_type = note_type or noteType
-    if not resolved_note_type:
+@_register
+def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None) -> dict[str, Any]:
+    """Create a new manual knowledge page. Existing files are never overwritten."""
+    selected_type = note_type or noteType
+    if not selected_type:
         return {"ok": False, "code": "missing_note_type", "error": "note_type is required"}
-    return wiki_write_note_tool(
-        note_type=resolved_note_type,
-        title=title,
-        content=content,
-        project=project,
-        domain=domain,
-        related_script_types=related_script_types or relatedScriptTypes,
-        script_type=script_type or scriptType,
-        object_type=object_type or objectType,
-        related_objects=related_objects or relatedObjects,
-        related_scripts=related_scripts or relatedScripts,
-        tags=tags,
-        zentao_urls=zentao_urls or zentaoUrls,
-        decision_status=decision_status or decisionStatus,
-        status=status,
-        filename=filename,
-        overwrite=overwrite,
-        auto_index=autoIndex if autoIndex is not None else auto_index,
-        vault_root=vault_root or vaultRoot,
-    )
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, overwrite=False, auto_index=True, vault_root=str(resolution.root))
+    return attach_warnings(result, resolution.warnings)
 
 
-@mcp.tool()
-def wiki_enrich(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    page_path: str = "",
-    stage: str = "prepare",
-    links: list[dict[str, str]] | str | None = None,
-) -> dict[str, Any]:
-    """Enrich a wiki page with [[wikilinks]] to existing pages. Two stages: prepare returns a prompt, apply writes links."""
-    return run_wiki_enrich(vault_root=_resolve_vault_root(vault_root, vaultRoot), page_path=page_path, stage=stage, links=links)
+@_register
+def wiki_ingest(source_path: str, source_name: str, project: str = "", source_type: str = "file", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Prepare ingestion of one explicit source; directory/batch orchestration belongs to CLI or workers."""
+    del metadata  # Accepted business metadata is consumed by the future compiler service.
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    result = run_staged_wiki_ingest(vault_root=str(resolution.root), stage="prepare", project=project, source_name=source_name, source_path=source_path, source_type=source_type)
+    return attach_warnings(result, resolution.warnings)
 
 
-@mcp.tool()
-def wiki_page_merge(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    page_path: str = "",
-    incoming_frontmatter: dict[str, Any] | None = None,
-    incoming_body: str = "",
-    merged_body: str | None = None,
-) -> dict[str, Any]:
-    """Merge incoming content into an existing generated wiki page, preserving locked fields and unioning array fields."""
-    return run_apply_page_merge(
-        vault_root=_resolve_vault_root(vault_root, vaultRoot),
-        page_path=page_path,
-        incoming_frontmatter=incoming_frontmatter or {},
-        incoming_body=incoming_body,
-        merged_body=merged_body,
-    )
+@_register
+def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, incoming_frontmatter: dict[str, Any] | None = None, merged_body: str | None = None) -> dict[str, Any]:
+    """Preview or apply a controlled update to an existing page."""
+    if action not in {"preview", "apply"}:
+        return {"ok": False, "code": "invalid_action", "error": "action must be preview or apply"}
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    if action == "preview":
+        existing_page_path = resolution.root / page_path
+        if not existing_page_path.is_file():
+            return {"ok": False, "code": "page_not_found", "error": f"page not found: {page_path}"}
+        existing_body = existing_page_path.read_text(encoding="utf-8")
+        result = run_prepare_body_merge(existing_body=existing_body, incoming_body=incoming_body)
+    else:
+        result = run_apply_page_merge(vault_root=str(resolution.root), page_path=page_path, incoming_frontmatter=incoming_frontmatter or {}, incoming_body=incoming_body, merged_body=merged_body)
+    return attach_warnings(result, resolution.warnings)
 
 
-@mcp.tool()
-def wiki_delete_source(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    project: str = "",
-    source_name: str = "",
-    dry_run: bool = False,
-) -> dict[str, Any]:
-    """Delete a source and cascade-clean derived wiki pages and cross-references."""
-    return run_wiki_delete_source(vault_root=_resolve_vault_root(vault_root, vaultRoot), project=project, source_name=source_name, dry_run=dry_run)
+def _archive_unavailable(operation: str, **_: Any) -> dict[str, Any]:
+    return {"ok": False, "code": "archive_lifecycle_not_available", "error": f"{operation} is registered but implemented by the archive lifecycle task"}
 
 
-@mcp.tool()
-def wiki_ingest_batch(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    action: str = "status",
-    tasks: list[dict[str, str]] | None = None,
-    task_id: str | None = None,
-    job_id: str | None = None,
-    result: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Manage persistent ingest queue: enqueue, next, complete, fail, retry, status, cancel, clear_done, reapply, prepare_all, apply_all, next_prepared, next_generation_job, set_generation, apply_one.
-
-    action="reapply": re-apply from cache for pending/failed tasks without re-preparing or calling LLM.
-    action="prepare_all": run prepare stage for all pending tasks; marks tasks as "prepared" when LLM response is needed.
-    action="apply_all": run apply stage for all prepared tasks (requires generation in task result).
-    action="next_prepared": return one prepared task with prompt for isolated generation.
-    action="next_generation_job": return one isolated page generation job.
-    action="set_generation": store one task/job generation without completing the task.
-    action="apply_one": validate/apply one stored task/job generation.
-    """
-    return run_wiki_ingest_batch(vault_root=_resolve_vault_root(vault_root, vaultRoot), action=action, tasks=tasks, task_id=task_id, job_id=job_id, result=result)
+@_register
+def wiki_archive(target: str, action: str = "plan", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+    """Plan/apply archive lifecycle operations; purge is intentionally not public."""
+    del target, action, plan_id
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    return attach_warnings(_archive_unavailable("wiki_archive"), resolution.warnings)
 
 
-def wiki_verify_tool(
-    vault_root: str,
-    stage: str,
-    project: str | None = None,
-    page_path: str | None = None,
-    verification_result: dict[str, Any] | str | None = None,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    return run_wiki_verify(vault_root=vault_root, stage=stage, project=project, page_path=page_path, verification_result=verification_result, language=language)
+@_register
+def wiki_restore(archive_id: str, action: str = "plan", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+    """Plan/apply restoration of an immutable archive bundle."""
+    del archive_id, action, plan_id
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    return attach_warnings(_archive_unavailable("wiki_restore"), resolution.warnings)
 
 
-@mcp.tool()
-def wiki_verify(
-    vault_root: str | None = None,
-    vaultRoot: str | None = None,
-    stage: str = "",
-    project: str | None = None,
-    page_path: str | None = None,
-    verification_result: dict[str, Any] | str | None = None,
-    language: str = "zh-CN",
-) -> dict[str, Any]:
-    """Verify generated wiki pages against raw sources for faithfulness. Two-stage: prepare (returns LLM prompt) then apply (records results)."""
-    return wiki_verify_tool(_resolve_vault_root(vault_root, vaultRoot), stage, project, page_path, verification_result, language)
+if CONFIG_REGISTRY.config.tool_profile == "worker":
+    @_register
+    def wiki_generation(action: str = "status", job_id: str | None = None, lease_token: str | None = None, result: dict[str, Any] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+        """Worker-only generation queue bridge; not registered in the core profile."""
+        del lease_token
+        try:
+            resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+        except RuntimeConfigError as exc:
+            return _tool_error(exc)
+        mapped_action = {"claim": "next_generation_job", "apply": "apply_one", "fail": "fail", "release": "retry", "status": "status"}.get(action)
+        if mapped_action is None:
+            return {"ok": False, "code": "invalid_action", "error": "invalid generation action"}
+        return attach_warnings(run_wiki_ingest_batch(vault_root=str(resolution.root), action=mapped_action, job_id=job_id, result=result), resolution.warnings)
 
 
 def main() -> None:

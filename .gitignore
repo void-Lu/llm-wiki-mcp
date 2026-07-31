@@ -79,3 +79,6 @@ htmlcov/
 .codex
 .github
 .trellis
+/.netsuite-mcp/logs/
+/.vscode/mcp.json
+/.mcp.json

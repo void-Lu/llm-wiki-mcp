@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from netsuite_llm_wiki_mcp.vector_index import DEFAULT_RRF_K, VectorIndexError, VectorIndexStore, VectorRecord, parse_vector_settings
+from netsuite_llm_wiki_mcp.vector_index import DEFAULT_RRF_K, VectorIndexError, VectorIndexStore, VectorRecord, VectorSettings, parse_vector_settings
 from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProviderError
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
 from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
@@ -151,6 +151,7 @@ def wiki_query(
     filter_type: str | None = None,
     filter_tags: list[str] | None = None,
     retrieval_mode: str = "hybrid",
+    vector_settings: VectorSettings | None = None,
 ) -> dict[str, Any]:
     return _execute_query(
         vault_root=vault_root,
@@ -169,6 +170,7 @@ def wiki_query(
         include_raw_sources=include_raw_sources,
         filter_type=filter_type,
         filter_tags=filter_tags,
+        vector_settings=vector_settings,
         collect_debug=False,
     ).result
 
@@ -190,6 +192,7 @@ def _execute_query(
     include_raw_sources: bool,
     filter_type: str | None,
     filter_tags: list[str] | None,
+    vector_settings: VectorSettings | None,
     collect_debug: bool,
 ) -> QueryExecution:
     if retrieval_mode not in {"lexical", "vector", "hybrid"}:
@@ -229,6 +232,7 @@ def _execute_query(
         vector_enabled,
         vector_config,
         question,
+        vector_settings=vector_settings,
         include_raw_sources=include_raw_sources,
     )
     _apply_graph_expansion(
@@ -311,6 +315,7 @@ def wiki_query_debug(
         include_raw_sources=include_raw_sources,
         filter_type=filter_type,
         filter_tags=filter_tags,
+        vector_settings=None,
         collect_debug=True,
     )
     graph_reasons = {
@@ -555,18 +560,19 @@ def _apply_optional_vector_stage(
     vector_config: dict[str, Any] | None,
     question: str,
     *,
+    vector_settings: VectorSettings | None = None,
     include_raw_sources: bool,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
     """Run independent vector recall without allowing it to mutate an index."""
 
     if not enable_vector:
         return [], {"state": "disabled"}
-    if not vector_config:
+    if vector_settings is None and not vector_config:
         return [
             {"code": "vector_config_missing", "message": "vector search was requested but vector_config was not provided"}
         ], {"state": "unconfigured"}
     try:
-        settings = parse_vector_settings(root, vector_config)
+        settings = vector_settings or parse_vector_settings(root, vector_config)
         if settings.model_path is None:
             raise VectorIndexError("model_missing", "a local model_path is required when vector search is enabled")
         store = VectorIndexStore(root, settings.index_path)
