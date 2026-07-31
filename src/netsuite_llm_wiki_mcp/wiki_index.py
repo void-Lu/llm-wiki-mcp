@@ -18,9 +18,7 @@ from netsuite_llm_wiki_mcp.wiki_limits import (
 _TOP_LEVEL_GROUPS = (
     ("Projects", Path("wiki/projects")),
     ("Concepts", Path("wiki/concepts")),
-    ("Chatlog", Path("wiki/chatlog")),
     ("Sources", Path("wiki/sources")),
-    ("Queries", Path("wiki/queries")),
     ("Entities", Path("wiki/entities")),
     ("Archives", Path("wiki/archives")),
 )
@@ -46,7 +44,7 @@ def refresh_indexes(vault_root: str | Path) -> dict[str, Any]:
         if result is not None:
             return result
         written.append((Path("wiki/projects") / project_dir.name / "index.md").as_posix())
-    for writer in (_write_concepts_indexes, _write_chatlog_index, _write_sources_index, _write_queries_index, _write_entities_index):
+    for writer in (_write_concepts_indexes, _write_sources_index, _write_entities_index):
         result = writer(root)
         if isinstance(result, dict):
             return result
@@ -140,9 +138,6 @@ def _write_concepts_indexes(root: Path) -> list[str] | dict[str, Any]:
     written.append("wiki/concepts/index.md")
     return written
 
-
-def _write_chatlog_index(root: Path) -> list[str] | dict[str, Any]:
-    return _write_section_index(root, Path("wiki/chatlog"), "Chatlog")
 
 
 def _write_sources_index(root: Path) -> list[str] | dict[str, Any]:
@@ -311,9 +306,6 @@ def _is_sources_navigation_page(path: Path) -> bool:
     frontmatter, _ = _read_page_metadata(path)
     return frontmatter.get("generated") is True and frontmatter.get("navigation") is True
 
-
-def _write_queries_index(root: Path) -> list[str] | dict[str, Any]:
-    return _write_section_index(root, Path("wiki/queries"), "Queries")
 
 
 def _write_entities_index(root: Path) -> list[str] | dict[str, Any]:

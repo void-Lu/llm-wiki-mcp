@@ -36,7 +36,6 @@ _ALLOWED_GENERATED_PAGE_TYPES = {
     "plan",
     "research",
     "troubleshooting",
-    "chatlog",
     "source_index",
 }
 _MIN_GENERATED_BODY_CHARS = 80
@@ -562,48 +561,14 @@ def _prepare_chat_from_messages(
     manifest = _write_chat_snapshot(raw_dir, root, messages, source_name)
     _write_cache(root, project, source_name, {"source_hash": source_hash, "manifest": manifest, "status": "prepared", "source_type": source_type}, source_type=source_type)
 
-    wiki_context = {
-        "purpose": _read_optional(root / "purpose.md"),
-        "schema": _read_optional(root / "schema.md"),
-        "index": _read_optional(root / "wiki" / "index.md"),
-    }
-
-    if analysis_mode:
-        classification_context = [item["relative_path"] for item in manifest]
-        prompt = _analysis_prompt(project, source_name, language, manifest)
-        return {
-            "ok": True,
-            "stage": "prepare_analysis",
-            "status": "needs_model",
-            "project": project,
-            "source_name": source_name,
-            "source_hash": source_hash,
-            "classification_context": classification_context,
-            "context": {"sources": manifest, "language": language},
-            "prompt": prompt,
-            "expected_response_schema": {
-                "key_entities": ["string"],
-                "concepts": ["string"],
-                "tensions": ["string"],
-                "suggested_pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string"}],
-            },
-            "next_call": {"tool": "wiki_ingest_llm", "stage": "prepare_generation", "required": ["analysis"]},
-        }
-
-    prompt = _combined_prompt(project, source_name, language, manifest, wiki_context, source_type)
     return {
         "ok": True,
-        "stage": "prepare",
-        "status": "needs_model",
+        "stage": "chat_candidate",
+        "status": "review_required",
         "project": project,
         "source_name": source_name,
         "source_hash": source_hash,
-        "prompt": prompt,
-        "expected_response_schema": {
-            "source_summary": {"title": "string", "summary": "string", "body": "markdown"},
-            "pages": [{"path": "wiki/...", "title": "string", "type": "string", "summary": "string", "body": "markdown", "sources": ["raw/..."]}],
-        },
-        "next_call": {"tool": "wiki_ingest_llm", "stage": "apply", "required": ["generation"]},
+        "message": "chat is indexed as raw history only; explicit human save is required for knowledge",
     }
 
 
@@ -843,6 +808,8 @@ def validate_generation_payload(
 
 
 def _apply_generation(root: Path, project: str, source_name: str, language: str, generation: dict[str, Any] | str, source_type: str = "file") -> dict[str, Any]:
+    if source_type == "chat":
+        return {"ok": False, "code": "chat_generation_forbidden", "error": "chat cannot automatically create knowledge pages"}
     cache = _read_cache(root, project, source_name, source_type)
     if not cache:
         return {"ok": False, "code": "missing_prepared_source", "error": "run prepare_analysis before apply_generation"}
@@ -1369,7 +1336,7 @@ def _chat_source_instructions(source_type: str) -> list[str]:
     return [
         "For source_type=chat, the raw transcript is stored under raw/sources/chat/YYYY/MM/DD/<source_name>/ as transcript.md (formatted conversation) and messages.json (raw message array).",
         "Generate the primary session summary as type=chatlog.",
-        "Chatlog page paths must use wiki/chatlog/YYYY/MM/DD/<slug>.md, with the date taken from the session when available.",
+        "Chat is raw history only: return review candidates and never generate a Markdown knowledge page.",
         "The transcript.md preserves the user/assistant turn-by-turn structure; use it to understand the conversation flow and extract key decisions, insights, and action items.",
     ]
 

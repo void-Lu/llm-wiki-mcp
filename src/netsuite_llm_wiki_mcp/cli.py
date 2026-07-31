@@ -18,6 +18,7 @@ from netsuite_llm_wiki_mcp.runtime_config import ConfigRegistry, RuntimeConfig, 
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexError, VectorIndexStore, parse_vector_settings
 from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProviderError, local_provider_readiness
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, vector_index_records
+from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 
 
 def _runtime_payload(runtime: RuntimeConfig) -> dict[str, Any]:
@@ -126,6 +127,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action_parser = index_actions.add_parser(action, help=f"{action.title()} a passage retrieval store.")
         action_parser.add_argument("--vault", required=True)
         action_parser.add_argument("--scope", choices=("active", "archive"), default="active")
+
+    generation_parser = subparsers.add_parser("generation", help="Private worker management for durable generation jobs.")
+    generation_parser.add_argument("action", choices=("status", "claim", "release", "fail"))
+    generation_parser.add_argument("--vault", required=True)
+    generation_parser.add_argument("--job-id")
+    generation_parser.add_argument("--lease-token")
+    generation_parser.add_argument("--owner", default="cli-worker")
 
     subparsers.add_parser("server", help="Run the MCP server.")
     return parser
@@ -289,6 +297,22 @@ def _run_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_generation(args: argparse.Namespace) -> int:
+    compiler = KnowledgeCompiler(args.vault)
+    if args.action == "status":
+        payload = compiler.queue.status()
+    elif args.action == "claim":
+        payload = compiler.claim(args.owner)
+    elif args.action == "release" and args.job_id and args.lease_token:
+        payload = compiler.queue.release(args.job_id, args.lease_token)
+    elif args.action == "fail" and args.job_id and args.lease_token:
+        payload = compiler.queue.fail(args.job_id, args.lease_token, "cli_failed")
+    else:
+        payload = {"ok": False, "code": "missing_generation_arguments"}
+    _print_json(payload)
+    return 0 if payload.get("ok") else 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -312,6 +336,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_vector(args)
         if args.command == "index":
             return _run_index(args)
+        if args.command == "generation":
+            return _run_generation(args)
     except RuntimeConfigError as exc:
         _print_json(_error_payload(exc.code, str(exc), config_path=exc.config_path))
         return 2

@@ -2,7 +2,7 @@
 
 The MCP tool accepts pre-collected search results (the caller is
 responsible for the actual web search), synthesizes them via an LLM
-prompt, and writes the result to wiki/queries/.
+prompt, and writes an explicitly scoped project research page.
 
 Two-stage design:
   stage="prepare": accepts search results, returns synthesis prompt.
@@ -36,7 +36,7 @@ def wiki_research(
     """Two-stage research synthesis.
 
     stage="prepare": build synthesis prompt from search results.
-    stage="apply": write synthesis to wiki/queries/.
+    stage="apply": write synthesis to wiki/projects/<project>/researches/.
     """
     root = Path(vault_root).expanduser().resolve()
 
@@ -94,16 +94,16 @@ def _apply(
 
     cleaned = _strip_thinking_blocks(synthesis)
     today = date.today().isoformat()
-    year, month, day = today.split("-")
     slug = _topic_to_slug(topic)
     filename = f"research-{slug}-{today}.md"
-
-    queries_dir = root / "wiki" / "queries" / year / month / day / slug
-    queries_dir.mkdir(parents=True, exist_ok=True)
-    target = queries_dir / filename
+    if not project:
+        return {"ok": False, "code": "explicit_save_required", "error": "project is required; generic query results are not persisted"}
+    project_value = safe_segment(project)
+    target = root / "wiki" / "projects" / project_value / "researches" / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
 
     frontmatter = {
-        "type": "query",
+        "type": "researches",
         "title": f"Research: {topic}",
         "created": today,
         "origin": "deep-research",

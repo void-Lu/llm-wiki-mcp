@@ -19,9 +19,7 @@ class WikiWriteError(ValueError):
 _ALLOWED_PREFIXES = (
     Path("wiki/projects"),
     Path("wiki/concepts"),
-    Path("wiki/chatlog"),
     Path("wiki/sources"),
-    Path("wiki/queries"),
     Path("wiki/entities"),
     Path("wiki/archives"),
 )
@@ -52,9 +50,7 @@ _RESERVED_STRUCTURE_PARTS = {
     "wiki",
     "projects",
     "concepts",
-    "chatlog",
     "sources",
-    "queries",
     "entities",
     "archives",
     *_PROJECT_SUBDIRS,

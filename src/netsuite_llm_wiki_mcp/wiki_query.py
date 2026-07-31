@@ -418,7 +418,7 @@ def _in_project_scope(rel: str, project: str) -> bool:
     parts = Path(rel).parts
     if rel.startswith(f"wiki/projects/{project}/"):
         return True
-    if rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/entities/")):
+    if rel.startswith(("wiki/concepts/", "wiki/sources/", "wiki/entities/")):
         return True
     if len(parts) >= 5 and parts[0] == "raw" and parts[1] == "sources" and parts[3] == project:
         return True

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore, page_from_file
+from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
 
 
@@ -43,6 +44,13 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     if previous_hash != incoming_hash:
         shutil.copyfile(source, target)
     operation = "new" if previous_hash is None else "unchanged" if previous_hash == incoming_hash else "modified"
+    # Raw snapshots are the source of truth.  Knowledge compilation is queued
+    # only after a new/changed non-chat snapshot exists; queue deduplication is
+    # content-addressed and durable independently of retrieval state.
+    compiler_result: dict[str, Any] | None = None
+    if type_value != "chat" and operation != "unchanged":
+        compiler = KnowledgeCompiler(root)
+        compiler_result = compiler.raw_changed(target.relative_to(root))
     indexed = page_from_file(root, target, scope="active")
     if indexed is None:
         index = {"ok": True, "state": "not_eligible", "code": "not_eligible"}
@@ -50,7 +58,11 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
         index = RetrievalIndexStore(root).update_page(indexed)
     else:
         index = sync_retrieval_index(root)
-    return {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "index": index}
+    response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "index": index}
+    if compiler_result is not None:
+        response["generation"] = compiler_result.get("enqueued")
+        response["stale_pages"] = compiler_result.get("stale", [])
+    return response
 
 
 def _hash_file(path: Path) -> str:

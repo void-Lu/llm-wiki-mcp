@@ -7,8 +7,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note as run_write_note
-from netsuite_llm_wiki_mcp.page_merge import apply_page_merge as run_apply_page_merge
-from netsuite_llm_wiki_mcp.page_merge import prepare_body_merge as run_prepare_body_merge
+from netsuite_llm_wiki_mcp.wiki_update import apply_update as run_apply_update
+from netsuite_llm_wiki_mcp.wiki_update import preview_update as run_preview_update
 from netsuite_llm_wiki_mcp.runtime_config import (
     ConfigRegistry,
     ResolvedVault,
@@ -20,6 +20,7 @@ from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
 from netsuite_llm_wiki_mcp.wiki_files import wiki_status as run_wiki_status
 from netsuite_llm_wiki_mcp.ingest_service import ingest_file as run_ingest_file
+from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
@@ -197,7 +198,7 @@ def wiki_ingest(source_path: str, source_name: str, project: str = "", source_ty
 
 
 @_register
-def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, incoming_frontmatter: dict[str, Any] | None = None, merged_body: str | None = None) -> dict[str, Any]:
+def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, incoming_frontmatter: dict[str, Any] | None = None, plan_id: str | None = None, expected_hash: str | None = None) -> dict[str, Any]:
     """Preview or apply a controlled update to an existing page."""
     if action not in {"preview", "apply"}:
         return {"ok": False, "code": "invalid_action", "error": "action must be preview or apply"}
@@ -206,13 +207,9 @@ def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vau
     except RuntimeConfigError as exc:
         return _tool_error(exc)
     if action == "preview":
-        existing_page_path = resolution.root / page_path
-        if not existing_page_path.is_file():
-            return {"ok": False, "code": "page_not_found", "error": f"page not found: {page_path}"}
-        existing_body = existing_page_path.read_text(encoding="utf-8")
-        result = run_prepare_body_merge(existing_body=existing_body, incoming_body=incoming_body)
+        result = run_preview_update(resolution.root, page_path, incoming_body, incoming_frontmatter)
     else:
-        result = run_apply_page_merge(vault_root=str(resolution.root), page_path=page_path, incoming_frontmatter=incoming_frontmatter or {}, incoming_body=incoming_body, merged_body=merged_body)
+        result = run_apply_update(resolution.root, page_path, incoming_body, incoming_frontmatter=incoming_frontmatter, plan_id=plan_id, expected_hash=expected_hash)
     return attach_warnings(result, resolution.warnings)
 
 
@@ -246,15 +243,26 @@ if CONFIG_REGISTRY.config.tool_profile == "worker":
     @_register
     def wiki_generation(action: str = "status", job_id: str | None = None, lease_token: str | None = None, result: dict[str, Any] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
         """Worker-only generation queue bridge; not registered in the core profile."""
-        del lease_token
         try:
             resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
         except RuntimeConfigError as exc:
             return _tool_error(exc)
-        mapped_action = {"claim": "next_generation_job", "apply": "apply_one", "fail": "fail", "release": "retry", "status": "status"}.get(action)
-        if mapped_action is None:
+        compiler = KnowledgeCompiler(resolution.root)
+        if action == "status":
+            payload = compiler.queue.status()
+        elif action == "claim":
+            payload = compiler.claim("mcp-worker")
+        elif action == "apply" and job_id and lease_token and result is not None:
+            payload = compiler.apply_capsule(job_id, lease_token, result)
+        elif action == "fail" and job_id and lease_token:
+            payload = compiler.queue.fail(job_id, lease_token, "worker_failed")
+        elif action == "release" and job_id and lease_token:
+            payload = compiler.queue.release(job_id, lease_token)
+        elif action not in {"apply", "fail", "release"}:
             return {"ok": False, "code": "invalid_action", "error": "invalid generation action"}
-        return attach_warnings(run_wiki_ingest_batch(vault_root=str(resolution.root), action=mapped_action, job_id=job_id, result=result), resolution.warnings)
+        else:
+            payload = {"ok": False, "code": "missing_generation_arguments"}
+        return attach_warnings(payload, resolution.warnings)
 
 
 def main() -> None:

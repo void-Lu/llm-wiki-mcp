@@ -18,9 +18,7 @@ TOP_LEVEL_DIRS = (
     Path("raw/assets"),
     Path("wiki/projects"),
     Path("wiki/concepts"),
-    Path("wiki/chatlog"),
     Path("wiki/sources"),
-    Path("wiki/queries"),
     Path("wiki/entities"),
     Path("wiki/archives"),
     Path(".obsidian"),
@@ -46,16 +44,14 @@ DEFAULT_SCHEMA_TEXT = """# Schema
 
 | frontmatter `type` | 位置 | 说明 | generated |
 | --- | --- | --- | --- |
-| `source_index` | `wiki/sources/` 下镜像目标 wiki 结构；CodeGraph: `wiki/sources/projects/<project>/architecture/codegraph.md`；会话: `wiki/sources/chatlog/<yyyy>/<mm>/<dd>/` | 索引溯源页：frontmatter + 一句话摘要 + raw source 路径 + wikilinks，不承载知识内容 | `true` |
+| `source_capsule` | `wiki/sources/<namespace>/**/capsules/` | 非聊天单来源中文短摘要，保留术语、API、字段 ID 和原始来源 hash | `true` |
 | `spec` | `wiki/projects/<project>/specs/` | 模型生成的规格文档 | `true` 或 `false` |
 | `plan` | `wiki/projects/<project>/plans/` | 模型生成的实施计划 | `true` 或 `false` |
 | `architecture` | `wiki/projects/<project>/architecture/` | 长期稳定的项目架构说明 | `true` 或 `false` |
 | `pipeline` | `wiki/projects/<project>/pipelines/` | 业务流程、SuiteScript 调用链、数据流、任务链路 | `true` |
 | `troubleshooting` | `wiki/projects/<project>/troubleshooting/` | 人工排障经验 | `false` |
 | `researches` | `wiki/projects/<project>/researches/` | 项目调查结果、代码阅读结论、专题研究沉淀 | `true` 或 `false` |
-| `chatlog` | `wiki/chatlog/<yyyy>/<mm>/<dd>/` | 会话摘要入口 | `true` |
 | `concept` / `knowledge` | `wiki/concepts/<domain-or-project>/` | 领域知识、API 参考、场景实践 | `true` 或 `false` |
-| `query` | `wiki/queries/<yyyy>/<mm>/<dd>/<query-id>/` | 外部研究或一次问题综合后的归档页 | `true` |
 | `entity` | `wiki/entities/<entity>/` | 构建完毕的实体页面 | `true` 或 `false` |
 | `archive` | `wiki/archives/<yyyy>/<mm>/<dd>/` | 过时、废弃或超限归档的 wiki 文档；不参与索引 | `true` 或 `false` |
 | `index` | `wiki/index.md` | 内容目录，按类别列出页面和摘要 | `true` |
@@ -94,7 +90,7 @@ tags:
 
 ## 写入与覆盖规则
 
-1. 只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,pipelines,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/chatlog/<yyyy>/<mm>/<dd>/`、`wiki/sources/`、`wiki/queries/<yyyy>/<mm>/<dd>/<query-id>/`、`wiki/entities/<entity>/`、`wiki/archives/<yyyy>/<mm>/<dd>/`。
+1. 只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,pipelines,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/sources/**/capsules/`、`wiki/entities/<entity>/`、`wiki/archives/<yyyy>/<mm>/<dd>/`。
 2. 工具生成页只能覆盖已有 `generated: true` 页面；遇到 `generated: false` 必须停止并报告。
 3. 页面合并时保留锁定字段：`type`、`title`、`created`、人工维护字段；数组字段采用去重合并。
 4. 文件名和路径段必须是 Windows 安全的单段名称：不得包含 `<>:"|?*`、控制字符、ADS 冒号、保留设备名、尾随点或空格。
@@ -123,7 +119,7 @@ wiki_ingest_llm(stage="prepare")
 wiki_ingest_llm(stage="apply")
     -> wiki/concepts/ 或 wiki/projects/ 下的知识页面
     -> wiki/sources/<target_dir>/<project>/<source_name>.md (索引页)
-    -> source_type="chat" 且生成 chatlog 时，写 wiki/sources/chatlog/<yyyy>/<mm>/<dd>/<source_name>.md (索引页)
+    -> source_type="chat" 仅写 raw/sources/chat/ passage 投影，绝不生成 Markdown 索引页或 capsule
     -> refresh index/overview/log/cache
 ```
 
@@ -131,7 +127,7 @@ wiki_ingest_llm(stage="apply")
 
 1. 回答问题时优先使用 `wiki_query` 获取带编号引用的 context pack，再基于 `[1]`、`[2]` 等引用回答。
 2. `wiki_query` 默认搜索 `wiki/**`，必要时可启用 `include_raw_sources` 查看 raw snapshot。
-3. 重要的比较、研究结论或跨页洞察，不应只留在聊天记录里；应通过 `wiki_research`、`wiki_write_note` 或后续 research 工具归档到 `wiki/queries/<yyyy>/<mm>/<dd>/<query-id>/` / `wiki/projects/<project>/researches/`。
+3. 重要的比较、研究结论或跨页洞察，应显式保存为 concept/entity 或 `wiki/projects/<project>/researches/`。
 4. 本地 Markdown 的宽泛检索可搭配 qmd 等外部工具，但不要把 qmd/embedding 设为本 MCP 的默认运行依赖。
 
 ## 维护工作流
@@ -181,9 +177,7 @@ DEFAULT_FILES = {
     Path("wiki/log.md"): "# Log\n\n",
     Path("wiki/overview.md"): "---\ntype: overview\ngenerated: true\n---\n\n# Overview\n\n",
     Path("wiki/concepts/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Concepts\n\n",
-    Path("wiki/chatlog/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Chatlog\n\n",
     Path("wiki/sources/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Sources\n\n",
-    Path("wiki/queries/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Queries\n\n",
     Path("wiki/entities/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Entities\n\n",
     Path("wiki/archives/log.md"): "# Archives Log\n\n",
 }
@@ -241,14 +235,8 @@ class WikiPaths:
     def concepts_dir(self) -> Path:
         return self.root / "wiki" / "concepts"
 
-    def chatlog_dir(self) -> Path:
-        return self.root / "wiki" / "chatlog"
-
     def sources_dir(self) -> Path:
         return self.root / "wiki" / "sources"
-
-    def queries_dir(self) -> Path:
-        return self.root / "wiki" / "queries"
 
     def entities_dir(self) -> Path:
         return self.root / "wiki" / "entities"

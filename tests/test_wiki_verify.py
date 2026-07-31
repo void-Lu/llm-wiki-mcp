@@ -76,20 +76,12 @@ def test_prepare_single_index_page_path(vault: Path):
     assert result["pages_to_verify"] == 1
 
 
-def test_prepare_project_includes_date_grouped_chatlog_source_indexes(vault: Path):
+def test_prepare_project_excludes_raw_chat_from_formal_knowledge_verification(vault: Path):
     _write_raw_source(vault, "raw/sources/chat/2026/06/16/session-2026-06-16/session.md", "Chat source content here")
-    _write_generated_page(vault, "wiki/chatlog/2026/06/16/session.md", "Session", "Body text from chat source")
-    _write_index_page(
-        vault,
-        "wiki/sources/chatlog/2026/06/16/session-2026-06-16.md",
-        ["raw/sources/chat/2026/06/16/session-2026-06-16/session.md"],
-        ["session"],
-    )
 
     result = wiki_verify(vault, "prepare", project="alpha")
 
-    assert result["ok"] is True
-    assert result["pages_to_verify"] == 1
+    assert result["code"] == "no_pages"
 
 
 def test_apply_records_faithful_results(vault: Path):

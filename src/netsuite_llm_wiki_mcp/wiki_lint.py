@@ -23,9 +23,7 @@ _REQUIRED_FILES = (
     Path("wiki/log.md"),
     Path("wiki/overview.md"),
     Path("wiki/concepts/index.md"),
-    Path("wiki/chatlog/index.md"),
     Path("wiki/sources/index.md"),
-    Path("wiki/queries/index.md"),
     Path("wiki/entities/index.md"),
     Path("wiki/archives/log.md"),
 )
@@ -38,9 +36,7 @@ _REQUIRED_DIRS = (
     Path("raw/assets"),
     Path("wiki/projects"),
     Path("wiki/concepts"),
-    Path("wiki/chatlog"),
     Path("wiki/sources"),
-    Path("wiki/queries"),
     Path("wiki/entities"),
     Path("wiki/archives"),
     Path(".llm-wiki/ingest-cache"),
@@ -154,9 +150,7 @@ def wiki_lint(
             "wiki/log.md",
             "wiki/overview.md",
             "wiki/concepts/index.md",
-            "wiki/chatlog/index.md",
             "wiki/sources/index.md",
-            "wiki/queries/index.md",
             "wiki/entities/index.md",
             "wiki/archives/log.md",
         }
@@ -288,7 +282,7 @@ def _semantic_review_context(root: Path, project: str | None) -> str:
 
 def _page_in_project_scope(path: Path, root: Path, project: str) -> bool:
     rel = path.relative_to(root).as_posix()
-    return rel.startswith(f"wiki/projects/{project}/") or rel.startswith(("wiki/concepts/", "wiki/chatlog/", "wiki/sources/", "wiki/queries/", "wiki/entities/"))
+    return rel.startswith(f"wiki/projects/{project}/") or rel.startswith(("wiki/concepts/", "wiki/sources/", "wiki/entities/"))
 
 
 def _is_archived_page(path: Path, root: Path) -> bool:
