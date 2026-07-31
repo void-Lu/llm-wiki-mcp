@@ -17,7 +17,7 @@ from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings
 from netsuite_llm_wiki_mcp.vector_provider import VectorProvider, VectorProviderError, VectorProviderIdentity
 
-VECTOR_INDEX_SCHEMA_VERSION = 1
+VECTOR_INDEX_SCHEMA_VERSION = 2
 DEFAULT_VECTOR_CANDIDATE_LIMIT = 50
 DEFAULT_RRF_K = 60
 DEFAULT_MIN_VECTOR_SCORE = 0.5
@@ -38,6 +38,9 @@ class VectorRecord:
     content_hash: str
     text: str
     source_kind: str
+    passage_id: str = ""
+    page_path: str = ""
+    corpus: str = "active"
 
 
 @dataclass(frozen=True)
@@ -60,8 +63,9 @@ class VectorSettings:
     max_sequence_length: int
 
 
-def default_vector_index_path(vault_root: str | Path) -> Path:
-    return Path(vault_root).expanduser().resolve() / ".llm-wiki" / "vector-index"
+def default_vector_index_path(vault_root: str | Path, *, corpus: str = "active") -> Path:
+    name = "vector-index" if corpus == "active" else "archive-vector-index"
+    return Path(vault_root).expanduser().resolve() / ".llm-wiki" / name
 
 
 def parse_vector_settings(vault_root: str | Path, config: dict[str, Any] | None) -> VectorSettings:
@@ -89,7 +93,7 @@ def parse_vector_settings(vault_root: str | Path, config: dict[str, Any] | None)
         min_vector_score=_bounded_float(values.get("min_vector_score"), DEFAULT_MIN_VECTOR_SCORE, -1.0, 1.0, "min_vector_score"),
         device=str(values.get("device") or "cpu"),
         batch_size=_bounded_int(values.get("batch_size"), 16, 1, 256, "batch_size"),
-        max_sequence_length=_bounded_int(values.get("max_sequence_length"), 256, 64, 8192, "max_sequence_length"),
+        max_sequence_length=_bounded_int(values.get("max_sequence_length"), 512, 64, 8192, "max_sequence_length"),
     )
 
 
@@ -156,9 +160,12 @@ def _bounded_float(value: object, default: float, minimum: float, maximum: float
 class VectorIndexStore:
     """A JSONL vector store with atomic full-build and incremental-update paths."""
 
-    def __init__(self, vault_root: str | Path, index_path: str | Path | None = None) -> None:
+    def __init__(self, vault_root: str | Path, index_path: str | Path | None = None, *, corpus: str = "active") -> None:
         self.root = Path(vault_root).expanduser().resolve()
-        self.index_path = Path(index_path).expanduser().resolve() if index_path is not None else default_vector_index_path(self.root)
+        if corpus not in {"active", "archive"}:
+            raise VectorIndexError("vector_config_invalid", "corpus must be active or archive")
+        self.corpus = corpus
+        self.index_path = Path(index_path).expanduser().resolve() if index_path is not None else default_vector_index_path(self.root, corpus=corpus)
         if not self.index_path.is_relative_to(self.root):
             raise VectorIndexError("vector_config_invalid", "index_path must remain inside the vault")
 
@@ -196,6 +203,7 @@ class VectorIndexStore:
             "dimensions": manifest["dimensions"],
             "document_count": manifest["document_count"],
             "include_raw_sources": manifest["include_raw_sources"],
+            "corpus": manifest["corpus"],
             "created_at": manifest["created_at"],
             "updated_at": manifest["updated_at"],
             "vault_fingerprint": manifest["vault_fingerprint"],
@@ -224,10 +232,10 @@ class VectorIndexStore:
     ) -> dict[str, object]:
         manifest = self._read_manifest()
         identity = provider.identity()
-        _assert_compatible(manifest, identity, include_raw_sources)
+        _assert_compatible(manifest, identity, include_raw_sources, self.corpus)
         existing = self._read_documents()
-        current_by_path = {record.path: record for record in records}
-        previous_by_path = {str(item["path"]): item for item in existing}
+        current_by_path = {_record_identity(record): record for record in records}
+        previous_by_path = {_document_identity(item): item for item in existing}
         added = sorted(set(current_by_path) - set(previous_by_path))
         deleted = sorted(set(previous_by_path) - set(current_by_path))
         modified = sorted(
@@ -242,7 +250,7 @@ class VectorIndexStore:
             if path in current_by_path and path not in vectors_by_path:
                 vectors_by_path[path] = _vector_from_document(document)
         ordered_records = [current_by_path[path] for path in sorted(current_by_path)]
-        ordered_vectors = [vectors_by_path[record.path] for record in ordered_records]
+        ordered_vectors = [vectors_by_path[_record_identity(record)] for record in ordered_records]
         self._write_index(
             ordered_records,
             ordered_vectors,
@@ -260,7 +268,8 @@ class VectorIndexStore:
         self,
         query_vector: Sequence[float],
         *,
-        allowed_paths: set[str],
+        allowed_paths: set[str] | None = None,
+        allowed_ids: set[str] | None = None,
         limit: int,
     ) -> list[VectorSearchResult]:
         manifest = self._read_manifest()
@@ -269,8 +278,11 @@ class VectorIndexStore:
             raise VectorIndexError("index_incompatible", "query embedding dimensions do not match the index")
         scored = []
         for document in self._read_documents():
-            path = str(document["path"])
-            if path not in allowed_paths:
+            path = str(document.get("page_path") or document["path"])
+            passage_id = _document_identity(document)
+            if allowed_ids is not None and passage_id not in allowed_ids:
+                continue
+            if allowed_paths is not None and path not in allowed_paths:
                 continue
             vector = _vector_from_document(document)
             score = round(sum(left * right for left, right in zip(query_vector, vector, strict=True)), 12)
@@ -283,7 +295,7 @@ class VectorIndexStore:
     def validate_provider(self, identity: VectorProviderIdentity, *, include_raw_sources: bool) -> None:
         """Reject a query when the loaded local model differs from its index."""
 
-        _assert_compatible(self._read_manifest(), identity, include_raw_sources)
+        _assert_compatible(self._read_manifest(), identity, include_raw_sources, self.corpus)
 
     def _read_manifest(self) -> dict[str, object]:
         if not self.manifest_path.exists() or not self.documents_path.exists():
@@ -306,6 +318,7 @@ class VectorIndexStore:
             "vault_fingerprint",
             "build_provenance",
             "document_hashes",
+            "corpus",
         }
         if not required <= set(manifest) or not isinstance(manifest["document_hashes"], dict):
             raise VectorIndexError("index_incompatible", "the vector index manifest is incomplete")
@@ -326,7 +339,7 @@ class VectorIndexStore:
             rows = [json.loads(line) for line in self.documents_path.read_text(encoding="utf-8").splitlines() if line]
         except (OSError, json.JSONDecodeError) as exc:
             raise VectorIndexError("index_incompatible", "the vector index documents are unreadable") from exc
-        if not all(isinstance(row, dict) and {"path", "content_hash", "source_kind", "vector"} <= set(row) for row in rows):
+        if not all(isinstance(row, dict) and {"path", "content_hash", "source_kind", "vector", "passage_id", "page_path", "corpus"} <= set(row) for row in rows):
             raise VectorIndexError("index_incompatible", "the vector index documents are invalid")
         with _DOCUMENT_READ_CACHE_LOCK:
             _DOCUMENT_READ_CACHE[cache_key] = (signature, rows)
@@ -344,6 +357,8 @@ class VectorIndexStore:
         if len(records) != len(vectors):
             raise VectorIndexError("invalid_embedding", "embedding count did not match document count")
         _validate_records(records)
+        if any(record.corpus != self.corpus for record in records):
+            raise VectorIndexError("index_incompatible", "vector records cannot cross the store corpus boundary")
         if any(len(vector) != identity.dimensions for vector in vectors):
             raise VectorIndexError("invalid_embedding", "embedding dimensions did not match the provider identity")
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -352,11 +367,14 @@ class VectorIndexStore:
             documents = [
                 {
                     "path": record.path,
+                    "passage_id": _record_identity(record),
+                    "page_path": record.page_path or record.path,
+                    "corpus": record.corpus,
                     "content_hash": record.content_hash,
                     "source_kind": record.source_kind,
                     "vector": [round(float(value), 12) for value in vector],
                 }
-                for record, vector in sorted(zip(records, vectors, strict=True), key=lambda item: item[0].path)
+                for record, vector in sorted(zip(records, vectors, strict=True), key=lambda item: _record_identity(item[0]))
             ]
             manifest = {
                 "schema_version": VECTOR_INDEX_SCHEMA_VERSION,
@@ -368,6 +386,7 @@ class VectorIndexStore:
                 "vault_fingerprint": _vault_fingerprint(records),
                 "build_provenance": RUNTIME_PROVENANCE.to_public_dict(),
                 "document_hashes": _record_hashes(records),
+                "corpus": self.corpus,
             }
             (temp_path / "documents.jsonl").write_text(
                 "".join(json.dumps(document, ensure_ascii=False, sort_keys=True) + "\n" for document in documents),
@@ -403,7 +422,15 @@ def _status_error(code: str, message: str) -> dict[str, object]:
 
 
 def _record_hashes(records: Sequence[VectorRecord] | None) -> dict[str, str]:
-    return {record.path: record.content_hash for record in sorted(records or (), key=lambda item: item.path)}
+    return {_record_identity(record): record.content_hash for record in sorted(records or (), key=_record_identity)}
+
+
+def _record_identity(record: VectorRecord) -> str:
+    return record.passage_id or record.path
+
+
+def _document_identity(document: dict[str, object]) -> str:
+    return str(document.get("passage_id") or document["path"])
 
 
 def _stale_details(manifest: dict[str, object], expected_hashes: dict[str, str] | None, include_raw_sources: bool | None) -> dict[str, object]:
@@ -425,13 +452,15 @@ def _stale_details(manifest: dict[str, object], expected_hashes: dict[str, str] 
     }
 
 
-def _assert_compatible(manifest: dict[str, object], identity: VectorProviderIdentity, include_raw_sources: bool) -> None:
+def _assert_compatible(manifest: dict[str, object], identity: VectorProviderIdentity, include_raw_sources: bool, corpus: str = "active") -> None:
     expected = identity.to_public_dict()
     for key, value in expected.items():
         if manifest.get(key) != value:
             raise VectorIndexError("index_incompatible", "provider or model changed; run a full vector build")
     if bool(manifest.get("include_raw_sources")) != include_raw_sources:
         raise VectorIndexError("index_incompatible", "raw-source policy changed; run a full vector build")
+    if manifest.get("corpus") != corpus:
+        raise VectorIndexError("index_incompatible", "corpus boundary changed; run a full vector build")
 
 
 def _vector_from_document(document: dict[str, object]) -> list[float]:
@@ -442,17 +471,21 @@ def _vector_from_document(document: dict[str, object]) -> list[float]:
 
 
 def _validate_records(records: Iterable[VectorRecord]) -> None:
-    paths: set[str] = set()
+    identities: set[str] = set()
     for record in records:
-        if not record.path or record.path in paths or Path(record.path).is_absolute() or ".." in Path(record.path).parts:
-            raise VectorIndexError("index_incompatible", "vector document paths must be unique vault-relative paths")
+        identity = _record_identity(record)
+        page_path = record.page_path or record.path
+        if not identity or not page_path or identity in identities or Path(page_path).is_absolute() or ".." in Path(page_path).parts:
+            raise VectorIndexError("index_incompatible", "vector passage IDs must be unique and page paths vault-relative")
+        if record.corpus not in {"active", "archive"}:
+            raise VectorIndexError("index_incompatible", "vector records must declare an allowed corpus")
         if not record.content_hash:
             raise VectorIndexError("index_incompatible", "vector documents must include a content hash")
-        paths.add(record.path)
+        identities.add(identity)
 
 
 def _vault_fingerprint(records: Sequence[VectorRecord]) -> str:
-    material = "\n".join(f"{record.path}\0{record.content_hash}" for record in sorted(records, key=lambda item: item.path))
+    material = "\n".join(f"{record.corpus}\0{_record_identity(record)}\0{record.content_hash}" for record in sorted(records, key=_record_identity))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 

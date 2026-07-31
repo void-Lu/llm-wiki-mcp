@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from netsuite_llm_wiki_mcp.platform_paths import global_config_path
+from netsuite_llm_wiki_mcp.ingest_service import sync_retrieval_index
+from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 from netsuite_llm_wiki_mcp.retrieval_eval import (
     RetrievalEvalError,
     load_retrieval_dataset,
@@ -73,7 +75,7 @@ def _build_parser() -> argparse.ArgumentParser:
     retrieval.add_argument("--model-path", required=True)
     retrieval.add_argument("--device", default="cpu")
     retrieval.add_argument("--batch-size", type=int, default=16)
-    retrieval.add_argument("--max-sequence-length", type=int, default=256)
+    retrieval.add_argument("--max-sequence-length", type=int, default=512)
     retrieval.add_argument("--candidate-limit", type=int, default=50)
     retrieval.add_argument("--rrf-k", type=int, default=60)
     retrieval.add_argument("--min-vector-score", type=float, default=0.5)
@@ -116,7 +118,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action_parser.add_argument("--model-path", required=action != "status", help="Local BGE-M3 model directory; never downloaded automatically.")
         action_parser.add_argument("--device", default="cpu", help="Sentence-transformers device (default: cpu).")
         action_parser.add_argument("--batch-size", type=int, default=16, help="Embedding batch size (default: 16).")
-        action_parser.add_argument("--max-sequence-length", type=int, default=256, help="Maximum BGE-M3 input tokens (default: 256).")
+        action_parser.add_argument("--max-sequence-length", type=int, default=512, help="Maximum BGE-M3 input tokens (default: 512).")
+
+    index_parser = subparsers.add_parser("index", help="Manage explicit passage FTS lifecycle.")
+    index_actions = index_parser.add_subparsers(dest="index_action", required=True)
+    for action in ("status", "build", "update"):
+        action_parser = index_actions.add_parser(action, help=f"{action.title()} a passage retrieval store.")
+        action_parser.add_argument("--vault", required=True)
+        action_parser.add_argument("--scope", choices=("active", "archive"), default="active")
 
     subparsers.add_parser("server", help="Run the MCP server.")
     return parser
@@ -267,6 +276,19 @@ def _run_vector(args: argparse.Namespace) -> int:
     raise ValueError(f"unknown vector action: {args.vector_action}")
 
 
+def _run_index(args: argparse.Namespace) -> int:
+    store = RetrievalIndexStore(args.vault, scope=args.scope)
+    if args.index_action == "status":
+        status = store.status()
+        _print_json(status)
+        return 0 if status.get("ok") else 2
+    if args.scope == "active":
+        _print_json(sync_retrieval_index(args.vault, full_build=args.index_action == "build"))
+        return 0
+    _print_json(store.build(store.iter_vault_pages()))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -288,6 +310,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_retrieval_eval(args)
         if args.command == "vector":
             return _run_vector(args)
+        if args.command == "index":
+            return _run_index(args)
     except RuntimeConfigError as exc:
         _print_json(_error_payload(exc.code, str(exc), config_path=exc.config_path))
         return 2

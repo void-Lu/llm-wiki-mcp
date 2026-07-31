@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
+from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexStore
 from netsuite_llm_wiki_mcp.wiki_paths import DEFAULT_FILES, TOP_LEVEL_DIRS
 
@@ -47,6 +48,10 @@ def wiki_status(vault_root: str | Path) -> dict[str, Any]:
         "queue": _queue_status(root),
         "codegraph": _codegraph_status(),
         "vector": _vector_status(root),
+        "retrieval": {
+            "active": RetrievalIndexStore(root).status(),
+            "archive": RetrievalIndexStore(root, scope="archive").status(),
+        },
         "version": RUNTIME_PROVENANCE.package_version,
         "runtime": RUNTIME_PROVENANCE.to_public_dict(),
     }

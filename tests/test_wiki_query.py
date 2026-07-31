@@ -49,6 +49,18 @@ def test_wiki_query_finds_keyword_matches_and_returns_citations(tmp_path: Path):
     assert result["context"][0]["citation"] == "[1] wiki/projects/alpha/architecture/suitelet.md"
 
 
+def test_wiki_query_uses_existing_retrieval_store_without_reading_corpus(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice.md", "Invoice", "invoice approval workflow", type="concept")
+    refresh_indexes(root)
+
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("corpus read")))
+    result = wiki_query(root, "invoice", include_content=False, include_context_pack=False)
+
+    assert result["results"][0]["path"] == "wiki/concepts/invoice.md"
+
+
 def test_wiki_query_project_scope_prioritizes_project_pages(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

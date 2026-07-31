@@ -101,12 +101,24 @@ def write_wiki_page(
     target.write_text(text, encoding="utf-8")
     original_text = f"{page.title}\n{page.frontmatter}\n{page.body}"
     redacted_text = f"{title}\n{frontmatter}\n{body}"
-    return {
+    result = {
         "ok": True,
         "path": relative_path.as_posix(),
         "absolute_path": str(target),
         "redacted_count": count_redactions(original_text, redacted_text),
     }
+    # A page write may update an existing store, but it never creates one or
+    # loads a vector model. Full builds remain explicit maintenance actions.
+    try:
+        from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore, page_from_file
+
+        store = RetrievalIndexStore(root)
+        indexed = page_from_file(root, target, scope="active")
+        if indexed is not None and store.path.exists():
+            result["retrieval_index"] = store.update_page(indexed)
+    except Exception as exc:
+        result["retrieval_index"] = {"ok": False, "state": "stale", "code": "index_update_failed", "error": str(exc)}
+    return result
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:

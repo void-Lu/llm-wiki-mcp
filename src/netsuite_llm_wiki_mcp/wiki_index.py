@@ -55,7 +55,15 @@ def refresh_indexes(vault_root: str | Path) -> dict[str, Any]:
     if result is not None:
         return result
     written.append("wiki/index.md")
-    return {"ok": True, "written": written}
+    # Navigation generation is an explicit maintenance/write boundary, so it
+    # is safe to rebuild the FTS projection here. Query traffic never does it.
+    from netsuite_llm_wiki_mcp.ingest_service import sync_retrieval_index
+
+    try:
+        retrieval = sync_retrieval_index(root)
+    except Exception as exc:
+        return {"ok": False, "code": "retrieval_index_stale", "written": written, "error": str(exc)}
+    return {"ok": True, "written": written, "retrieval_index": retrieval}
 
 
 def _write_top_index(root: Path) -> dict[str, Any] | None:

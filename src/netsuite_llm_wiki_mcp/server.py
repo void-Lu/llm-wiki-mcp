@@ -19,6 +19,7 @@ from netsuite_llm_wiki_mcp.runtime_config import (
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
 from netsuite_llm_wiki_mcp.wiki_files import wiki_status as run_wiki_status
+from netsuite_llm_wiki_mcp.ingest_service import ingest_file as run_ingest_file
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
@@ -125,7 +126,7 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
         "state": "ready" if archive_index.exists() else "missing",
     }
     if detail == "indexes":
-        status = {key: status[key] for key in ("ok", "vault", "vector", "config", "version", "runtime") if key in status}
+        status = {key: status[key] for key in ("ok", "vault", "vector", "retrieval", "config", "version", "runtime") if key in status}
     elif detail == "generation":
         status = {key: status[key] for key in ("ok", "vault", "queue", "config", "version", "runtime") if key in status}
     elif detail == "archive":
@@ -185,13 +186,13 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
 
 @_register
 def wiki_ingest(source_path: str, source_name: str, project: str = "", source_type: str = "file", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Prepare ingestion of one explicit source; directory/batch orchestration belongs to CLI or workers."""
-    del metadata  # Accepted business metadata is consumed by the future compiler service.
+    """Ingest one explicit file; directory/batch orchestration belongs to CLI/workers."""
+    del metadata
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
-    result = run_staged_wiki_ingest(vault_root=str(resolution.root), stage="prepare", project=project, source_name=source_name, source_path=source_path, source_type=source_type)
+    result = run_ingest_file(vault_root=resolution.root, project=project, source_name=source_name, source_path=source_path, source_type=source_type)
     return attach_warnings(result, resolution.warnings)
 
 

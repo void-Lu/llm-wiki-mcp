@@ -113,7 +113,7 @@ class LocalBgeM3Provider:
         *,
         device: str = "cpu",
         batch_size: int = 16,
-        max_sequence_length: int = 256,
+        max_sequence_length: int = 512,
     ) -> None:
         self.model_path = Path(model_path).expanduser().resolve()
         self.device = device
@@ -131,7 +131,10 @@ class LocalBgeM3Provider:
         if not texts:
             return []
         model: Any = self._load_model()
-        encoded = model.encode(
+        encoder = getattr(model, "encode_document", None)
+        if encoder is None:
+            encoder = model.encode
+        encoded = encoder(
             list(texts),
             batch_size=self.batch_size,
             show_progress_bar=False,
@@ -141,8 +144,13 @@ class LocalBgeM3Provider:
         return [_normalize([float(value) for value in vector]) for vector in encoded.tolist()]
 
     def embed_query(self, text: str) -> list[float]:
-        vectors = self.embed_documents([text])
-        return vectors[0]
+        model: Any = self._load_model()
+        encoder = getattr(model, "encode_query", None)
+        if encoder is None:
+            return self.embed_documents([text])[0]
+        encoded = encoder(text, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
+        values = encoded.tolist() if hasattr(encoded, "tolist") else encoded
+        return _normalize([float(value) for value in values])
 
     def _load_model(self):
         if self._model is not None:
@@ -185,8 +193,8 @@ class LocalBgeM3Provider:
             raise
         except Exception as exc:  # pragma: no cover - depends on optional runtime packages
             raise VectorProviderError("model_load_failed", "the local embedding model could not be loaded offline") from exc
-        if not isinstance(dimensions, int) or dimensions <= 0:
-            raise VectorProviderError("model_incompatible", "the local embedding model did not report a usable dimension")
+        if not isinstance(dimensions, int) or dimensions != 1024:
+            raise VectorProviderError("model_incompatible", "the local BGE-M3 model must report 1024 embedding dimensions")
 
         self._model = model
         self._identity = VectorProviderIdentity(

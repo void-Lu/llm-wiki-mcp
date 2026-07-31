@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from netsuite_llm_wiki_mcp.lexical_analyzer import tokens as lexical_tokens
+from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 from netsuite_llm_wiki_mcp.vector_index import DEFAULT_RRF_K, VectorIndexError, VectorIndexStore, VectorRecord, VectorSettings, parse_vector_settings
 from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProviderError
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
@@ -208,7 +210,7 @@ def _execute_query(
     if filter_tags:
         tag_set = set(filter_tags)
         candidates = [candidate for candidate in candidates if tag_set & set(_as_list(candidate.frontmatter.get("tags")))]
-    graph = _build_graph(root)
+    graph = _build_graph(root, all_candidates)
     token_weights = _token_weights(candidates, tokens)
 
     scored: dict[str, QueryCandidate] = {}
@@ -363,6 +365,27 @@ def _relationship_reasons(left: str, right: str, graph: Graph) -> list[dict[str,
 
 
 def _candidate_pages(root: Path, include_raw_sources: bool = False) -> list[QueryCandidate]:
+    store = RetrievalIndexStore(root)
+    if store.status().get("ok"):
+        candidates = [
+            QueryCandidate(
+                path=root / str(item["path"]),
+                rel=str(item["path"]),
+                title=str(item["title"]),
+                body=str(item["body"]),
+                frontmatter={
+                    str(key): value
+                    for key, value in (item["frontmatter"] if isinstance(item["frontmatter"], dict) else {}).items()
+                },
+                source_kind="raw" if str(item["source_kind"]) == "raw_chat" else "wiki",
+            )
+            for item in store.page_candidates()
+            if include_raw_sources or not str(item["path"]).startswith("raw/")
+        ]
+        return candidates
+    # Compatibility fallback for a vault that has not received its first
+    # explicit maintenance build. It is deliberately not used once a store is
+    # present, so normal query traffic never walks the corpus.
     candidates: list[QueryCandidate] = []
     wiki = root / "wiki"
     if wiki.exists():
@@ -434,16 +457,7 @@ def _raw_candidate(path: Path, root: Path) -> QueryCandidate:
 
 
 def _tokens(text: str) -> list[str]:
-    lowered = text.casefold()
-    words = [word for word in re.findall(r"[a-z0-9_]+", lowered) if word not in _STOPWORDS]
-    cjk_runs = re.findall(r"[一-鿿]+", lowered)
-    cjk_tokens: list[str] = []
-    for run in cjk_runs:
-        if len(run) == 1:
-            cjk_tokens.append(run)
-        else:
-            cjk_tokens.extend(run[index : index + 2] for index in range(len(run) - 1))
-    return [token for token in words + cjk_tokens if token]
+    return [token for token in lexical_tokens(text) if token not in _STOPWORDS]
 
 
 def _keyword_score(candidate: QueryCandidate, tokens: list[str], query: str = "", token_weights: dict[str, float] | None = None) -> float:
@@ -576,7 +590,7 @@ def _apply_optional_vector_stage(
         if settings.model_path is None:
             raise VectorIndexError("model_missing", "a local model_path is required when vector search is enabled")
         store = VectorIndexStore(root, settings.index_path)
-        index_records = _vector_records(index_candidates)
+        index_records = vector_index_records(root, include_raw_sources=include_raw_sources)
         status = store.status(index_records, include_raw_sources=include_raw_sources)
         if not status.get("ok") or status.get("state") != "fresh":
             code = str(status.get("code") or "index_stale")
@@ -663,6 +677,21 @@ def vector_index_records(vault_root: str | Path, *, include_raw_sources: bool = 
     """Return the complete eligible corpus for explicit index lifecycle actions."""
 
     root = Path(vault_root).expanduser().resolve()
+    store = RetrievalIndexStore(root)
+    if store.status().get("ok"):
+        return [
+            VectorRecord(
+                path=record["page_path"],
+                page_path=record["page_path"],
+                passage_id=record["passage_id"],
+                content_hash=record["content_hash"],
+                text=record["text"],
+                source_kind=record["source_kind"],
+                corpus="active",
+            )
+            for record in store.vector_records()
+            if include_raw_sources or record["corpus"] != "history"
+        ]
     return _vector_records(_candidate_pages(root, include_raw_sources=include_raw_sources))
 
 
@@ -676,17 +705,12 @@ def _debug_rrf_k(vector_config: dict[str, Any] | None) -> int:
     return value if 1 <= value <= 10_000 else DEFAULT_RRF_K
 
 
-def _build_graph(root: Path) -> Graph:
-    wiki = root / "wiki"
-    pages = []
-    if wiki.exists():
-        pages = [
-            path
-            for path in sorted(wiki.rglob("*.md"))
-            if not _is_structural_page(path)
-            and path.relative_to(root).parts[:2] != ("wiki", "archives")
-        ]
-    by_rel = {path.relative_to(root).as_posix(): path for path in pages}
+def _build_graph(root: Path, candidates: list[QueryCandidate] | None = None) -> Graph:
+    if candidates is None:
+        candidates = _candidate_pages(root)
+    wiki_candidates = [candidate for candidate in candidates if candidate.rel.startswith("wiki/")]
+    by_rel = {candidate.rel: candidate.path for candidate in wiki_candidates}
+    by_candidate = {candidate.rel: candidate for candidate in wiki_candidates}
     by_stem: dict[str, list[str]] = {}
     for rel, path in by_rel.items():
         by_stem.setdefault(path.stem.casefold(), []).append(rel)
@@ -695,10 +719,10 @@ def _build_graph(root: Path) -> Graph:
     sources: dict[str, set[str]] = {}
     types: dict[str, str] = {}
     for rel, path in by_rel.items():
-        page = read_markdown_page(path, root)
-        sources[rel] = {str(item) for item in _as_list(page.frontmatter.get("sources"))}
-        types[rel] = str(page.frontmatter.get("type") or _path_type(rel))
-        for target in _wikilink_targets(page.body, path, root, by_rel, by_stem):
+        candidate = by_candidate[rel]
+        sources[rel] = {str(item) for item in _as_list(candidate.frontmatter.get("sources"))}
+        types[rel] = str(candidate.frontmatter.get("type") or _path_type(rel))
+        for target in _wikilink_targets(candidate.body, path, root, by_rel, by_stem):
             neighbors[rel].add(target)
             neighbors.setdefault(target, set()).add(rel)
     return Graph(neighbors=neighbors, sources=sources, types=types)
