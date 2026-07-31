@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/runtime-provenance.md", "reason": "Archive 管理/status/operation journal 必须保留 runtime provenance 和稳定错误契约。"}
+{"file": ".trellis/spec/backend/local-vector-retrieval.md", "reason": "Active/archive index 都必须遵守可重建、offline 和普通 query 零写入边界。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Archive transaction 跨文件系统、state SQLite、retrieval/vector、MCP/CLI 和迁移层。"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "路径、hash、依赖、状态 reducer、redaction 和 index coordinator 必须单一所有者。"}
+{"file": ".trellis/tasks/07-31-concept-first-wiki-retrieval/research/current-retrieval-architecture.md", "reason": "记录当前 wiki/archives、日志轮转、query 排除和 vector 删除事实。"}
+{"file": ".trellis/tasks/07-31-concept-first-wiki-retrieval/research/corpus-and-archive-lifecycle-decisions.md", "reason": "归档目录、不可变 bundle、引用完整性、restore/purge 和旧目录迁移的已确认决策。"}
+{"file": ".trellis/tasks/07-31-concept-first-wiki-retrieval/research/public-tool-surface-decisions.md", "reason": "定义 archive/restore 两阶段公开面以及 purge/recover/migrate 的 CLI-only 边界。"}
