@@ -19,6 +19,8 @@ from netsuite_llm_wiki_mcp.vector_index import VectorIndexError, VectorIndexStor
 from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProviderError, local_provider_readiness
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, vector_index_records
 from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
+from netsuite_llm_wiki_mcp.archive_migration import apply_legacy_migration, plan_legacy_migration
+from netsuite_llm_wiki_mcp.archive_service import ArchiveService
 
 
 def _runtime_payload(runtime: RuntimeConfig) -> dict[str, Any]:
@@ -134,6 +136,14 @@ def _build_parser() -> argparse.ArgumentParser:
     generation_parser.add_argument("--job-id")
     generation_parser.add_argument("--lease-token")
     generation_parser.add_argument("--owner", default="cli-worker")
+
+    archive_parser = subparsers.add_parser("archive", help="Admin-only archive lifecycle maintenance.")
+    archive_actions = archive_parser.add_subparsers(dest="archive_action", required=True)
+    archive_status = archive_actions.add_parser("status"); archive_status.add_argument("--vault", required=True)
+    archive_recover = archive_actions.add_parser("recover"); archive_recover.add_argument("--vault", required=True)
+    archive_rebuild = archive_actions.add_parser("rebuild-index"); archive_rebuild.add_argument("--vault", required=True)
+    archive_purge = archive_actions.add_parser("purge"); archive_purge.add_argument("--vault", required=True); archive_purge.add_argument("--archive-id", required=True); archive_purge.add_argument("--forget", action="store_true"); archive_purge.add_argument("--authorize", action="store_true")
+    archive_migrate = archive_actions.add_parser("migrate"); archive_migrate.add_argument("--vault", required=True); archive_migrate.add_argument("--apply", action="store_true")
 
     subparsers.add_parser("server", help="Run the MCP server.")
     return parser
@@ -313,6 +323,20 @@ def _run_generation(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 2
 
 
+def _run_archive(args: argparse.Namespace) -> int:
+    if args.archive_action == "migrate":
+        payload = apply_legacy_migration(args.vault) if args.apply else plan_legacy_migration(args.vault)
+    else:
+        service = ArchiveService(args.vault, actor="cli-admin")
+        if args.archive_action == "status": payload = service.status()
+        elif args.archive_action == "recover": payload = service.recover()
+        elif args.archive_action == "rebuild-index": payload = service.rebuild_archive_index()
+        elif args.archive_action == "purge": payload = service.purge(args.archive_id, authorized=bool(args.authorize), forget=bool(args.forget))
+        else: raise ValueError(f"unknown archive action: {args.archive_action}")
+    _print_json(payload)
+    return 0 if payload.get("ok") else 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -338,6 +362,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_index(args)
         if args.command == "generation":
             return _run_generation(args)
+        if args.command == "archive":
+            return _run_archive(args)
     except RuntimeConfigError as exc:
         _print_json(_error_payload(exc.code, str(exc), config_path=exc.config_path))
         return 2

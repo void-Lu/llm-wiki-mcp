@@ -70,6 +70,11 @@ def _validated_identity(revision: str, dirty_text: str | None) -> BuildIdentity:
 
 
 def _git_identity(project_root: Path) -> BuildIdentity | None:
+    # ``git -C <path>`` walks parent directories.  A copied release tree can
+    # therefore accidentally inherit the surrounding checkout's revision;
+    # only metadata rooted in the project being built is authoritative.
+    if not (project_root / ".git").exists():
+        return None
     source_path = str(project_root / "src")
     sys.path.insert(0, source_path)
     try:

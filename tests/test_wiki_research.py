@@ -57,16 +57,12 @@ def test_prepare_empty_results(research_root: Path):
 
 def test_apply_writes_page(research_root: Path):
     synthesis = "## Overview\n\nSuiteQL is powerful. See [[concepts/suiteql|SuiteQL]].\n\n## References\n\n1. [Guide](https://example.com)"
-    result = wiki_research(str(research_root), "SuiteQL best practices", stage="apply", synthesis=synthesis)
+    result = wiki_research(str(research_root), "SuiteQL best practices", stage="apply", synthesis=synthesis, project="alpha")
     assert result["ok"] is True
     assert result["stage"] == "apply"
-    assert result["path"].startswith("wiki/queries/")
+    assert result["path"].startswith("wiki/projects/alpha/researches/")
     parts = Path(result["path"]).parts
-    assert parts[:2] == ("wiki", "queries")
-    assert len(parts) == 7
-    assert len(parts[2]) == 4 and parts[2].isdigit()
-    assert len(parts[3]) == 2 and parts[3].isdigit()
-    assert len(parts[4]) == 2 and parts[4].isdigit()
+    assert parts[:4] == ("wiki", "projects", "alpha", "researches")
 
     page_path = research_root / result["path"]
     assert page_path.exists()
@@ -78,7 +74,7 @@ def test_apply_writes_page(research_root: Path):
 
 def test_apply_strips_thinking(research_root: Path):
     synthesis = "<thinking>Let me think...</thinking>\n\nActual content here."
-    result = wiki_research(str(research_root), "test topic", stage="apply", synthesis=synthesis)
+    result = wiki_research(str(research_root), "test topic", stage="apply", synthesis=synthesis, project="alpha")
     assert result["ok"] is True
     page_path = research_root / result["path"]
     content = page_path.read_text(encoding="utf-8")

@@ -154,6 +154,7 @@ def wiki_query(
     filter_tags: list[str] | None = None,
     retrieval_mode: str = "hybrid",
     vector_settings: VectorSettings | None = None,
+    scope: str = "active",
 ) -> dict[str, Any]:
     return _execute_query(
         vault_root=vault_root,
@@ -173,6 +174,7 @@ def wiki_query(
         filter_type=filter_type,
         filter_tags=filter_tags,
         vector_settings=vector_settings,
+        scope=scope,
         collect_debug=False,
     ).result
 
@@ -195,13 +197,14 @@ def _execute_query(
     filter_type: str | None,
     filter_tags: list[str] | None,
     vector_settings: VectorSettings | None,
+    scope: str,
     collect_debug: bool,
 ) -> QueryExecution:
     if retrieval_mode not in {"lexical", "vector", "hybrid"}:
         raise ValueError("retrieval_mode must be lexical, vector, or hybrid")
     root = Path(vault_root).expanduser().resolve()
     tokens = _tokens(question)
-    all_candidates = _candidate_pages(root, include_raw_sources=include_raw_sources)
+    all_candidates = _candidate_pages(root, include_raw_sources=include_raw_sources, scope=scope)
     candidates = all_candidates
     if project:
         candidates = [candidate for candidate in candidates if _in_project_scope(candidate.rel, project)]
@@ -318,6 +321,7 @@ def wiki_query_debug(
         filter_type=filter_type,
         filter_tags=filter_tags,
         vector_settings=None,
+        scope="active",
         collect_debug=True,
     )
     graph_reasons = {
@@ -364,8 +368,8 @@ def _relationship_reasons(left: str, right: str, graph: Graph) -> list[dict[str,
     return reasons
 
 
-def _candidate_pages(root: Path, include_raw_sources: bool = False) -> list[QueryCandidate]:
-    store = RetrievalIndexStore(root)
+def _candidate_pages(root: Path, include_raw_sources: bool = False, *, scope: str = "active") -> list[QueryCandidate]:
+    store = RetrievalIndexStore(root, scope="archive" if scope == "archive" else "active")
     if store.status().get("ok"):
         candidates = [
             QueryCandidate(
@@ -380,12 +384,16 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False) -> list[Quer
                 source_kind="raw" if str(item["source_kind"]) == "raw_chat" else "wiki",
             )
             for item in store.page_candidates()
-            if include_raw_sources or not str(item["path"]).startswith("raw/")
+            if scope == "archive" or include_raw_sources or not str(item["path"]).startswith("raw/")
         ]
         return candidates
     # Compatibility fallback for a vault that has not received its first
     # explicit maintenance build. It is deliberately not used once a store is
     # present, so normal query traffic never walks the corpus.
+    if scope == "archive":
+        # Archive queries never scan bundles on demand.  Only a committed,
+        # explicit archive-index projection can make cold content searchable.
+        return []
     candidates: list[QueryCandidate] = []
     wiki = root / "wiki"
     if wiki.exists():

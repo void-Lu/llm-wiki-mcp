@@ -27,33 +27,27 @@ def test_refresh_indexes_groups_top_level_wiki_categories(tmp_path: Path):
     create_wiki_root(root)
     write_wiki_page(root, _page("wiki/projects/alpha/specs/spec.md", "Spec", "spec summary"))
     write_wiki_page(root, _page("wiki/concepts/suitescript/module.md", "SuiteScript", "concept summary"))
-    write_wiki_page(root, _page("wiki/chatlog/2026/06/13/session.md", "Session", "chat summary"))
     write_wiki_page(root, _page("wiki/sources/concepts/suitescript/source-a.md", "Source A", "source summary"))
-    write_wiki_page(root, _page("wiki/queries/2026/06/16/query-a/research.md", "Query A", "query summary"))
     write_wiki_page(root, _page("wiki/entities/customer/customer.md", "Customer", "entity summary"))
 
     result = refresh_indexes(root)
 
     assert result["ok"] is True
     index = (root / "wiki/index.md").read_text(encoding="utf-8")
-    for heading in ["## Projects", "## Concepts", "## Chatlog", "## Sources", "## Queries", "## Entities", "## Archives"]:
+    for heading in ["## Projects", "## Concepts", "## Sources", "## Entities"]:
         assert heading in index
     assert "[[projects/alpha/index.md|alpha]]" in index
     assert "[[concepts/index.md|Concepts]]" in index
-    assert "[[chatlog/index.md|Chatlog]]" in index
     assert "[[sources/index.md|Sources]]" in index
-    assert "[[queries/index.md|Queries]]" in index
     assert "[[entities/index.md|Entities]]" in index
-    assert "[[archives/log.md|Archives Log]]" in index
+    assert "Chatlog" not in index
+    assert "Queries" not in index
     assert "concept summary" not in index
 
     concepts_index = (root / "wiki/concepts/index.md").read_text(encoding="utf-8")
     assert "[[suitescript/index.md|suitescript]]" in concepts_index
     concept_domain_index = (root / "wiki/concepts/suitescript/index.md").read_text(encoding="utf-8")
     assert "[[module.md|SuiteScript]] — concept summary" in concept_domain_index
-    chatlog_index = (root / "wiki/chatlog/index.md").read_text(encoding="utf-8")
-    assert "[[2026/06/13/session.md|Session]] — chat summary" in chatlog_index
-    assert not (root / "wiki/chatlog/2026/06/13/index.md").exists()
     entities_index = (root / "wiki/entities/index.md").read_text(encoding="utf-8")
     assert "[[customer/customer.md|Customer]] — entity summary" in entities_index
     assert not (root / "wiki/entities/customer/index.md").exists()
@@ -178,7 +172,7 @@ def test_refresh_sources_stages_navigation_before_replacing_existing_pages(tmp_p
 
     original_write_text = Path.write_text
 
-    def fail_staged_writes(path: Path, text: str, *args: object, **kwargs: object) -> int:
+    def fail_staged_writes(path: Path, text: str, *args: str | None, **kwargs: str | None) -> int:
         if path.suffix == ".tmp" and path.parent.is_relative_to(root / "wiki/sources"):
             raise OSError("injected navigation write failure")
         return original_write_text(path, text, *args, **kwargs)

@@ -70,7 +70,7 @@ class RetrievalIndexStore:
             raise RetrievalIndexError("invalid_store_scope", "scope must be active or archive")
         self.root = Path(vault_root).expanduser().resolve()
         self.scope: StoreScope = scope
-        default = self.root / ".llm-wiki" / ("retrieval.sqlite3" if scope == "active" else "archive-retrieval.sqlite3")
+        default = self.root / ".llm-wiki" / ("retrieval.sqlite3" if scope == "active" else "archive-index.sqlite3")
         self.path = Path(path).expanduser().resolve() if path is not None else default
         if not self.path.is_relative_to(self.root):
             raise RetrievalIndexError("invalid_index_path", "retrieval store must remain inside the vault")

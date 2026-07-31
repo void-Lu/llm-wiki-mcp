@@ -66,7 +66,7 @@ def test_wiki_lint_reports_missing_frontmatter_and_generated_sources(tmp_path: P
 def test_wiki_lint_ignores_archived_markdown_content(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    archived = root / "wiki/archives/2026/06/16/raw/sources/codegraph/legacy.md"
+    archived = root / "archives/bundles/2026/06/20260616legacy/raw/sources/codegraph/legacy.md"
     archived.parent.mkdir(parents=True)
     archived.write_text("# Legacy raw markdown without frontmatter\n\n[[missing-old-page]]", encoding="utf-8")
 

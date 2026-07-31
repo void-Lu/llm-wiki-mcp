@@ -25,7 +25,7 @@ _REQUIRED_FILES = (
     Path("wiki/concepts/index.md"),
     Path("wiki/sources/index.md"),
     Path("wiki/entities/index.md"),
-    Path("wiki/archives/log.md"),
+    Path("archives/log.md"),
 )
 _REQUIRED_DIRS = (
     Path("raw/sources"),
@@ -38,7 +38,7 @@ _REQUIRED_DIRS = (
     Path("wiki/concepts"),
     Path("wiki/sources"),
     Path("wiki/entities"),
-    Path("wiki/archives"),
+    Path("archives/bundles"),
     Path(".llm-wiki/ingest-cache"),
     Path(".llm-wiki/graph-index"),
     Path(".llm-wiki/relation-candidates"),

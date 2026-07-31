@@ -24,6 +24,7 @@ from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
+from netsuite_llm_wiki_mcp.archive_service import ArchiveService
 
 
 @dataclass(frozen=True)
@@ -121,17 +122,15 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
         codegraph.pop("executable", None)
     status["vault"] = resolution.logical_name
     status["config"] = CONFIG_REGISTRY.public_status(resolution.resolved)
-    archive_index = resolution.root / ".llm-wiki" / "archive-index.sqlite3"
-    status["archive_index"] = {
-        "enabled": resolution.resolved.settings.archive.archive_index_enabled,
-        "state": "ready" if archive_index.exists() else "missing",
-    }
+    archive_status = ArchiveService(resolution.root).status()
+    status["archive_index"] = {"enabled": resolution.resolved.settings.archive.archive_index_enabled, **archive_status["archive_index"]}
+    status["archive_operations"] = archive_status["operations"]
     if detail == "indexes":
         status = {key: status[key] for key in ("ok", "vault", "vector", "retrieval", "config", "version", "runtime") if key in status}
     elif detail == "generation":
         status = {key: status[key] for key in ("ok", "vault", "queue", "config", "version", "runtime") if key in status}
     elif detail == "archive":
-        status = {key: status[key] for key in ("ok", "vault", "archive_index", "config", "version", "runtime") if key in status}
+        status = {key: status[key] for key in ("ok", "vault", "archive_index", "archive_operations", "config", "version", "runtime") if key in status}
     return attach_warnings(status, resolution.warnings)
 
 
@@ -158,14 +157,14 @@ def wiki_query(question: str, vault: str | None = None, vault_root: str | None =
     warnings = list(resolution.warnings)
     if vector_config is not None:
         warnings.append("deprecated_vector_config")
-    result = wiki_query_tool(
+    result = run_wiki_query(
         str(resolution.root), question, project, top_k,
         include_content=True,
         context_window_tokens=settings.context.hard_budget_tokens,
         include_context_pack=settings.context.response_mode == "context_pack",
         enable_vector=settings.embedding.enabled,
         vector_config=vector_config,
-        filter_type=filter_values.get("type"), filter_tags=tags,
+        filter_type=filter_values.get("type"), filter_tags=tags, scope="archive" if scope == "archive" else "active",
     )
     result["scope"] = scope
     return attach_warnings(result, warnings)
@@ -213,30 +212,38 @@ def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vau
     return attach_warnings(result, resolution.warnings)
 
 
-def _archive_unavailable(operation: str, **_: Any) -> dict[str, Any]:
-    return {"ok": False, "code": "archive_lifecycle_not_available", "error": f"{operation} is registered but implemented by the archive lifecycle task"}
-
-
 @_register
-def wiki_archive(target: str, action: str = "plan", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+def wiki_archive(target: str, reason: str = "manual", cascade: bool = False, action: str = "plan", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Plan/apply archive lifecycle operations; purge is intentionally not public."""
-    del target, action, plan_id
+    if action not in {"plan", "apply"}:
+        return {"ok": False, "code": "invalid_action", "error": "action must be plan or apply"}
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
-    return attach_warnings(_archive_unavailable("wiki_archive"), resolution.warnings)
+    service = ArchiveService(resolution.root, actor="mcp")
+    try:
+        result = service.plan_archive(target, reason=reason, cascade=cascade) if action == "plan" else service.apply(plan_id or "")
+    except Exception as exc:
+        result = {"ok": False, "code": getattr(exc, "code", "archive_apply_failed"), "error": str(exc)}
+    return attach_warnings(result, resolution.warnings)
 
 
 @_register
 def wiki_restore(archive_id: str, action: str = "plan", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Plan/apply restoration of an immutable archive bundle."""
-    del archive_id, action, plan_id
+    if action not in {"plan", "apply"}:
+        return {"ok": False, "code": "invalid_action", "error": "action must be plan or apply"}
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
-    return attach_warnings(_archive_unavailable("wiki_restore"), resolution.warnings)
+    service = ArchiveService(resolution.root, actor="mcp")
+    try:
+        result = service.plan_restore(archive_id) if action == "plan" else service.apply(plan_id or "")
+    except Exception as exc:
+        result = {"ok": False, "code": getattr(exc, "code", "restore_apply_failed"), "error": str(exc)}
+    return attach_warnings(result, resolution.warnings)
 
 
 if CONFIG_REGISTRY.config.tool_profile == "worker":

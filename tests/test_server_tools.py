@@ -127,7 +127,8 @@ def test_archive_tools_use_shared_vault_resolver(monkeypatch: pytest.MonkeyPatch
         result = tool(target="wiki/concepts/example.md", **kwargs)  # type: ignore[operator]
     else:
         result = tool(archive_id="bundle-1", **kwargs)  # type: ignore[operator]
-    assert result["code"] == "archive_lifecycle_not_available"  # type: ignore[index]
+    assert result["ok"] is False  # type: ignore[index]
+    assert result["code"] in {"archive_target_missing", "archive_not_found"}  # type: ignore[index]
     assert result["warnings"] == ["deprecated_vault_root"]  # type: ignore[index]
 
 

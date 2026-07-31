@@ -16,11 +16,9 @@ EXPECTED_DIRS = [
     "raw/assets",
     "wiki/projects",
     "wiki/concepts",
-    "wiki/chatlog",
     "wiki/sources",
-    "wiki/queries",
     "wiki/entities",
-    "wiki/archives",
+    "archives/bundles",
     ".llm-wiki/ingest-cache",
     ".llm-wiki/graph-index",
     ".llm-wiki/relation-candidates",
@@ -34,11 +32,9 @@ EXPECTED_FILES = [
     "wiki/log.md",
     "wiki/overview.md",
     "wiki/concepts/index.md",
-    "wiki/chatlog/index.md",
     "wiki/sources/index.md",
-    "wiki/queries/index.md",
     "wiki/entities/index.md",
-    "wiki/archives/log.md",
+    "archives/log.md",
 ]
 
 
@@ -97,11 +93,9 @@ def test_project_helpers_return_confirmed_project_substructure(tmp_path: Path):
     assert paths.project_troubleshooting_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "troubleshooting"
     assert paths.project_researches_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "researches"
     assert paths.concepts_dir() == paths.root / "wiki" / "concepts"
-    assert paths.chatlog_dir() == paths.root / "wiki" / "chatlog"
     assert paths.sources_dir() == paths.root / "wiki" / "sources"
-    assert paths.queries_dir() == paths.root / "wiki" / "queries"
     assert paths.entities_dir() == paths.root / "wiki" / "entities"
-    assert paths.archives_dir() == paths.root / "wiki" / "archives"
+    assert paths.archives_dir() == paths.root / "archives"
 
 
 @pytest.mark.parametrize(

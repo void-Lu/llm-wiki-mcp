@@ -20,7 +20,9 @@ TOP_LEVEL_DIRS = (
     Path("wiki/concepts"),
     Path("wiki/sources"),
     Path("wiki/entities"),
-    Path("wiki/archives"),
+    Path("archives/bundles"),
+    Path("archives/.staging"),
+    Path("archives/.pending"),
     Path(".obsidian"),
     Path(".llm-wiki/ingest-cache"),
     Path(".llm-wiki/graph-index"),
@@ -179,7 +181,7 @@ DEFAULT_FILES = {
     Path("wiki/concepts/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Concepts\n\n",
     Path("wiki/sources/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Sources\n\n",
     Path("wiki/entities/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Entities\n\n",
-    Path("wiki/archives/log.md"): "# Archives Log\n\n",
+    Path("archives/log.md"): "# Archives Log\n\n",
 }
 
 
@@ -242,7 +244,7 @@ class WikiPaths:
         return self.root / "wiki" / "entities"
 
     def archives_dir(self) -> Path:
-        return self.root / "wiki" / "archives"
+        return self.root / "archives"
 
 
 def safe_segment(value: str) -> str:

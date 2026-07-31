@@ -641,7 +641,7 @@ def test_staged_wiki_ingest_accepts_valid_generation_payload(tmp_path: Path):
     assert (root / "wiki/concepts/alpha/generated.md").exists()
 
 
-def test_staged_wiki_ingest_chat_source_can_write_chatlog_page(tmp_path: Path):
+def test_staged_wiki_ingest_chat_source_rejects_legacy_chatlog_pages(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
     source = tmp_path / "session.md"
@@ -677,19 +677,9 @@ def test_staged_wiki_ingest_chat_source_can_write_chatlog_page(tmp_path: Path):
         source_type="chat",
     )
 
-    assert result["ok"] is True
-    assert "wiki/chatlog/2026/06/13/session-2026-06-13.md" in result["paths"]
-    assert "wiki/sources/chatlog/2026/06/13/session-2026-06-13.md" in result["paths"]
-    generated = root / "wiki/chatlog/2026/06/13/session-2026-06-13.md"
-    frontmatter = yaml.safe_load(generated.read_text(encoding="utf-8").split("---", 2)[1])
-    assert frontmatter["type"] == "chatlog"
-    assert frontmatter["sources"] == ["raw/sources/chat/2026/06/13/session-2026-06-13/session.md"]
-    source_index = root / "wiki/sources/chatlog/2026/06/13/session-2026-06-13.md"
-    assert source_index.is_file()
-    source_frontmatter = yaml.safe_load(source_index.read_text(encoding="utf-8").split("---", 2)[1])
-    assert source_frontmatter["type"] == "source_index"
-    assert source_frontmatter["source_type"] == "chat"
-    assert source_frontmatter["sources"] == ["raw/sources/chat/2026/06/13/session-2026-06-13/session.md"]
+    assert result["ok"] is False
+    assert not (root / "wiki" / "chatlog").exists()
+    assert not (root / "wiki" / "sources" / "chatlog").exists()
     assert (root / "raw/sources/chat/2026/06/13/session-2026-06-13/session.md").is_file()
 
 
@@ -720,7 +710,7 @@ def test_staged_wiki_ingest_rejects_chatlog_path_for_non_chat_source(tmp_path: P
     assert result["code"] == "invalid_generated_path"
 
 
-def test_prepare_chat_source_prompt_prefers_chatlog_pages(tmp_path: Path):
+def test_prepare_chat_source_prompt_keeps_chat_in_raw_history(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
     source = tmp_path / "session.md"
@@ -736,7 +726,7 @@ def test_prepare_chat_source_prompt_prefers_chatlog_pages(tmp_path: Path):
     )
 
     assert result["ok"] is True
-    assert "wiki/chatlog/YYYY/MM/DD/<slug>.md" in result["prompt"]
+    assert "wiki/chatlog" not in result["prompt"]
     assert "raw/sources/chat" in result["prompt"]
 
 
@@ -775,9 +765,7 @@ def test_staged_wiki_ingest_chat_messages_write_formatted_snapshot(tmp_path: Pat
     )
 
     assert result["ok"] is True
-    assert result["status"] == "needs_model"
-    assert "transcript.md" in result["prompt"]
-    assert "messages.json" in result["prompt"]
+    assert result["status"] == "review_required"
 
     raw_dir = root / "raw/sources/chat/2026/06/18/session-2026-06-18"
     transcript_path = raw_dir / "transcript.md"
@@ -812,8 +800,7 @@ def test_staged_wiki_ingest_chat_messages_prepare_analysis_uses_formatted_snapsh
     )
 
     assert result["ok"] is True
-    assert result["stage"] == "prepare_analysis"
-    assert result["classification_context"] == ["transcript.md", "messages.json"]
+    assert result["stage"] == "chat_candidate"
     assert (root / "raw/sources/chat/2026/06/18/session-2026-06-18/transcript.md").is_file()
 
 
