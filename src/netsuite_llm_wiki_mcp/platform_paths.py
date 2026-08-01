@@ -56,13 +56,5 @@ def user_data_dir(app_name: str = APP_NAME) -> Path:
     return (root / app_name).resolve()
 
 
-def default_data_root(app_name: str = APP_NAME) -> Path:
-    return user_data_dir(app_name)
-
-
 def global_config_path(app_name: str = APP_NAME) -> Path:
     return user_config_dir(app_name) / "config.yaml"
-
-
-def default_config_path(app_name: str = APP_NAME) -> Path:
-    return global_config_path(app_name)

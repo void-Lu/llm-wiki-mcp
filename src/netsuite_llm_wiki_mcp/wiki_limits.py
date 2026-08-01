@@ -1,9 +1,8 @@
 """Shared capacity limits for generated wiki pages.
 
 The limits are deliberately expressed in UTF-8 bytes because that is the unit
-used by :mod:`wiki_lint` and by the filesystem.  Writers use the smaller target
-limit so that a later rendering change has room before reaching the hard lint
-limit.
+used by the filesystem.  Writers use the smaller target limit so that a later
+rendering change has room before reaching the hard page limit.
 """
 
 from __future__ import annotations

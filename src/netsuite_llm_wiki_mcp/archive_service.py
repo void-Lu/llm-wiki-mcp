@@ -18,7 +18,7 @@ import sqlite3
 from typing import Any, Iterator
 from uuid import uuid4
 
-from netsuite_llm_wiki_mcp.archive_manifest import content_hash, load_manifest, verify_bundle, write_manifest
+from netsuite_llm_wiki_mcp.archive_manifest import content_hash, verify_bundle, write_manifest
 from netsuite_llm_wiki_mcp.archive_models import ArchiveError, ArchiveItem, ArchiveManifest, ArchivePlan, Tombstone
 from netsuite_llm_wiki_mcp.archive_planner import ArchivePlanner
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore, page_from_file

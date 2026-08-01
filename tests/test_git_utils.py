@@ -9,12 +9,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from netsuite_llm_wiki_mcp.git_utils import (
-    GitInfo,
-    format_git_commit,
     get_git_branch,
     get_git_commit,
     get_git_dirty,
-    get_git_info,
     get_git_revision,
     is_git_dirty,
 )
@@ -178,65 +175,3 @@ class TestGetGitBranch:
             result = get_git_branch(SAMPLE_DIR)
             assert result == "HEAD"
 
-
-# ---------------------------------------------------------------------------
-# get_git_info
-# ---------------------------------------------------------------------------
-
-
-class TestGetGitInfo:
-    def test_returns_full_info_for_git_repo(self) -> None:
-        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                _successful_run("abc1234\n"),      # get_git_commit
-                _successful_run("feature/x\n"),     # get_git_branch
-                _successful_run(" M file.py\n"),    # is_git_dirty
-            ]
-            info = get_git_info(SAMPLE_DIR)
-            assert info == GitInfo(commit="abc1234", branch="feature/x", dirty=True)
-
-    def test_returns_defaults_for_non_git_dir(self) -> None:
-        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(128, "git")
-            info = get_git_info(SAMPLE_DIR)
-            assert info == GitInfo(commit="", branch="", dirty=False)
-
-    def test_works_with_file_path(self) -> None:
-        """get_git_info should work when given a file path (uses parent dir)."""
-        with patch("netsuite_llm_wiki_mcp.git_utils._resolve_git_dir", return_value=SAMPLE_DIR), \
-             patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                _successful_run("deadbeef\n"),   # get_git_commit
-                _successful_run("main\n"),        # get_git_branch
-                _successful_run(""),              # is_git_dirty
-            ]
-            info = get_git_info(Path("/fake/repo/src/main.py"))
-            assert info.commit == "deadbeef"
-            assert info.branch == "main"
-            assert info.dirty is False
-
-    def test_returns_defaults_when_git_not_available(self) -> None:
-        with patch("netsuite_llm_wiki_mcp.git_utils.subprocess.run") as mock_run:
-            mock_run.side_effect = FileNotFoundError("git not found")
-            info = get_git_info(SAMPLE_DIR)
-            assert info == GitInfo(commit="", branch="", dirty=False)
-
-
-# ---------------------------------------------------------------------------
-# format_git_commit
-# ---------------------------------------------------------------------------
-
-
-class TestFormatGitCommit:
-    def test_plain_commit(self) -> None:
-        assert format_git_commit("abc1234", dirty=False) == "abc1234"
-
-    def test_dirty_commit(self) -> None:
-        assert format_git_commit("abc1234", dirty=True) == "abc1234+dirty"
-
-    def test_empty_commit_not_dirty(self) -> None:
-        assert format_git_commit("", dirty=False) == ""
-
-    def test_empty_commit_dirty(self) -> None:
-        """Even with empty commit, dirty flag is appended (unusual but defined)."""
-        assert format_git_commit("", dirty=True) == "+dirty"

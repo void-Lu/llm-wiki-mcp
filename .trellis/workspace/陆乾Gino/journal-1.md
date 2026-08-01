@@ -378,3 +378,36 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: 完成 Query V2 评测与 Concept-first 集成归档
+
+**Date**: 2026-07-31
+**Task**: 完成 Query V2 评测与 Concept-first 集成归档
+**Branch**: `v0.9.11`
+
+### Summary
+
+固化 40 条审核标签与 36 个 capsule-only CI fixture，完成 V1/V2 lexical ablation、576 项全量回归、父任务集成验收，并归档 Query V2 与 Concept-first 任务。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e04b25c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

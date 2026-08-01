@@ -15,7 +15,7 @@ from typing import Any, Iterable, Sequence
 
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings
-from netsuite_llm_wiki_mcp.vector_provider import VectorProvider, VectorProviderError, VectorProviderIdentity
+from netsuite_llm_wiki_mcp.vector_provider import VectorProvider, VectorProviderIdentity
 
 VECTOR_INDEX_SCHEMA_VERSION = 2
 DEFAULT_VECTOR_CANDIDATE_LIMIT = 50

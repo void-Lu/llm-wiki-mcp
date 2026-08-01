@@ -5,8 +5,7 @@ from pathlib import Path
 import netsuite_llm_wiki_mcp.wiki_log as wiki_log
 
 from netsuite_llm_wiki_mcp.wiki_limits import HARD_PAGE_BYTES, TARGET_PAGE_BYTES, partition_rendered_units, utf8_size
-from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint
-from netsuite_llm_wiki_mcp.wiki_log import append_log_entry, parse_log_entries, read_recent_log_entries
+from netsuite_llm_wiki_mcp.wiki_log import append_log_entry, read_recent_log_entries
 from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
@@ -86,48 +85,6 @@ def test_read_recent_log_entries_returns_latest_headings(tmp_path: Path):
     ]
 
 
-def test_parse_log_entries_returns_structured_entries(tmp_path: Path):
-    root = tmp_path / "vault"
-    create_wiki_root(root)
-    append_log_entry(
-        root,
-        WikiLogEntry(
-            operation="ingest",
-            title="CodeGraph alpha",
-            paths=["wiki/projects/alpha/architecture/script.md", "wiki/sources/projects/alpha/architecture/codegraph.md"],
-            sources=["raw/sources/projects/alpha/codegraph/context.json"],
-            project="alpha",
-            status="ok",
-            timestamp="2026-05-26T10:20:30Z",
-        ),
-    )
-    append_log_entry(
-        root,
-        WikiLogEntry(
-            operation="llm_ingest",
-            title="alpha/docs",
-            paths=["wiki/sources/alpha-docs.md"],
-            sources=["raw/sources/file/alpha/docs/notes.md"],
-            project="alpha",
-            status="ok",
-            timestamp="2026-05-26T11:00:00Z",
-        ),
-    )
-
-    entries = parse_log_entries(root, limit=5)
-
-    assert len(entries) == 2
-    assert entries[0]["timestamp"] == "2026-05-26T11:00:00Z"
-    assert entries[0]["operation"] == "llm_ingest"
-    assert entries[0]["title"] == "alpha/docs"
-    assert entries[0]["project"] == "alpha"
-    assert entries[0]["status"] == "ok"
-    assert entries[0]["paths"] == ["wiki/sources/alpha-docs.md"]
-    assert entries[0]["sources"] == ["raw/sources/file/alpha/docs/notes.md"]
-    assert entries[1]["timestamp"] == "2026-05-26T10:20:30Z"
-    assert entries[1]["operation"] == "ingest"
-
-
 def test_append_log_entry_archives_oldest_half_when_exceeding_limit(tmp_path: Path):
     """When log exceeds 200 entries, the oldest 100 are archived, leaving 100."""
     root = tmp_path / "vault"
@@ -145,12 +102,12 @@ def test_append_log_entry_archives_oldest_half_when_exceeding_limit(tmp_path: Pa
             ),
         )
 
-    entries = parse_log_entries(root, limit=250)
+    headings = read_recent_log_entries(root, limit=250)
     text = (root / "wiki/log.md").read_text(encoding="utf-8")
     archived = sorted((root / "wiki/archives/log/2026/05").glob("log-*.md"))
 
     # After 201 entries: 101 oldest archived (0-100), 100 kept in log (101-200)
-    assert len(entries) == 100
+    assert len(headings) == 100
     assert "Question 100" not in text
     assert "Question 101" in text
     assert archived
@@ -218,13 +175,11 @@ def test_append_log_entry_rotates_few_long_records_on_utf8_bytes(tmp_path: Path)
 
     active = (root / "wiki/log.md").read_text(encoding="utf-8")
     archives = list((root / "wiki/archives/log").rglob("log-*.md"))
-    lint_codes = {issue["code"] for issue in wiki_lint(root)["issues"]}
     assert "First" not in active
     assert "Second" in active
     assert len(archives) == 1
     assert "First" in archives[0].read_text(encoding="utf-8")
     assert utf8_size(active) <= TARGET_PAGE_BYTES
-    assert "oversized_page" not in lint_codes
 
 
 def test_append_log_entry_rejects_record_that_cannot_fit_in_an_archive_page(tmp_path: Path):
@@ -244,7 +199,7 @@ def test_append_log_entry_rejects_record_that_cannot_fit_in_an_archive_page(tmp_
 
     assert result["ok"] is False
     assert result["code"] == "log_entry_too_large"
-    assert parse_log_entries(root) == []
+    assert read_recent_log_entries(root) == []
 
 
 def test_archive_index_never_overwrites_a_manual_paged_index(tmp_path: Path, monkeypatch):

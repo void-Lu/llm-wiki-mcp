@@ -1,6 +1,6 @@
 # NetSuite LLM Wiki MCP
 
-一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。代码事实来自 CodeGraph；其他内容都通过 MCP 工具进行摄入、查询和维护。
+一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。内容通过 MCP 工具摄入、查询、维护和归档；代码事实不再走 CodeGraph 摄入主路径，CodeGraph 只保留在 `wiki_status` 的只读可用性字段中。
 
 默认不使用 embedding 或向量数据库；关键词、图检索和 `[[wikilinks]]` 始终可独立运行。需要语义召回时可显式启用本地 BGE-M3 索引，绝不自动下载模型或向外部服务发送 vault 内容。
 
@@ -61,18 +61,18 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 本 server 的安装目录和 vault 根路径都通过环境变量传递，避免在配置文件里硬编码绝对路径，也避免依赖 `${workspaceFolder}`（在别的工作区打开时会解析错）。先在系统（或用户）环境变量里设置一次：
 
-| 变量 | 含义 | 示例（Windows） |
-|------|------|-----------------|
-| `NETSUITE_LLM_WIKI_MCP_DIR` | 本仓库（MCP server 安装目录）的绝对路径 | `c:\Users\<you>\VSCodeProjects\netsuite-llm-wiki-mcp` |
-| `NETSUITE_LLM_WIKI_VAULT_ROOT` | Obsidian wiki vault 的绝对路径 | `c:\Users\<you>\Documents\Obsidian Vault\codingwork` |
+| 变量                             | 含义                                    | 示例（Windows）                                         |
+| -------------------------------- | --------------------------------------- | ------------------------------------------------------- |
+| `NETSUITE_LLM_WIKI_MCP_DIR`    | 本仓库（MCP server 安装目录）的绝对路径 | `c:\Users\<you>\VSCodeProjects\netsuite-llm-wiki-mcp` |
+| `NETSUITE_LLM_WIKI_VAULT_ROOT` | Obsidian wiki vault 的绝对路径          | `c:\Users\<you>\Documents\Obsidian Vault\codingwork`  |
 
 设好后再用各客户端对应的变量引用语法取值。三家客户端的变量替换语法不同：
 
-| 客户端 | 配置文件 | 变量语法 |
-|--------|----------|----------|
-| VS Code / GitHub Copilot | 项目根 `.vscode/mcp.json` | `${env:VAR}` |
-| Claude Code | 项目根 `.mcp.json` 或 `~/.claude.json` 的 `mcpServers` | `${VAR}` |
-| Codex | `~/.codex/config.toml` | `$VAR` |
+| 客户端                   | 配置文件                                                    | 变量语法       |
+| ------------------------ | ----------------------------------------------------------- | -------------- |
+| VS Code / GitHub Copilot | 项目根`.vscode/mcp.json`                                  | `${env:VAR}` |
+| Claude Code              | 项目根`.mcp.json` 或 `~/.claude.json` 的 `mcpServers` | `${VAR}`     |
+| Codex                    | `~/.codex/config.toml`                                    | `$VAR`       |
 
 #### VS Code / GitHub Copilot（推荐）
 
@@ -140,17 +140,17 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 默认 core profile 只注册以下 7 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。
 
-| 工具 | 说明 |
-|------|------|
-| `wiki_status` | 聚合逻辑 vault、检索配置、active/archive index、generation queue、版本与运行身份；不回显绝对路径、模型路径、凭据或脱敏规则正文。`detail=summary|indexes|generation|archive` 只改变只读展示范围。 |
-| `wiki_ingest` | 为一个明确 source 准备摄入；目录/batch/reconcile 由 CLI 或 worker 执行。 |
-| `wiki_write_note` | 仅创建人工知识页，已有目标不会被覆盖。 |
-| `wiki_update` | 对既有页面执行 `preview|apply` 受控更新。 |
-| `wiki_query` | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；模型、预算、索引和隐私策略全部来自启动时配置快照。 |
-| `wiki_archive` | 归档生命周期的 `plan|apply` 公开入口；不提供 purge。 |
-| `wiki_restore` | 不可变归档包的 `plan|apply` 恢复入口。 |
+| 工具                | 说明                                                                                                                                            |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wiki_status`     | 聚合逻辑 vault、检索配置、active/archive index、generation queue、版本与运行身份；不回显绝对路径、模型路径、凭据或脱敏规则正文。`detail=summary |
+| `wiki_ingest`     | 摄入一个明确文件，写入`raw/sources/`，同步检索索引并把知识编译任务加入 durable queue。                                                        |
+| `wiki_write_note` | 仅创建人工知识页，已有目标不会被覆盖。                                                                                                          |
+| `wiki_update`     | 对既有页面执行 `preview                                                                                                                         |
+| `wiki_query`      | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；模型、预算、索引和隐私策略全部来自启动时配置快照。                     |
+| `wiki_archive`    | 归档生命周期的 `plan                                                                                                                            |
+| `wiki_restore`    | 不可变归档包的 `plan                                                                                                                            |
 
-worker profile 只会额外注册 `wiki_generation`。init/config、batch ingest/reconcile、vector build/rebuild、lint/verify/debug/evaluation、purge 和 migration 只保留在 CLI/admin 边界。
+worker profile 只会额外注册 `wiki_generation`。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 
 `retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共查询契约，输出 JSON 与 Markdown 报告。默认 `--query-version v2`，只读取已构建的 passage/vector index，且关闭查询遥测；用 `--query-version v1` 生成可比的 legacy baseline，`--scope` 控制 V2 corpus。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
@@ -165,7 +165,7 @@ worker profile 只会额外注册 `wiki_generation`。init/config、batch ingest
 ```python
 wiki_query(
     question="如何自动化应付账款处理？",
-    vault="homework",
+    vault="codingwork",
     scope="knowledge",
 )
 ```
@@ -186,49 +186,29 @@ vault_root/
 │   ├── assets/
 │   └── sources/
 │       ├── projects/
-│       │   └── <project>/
-│       │       ├── requirements/
-│       │       ├── codegraph/
-│       │       └── assets/
 │       ├── chat/
-│       │   └── <yyyy>/<mm>/<dd>/<session-id>/
 │       ├── file/
 │       └── references/
 ├── wiki/
 │   ├── index.md
 │   ├── log.md
 │   ├── overview.md
-│   ├── concepts/
-│   │   ├── index.md
-│   │   └── <domain>/
-│   ├── chatlog/
-│   │   ├── index.md
-│   │   └── <yyyy>/<mm>/<dd>/
+│   ├── concepts/<domain>/
 │   ├── projects/
 │   │   └── <project>/
 │   │       ├── index.md
 │   │       ├── specs/
 │   │       ├── plans/
 │   │       ├── architecture/
-│   │       ├── pipelines/
 │   │       ├── troubleshooting/
 │   │       └── researches/
-│   ├── sources/
-│   │   ├── index.md
-│   │   ├── concepts/
-│   │   ├── projects/
-│   │   ├── chatlog/
-│   │   ├── queries/
-│   │   └── entities/
-│   ├── queries/
-│   │   ├── index.md
-│   │   └── <yyyy>/<mm>/<dd>/<query-id>/
+│   ├── sources/index.md
 │   ├── entities/
-│   │   ├── index.md
-│   │   └── <entity>/
 │   └── archives/
-│       ├── log.md
-│       └── <yyyy>/<mm>/<dd>/
+├── archives/
+│   ├── log.md
+│   ├── bundles/
+│   └── .staging/
 └── .llm-wiki/
     ├── ingest-cache/
     ├── ingest-queue.json
@@ -242,79 +222,47 @@ vault_root/
 
 推荐循环：
 
-1. 用 `wiki_init` 初始化 vault，然后根据领域定制 `purpose.md` 和 `schema.md`。
-2. 摄入 source：
-   - 代码仓库 → `wiki_ingest_codegraph`（同步，不需要 LLM）
-   - 本地文件 → `wiki_ingest_llm(stage="prepare")` → LLM 生成 → `wiki_ingest_llm(stage="apply")`
-  - 会话历史 → `wiki_ingest_llm(source_type="chat", stage="prepare")` 先保存到 `raw/sources/chat/YYYY/MM/DD/<source_name>/` → `wiki_ingest_llm(stage="apply")` 生成 `wiki/chatlog/YYYY/MM/DD/` 会话页，并写 `wiki/sources/chatlog/YYYY/MM/DD/` 索引溯源页
-   - 外部爬虫或人工收集的 MD 文件 → `raw/sources/references/` 或 `raw/sources/file/` → `wiki_ingest_llm(stage="prepare")` → `wiki_ingest_llm(stage="apply")`
-3. 用 `wiki_verify` 校验生成页面是否忠实于原始来源。
-4. 用 `wiki_query` 查询已积累的知识；回答时引用 numbered context pack。
-5. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
-6. 用 `wiki_lint` 和 `wiki_enrich` 保持图谱健康；使用 `wiki_lint(stage="prepare_semantic_review")` -> `wiki_lint(stage="apply_semantic_review")` 进行 LLM 辅助的矛盾、过期声明和缺失概念审查。
+1. 用 CLI 注册 vault：`netsuite-llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
+2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步检索索引，并把知识编译任务加入 durable queue。
+3. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。
+4. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
+5. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑；preview 返回 hash、plan_id、锁定字段和 diff，apply 在内容变化前校验这些不变量。
+6. 用 `wiki_archive`/`wiki_restore` 管理归档生命周期；purge 只保留在 CLI/admin 边界。
 
 对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
 
-### 批量摄入工作流
+### 知识编译与 worker
 
-当需要一次性摄入大量源文件时，使用 `wiki_ingest_batch` 的批量 action：
+`wiki_ingest` 只负责 raw snapshot 和入队，不直接调用 LLM。知识编译由 [knowledge_compiler.py](src/netsuite_llm_wiki_mcp/knowledge_compiler.py) 和 durable [generation_queue.py](src/netsuite_llm_wiki_mcp/generation_queue.py) 管理。worker profile 额外注册 `wiki_generation`，提供 `status`、`claim`、`apply`、`fail`、`release`；CLI `generation` 提供同一队列的管理入口。
 
-1. **入队**：`wiki_ingest_batch(action="enqueue", tasks=[...])` — 批量添加待摄入任务
-2. **批量 prepare**：`wiki_ingest_batch(action="prepare_all")` — 对所有 `pending` 任务运行 prepare，标记为 `prepared`（需要 LLM）或 `done`（源未变化）。批量响应只返回 `task_id`、`status`、`source_hash`、`has_prompt`、`generation_job_count` 等摘要，不返回整批 prompt 正文
-3. **单条取 job**：优先使用 `wiki_ingest_batch(action="next_generation_job")`，每次只取一个 page generation job。兼容旧 source-level 流程时可用 `next_prepared` 取单个 prepared task 和 prompt
-4. **隔离生成**：在独立子代理或新会话中只给当前 job 的 `raw_sources`、`raw_reading_instructions`、`expected_response_schema` 和精简 `context`，不要把其他任务的 prompt/generation/失败历史带入同一模型上下文
-5. **保存 generation**：`wiki_ingest_batch(action="set_generation", task_id="...", job_id="...", result={"generation": ...})` — 只保存单条模型输出，不改变任务终态
-6. **单条或批量 apply**：`wiki_ingest_batch(action="apply_one", task_id="...", job_id="...")` 或 `wiki_ingest_batch(action="apply_all")` — 写入前执行 generation schema / quality gate；通过后写 wiki，失败则标记 `failed`
-
-`status` 也返回瘦身任务摘要：包含 `has_prompt`、`has_generation`、`source_hash`、`generation_hash`、`error_stage`、`validation_errors` 等诊断字段，不返回大段 prompt 或 generation 正文。
-
-### Generation 质量门禁
-
-`wiki_ingest_llm(stage="apply")` 和旧 `apply_generation` 在写任何页面、刷新索引或追加日志前，会先验证 generation payload：
-
-- generation 必须是 JSON object。
-- `source_summary` 必须是 object 或非空字符串。
-- `pages` 必须是 list；允许为空，此时只生成 source index。
-- 非空页面必须包含非空 `path`、`title`、`type`、`summary`、`body`、`sources`。
-- `sources` 必须能归一到 prepared manifest 中的 raw source path。
-- `path` 必须落在允许的 wiki 目录内，不能逃逸项目或 source_type 约束。
-- `type` 只允许 `concept`、`entity`、`pipeline`、`spec`、`plan`、`research`、`troubleshooting`、`chatlog`、`source_index`。
-- `body` 去除空白后至少 80 字符；`summary` 必须是短文本，不能塞入多段正文。
-
-校验失败时不会写页面、不会刷新索引、不会追加 ingest log。返回形态为 `code="generation_schema_invalid"` 和结构化 `errors[]`；batch apply 会把任务标记为 `failed`，记录 `error_stage="validate"`、`validation_errors`、`generation_hash`，但不会在批量响应或 status 中回显坏 generation 正文。
-
-**页面损坏恢复**：当 wiki 页面损坏但 ingest cache 完好时，使用 `wiki_ingest_batch(action="reapply")` 从缓存重新 apply，无需重新 prepare 或调用 LLM。reapply 会检测每页完整性，报告 `regeneration_needed`（需要完整 LLM 重新摄入的页面）和 `pages_restored`（仍然完好的页面数）。
+批量或重建立索引不是 MCP 工具职责：`retrieval-eval`、`vector build/update`、`index build/update`、archive admin 和 migration 都保留在 CLI 边界。
 
 ## 数据流
 
-### CodeGraph 摄入
+### 单文件摄入
 
 ```
-wiki_ingest_codegraph → raw/sources/projects/<project>/codegraph/
-                      → raw/sources/projects/<project>/codegraph/codefacts.json
-                      → wiki/sources/projects/<project>/architecture/codegraph.md (索引溯源页)
-                      → wiki/projects/<project>/architecture/code-overview.md
-                      → wiki/projects/<project>/pipelines/ (仅 profile="suitescript" 且检测到链路时)
-                      → index + overview + log 更新
+wiki_ingest
+    → raw/sources/<source_type>/<project>/<source_name>/<file>
+    → RetrievalIndexStore 增量更新
+    → 非 chat 且内容变化时，KnowledgeCompiler 入队
+    → worker `wiki_generation` claim/apply
+    → 写 wiki 页面 + refresh index/overview/log
 ```
 
-`wiki_ingest_codegraph` 默认使用 `profile="generic"`，CodeGraph 机器事实保存到 raw，不再作为普通 wiki 知识页展示；可读层生成 `wiki/sources/` 下的索引溯源页和项目 architecture overview。SuiteScript/SuiteCloud 项目需要传 `profile="suitescript"` 才会启用 `N/task`、`N/record`、`N/url`、`form.clientScriptModulePath`、`custscript_*` 等隐式关系抽取和业务 pipeline 页面生成。对 SDF 项目根目录摄入时，可用 `include_extensions=[".js"]` 只保留脚本文件，避免 `Objects/*.xml` 混入代码事实。
+`wiki_ingest` 只接受一个已存在文件，不接受目录或自动下载。raw snapshot 按字节复制，检索投影在复制后同步；若 raw 内容未变化，不会重复入队知识编译。
 
-### LLM 分阶段摄入
+### 受控更新与归档
 
 ```
-推荐两阶段流程：
-prepare → 读源文件 + 写 raw/sources/<source_type>/ snapshot + 返回合并 prompt（agent 发送给 LLM）
-  → source_type="chat" 时，写 raw/sources/chat/YYYY/MM/DD/<source_name>/
-apply   → 写 wiki/concepts/ 或 wiki/projects/ 下的知识页面
-  → 写 wiki/sources/ 下镜像目标 wiki 结构的索引溯源页
-  → source_type="chat" 且生成 chatlog 时，写 wiki/sources/chatlog/YYYY/MM/DD/<source_name>.md 索引溯源页
-  → 写入前校验 generation：source_summary、pages、页面 path/title/type/summary/body/sources、允许 type、路径安全、body 最低质量和 source manifest 可追溯性
+wiki_update(preview) → current_hash + plan_id + locked-field diff
+wiki_update(apply)   → hash/plan 校验 + 锁定字段/来源检查
+                     → 写页面 + 更新依赖 + refresh index + append log
 
-旧三阶段（仍兼容）：
-prepare_analysis   → 返回 analysis prompt
-prepare_generation → 返回 generation prompt
-apply_generation   → 写入 wiki 页面
+wiki_archive(plan)   → 生成不可变 bundle 计划
+wiki_archive(apply)  → 写入 archives/bundles + archive index
+wiki_restore(plan)   → 从 bundle 生成恢复计划
+wiki_restore(apply)  → 恢复页面 + 更新 active/archive index
 ```
 
 ### 查询流水线

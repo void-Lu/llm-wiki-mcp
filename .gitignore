@@ -93,3 +93,4 @@ tests/fixtures
 !tests/fixtures/retrieval/
 !tests/fixtures/retrieval/v2_40/
 !tests/fixtures/retrieval/v2_40/**
+.pytest-tmp

@@ -8,7 +8,7 @@ from netsuite_llm_wiki_mcp.wiki_models import WikiPage
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexStore
 from netsuite_llm_wiki_mcp.vector_provider import DeterministicFakeProvider
-from netsuite_llm_wiki_mcp.wiki_query import wiki_query, wiki_query_debug
+from netsuite_llm_wiki_mcp.wiki_query import wiki_query
 import netsuite_llm_wiki_mcp.wiki_query as wiki_query_module
 
 
@@ -245,40 +245,6 @@ def test_wiki_query_archived_page_is_not_a_graph_bridge(tmp_path: Path):
     assert all(not path.startswith("wiki/archives/") for path in paths)
 
 
-def test_wiki_query_debug_explains_graph_reasons(tmp_path: Path):
-    root = tmp_path / "vault"
-    create_wiki_root(root)
-    _write(
-        root,
-        "wiki/concepts/seed.md",
-        "Seed Page",
-        "unique needle links to [[neighbor.md]].",
-        type="concept",
-        sources=["raw/sources/a.md"],
-    )
-    _write(root, "wiki/concepts/neighbor.md", "Neighbor Page", "related content", type="concept", sources=["raw/sources/a.md"])
-    refresh_indexes(root)
-
-    result = wiki_query_debug(root, "needle", top_k=3)
-    normal_result = wiki_query(root, "needle", top_k=3, include_content=False, include_context_pack=False)
-
-    assert result["ok"] is True
-    paths = [item["path"] for item in result["results"]]
-    assert "wiki/concepts/neighbor.md" in paths
-    reasons = result["graph_reasons"]["wiki/concepts/neighbor.md"]
-    assert {reason["kind"] for reason in reasons} >= {"direct_wikilink", "shared_source", "same_type"}
-    assert all("score" in reason for reason in reasons)
-    debug = result["ranking_debug"]
-    assert debug["ranking_version"] == result["pipeline"]["stage_1_ranking_version"]
-    neighbor_debug = next(item for item in debug["results"] if item["path"] == "wiki/concepts/neighbor.md")
-    neighbor = next(item for item in result["results"] if item["path"] == "wiki/concepts/neighbor.md")
-    assert set(neighbor_debug) >= {"lexical", "graph", "fusion", "rank"}
-    assert neighbor_debug["graph"]["total"] == neighbor["scores"]["graph"]
-    assert 0 < neighbor["scores"]["graph"] <= debug["parameters"]["pure_graph_score_cap"]
-    assert "ranking_debug" not in normal_result
-    assert all("rank_breakdown" not in item for item in normal_result["results"])
-
-
 def test_wiki_query_returns_budgeted_context_pack(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -330,7 +296,7 @@ def test_wiki_query_vector_stage_is_optional_warning(tmp_path: Path):
     assert result["pipeline"]["stage_1_5_vector_warnings"][0]["code"] == "vector_config_missing"
 
 
-def test_wiki_query_vector_recall_is_independent_and_rrf_debuggable(tmp_path: Path, monkeypatch) -> None:
+def test_wiki_query_vector_recall_is_independent(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
     _write(root, "wiki/concepts/lexical.md", "Lexical Match", "expense report keyword", type="concept")
@@ -351,15 +317,11 @@ def test_wiki_query_vector_recall_is_independent_and_rrf_debuggable(tmp_path: Pa
     config = {"provider": "local_bge_m3", "model_path": str(model), "rrf_k": 60}
 
     result = wiki_query(root, "expense automation", top_k=3, include_content=False, include_context_pack=False, enable_vector=True, vector_config=config)
-    debug = wiki_query_debug(root, "expense automation", top_k=3, enable_vector=True, vector_config=config)
 
     semantic = next(item for item in result["results"] if item["path"] == "wiki/concepts/semantic.md")
-    semantic_debug = next(item for item in debug["ranking_debug"]["results"] if item["path"] == semantic["path"])
     assert semantic["scores"]["keyword"] == 0
     assert semantic["scores"]["vector"] > 0
     assert result["pipeline"]["stage_1_5_vector_status"]["state"] == "ready"
-    assert semantic_debug["vector"]["rank"] is not None
-    assert semantic_debug["fusion"]["rrf_contribution"] > 0
 
 
 def test_wiki_query_min_vector_score_filters_weak_matches(tmp_path: Path, monkeypatch) -> None:

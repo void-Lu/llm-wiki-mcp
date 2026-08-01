@@ -23,14 +23,6 @@ from netsuite_llm_wiki_mcp.knowledge_compiler import filesystem_path
 
 RETRIEVAL_EVAL_SCHEMA_VERSION = 1
 _ALLOWED_FILTERS = {"project", "filter_type", "filter_tags"}
-_COMPARISON_METRICS = (
-    "recall_at_k_macro",
-    "mrr_at_k_macro",
-    "ndcg_at_k_macro",
-    "no_answer_false_positive_rate",
-    "filter_correctness",
-    "p95_latency_ms",
-)
 
 
 class RetrievalEvalError(ValueError):
@@ -426,65 +418,6 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
     return {"json": str(json_path), "markdown": str(markdown_path)}
 
 
-def compare_retrieval_reports(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
-    """Compare two reports from the same frozen dataset and vault fingerprint.
-
-    The function intentionally does not decide a release gate: P95 is
-    environment-sensitive, while the caller owns the task-specific thresholds.
-    It supplies reproducible deltas and per-case win/tie/loss evidence instead.
-    """
-
-    baseline_metadata = _mapping(baseline.get("metadata"), "baseline_invalid", "baseline metadata must be an object")
-    candidate_metadata = _mapping(candidate.get("metadata"), "candidate_invalid", "candidate metadata must be an object")
-    _require_comparable_reports(baseline_metadata, candidate_metadata)
-    baseline_metrics = _mapping(baseline.get("metrics"), "baseline_invalid", "baseline metrics must be an object")
-    candidate_metrics = _mapping(candidate.get("metrics"), "candidate_invalid", "candidate metrics must be an object")
-    baseline_cases = _cases_by_id(baseline, "baseline_invalid")
-    candidate_cases = _cases_by_id(candidate, "candidate_invalid")
-    if baseline_cases.keys() != candidate_cases.keys():
-        raise RetrievalEvalError("baseline_incompatible", "baseline and candidate cases must have identical IDs")
-
-    metric_deltas = {
-        metric: _metric_delta(baseline_metrics.get(metric), candidate_metrics.get(metric))
-        for metric in _COMPARISON_METRICS
-    }
-    return {
-        "schema_version": RETRIEVAL_EVAL_SCHEMA_VERSION,
-        "baseline": _report_identity(baseline_metadata),
-        "candidate": _report_identity(candidate_metadata),
-        "metric_deltas": metric_deltas,
-        "cases": [
-            _compare_case(case_id, baseline_cases[case_id], candidate_cases[case_id])
-            for case_id in sorted(baseline_cases)
-        ],
-    }
-
-
-def write_retrieval_comparison(comparison: Mapping[str, Any], output_dir: str | Path) -> dict[str, str]:
-    """Persist a compact, reviewable comparison alongside candidate reports."""
-
-    target = Path(output_dir).expanduser().resolve()
-    target.mkdir(parents=True, exist_ok=True)
-    json_path = target / "retrieval-comparison.json"
-    markdown_path = target / "retrieval-comparison.md"
-    json_path.write_text(json.dumps(comparison, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    deltas = _mapping(comparison.get("metric_deltas"), "comparison_invalid", "comparison metric_deltas must be an object")
-    lines = [
-        "# 检索评测对比",
-        "",
-        f"- 基线数据集：`{comparison['baseline']['dataset_id']}`（revision `{comparison['baseline']['dataset_revision']}`）",
-        f"- 候选排名版本：`{comparison['candidate']['ranking_version']}`",
-        "",
-        "## 指标差值（candidate - baseline）",
-        "",
-    ]
-    lines.extend(f"- `{metric}`：{_format_delta(deltas.get(metric))}" for metric in _COMPARISON_METRICS)
-    lines.extend(["", "## Case 对比", ""])
-    lines.extend(f"- `{case['id']}`：{case['outcome']}" for case in comparison["cases"])
-    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"json": str(json_path), "markdown": str(markdown_path)}
-
-
 def _parse_manifest(raw: object) -> RetrievalEvalManifest:
     data = _mapping(raw, "manifest_invalid", "manifest must be a JSON object")
     _require_schema_version(data, "manifest")
@@ -681,85 +614,3 @@ def _normalise_experiment_metadata(metadata: Mapping[str, Any] | None) -> dict[s
         raise RetrievalEvalError("invalid_experiment_metadata", "experiment metadata must be an object")
     return value
 
-
-def _require_comparable_reports(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
-    for key in ("dataset_id", "dataset_revision"):
-        if baseline.get(key) != candidate.get(key):
-            raise RetrievalEvalError("baseline_incompatible", f"baseline and candidate differ on {key}")
-    baseline_fingerprint = _mapping(baseline.get("vault_fingerprint"), "baseline_invalid", "baseline vault fingerprint must be an object")
-    candidate_fingerprint = _mapping(candidate.get("vault_fingerprint"), "candidate_invalid", "candidate vault fingerprint must be an object")
-    if baseline_fingerprint.get("value") != candidate_fingerprint.get("value"):
-        raise RetrievalEvalError("baseline_incompatible", "baseline and candidate vault fingerprints differ")
-    baseline_parameters = _mapping(baseline.get("parameters"), "baseline_invalid", "baseline parameters must be an object")
-    candidate_parameters = _mapping(candidate.get("parameters"), "candidate_invalid", "candidate parameters must be an object")
-    if baseline_parameters.get("top_k") != candidate_parameters.get("top_k"):
-        raise RetrievalEvalError("baseline_incompatible", "baseline and candidate top_k values differ")
-
-
-def _report_identity(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    fingerprint = _mapping(metadata.get("vault_fingerprint"), "report_invalid", "report vault fingerprint must be an object")
-    ranking_raw = metadata.get("ranking", {})
-    ranking = _mapping(ranking_raw, "report_invalid", "report ranking must be an object")
-    experiment = metadata.get("experiment", {})
-    if not isinstance(experiment, Mapping):
-        raise RetrievalEvalError("report_invalid", "report experiment metadata must be an object")
-    return {
-        "dataset_id": metadata.get("dataset_id"),
-        "dataset_revision": metadata.get("dataset_revision"),
-        "vault_fingerprint": fingerprint.get("value"),
-        "ranking_version": ranking.get("version", "legacy-unversioned"),
-        "parent_baseline_id": experiment.get("parent_baseline_id"),
-    }
-
-
-def _cases_by_id(report: Mapping[str, Any], code: str) -> dict[str, Mapping[str, Any]]:
-    raw_cases = report.get("cases")
-    if not isinstance(raw_cases, list):
-        raise RetrievalEvalError(code, "report cases must be a list")
-    cases: dict[str, Mapping[str, Any]] = {}
-    for raw_case in raw_cases:
-        case = _mapping(raw_case, code, "report case must be an object")
-        case_id = _nonempty_string(case.get("id"), code, "report case id must be a string")
-        if case_id in cases:
-            raise RetrievalEvalError(code, f"duplicate report case id: {case_id}")
-        cases[case_id] = case
-    return cases
-
-
-def _compare_case(case_id: str, baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
-    baseline_metrics = _mapping(baseline.get("metrics"), "baseline_invalid", "baseline case metrics must be an object")
-    candidate_metrics = _mapping(candidate.get("metrics"), "candidate_invalid", "candidate case metrics must be an object")
-    deltas = {
-        metric: _metric_delta(baseline_metrics.get(metric), candidate_metrics.get(metric))
-        for metric in ("recall", "mrr", "ndcg")
-    }
-    recall_delta = deltas["recall"]
-    if recall_delta is not None and recall_delta > 0:
-        outcome = "win"
-    elif recall_delta is not None and recall_delta < 0:
-        outcome = "loss"
-    else:
-        secondary = [delta for metric, delta in deltas.items() if metric != "recall" and delta is not None]
-        if secondary and all(delta >= 0 for delta in secondary) and any(delta > 0 for delta in secondary):
-            outcome = "win"
-        elif secondary and all(delta <= 0 for delta in secondary) and any(delta < 0 for delta in secondary):
-            outcome = "loss"
-        else:
-            outcome = "tie"
-    return {"id": case_id, "outcome": outcome, "metric_deltas": deltas}
-
-
-def _metric_delta(baseline: object, candidate: object) -> float | None:
-    if baseline is None or candidate is None:
-        return None
-    if isinstance(baseline, bool) or isinstance(candidate, bool) or not isinstance(baseline, (int, float)) or not isinstance(candidate, (int, float)):
-        raise RetrievalEvalError("report_invalid", "comparison metrics must be numeric or null")
-    return float(candidate) - float(baseline)
-
-
-def _format_delta(value: object) -> str:
-    if value is None:
-        return "N/A"
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise RetrievalEvalError("comparison_invalid", "comparison delta must be numeric or null")
-    return f"{float(value):+.4f}"

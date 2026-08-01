@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -87,10 +86,6 @@ def verify_bundle(root: Path, bundle: Path) -> ArchiveManifest:
         if content_hash(payload) != item.content_hash:
             raise ArchiveError("archive_hash_mismatch", f"archive payload hash differs: {item.original_path}")
     return manifest
-
-
-def manifest_digest(manifest: ArchiveManifest) -> str:
-    return "sha256:" + sha256(stable_manifest_yaml(manifest).encode("utf-8")).hexdigest()
 
 
 def _safe_relative(value: str) -> bool:

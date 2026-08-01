@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 10
+- **Total Sessions**: 11
 - **Last Active**: 2026-07-31
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~380 | Active |
+| `journal-1.md` | ~413 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 11 | 2026-07-31 | 完成 Query V2 评测与 Concept-first 集成归档 | `e04b25c` | `v0.9.11` |
 | 10 | 2026-07-31 | 归档生命周期与恢复 | `f0487c3` | `v0.9.10` |
 | 9 | 2026-07-31 | 完成知识编译任务 | `cdab0a6` | `v0.9.10` |
 | 8 | 2026-07-31 | Passage hybrid index | `b5ce90e` | `v0.9.9` |

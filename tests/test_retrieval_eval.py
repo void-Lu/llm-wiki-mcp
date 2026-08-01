@@ -17,13 +17,11 @@ from netsuite_llm_wiki_mcp.retrieval_eval import (
     RetrievalEvalError,
     RetrievalEvalManifest,
     calculate_ranking_metrics,
-    compare_retrieval_reports,
     load_retrieval_dataset,
     percentile_95,
     run_retrieval_evaluation,
     validate_dataset_paths,
     write_retrieval_eval_report,
-    write_retrieval_comparison,
     _results_match_filters,
 )
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexStore
@@ -120,8 +118,6 @@ def test_reviewed_v2_forty_case_fixture_runs_v1_v2_lexical_ablation(tmp_path: Pa
         assert report["metrics"]["latency_sample_count"] == 40
         assert all(len(case["ranking_runs"]) == 1 for case in report["cases"])
 
-    comparison = compare_retrieval_reports(reports["v1"], reports["v2"])
-    assert comparison["baseline"]["vault_fingerprint"] == comparison["candidate"]["vault_fingerprint"]
     assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
 
 
@@ -341,36 +337,3 @@ def test_context_budget_case_limit_samples_the_requested_prefix(tmp_path: Path) 
     }
     with pytest.raises(RetrievalEvalError, match="must be non-negative"):
         run_retrieval_evaluation(vault, dataset, context_budget_case_limit=-1, query_version="v1")
-
-
-def test_evaluation_records_experiment_metadata_and_compares_case_outcomes(tmp_path: Path) -> None:
-    vault = _copy_vault(tmp_path)
-    dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
-    baseline = run_retrieval_evaluation(vault, dataset, measure_context_budget=False, query_version="v1")
-    candidate = deepcopy(
-        run_retrieval_evaluation(
-            vault,
-            dataset,
-            measure_context_budget=False,
-                query_version="v1",
-                experiment_metadata={
-                "parent_baseline_id": "baseline-2026-07-27",
-                "changed_item": "body_length_normalization",
-                "parameters": {"body_length_exponent": 0.5},
-            },
-        )
-    )
-    candidate["metrics"]["recall_at_k_macro"] = 0.8
-    candidate["cases"][0]["metrics"]["recall"] = 0.0
-
-    comparison = compare_retrieval_reports(baseline, candidate)
-
-    assert candidate["metadata"]["experiment"]["parent_baseline_id"] == "baseline-2026-07-27"
-    assert comparison["metric_deltas"]["recall_at_k_macro"] == pytest.approx(-0.2)
-    assert comparison["baseline"]["vault_fingerprint"] == comparison["candidate"]["vault_fingerprint"]
-    assert next(case for case in comparison["cases"] if case["id"] == "concept-governance")["outcome"] == "loss"
-
-    output = write_retrieval_comparison(comparison, tmp_path / "comparison")
-    markdown = Path(output["markdown"]).read_text(encoding="utf-8")
-    assert "candidate - baseline" in markdown
-    assert Path(output["json"]).is_file()

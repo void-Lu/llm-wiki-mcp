@@ -10,7 +10,7 @@ from typing import Any
 
 from netsuite_llm_wiki_mcp.lexical_analyzer import tokens as lexical_tokens
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
-from netsuite_llm_wiki_mcp.vector_index import DEFAULT_RRF_K, VectorIndexError, VectorIndexStore, VectorRecord, VectorSettings, parse_vector_settings
+from netsuite_llm_wiki_mcp.vector_index import VectorIndexError, VectorIndexStore, VectorRecord, VectorSettings, parse_vector_settings
 from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProviderError
 from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page, split_frontmatter
 from netsuite_llm_wiki_mcp.wikilinks import wikilink_targets
@@ -67,39 +67,10 @@ class CandidateSignals:
 
 @dataclass
 class RankBreakdown:
-    """Internal explanation data exposed only by ``wiki_query_debug``."""
-
-    lexical_fields: dict[str, float] = field(default_factory=dict)
-    lexical_exact_matches: list[dict[str, str]] = field(default_factory=list)
     graph_reasons: list[dict[str, Any]] = field(default_factory=list)
     lexical_rank: int | None = None
     vector_rank: int | None = None
     rrf_contribution: float = 0.0
-    fusion_total: float = 0.0
-    rank: int = 0
-
-    def as_debug_dict(self, candidate: QueryCandidate) -> dict[str, Any]:
-        return {
-            "lexical": {
-                "total": candidate.keyword_score,
-                "rank": self.lexical_rank,
-                "fields": dict(self.lexical_fields),
-                "exact_matches": list(self.lexical_exact_matches),
-            },
-            "vector": {
-                "score": candidate.vector_score,
-                "rank": self.vector_rank,
-            },
-            "graph": {
-                "total": candidate.graph_score,
-                "reasons": list(self.graph_reasons),
-            },
-            "fusion": {
-                "total": self.fusion_total,
-                "rrf_contribution": self.rrf_contribution,
-            },
-            "rank": self.rank,
-        }
 
 
 @dataclass
@@ -126,14 +97,6 @@ class Graph:
     neighbors: dict[str, set[str]]
     sources: dict[str, set[str]]
     types: dict[str, str]
-
-
-@dataclass
-class QueryExecution:
-    result: dict[str, Any]
-    selected: list[QueryCandidate]
-    candidate_count: int
-    filtered_out: int
 
 
 def wiki_query(
@@ -175,8 +138,7 @@ def wiki_query(
         filter_tags=filter_tags,
         vector_settings=vector_settings,
         scope=scope,
-        collect_debug=False,
-    ).result
+    )
 
 
 def _execute_query(
@@ -198,8 +160,7 @@ def _execute_query(
     filter_tags: list[str] | None,
     vector_settings: VectorSettings | None,
     scope: str,
-    collect_debug: bool,
-) -> QueryExecution:
+) -> dict[str, Any]:
     if retrieval_mode not in {"lexical", "vector", "hybrid"}:
         raise ValueError("retrieval_mode must be lexical, vector, or hybrid")
     root = Path(vault_root).expanduser().resolve()
@@ -222,8 +183,6 @@ def _execute_query(
         if project and candidate.rel.startswith(f"wiki/projects/{project}/"):
             signals = _with_lexical_adjustment(signals, "project_scope", 5.0)
         candidate.keyword_score = signals.total
-        candidate.rank_breakdown.lexical_fields = dict(signals.fields)
-        candidate.rank_breakdown.lexical_exact_matches = list(signals.exact_matches)
         if candidate.keyword_score > 0 and retrieval_mode != "vector":
             candidate.fusion_score = candidate.keyword_score
             scored[candidate.rel] = candidate
@@ -245,13 +204,10 @@ def _execute_query(
         candidates,
         graph,
         max_graph_hops=max_graph_hops,
-        collect_reasons=collect_debug,
+        collect_reasons=False,
     )
 
     selected = sorted(scored.values(), key=lambda item: (-item.total_score, item.rel))[:top_k]
-    for rank, candidate in enumerate(selected, 1):
-        candidate.rank_breakdown.rank = rank
-        candidate.rank_breakdown.fusion_total = candidate.fusion_score
     results = [_result_item(candidate, tokens) for candidate in selected]
     context = _legacy_context(selected, tokens, include_content)
     context_pack = _context_pack(root, selected, question, context_window_tokens, chat_history or [], language) if include_context_pack else None
@@ -282,73 +238,7 @@ def _execute_query(
         },
         "policy": "Answer from the numbered context pages and cite sources as [1], [2], etc.",
     }
-    return QueryExecution(
-        result=result,
-        selected=selected,
-        candidate_count=len(all_candidates),
-        filtered_out=len(all_candidates) - len(candidates),
-    )
-
-
-def wiki_query_debug(
-    vault_root: str | Path,
-    question: str,
-    project: str | None = None,
-    top_k: int = DEFAULT_TOP_K,
-    max_graph_hops: int = 2,
-    include_raw_sources: bool = False,
-    enable_vector: bool = False,
-    vector_config: dict[str, Any] | None = None,
-    retrieval_mode: str = "hybrid",
-    filter_type: str | None = None,
-    filter_tags: list[str] | None = None,
-) -> dict[str, Any]:
-    execution = _execute_query(
-        vault_root=vault_root,
-        question=question,
-        project=project,
-        top_k=top_k,
-        include_content=False,
-        context_window_tokens=16_000,
-        include_context_pack=False,
-        chat_history=None,
-        language="zh-CN",
-        enable_vector=enable_vector,
-        vector_config=vector_config,
-        retrieval_mode=retrieval_mode,
-        max_graph_hops=max_graph_hops,
-        include_raw_sources=include_raw_sources,
-        filter_type=filter_type,
-        filter_tags=filter_tags,
-        vector_settings=None,
-        scope="active",
-        collect_debug=True,
-    )
-    graph_reasons = {
-        candidate.rel: list(candidate.rank_breakdown.graph_reasons)
-        for candidate in execution.selected
-        if candidate.rank_breakdown.graph_reasons
-    }
-    return {
-        **execution.result,
-        "graph_reasons": graph_reasons,
-        "ranking_debug": {
-            "ranking_version": RANKING_VERSION,
-            "stage_candidates": execution.candidate_count,
-            "filter_rejections": execution.filtered_out,
-            "parameters": {
-                "max_graph_hops": max_graph_hops,
-                "max_graph_expansions_per_seed": _MAX_GRAPH_EXPANSIONS_PER_SEED,
-                "graph_score_ratio_cap": _GRAPH_SCORE_RATIO_CAP,
-                "pure_graph_score_cap": _PURE_GRAPH_SCORE_CAP,
-                "rrf_k": _debug_rrf_k(vector_config),
-            },
-            "results": [
-                {"path": candidate.rel, **candidate.rank_breakdown.as_debug_dict(candidate)}
-                for candidate in execution.selected
-            ],
-        },
-    }
+    return result
 
 
 def _relationship_reasons(left: str, right: str, graph: Graph) -> list[dict[str, Any]]:
@@ -466,12 +356,6 @@ def _raw_candidate(path: Path, root: Path) -> QueryCandidate:
 
 def _tokens(text: str) -> list[str]:
     return [token for token in lexical_tokens(text) if token not in _STOPWORDS]
-
-
-def _keyword_score(candidate: QueryCandidate, tokens: list[str], query: str = "", token_weights: dict[str, float] | None = None) -> float:
-    """Compatibility helper for callers that only need the lexical total."""
-
-    return _keyword_signals(candidate, tokens, query, token_weights).total
 
 
 def _keyword_signals(
@@ -701,16 +585,6 @@ def vector_index_records(vault_root: str | Path, *, include_raw_sources: bool = 
             if include_raw_sources or record["corpus"] != "history"
         ]
     return _vector_records(_candidate_pages(root, include_raw_sources=include_raw_sources))
-
-
-def _debug_rrf_k(vector_config: dict[str, Any] | None) -> int:
-    if not vector_config or isinstance(vector_config.get("rrf_k"), bool):
-        return DEFAULT_RRF_K
-    try:
-        value = int(vector_config["rrf_k"])
-    except (KeyError, TypeError, ValueError):
-        return DEFAULT_RRF_K
-    return value if 1 <= value <= 10_000 else DEFAULT_RRF_K
 
 
 def _build_graph(root: Path, candidates: list[QueryCandidate] | None = None) -> Graph:

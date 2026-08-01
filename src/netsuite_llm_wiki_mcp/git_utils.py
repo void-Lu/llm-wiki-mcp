@@ -7,19 +7,9 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class GitInfo:
-    """Git information for a file or directory."""
-
-    commit: str = ""  # Short commit SHA (empty if not in git repo)
-    branch: str = ""  # Current branch name (empty if not in git repo)
-    dirty: bool = False  # True if working tree has uncommitted changes
 
 
 def _resolve_git_dir(path: Path) -> Path:
@@ -78,38 +68,6 @@ def get_git_branch(path: Path) -> str:
         Branch name, or empty string if not in a git repo or git not available.
     """
     return _run_git(path, "rev-parse", "--abbrev-ref", "HEAD") or ""
-
-
-def get_git_info(path: Path) -> GitInfo:
-    """Get git info for a directory or file.
-
-    Args:
-        path: Path to a file or directory within a git repo.
-
-    Returns:
-        GitInfo with commit, branch, dirty status.
-        Returns defaults (empty strings, False) if not in a git repo or git not available.
-    """
-    return GitInfo(
-        commit=get_git_commit(path),
-        branch=get_git_branch(path),
-        dirty=is_git_dirty(path),
-    )
-
-
-def format_git_commit(commit: str, dirty: bool) -> str:
-    """Format commit+dirty as 'abc1234' or 'abc1234+dirty'.
-
-    Args:
-        commit: Short commit SHA.
-        dirty: Whether there are uncommitted changes.
-
-    Returns:
-        Formatted string like 'abc1234' or 'abc1234+dirty'.
-    """
-    if dirty:
-        return f"{commit}+dirty"
-    return commit
 
 
 def _run_git(path: Path, *arguments: str) -> str | None:

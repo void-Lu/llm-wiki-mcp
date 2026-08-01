@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from hashlib import sha256
 import json
 import shutil
@@ -14,6 +15,13 @@ from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 
 
 _STRUCTURAL = {"index.md", "log.md", "overview.md"}
+_IGNORED_LEGACY_PLACEHOLDERS = {".gitkeep", ".DS_Store"}
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 def _legacy_chatlog_payload(source: Path, source_name: str) -> bytes:
@@ -27,7 +35,7 @@ def _legacy_chatlog_payload(source: Path, source_name: str) -> bytes:
         "original_content_hash": "sha256:" + redacted.original_hash,
         "redacted_content_hash": "sha256:" + redacted.redacted_hash,
     })
-    header = "\n".join(f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in frontmatter.items())
+    header = "\n".join(f"{key}: {json.dumps(value, ensure_ascii=False, default=_json_default)}" for key, value in frontmatter.items())
     return ("---\n" + header + "\n---\n\n" + body).encode("utf-8")
 
 
@@ -37,13 +45,17 @@ def plan_legacy_migration(vault_root: str | Path) -> dict[str, Any]:
     blockers: list[dict[str, str]] = []
     queries = root / "wiki" / "queries"
     if queries.exists():
-        non_structural = [path for path in queries.rglob("*") if path.is_file() and path.name not in _STRUCTURAL]
+        non_structural = [
+            path
+            for path in queries.rglob("*")
+            if path.is_file() and path.name not in _STRUCTURAL and path.name not in _IGNORED_LEGACY_PLACEHOLDERS
+        ]
         if non_structural:
             blockers.extend({"code": "legacy_queries_not_empty", "path": path.relative_to(root).as_posix()} for path in non_structural)
     chatlog = root / "wiki" / "chatlog"
     if chatlog.exists():
         for source in sorted(chatlog.rglob("*")):
-            if not source.is_file(): continue
+            if not source.is_file() or source.name in _IGNORED_LEGACY_PLACEHOLDERS: continue
             target = root / "raw" / "sources" / "chat" / "legacy" / source.relative_to(chatlog)
             source_name = source.relative_to(root).as_posix()
             try:
@@ -63,7 +75,7 @@ def plan_legacy_migration(vault_root: str | Path) -> dict[str, Any]:
                 blockers.append({"code": "legacy_chat_source_orphan", "path": source.relative_to(root).as_posix()})
     legacy_archives = root / "wiki" / "archives"
     if legacy_archives.exists():
-        for source in sorted(path for path in legacy_archives.rglob("*") if path.is_file()):
+        for source in sorted(path for path in legacy_archives.rglob("*") if path.is_file() and path.name not in _IGNORED_LEGACY_PLACEHOLDERS):
             moves.append({"source": source.relative_to(root).as_posix(), "target": "archives/log.md", "hash": "sha256:" + sha256(source.read_bytes()).hexdigest()})
     return {"ok": not blockers, "dry_run": True, "moves": moves, "blockers": blockers, "migration_version": 1}
 

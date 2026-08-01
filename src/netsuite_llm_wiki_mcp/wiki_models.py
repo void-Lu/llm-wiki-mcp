@@ -6,11 +6,6 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class WikiConfig:
-    root: Path
-
-
-@dataclass(frozen=True)
 class WikiPage:
     relative_path: Path
     frontmatter: dict[str, Any]
@@ -27,28 +22,3 @@ class WikiLogEntry:
     project: str = ""
     status: str = "ok"
     timestamp: str = ""
-
-
-@dataclass(frozen=True)
-class WikiSearchResult:
-    path: str
-    title: str
-    snippet: str
-    score: float
-    frontmatter: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class LintIssue:
-    code: str
-    message: str
-    path: str = ""
-    severity: str = "warning"
-
-
-@dataclass(frozen=True)
-class CodeGraphSnapshot:
-    project: str
-    source_name: str
-    path: str
-    data: dict[str, Any]

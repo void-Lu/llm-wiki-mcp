@@ -5,10 +5,10 @@ def test_readme_documents_llm_wiki_workflow():
     text = Path("README.md").read_text(encoding="utf-8")
 
     assert "NetSuite LLM Wiki MCP" in text
-    assert "wiki_init" in text
     assert "wiki_ingest" in text
     assert "wiki_query" in text
-    assert "wiki_lint" in text
+    assert "wiki_update" in text
+    assert "wiki_archive" in text
     assert "raw/" in text
     assert "sources/" in text
     assert "wiki/projects/" in text

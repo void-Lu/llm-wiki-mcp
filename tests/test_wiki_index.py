@@ -6,7 +6,6 @@ import pytest
 
 from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
-from netsuite_llm_wiki_mcp.wiki_lint import wiki_lint
 from netsuite_llm_wiki_mcp.wiki_limits import HARD_PAGE_BYTES, utf8_size
 from netsuite_llm_wiki_mcp.wiki_models import WikiPage
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
@@ -131,12 +130,6 @@ def test_refresh_sources_uses_bounded_hierarchical_navigation_without_hiding_lea
     first_render = {path.name: path.read_text(encoding="utf-8") for path in navigation_pages}
     assert refresh_indexes(root)["ok"] is True
     assert {path.name: path.read_text(encoding="utf-8") for path in sorted(bulk.glob("index*.md"))} == first_render
-
-    lint_issues = wiki_lint(root)["issues"]
-    assert not any(
-        issue["code"] == "oversized_page" and issue["path"].startswith("wiki/sources/")
-        for issue in lint_issues
-    )
 
     query = wiki_query(root, "unique leaf token 1653", top_k=3)
     assert "wiki/sources/bulk/source-1653.md" in [item["path"] for item in query["results"]]

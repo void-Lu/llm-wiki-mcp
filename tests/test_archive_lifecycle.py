@@ -75,6 +75,9 @@ def test_legacy_migration_blocks_non_markdown_queries_and_is_repeatable(tmp_path
     assert plan_legacy_migration(root)["ok"] is False
 
     query.unlink()
+    (root / "wiki" / "queries" / ".gitkeep").write_text("", encoding="utf-8")
+    assert plan_legacy_migration(root)["ok"] is True
+
     chat = root / "wiki" / "chatlog" / "session.md"
     chat.parent.mkdir(parents=True)
     chat.write_text("Authorization: token_verysecretvalue\n", encoding="utf-8")
@@ -83,3 +86,22 @@ def test_legacy_migration_blocks_non_markdown_queries_and_is_repeatable(tmp_path
     migrated = root / "raw" / "sources" / "chat" / "legacy" / "session.md"
     assert "source_kind: \"legacy_chatlog\"" in migrated.read_text(encoding="utf-8")
     assert apply_legacy_migration(root)["already_migrated"] is True
+
+
+def test_legacy_migration_serializes_date_frontmatter(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    chat = root / "wiki" / "chatlog" / "session.md"
+    chat.parent.mkdir(parents=True)
+    chat.write_text(
+        "---\ntype: chatlog\ntitle: Session\ndate: 2026-07-28\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    plan = plan_legacy_migration(root)
+    assert plan["ok"] is True
+
+    migrated = apply_legacy_migration(root)
+    assert migrated["ok"] is True
+    migrated_text = (root / "raw" / "sources" / "chat" / "legacy" / "session.md").read_text(encoding="utf-8")
+    assert "date: \"2026-07-28\"" in migrated_text
+    assert "source_kind: \"legacy_chatlog\"" in migrated_text

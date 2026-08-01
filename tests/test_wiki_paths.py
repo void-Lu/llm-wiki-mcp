@@ -69,12 +69,12 @@ def test_create_wiki_root_writes_actionable_schema_template(tmp_path: Path):
     schema = (root / "schema.md").read_text(encoding="utf-8")
     assert "LLM Wiki 维护原则" in schema
     assert "raw/sources/" in schema
-    assert "raw/sources/projects/<project>/codegraph/" in schema
-    assert "raw/projects/<project>/codegraph/" not in schema
+    assert "wiki_ingest" in schema
+    assert "wiki_update" in schema
+    assert "wiki_archive" in schema
     assert "wiki/projects/<project>/specs/" in schema
     assert "wiki/projects/<project>/plans/" in schema
     assert "wiki/index.md" in schema
-    assert "wiki_lint" in schema
     assert "generated: false" in schema
 
 

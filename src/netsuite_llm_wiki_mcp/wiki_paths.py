@@ -32,30 +32,29 @@ TOP_LEVEL_DIRS = (
 
 DEFAULT_SCHEMA_TEXT = """# Schema
 
-本文件是 LLM Wiki 的维护规约。Agent 在摄入资料、生成页面、回答问题、合并页面或执行维护工具前，应先遵守这里的目录、frontmatter、来源追踪和安全规则。
+本文件是 LLM Wiki 的维护规约。Agent 在摄入资料、生成页面、回答问题、受控更新或执行归档维护前，应先遵守这里的目录、frontmatter、来源追踪和安全规则。
 
 ## LLM Wiki 维护原则
 
-1. `raw/` 是来源事实层：保存经过脱敏的 source snapshot、manifest、项目原始资料、会话原文或 CodeGraph 输出；除 rescan/delete 等生命周期工具外，不把它当成普通可编辑笔记。
+1. `raw/` 是来源事实层：保存 source snapshot、manifest 和项目原始资料；除 ingest/update 生命周期外，不把它当成普通可编辑笔记。
 2. `wiki/` 是知识编译层：页面可以总结、关联、比较、综合，但必须能通过 `sources` 字段追溯到 raw snapshot、外部搜索结果或人工 note。
 3. `purpose.md` 描述当前 vault 的研究范围；`schema.md` 描述维护规则；`wiki/index.md` 是内容目录；`wiki/log.md` 是时间线。
 4. 优先维护可读 Markdown、YAML frontmatter 和 `[[wikilink]]` 图谱；不要把 embedding/vector DB 作为主路径。
-5. 生成内容要小步、可审计：先准备 prompt，再由调用方确认/传回 LLM 输出，最后 apply 写入。
+5. 生成内容要小步、可审计：raw snapshot 先入队知识编译，再由 worker 校验并 apply。
 
 ## 页面类型与目录
 
 | frontmatter `type` | 位置 | 说明 | generated |
 | --- | --- | --- | --- |
-| `source_capsule` | `wiki/sources/<namespace>/**/capsules/` | 非聊天单来源中文短摘要，保留术语、API、字段 ID 和原始来源 hash | `true` |
-| `spec` | `wiki/projects/<project>/specs/` | 模型生成的规格文档 | `true` 或 `false` |
-| `plan` | `wiki/projects/<project>/plans/` | 模型生成的实施计划 | `true` 或 `false` |
+| `spec` | `wiki/projects/<project>/specs/` | 规格文档 | `true` 或 `false` |
+| `plan` | `wiki/projects/<project>/plans/` | 实施计划 | `true` 或 `false` |
 | `architecture` | `wiki/projects/<project>/architecture/` | 长期稳定的项目架构说明 | `true` 或 `false` |
-| `pipeline` | `wiki/projects/<project>/pipelines/` | 业务流程、SuiteScript 调用链、数据流、任务链路 | `true` |
 | `troubleshooting` | `wiki/projects/<project>/troubleshooting/` | 人工排障经验 | `false` |
 | `researches` | `wiki/projects/<project>/researches/` | 项目调查结果、代码阅读结论、专题研究沉淀 | `true` 或 `false` |
-| `concept` / `knowledge` | `wiki/concepts/<domain-or-project>/` | 领域知识、API 参考、场景实践 | `true` 或 `false` |
+| `concept` / `knowledge` | `wiki/concepts/<domain>/` | 领域知识、API 参考、场景实践 | `true` 或 `false` |
 | `entity` | `wiki/entities/<entity>/` | 构建完毕的实体页面 | `true` 或 `false` |
 | `archive` | `wiki/archives/<yyyy>/<mm>/<dd>/` | 过时、废弃或超限归档的 wiki 文档；不参与索引 | `true` 或 `false` |
+| `source_index` | `wiki/sources/` 或项目来源索引 | 来源索引/溯源页 | `true` |
 | `index` | `wiki/index.md` | 内容目录，按类别列出页面和摘要 | `true` |
 | `project_index` | `wiki/projects/<project>/index.md` | 项目内目录 | `true` |
 | `overview` | `wiki/overview.md` | 自动统计和最近日志摘要 | `true` |
@@ -74,7 +73,7 @@ domain: suitescript       # knowledge/concept 可选
 source_name: docs         # 来源命名空间，可选
 source_hash: sha256...    # source snapshot hash，可选
 sources:
-    - raw/sources/projects/project-a/codegraph/graph.json
+    - raw/sources/file/project-a/docs/source.md
 summary: 一句话摘要
 tags:
     - netsuite
@@ -87,60 +86,48 @@ tags:
 - `type`、`title`、`generated` 是核心字段。
 - `generated: true` 页面应尽量包含 `sources`；如果是 `index` / `overview` 这类结构页，可不包含来源。
 - `generated: false` 表示人工页，不允许工具静默覆盖。
-- `sources` 中引用 `raw/...` 时，路径必须真实存在；删除 source 时应通过 `wiki_delete_source` 级联清理。
+- `sources` 中引用 `raw/...` 时，路径必须真实存在；删除或归档 source 时应通过 `wiki_archive`/CLI admin 生命周期处理。
 - 新页面标题和摘要应能让 `wiki/index.md` 成为有效导航入口。
 
 ## 写入与覆盖规则
 
-1. 只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,pipelines,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/sources/**/capsules/`、`wiki/entities/<entity>/`、`wiki/archives/<yyyy>/<mm>/<dd>/`。
+1. 只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/sources/`、`wiki/entities/<entity>/`、`wiki/archives/<yyyy>/<mm>/<dd>/`。
 2. 工具生成页只能覆盖已有 `generated: true` 页面；遇到 `generated: false` 必须停止并报告。
-3. 页面合并时保留锁定字段：`type`、`title`、`created`、人工维护字段；数组字段采用去重合并。
+3. 受控更新时保留锁定字段：`type`、`title`、`created`、来源和人工维护字段；数组字段采用去重合并。
 4. 文件名和路径段必须是 Windows 安全的单段名称：不得包含 `<>:"|?*`、控制字符、ADS 冒号、保留设备名、尾随点或空格。
 5. 写入前必须脱敏手机号、邮箱、API key、token 等敏感信息。
 
 ## Ingest 工作流
 
-### CodeGraph ingest
+### 单文件 ingest
 
 ```text
-wiki_ingest_codegraph
-    -> raw/sources/projects/<project>/codegraph/
-    -> wiki/sources/projects/<project>/architecture/codegraph.md (索引页)
-    -> wiki/projects/<project>/architecture/ 或 pipelines/ (可读总结页)
-    -> refresh wiki/index.md + wiki/overview.md
-    -> append wiki/log.md
+wiki_ingest
+    -> raw/sources/<source_type>/<project>/<source_name>/<file>
+    -> RetrievalIndexStore 增量更新
+    -> 非 chat 且内容变化时，KnowledgeCompiler 入队
+    -> worker wiki_generation claim/apply
+    -> 写 wiki 页面 + refresh index/overview/log
 ```
 
-### LLM staged ingest
+`wiki_ingest` 只接受一个已存在文件；目录、批量摄入和 reconcile 不再属于 MCP 工具职责。
 
-```text
-wiki_ingest_llm(stage="prepare")
-    -> raw/sources/<source_type>/<project>/<source_name>/
-    -> source_type="chat" 时，写 raw/sources/chat/<yyyy>/<mm>/<dd>/<source_name>/
-    -> 返回合并 prompt
-wiki_ingest_llm(stage="apply")
-    -> wiki/concepts/ 或 wiki/projects/ 下的知识页面
-    -> wiki/sources/<target_dir>/<project>/<source_name>.md (索引页)
-    -> source_type="chat" 仅写 raw/sources/chat/ passage 投影，绝不生成 Markdown 索引页或 capsule
-    -> refresh index/overview/log/cache
-```
-
-## Query 与归档规则
+## Query、更新与归档规则
 
 1. 回答问题时优先使用 `wiki_query` 获取带编号引用的 context pack，再基于 `[1]`、`[2]` 等引用回答。
 2. `wiki_query` 默认搜索 `wiki/**`，必要时可启用 `include_raw_sources` 查看 raw snapshot。
 3. 重要的比较、研究结论或跨页洞察，应显式保存为 concept/entity 或 `wiki/projects/<project>/researches/`。
 4. 本地 Markdown 的宽泛检索可搭配 qmd 等外部工具，但不要把 qmd/embedding 设为本 MCP 的默认运行依赖。
+5. 使用 `wiki_update(preview|apply)` 保持页面编辑可审计；使用 `wiki_archive`/`wiki_restore` 管理生命周期，purge 只在 CLI/admin 边界。
 
 ## 维护工作流
 
 定期执行：
 
-1. `wiki_lint`：检查结构、frontmatter、断链、孤儿页、source traceability 和 cache manifest。
-2. `wiki_enrich`：为页面补充指向已有页面的 `[[wikilink]]`。
-3. `wiki_dedup`：检测并合并重复页面。
-4. `wiki_insights`：查看孤儿、桥接节点、跨类型连接和社区结构。
-5. `wiki_changelog`：查看最近 ingest/query/research/note 记录。
+1. 用 `wiki_query` 检查知识覆盖和检索质量。
+2. 用 `wiki_update` 修正过期、错误或锁定字段冲突的页面。
+3. 用 `wiki_archive`/`wiki_restore` 管理归档生命周期。
+4. 用 CLI `vector/index status|build|update` 与 `retrieval-eval` 验证索引和检索回归。
 
 语义维护建议：
 
@@ -150,7 +137,7 @@ wiki_ingest_llm(stage="apply")
 
 ## 日志约定
 
-`wiki/log.md` 是 append-only 时间线。每次 ingest、research、note、delete 或维护写入都应追加结构化条目，格式类似：
+`wiki/log.md` 是 append-only 时间线。每次 ingest、update、note、archive 或 restore 都应追加结构化条目，格式类似：
 
 ```text
 ## [2026-05-27T00:00:00Z] ingest | Source Title

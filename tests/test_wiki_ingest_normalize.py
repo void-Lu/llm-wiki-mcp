@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from netsuite_llm_wiki_mcp.wiki_ingest import normalize_wikilink_targets
+from netsuite_llm_wiki_mcp.wikilinks import normalize_wikilink_targets
 
 
 def test_basic_lowercase():

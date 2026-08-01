@@ -5,7 +5,6 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from netsuite_llm_wiki_mcp.redaction import redact_sensitive_text
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
@@ -69,49 +68,6 @@ def read_recent_log_entries(vault_root: str | Path, limit: int = 5) -> list[str]
         return []
     headings = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.startswith("## [")]
     return list(reversed(headings[-limit:]))
-
-
-def parse_log_entries(vault_root: str | Path, limit: int = 10) -> list[dict[str, Any]]:
-    log_path = Path(vault_root) / "wiki" / "log.md"
-    if not log_path.exists():
-        return []
-    _, blocks = _split_log_blocks(log_path.read_text(encoding="utf-8"))
-    entries = [_parse_log_block(block) for block in blocks]
-    return list(reversed(entries[-limit:]))
-
-
-def _parse_log_block(block: str) -> dict[str, Any]:
-    lines = block.splitlines()
-    match = _LOG_HEADING_RE.match(lines[0]) if lines else None
-    if not match:
-        return {"timestamp": "", "operation": "", "title": "", "project": "", "status": "", "paths": [], "sources": []}
-    entry: dict[str, Any] = {
-        "timestamp": match.group(1),
-        "operation": match.group(2),
-        "title": match.group(3),
-        "project": "",
-        "status": "",
-        "paths": [],
-        "sources": [],
-    }
-    current_field = ""
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped.startswith("- project:"):
-            entry["project"] = stripped[len("- project:"):].strip()
-            current_field = ""
-        elif stripped.startswith("- status:"):
-            entry["status"] = stripped[len("- status:"):].strip()
-            current_field = ""
-        elif stripped == "- paths:":
-            current_field = "paths"
-        elif stripped == "- sources:":
-            current_field = "sources"
-        elif stripped.startswith("- ") and current_field:
-            value = stripped[2:].strip()
-            if value != "none":
-                entry[current_field].append(value)
-    return entry
 
 
 def _render_log_entry(entry: WikiLogEntry, timestamp: str) -> str:
@@ -182,22 +138,6 @@ def _rotate_blocks(preamble: str, blocks: list[str]) -> tuple[list[str], list[st
     while keep and utf8_size(_join_log_blocks(preamble, keep)) > TARGET_PAGE_BYTES:
         overflow.append(keep.pop(0))
     return keep, overflow
-
-
-def _enforce_log_limit(root: Path, log_path: Path, source_log_name: str, record_archive: bool) -> None:
-    """Compatibility entry point for bounded rotation of either active log."""
-
-    default_preamble = "# Log" if log_path.name == "log.md" and log_path.parent.name != "archives" else "# Archives Log"
-    preamble, blocks = _read_log_blocks(log_path, default_preamble)
-    keep, overflow = _rotate_blocks(preamble, blocks)
-    if not overflow:
-        return
-    archive_paths = _write_archived_log_blocks(root, source_log_name, overflow)
-    _atomic_write(log_path, _join_log_blocks(preamble, keep))
-    if record_archive:
-        for archive_path in archive_paths:
-            _append_archive_log(root, archive_path)
-    _write_archive_index(root)
 
 
 def _split_log_blocks(text: str) -> tuple[str, list[str]]:

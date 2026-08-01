@@ -13,15 +13,12 @@ from netsuite_llm_wiki_mcp.runtime_config import (
     ConfigRegistry,
     ResolvedVault,
     RuntimeConfigError,
-    VAULT_ROOT_ENV,
     VaultSettings,
 )
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
-from netsuite_llm_wiki_mcp.wiki_batch import wiki_ingest_batch as run_wiki_ingest_batch
 from netsuite_llm_wiki_mcp.wiki_files import wiki_status as run_wiki_status
 from netsuite_llm_wiki_mcp.ingest_service import ingest_file as run_ingest_file
 from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
-from netsuite_llm_wiki_mcp.wiki_ingest import staged_wiki_ingest as run_staged_wiki_ingest
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
 from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
@@ -84,19 +81,9 @@ def _tool_error(exc: RuntimeConfigError) -> dict[str, Any]:
     return {"ok": False, "code": exc.code, "error": str(exc)}
 
 
-def _resolve_vault_root(vault_root: str | None = None, vaultRoot: str | None = None) -> str:
-    """Deprecated internal shim retained for CLI/internal callers only."""
-    return str(resolve_tool_vault(vault_root=vault_root, vaultRoot=vaultRoot).root)
-
-
 def wiki_status_tool(vault_root: str) -> dict[str, Any]:
     """Domain-level status helper; it intentionally accepts an explicit root."""
     return run_wiki_status(vault_root)
-
-
-def wiki_query_tool(vault_root: str, question: str, project: str | None = None, top_k: int = DEFAULT_TOP_K, include_content: bool = True, context_window_tokens: int = 16_000, include_context_pack: bool = True, chat_history: list[dict[str, str]] | None = None, language: str = "zh-CN", enable_vector: bool = False, vector_config: dict[str, Any] | None = None, max_graph_hops: int = 2, include_raw_sources: bool = False, filter_type: str | None = None, filter_tags: list[str] | None = None, retrieval_mode: str = "hybrid") -> dict[str, Any]:
-    """Compatibility helper for internal callers; not an MCP schema."""
-    return run_wiki_query(vault_root=vault_root, question=question, project=project, top_k=top_k, include_content=include_content, context_window_tokens=context_window_tokens, include_context_pack=include_context_pack, chat_history=chat_history, language=language, enable_vector=enable_vector, vector_config=vector_config, max_graph_hops=max_graph_hops, include_raw_sources=include_raw_sources, filter_type=filter_type, filter_tags=filter_tags, retrieval_mode=retrieval_mode)
 
 
 def wiki_write_note_tool(*, note_type: str, title: str, content: str, vault_root: str, **kwargs: Any) -> dict[str, Any]:
