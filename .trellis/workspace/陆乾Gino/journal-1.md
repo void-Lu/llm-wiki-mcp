@@ -411,3 +411,36 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: 实现可审计会话记忆与可溯源 Capsule
+
+**Date**: 2026-08-01
+**Task**: 实现可审计会话记忆与可溯源 Capsule
+**Branch**: `v0.9.13`
+
+### Summary
+
+实现显式脱敏 chat source、受限 capsule worker、chat provenance 与 entity 路由；分组 pytest 322 项和 Ruff 均通过。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `268c228` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
