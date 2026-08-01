@@ -14,10 +14,11 @@ def _result() -> dict[str, object]:
     return {"title": "SuiteQL API", "summary": "中文摘要 SuiteQL", "aliases": ["SuiteQL", "套件查询"], "keywords": ["SuiteQL", "N/query"], "coverage": ["API"], "body": "SuiteQL API 使用 N/query。fieldId custbody_test。", "uncertainties": []}
 
 
-def test_capsule_path_and_chat_rejection(tmp_path) -> None:
+def test_capsule_path_supports_chat_sources(tmp_path) -> None:
     assert capsule_path("raw/sources/file/default/docs/readme.md").as_posix() == "wiki/sources/file/default/docs/capsules/readme.md"
+    assert capsule_path("raw/sources/chat/2026/08/01/session-a/revision-000001.md").as_posix() == "wiki/sources/chat/2026/08/01/session-a/capsules/revision-000001.md"
     compiler = KnowledgeCompiler(tmp_path)
-    assert compiler.enqueue_capsule("raw/sources/chat/a.md")["code"] == "chat_capsule_forbidden"
+    assert compiler.enqueue_capsule("raw/sources/chat/a.md")["code"] == "source_not_found"
 
 
 def test_apply_capsule_checks_source_and_target_cas(tmp_path) -> None:

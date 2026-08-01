@@ -16,7 +16,7 @@ from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
 from netsuite_llm_wiki_mcp.wiki_overview import refresh_overview
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 
-NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge"}
+NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge", "entity", "chat"}
 PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
 DOMAINS = {"common-errors", "integration-patterns", "netsuite-object-playbooks", "suitescript-patterns"}
 WINDOWS_RESERVED_CHARS = set('<>:"|?*')
@@ -140,7 +140,7 @@ def _frontmatter(
         data.update({"status": status or "", "related_objects": related_objects or [], "related_scripts": related_scripts or []})
     elif note_type == "researches":
         data.update({"status": status or "", "related_objects": related_objects or [], "related_scripts": related_scripts or [], "zentao_urls": zentao_urls or []})
-    elif note_type == "knowledge":
+    elif note_type in {"knowledge", "entity"}:
         data.update({"topic": title, "domain": domain or "", "related_objects": related_objects or []})
         if related_script_types is not None:
             data["related_script_types"] = related_script_types
@@ -166,6 +166,9 @@ def save_obsidian_note(
     overwrite: bool = False,
     auto_index: bool = True,
     vault_root: str | None = None,
+    chat_metadata: dict[str, Any] | None = None,
+    chat_derived: bool = False,
+    chat_sources: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     root, root_error = _vault_root(vault_root)
     if root_error is not None:
@@ -175,6 +178,29 @@ def save_obsidian_note(
 
     if note_type not in NOTE_TYPES:
         return _error("invalid_note_type", f"invalid note_type: {note_type}")
+    if note_type == "chat":
+        if chat_derived:
+            return _error("invalid_chat_derived", "chat sources cannot be chat-derived pages")
+        from netsuite_llm_wiki_mcp.chat_memory import ChatMemoryError, ChatMemoryService
+
+        try:
+            return ChatMemoryService(root).save(content, chat_metadata)
+        except ChatMemoryError as exc:
+            return _error(exc.code, str(exc))
+        except OSError as exc:
+            return _error("write_failed", str(exc))
+    if type(chat_derived) is not bool:
+        return _error("invalid_chat_derived", "chat_derived must be a boolean")
+    if chat_derived and note_type not in {"knowledge", "entity"}:
+        return _error("invalid_chat_derived", "only knowledge or entity pages may be chat-derived")
+    provenance: list[dict[str, Any]] = []
+    if chat_derived:
+        from netsuite_llm_wiki_mcp.chat_memory import ChatMemoryService
+
+        validated = ChatMemoryService(root).provenance(chat_sources)
+        if not validated["ok"]:
+            return _error(str(validated["code"]), "chat_sources must reference existing fixed chat revisions")
+        provenance = list(validated["sources"])
     name, name_error = _filename(title, filename)
     if name_error is not None:
         return name_error
@@ -196,16 +222,16 @@ def save_obsidian_note(
         project = project_value
     else:
         if project:
-            return _error("knowledge_project_not_allowed", "knowledge notes do not accept project")
+            return _error("knowledge_project_not_allowed", "knowledge and entity notes do not accept project")
         domain_value, domain_error = _safe_segment(domain, "missing_domain", "domain")
         if domain_error is not None:
             return domain_error
         assert domain_value is not None
-        domain_dir = root / "wiki" / "concepts" / domain_value
+        domain_dir = root / "wiki" / ("entities" if note_type == "entity" else "concepts") / domain_value
         subdir_error = _known_or_existing(domain_value, DOMAINS, domain_dir)
         if subdir_error is not None:
             return subdir_error
-        relative_path = Path("wiki") / "concepts" / domain_value / name
+        relative_path = Path("wiki") / ("entities" if note_type == "entity" else "concepts") / domain_value / name
         domain = domain_value
 
     target = (root / relative_path).resolve()
@@ -217,6 +243,13 @@ def save_obsidian_note(
     redacted_content = redact_sensitive_text(content)
     redacted_count = count_redactions(content, redacted_content)
     frontmatter = _frontmatter(note_type, title, project, domain, related_script_types, related_objects, related_scripts, tags, zentao_urls, decision_status, status)
+    if chat_derived:
+        frontmatter["chat_derived"] = True
+        frontmatter["chat_sources"] = [
+            {"source_id": item["source_id"], "revision": item["revision"], "redacted_hash": item["redacted_hash"]}
+            for item in provenance
+        ]
+        frontmatter["sources"] = [item["path"] for item in provenance]
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
     note_text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{redacted_content}"
 
@@ -225,7 +258,7 @@ def save_obsidian_note(
         target.write_text(note_text, encoding="utf-8")
         refresh_indexes(root)
         refresh_overview(root)
-        append_log_entry(root, WikiLogEntry(operation="concept" if note_type == "knowledge" else "note", title=title, paths=[relative_path.as_posix()], sources=[], project=project or "", status="ok"))
+        append_log_entry(root, WikiLogEntry(operation="concept" if note_type == "knowledge" else "entity" if note_type == "entity" else "note", title=title, paths=[relative_path.as_posix()], sources=[item["path"] for item in provenance], project=project or "", status="ok"))
     except OSError as exc:
         return _error("write_failed", str(exc))
 

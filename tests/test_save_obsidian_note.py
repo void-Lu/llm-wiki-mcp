@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note
+from netsuite_llm_wiki_mcp.chat_memory import ChatMemoryService
 
 
 @pytest.fixture
@@ -69,6 +70,7 @@ def test_script_and_object_note_types_are_removed(vault: Path, note_type: str):
         ("troubleshooting", {"project": "project-a"}, "wiki/projects/project-a/troubleshooting/troubleshooting-note.md"),
         ("researches", {"project": "project-a"}, "wiki/projects/project-a/researches/researches-note.md"),
         ("knowledge", {"domain": "suitescript-patterns"}, "wiki/concepts/suitescript-patterns/knowledge-note.md"),
+        ("entity", {"domain": "suitescript-patterns"}, "wiki/entities/suitescript-patterns/entity-note.md"),
     ],
 )
 def test_note_type_path_mappings_create_expected_files(vault: Path, note_type: str, kwargs: dict[str, str], expected_path: str):
@@ -99,6 +101,27 @@ def test_knowledge_rejects_project(vault: Path):
 
     assert result["ok"] is False
     assert result["code"] == "knowledge_project_not_allowed"
+
+
+def test_chat_derived_entity_requires_and_locks_chat_source(vault: Path):
+    source = ChatMemoryService(vault).save(
+        "## User\n\n记录结论。\n\n## Assistant\n\n已记录。",
+        {"session_id": "writer-session", "summary": "结论", "decisions": ["记录"], "open_questions": [], "tags": []},
+    )
+    missing = _save(vault, note_type="entity", domain="suitescript-patterns", filename="missing", chat_derived=True)
+    assert missing["code"] == "chat_sources_required"
+    result = _save(
+        vault,
+        note_type="entity",
+        domain="suitescript-patterns",
+        filename="derived",
+        chat_derived=True,
+        chat_sources=[{"source_id": source["source_id"], "revision": source["revision"], "redacted_hash": source["redacted_hash"]}],
+    )
+    path = _written_path(vault, result)
+    frontmatter, _ = _frontmatter_and_body(path)
+    assert frontmatter["chat_derived"] is True
+    assert frontmatter["chat_sources"] == [{"source_id": "writer-session", "revision": 1, "redacted_hash": source["redacted_hash"]}]
 
 
 def test_unknown_knowledge_domain_returns_code(vault: Path):

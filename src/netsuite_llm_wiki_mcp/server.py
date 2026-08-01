@@ -178,8 +178,8 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
 
 
 @_register
-def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None) -> dict[str, Any]:
-    """Create a new manual knowledge page. Existing files are never overwritten."""
+def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    """Create an explicit manual page or an immutable, redacted chat source."""
     selected_type = note_type or noteType
     if not selected_type:
         return {"ok": False, "code": "missing_note_type", "error": "note_type is required"}
@@ -187,7 +187,7 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
-    result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, overwrite=False, auto_index=True, vault_root=str(resolution.root))
+    result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, chat_metadata=chat_metadata, chat_derived=chat_derived, chat_sources=chat_sources, overwrite=False, auto_index=True, vault_root=str(resolution.root))
     return attach_warnings(result, resolution.warnings)
 
 

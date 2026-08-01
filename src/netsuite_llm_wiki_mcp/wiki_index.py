@@ -168,7 +168,6 @@ def _collect_sources_navigation(
         return None
     if _is_manual_page(target):
         return _manual_page_error(target, root)
-
     entries: list[tuple[str, str]] = []
     for path in sorted(directory.glob("*.md")):
         if _is_sources_navigation_page(path):

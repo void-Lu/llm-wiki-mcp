@@ -14,6 +14,8 @@ REDACTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)(password|passwd|secret|token|api_key|apikey)\s*[:=]\s*[^\s,;]+"), r"\1=[REDACTED_SECRET]"),
 ]
 
+REDACTION_POLICY_VERSION = "redaction-v1"
+
 
 def redact_sensitive_text(text: str) -> str:
     redacted = text
@@ -40,6 +42,22 @@ def count_redactions(original_text: str, redacted_text: str) -> int:
         # that were NOT present in the original text
         count += redacted_text.count(marker) - original_text.count(marker)
     return max(count, 0)  # Never return negative
+
+
+def count_redaction_categories(original_text: str, redacted_text: str) -> dict[str, int]:
+    """Return a privacy-safe summary of replacements grouped by placeholder."""
+    labels = {
+        "[REDACTED_PHONE]": "phone",
+        "[REDACTED_EMAIL]": "email",
+        "[REDACTED_ID_CARD]": "id_card",
+        "[REDACTED_BANK_CARD]": "bank_card",
+        "[REDACTED_SECRET]": "secret",
+    }
+    return {
+        label: count
+        for marker, label in labels.items()
+        if (count := redacted_text.count(marker) - original_text.count(marker)) > 0
+    }
 
 
 _REDACTION_MARKERS = (
