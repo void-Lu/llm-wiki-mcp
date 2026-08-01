@@ -132,6 +132,33 @@ def test_archive_tools_use_shared_vault_resolver(monkeypatch: pytest.MonkeyPatch
     assert result["warnings"] == ["deprecated_vault_root"]  # type: ignore[index]
 
 
+@pytest.mark.parametrize(
+    ("tool", "kwargs", "expected_code"),
+    [
+        (wiki_archive, {"target": "wiki/concepts/example.md"}, "archive_apply_failed"),
+        (wiki_restore, {"archive_id": "bundle-1"}, "restore_apply_failed"),
+    ],
+)
+def test_archive_tools_return_structured_error_when_service_initialization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tool: object,
+    kwargs: dict[str, str],
+    expected_code: str,
+) -> None:
+    registry, _ = _registry(tmp_path)
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.server.CONFIG_REGISTRY", registry)
+
+    def fail_initialization(*args: object, **kwargs: object) -> object:
+        raise OSError("state directory is not writable")
+
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.server.ArchiveService", fail_initialization)
+
+    result = tool(**kwargs)  # type: ignore[operator]
+
+    assert result == {"ok": False, "code": expected_code, "error": "state directory is not writable"}  # type: ignore[comparison-overlap]
+
+
 def test_query_rejects_runtime_override_filters_before_domain_call() -> None:
     result = wiki_query(question="hello", filters={"index_path": "bad"})
     assert result == {"ok": False, "code": "invalid_filters", "error": "filters may only contain type and tags"}

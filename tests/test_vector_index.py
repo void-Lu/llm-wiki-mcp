@@ -37,6 +37,7 @@ def test_build_status_update_and_search_are_explicit_and_incremental(tmp_path: P
 
     assert built["state"] == "fresh"
     assert built["document_count"] == 2
+    assert {"model_load", "embed_documents", "write_index", "total"} <= set(built["timings_ms"])
     assert provider.document_batches == [["intent document body", "other document body"]]
     stored = store.documents_path.read_text(encoding="utf-8")
     assert "document body" not in stored
@@ -50,6 +51,7 @@ def test_build_status_update_and_search_are_explicit_and_incremental(tmp_path: P
 
     assert updated["state"] == "fresh"
     assert updated["changes"] == {"added": 0, "modified": 1, "deleted": 0, "unchanged": 1}
+    assert {"read_manifest", "model_load", "read_documents", "compare_records", "embed_documents", "write_index", "total"} <= set(updated["timings_ms"])
     assert provider.document_batches[-1] == ["intent changed body"]
 
 

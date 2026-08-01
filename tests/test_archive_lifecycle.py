@@ -32,7 +32,7 @@ def test_archive_restore_is_immutable_and_plan_gated(tmp_path: Path) -> None:
 def test_raw_active_dependency_blocks_unless_cascade(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     raw = root / "raw/sources/file/proj/source.md"; raw.parent.mkdir(parents=True); raw.write_text("source", encoding="utf-8")
-    page = _page(root, "wiki/concepts/example.md")
+    _page(root, "wiki/concepts/example.md")
     deps = KnowledgeDependencies(root)
     deps.update_page("wiki/concepts/example.md", "hash", {"raw/sources/file/proj/source.md": "hash"}, generated=True, lifecycle="deprecated")
     service = ArchiveService(root)

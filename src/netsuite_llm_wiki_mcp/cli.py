@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Sequence
 
 from netsuite_llm_wiki_mcp.platform_paths import global_config_path
@@ -272,9 +273,12 @@ def _vector_config_from_args(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _run_vector(args: argparse.Namespace) -> int:
+    started_at = perf_counter()
     settings = parse_vector_settings(args.vault, _vector_config_from_args(args))
     store = VectorIndexStore(args.vault, settings.index_path)
+    stage_started_at = perf_counter()
     records = vector_index_records(args.vault, include_raw_sources=bool(args.include_raw_sources))
+    collect_records_ms = _elapsed_ms(stage_started_at)
     if args.vector_action == "status":
         status = store.status(records, include_raw_sources=bool(args.include_raw_sources))
         status["local_provider"] = local_provider_readiness(settings.model_path)
@@ -290,12 +294,29 @@ def _run_vector(args: argparse.Namespace) -> int:
         max_sequence_length=settings.max_sequence_length,
     )
     if args.vector_action == "build":
-        _print_json(store.build(records, provider, include_raw_sources=bool(args.include_raw_sources)))
+        _print_json(_with_vector_timings(store.build(records, provider, include_raw_sources=bool(args.include_raw_sources)), collect_records_ms, started_at))
         return 0
     if args.vector_action == "update":
-        _print_json(store.update(records, provider, include_raw_sources=bool(args.include_raw_sources)))
+        _print_json(_with_vector_timings(store.update(records, provider, include_raw_sources=bool(args.include_raw_sources)), collect_records_ms, started_at))
         return 0
     raise ValueError(f"unknown vector action: {args.vector_action}")
+
+
+def _with_vector_timings(payload: dict[str, object], collect_records_ms: float, started_at: float) -> dict[str, object]:
+    timings = payload.get("timings_ms")
+    stage_timings = timings if isinstance(timings, dict) else {}
+    return {
+        **payload,
+        "timings_ms": {
+            "collect_records": collect_records_ms,
+            **stage_timings,
+            "total": _elapsed_ms(started_at),
+        },
+    }
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((perf_counter() - started_at) * 1000, 3)
 
 
 def _run_index(args: argparse.Namespace) -> int:

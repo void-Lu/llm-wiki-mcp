@@ -372,7 +372,6 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
     stat = path.stat()
     is_chat = rel.startswith("raw/sources/chat/")
     if is_chat:
-        parts = rel.split("/")
         frontmatter = dict(frontmatter)
         # Chat storage is date/session based, not project based.  Never label
         # a date segment as a project in public historical evidence.

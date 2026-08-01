@@ -228,8 +228,8 @@ def wiki_archive(target: str, reason: str = "manual", cascade: bool = False, act
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
-    service = ArchiveService(resolution.root, actor="mcp")
     try:
+        service = ArchiveService(resolution.root, actor="mcp")
         result = service.plan_archive(target, reason=reason, cascade=cascade) if action == "plan" else service.apply(plan_id or "")
     except Exception as exc:
         result = {"ok": False, "code": getattr(exc, "code", "archive_apply_failed"), "error": str(exc)}
@@ -245,8 +245,8 @@ def wiki_restore(archive_id: str, action: str = "plan", plan_id: str | None = No
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
-    service = ArchiveService(resolution.root, actor="mcp")
     try:
+        service = ArchiveService(resolution.root, actor="mcp")
         result = service.plan_restore(archive_id) if action == "plan" else service.apply(plan_id or "")
     except Exception as exc:
         result = {"ok": False, "code": getattr(exc, "code", "restore_apply_failed"), "error": str(exc)}

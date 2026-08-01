@@ -6,8 +6,6 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from netsuite_llm_wiki_mcp.git_utils import (
     get_git_branch,
     get_git_commit,

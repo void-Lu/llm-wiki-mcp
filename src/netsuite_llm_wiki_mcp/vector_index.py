@@ -11,6 +11,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Iterable, Sequence
 
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
@@ -219,10 +220,26 @@ class VectorIndexStore:
         *,
         include_raw_sources: bool,
     ) -> dict[str, object]:
+        started_at = perf_counter()
+        stage_started_at = perf_counter()
         identity = provider.identity()
+        model_load_ms = _elapsed_ms(stage_started_at)
+        stage_started_at = perf_counter()
         vectors = provider.embed_documents([record.text for record in records])
+        embed_documents_ms = _elapsed_ms(stage_started_at)
+        stage_started_at = perf_counter()
         self._write_index(records, vectors, identity, include_raw_sources=include_raw_sources, created_at=_utc_now())
-        return {**self.status(records, include_raw_sources=include_raw_sources), "operation": "build"}
+        write_index_ms = _elapsed_ms(stage_started_at)
+        return {
+            **self.status(records, include_raw_sources=include_raw_sources),
+            "operation": "build",
+            "timings_ms": {
+                "model_load": model_load_ms,
+                "embed_documents": embed_documents_ms,
+                "write_index": write_index_ms,
+                "total": _elapsed_ms(started_at),
+            },
+        }
 
     def update(
         self,
@@ -231,10 +248,18 @@ class VectorIndexStore:
         *,
         include_raw_sources: bool,
     ) -> dict[str, object]:
+        started_at = perf_counter()
+        stage_started_at = perf_counter()
         manifest = self._read_manifest()
+        read_manifest_ms = _elapsed_ms(stage_started_at)
+        stage_started_at = perf_counter()
         identity = provider.identity()
+        model_load_ms = _elapsed_ms(stage_started_at)
+        stage_started_at = perf_counter()
         _assert_compatible(manifest, identity, include_raw_sources, self.corpus)
         existing = self._read_documents()
+        read_documents_ms = _elapsed_ms(stage_started_at)
+        stage_started_at = perf_counter()
         current_by_path = {_record_identity(record): record for record in records}
         previous_by_path = {_document_identity(item): item for item in existing}
         added = sorted(set(current_by_path) - set(previous_by_path))
@@ -245,7 +270,11 @@ class VectorIndexStore:
             if current_by_path[path].content_hash != previous_by_path[path].get("content_hash")
         )
         changed = added + modified
+        compare_records_ms = _elapsed_ms(stage_started_at)
+        stage_started_at = perf_counter()
         new_vectors = provider.embed_documents([current_by_path[path].text for path in changed])
+        embed_documents_ms = _elapsed_ms(stage_started_at)
+        stage_started_at = perf_counter()
         vectors_by_path = {path: vector for path, vector in zip(changed, new_vectors, strict=True)}
         for path, document in previous_by_path.items():
             if path in current_by_path and path not in vectors_by_path:
@@ -259,10 +288,20 @@ class VectorIndexStore:
             include_raw_sources=include_raw_sources,
             created_at=str(manifest["created_at"]),
         )
+        write_index_ms = _elapsed_ms(stage_started_at)
         return {
             **self.status(ordered_records, include_raw_sources=include_raw_sources),
             "operation": "update",
             "changes": {"added": len(added), "modified": len(modified), "deleted": len(deleted), "unchanged": len(records) - len(added) - len(modified)},
+            "timings_ms": {
+                "read_manifest": read_manifest_ms,
+                "model_load": model_load_ms,
+                "read_documents": read_documents_ms,
+                "compare_records": compare_records_ms,
+                "embed_documents": embed_documents_ms,
+                "write_index": write_index_ms,
+                "total": _elapsed_ms(started_at),
+            },
         }
 
     def search(
@@ -494,3 +533,7 @@ def _vault_fingerprint(records: Sequence[VectorRecord]) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((perf_counter() - started_at) * 1000, 3)
