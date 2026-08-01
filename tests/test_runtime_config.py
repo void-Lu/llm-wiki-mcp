@@ -247,6 +247,7 @@ def test_registry_decodes_profiles_and_redacts_public_status(tmp_path: Path) -> 
     status: dict[str, Any] = registry.public_status(resolved)
 
     assert resolved.settings.retrieval.embedding.candidate_limit == 80
+    assert resolved.settings.retrieval.embedding.max_sequence_length == 256
     assert status["telemetry"]["retention_days"] == 30
     assert "model_path" not in status["retrieval"]["embedding"]
     assert status["archive"]["automatic_purge"] is False

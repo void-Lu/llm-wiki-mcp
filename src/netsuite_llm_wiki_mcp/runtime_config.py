@@ -208,7 +208,7 @@ def _decode_embedding(value: object, path: Path) -> EmbeddingSettings:
         model_path=model_path,
         device=device,
         batch_size=_integer(raw.get("batch_size"), 16, 1, 256, "embedding.batch_size", path),
-        max_sequence_length=_integer(raw.get("max_sequence_length"), 512, 64, 8192, "embedding.max_sequence_length", path),
+        max_sequence_length=_integer(raw.get("max_sequence_length"), 256, 64, 8192, "embedding.max_sequence_length", path),
         candidate_limit=_integer(raw.get("candidate_limit"), 50, 1, 500, "embedding.candidate_limit", path),
         rrf_k=_integer(raw.get("rrf_k"), 60, 1, 10_000, "embedding.rrf_k", path),
         min_vector_score=_number(raw.get("min_vector_score"), 0.5, -1.0, 1.0, "embedding.min_vector_score", path),

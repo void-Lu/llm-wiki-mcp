@@ -79,7 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
     retrieval.add_argument("--model-path", required=True)
     retrieval.add_argument("--device", default="cpu")
     retrieval.add_argument("--batch-size", type=int, default=16)
-    retrieval.add_argument("--max-sequence-length", type=int, default=512)
+    retrieval.add_argument("--max-sequence-length", type=int, default=256)
     retrieval.add_argument("--candidate-limit", type=int, default=50)
     retrieval.add_argument("--rrf-k", type=int, default=60)
     retrieval.add_argument("--min-vector-score", type=float, default=0.5)
@@ -124,7 +124,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action_parser.add_argument("--model-path", required=action != "status", help="Local BGE-M3 model directory; never downloaded automatically.")
         action_parser.add_argument("--device", default="cpu", help="Sentence-transformers device (default: cpu).")
         action_parser.add_argument("--batch-size", type=int, default=16, help="Embedding batch size (default: 16).")
-        action_parser.add_argument("--max-sequence-length", type=int, default=512, help="Maximum BGE-M3 input tokens (default: 512).")
+        action_parser.add_argument("--max-sequence-length", type=int, default=256, help="Maximum BGE-M3 input tokens (default: 256).")
 
     index_parser = subparsers.add_parser("index", help="Manage explicit passage FTS lifecycle.")
     index_actions = index_parser.add_subparsers(dest="index_action", required=True)

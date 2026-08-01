@@ -113,7 +113,7 @@ class LocalBgeM3Provider:
         *,
         device: str = "cpu",
         batch_size: int = 16,
-        max_sequence_length: int = 512,
+        max_sequence_length: int = 256,
     ) -> None:
         self.model_path = Path(model_path).expanduser().resolve()
         self.device = device

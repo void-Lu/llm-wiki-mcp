@@ -95,7 +95,7 @@ def parse_vector_settings(vault_root: str | Path, config: dict[str, Any] | None)
         min_vector_score=_bounded_float(values.get("min_vector_score"), DEFAULT_MIN_VECTOR_SCORE, -1.0, 1.0, "min_vector_score"),
         device=str(values.get("device") or "cpu"),
         batch_size=_bounded_int(values.get("batch_size"), 16, 1, 256, "batch_size"),
-        max_sequence_length=_bounded_int(values.get("max_sequence_length"), 512, 64, 8192, "max_sequence_length"),
+        max_sequence_length=_bounded_int(values.get("max_sequence_length"), 256, 64, 8192, "max_sequence_length"),
     )
 
 

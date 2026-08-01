@@ -80,6 +80,7 @@ def test_local_only_settings_reject_credential_fields_and_external_provider(tmp_
 def test_parse_vector_settings_applies_defaults_and_bounds(tmp_path: Path) -> None:
     settings = parse_vector_settings(tmp_path, None)
     assert settings.candidate_limit == 50
+    assert settings.max_sequence_length == 256
     assert settings.rrf_k == 60
     assert settings.min_vector_score == 0.5
     custom = parse_vector_settings(tmp_path, {"rrf_k": 30, "min_vector_score": 0.3, "candidate_limit": 20})
