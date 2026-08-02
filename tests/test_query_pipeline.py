@@ -145,6 +145,32 @@ def test_v2_never_returns_source_index_pages_regardless_of_filename(tmp_path: Pa
     assert [item["path"] for item in result["results"]] == ["wiki/sources/capsules/catalog.md"]
 
 
+def test_v2_lexical_recall_is_not_starved_by_source_indexes(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    for number in range(55):
+        _write(
+            root,
+            f"wiki/sources/catalog/{number:02d}/index.md",
+            f"Navigation {number}",
+            "uncommon lexical retrieval token",
+            type="source_index",
+        )
+    _write(
+        root,
+        "wiki/sources/capsules/target.md",
+        "Target capsule",
+        "uncommon lexical retrieval token",
+        type="source_capsule",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "uncommon lexical retrieval token", retrieval_mode="lexical")
+
+    assert [item["path"] for item in result["results"]] == ["wiki/sources/capsules/target.md"]
+    assert result["pipeline"]["counters"]["fts_hits"] == 1
+
+
 def test_v2_archive_scope_is_physically_isolated(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

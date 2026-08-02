@@ -171,7 +171,16 @@ class RetrievalIndexStore:
                 return deleted
         return {**self.status(), "operation": "reconcile", "changed": len(changed), "deleted": len(set(known) - set(current))}
 
-    def search_fts(self, query: str, *, limit: int = 10, project: str | None = None, page_type: str | None = None, tags: list[str] | None = None) -> list[PassageHit]:
+    def search_fts(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        project: str | None = None,
+        page_type: str | None = None,
+        tags: list[str] | None = None,
+        include_navigation: bool = False,
+    ) -> list[PassageHit]:
         if self.scope != "active" and self.scope != "archive":
             return []
         phrase = fts_query(query)
@@ -186,6 +195,13 @@ class RetrievalIndexStore:
         if tags:
             for tag in tags:
                 clauses.append("pages.frontmatter_json LIKE ?"); params.append(f'%"{tag}"%')
+        if not include_navigation:
+            # Source/navigation pages can dominate an FTS prefix match while
+            # the query pipeline intentionally excludes them from results.
+            # Exclude them before applying the bounded candidate limit so they
+            # cannot starve searchable capsules or knowledge pages.
+            clauses.append("pages.page_type NOT IN (?, ?, ?, ?)")
+            params.extend(("source_index", "source-index", "index", "source_summary"))
         params.append(limit)
         sql = """
             SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
