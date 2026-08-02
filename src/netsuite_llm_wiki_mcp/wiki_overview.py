@@ -5,10 +5,12 @@ from typing import Any
 
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 from netsuite_llm_wiki_mcp.wiki_log import read_recent_log_entries
+from netsuite_llm_wiki_mcp.wiki_paths import filesystem_path
 
 
 def refresh_overview(vault_root: str | Path) -> dict[str, Any]:
-    root = Path(vault_root)
+    # Extended-length form keeps deep source subtrees over MAX_PATH countable.
+    root = filesystem_path(vault_root)
     wiki_root = root / "wiki"
     target = wiki_root / "overview.md"
     if _is_manual_page(target):

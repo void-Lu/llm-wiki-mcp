@@ -14,6 +14,7 @@ from netsuite_llm_wiki_mcp.wiki_limits import (
     partition_rendered_units,
     render_units,
 )
+from netsuite_llm_wiki_mcp.wiki_paths import filesystem_path
 
 _TOP_LEVEL_GROUPS = (
     ("Projects", Path("wiki/projects")),
@@ -35,7 +36,9 @@ _SOURCES_NAVIGATION_PAGE_RE = re.compile(r"^index(?:-\d{2,})?\.md$")
 
 
 def refresh_indexes(vault_root: str | Path) -> dict[str, Any]:
-    root = Path(vault_root)
+    # Use the extended-length form so deep source trees over MAX_PATH are
+    # walked and indexed instead of being skipped.
+    root = filesystem_path(vault_root)
     written = []
     projects_root = root / "wiki" / "projects"
     projects_root.mkdir(parents=True, exist_ok=True)

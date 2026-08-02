@@ -22,6 +22,7 @@ from netsuite_llm_wiki_mcp.content_redaction import REDACTION_POLICY_VERSION, re
 from netsuite_llm_wiki_mcp.lexical_analyzer import fts_query, normalize
 from netsuite_llm_wiki_mcp.passage_chunker import CHUNK_SCHEMA_VERSION, PassageChunk, chunk_markdown
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_paths import filesystem_path
 
 RETRIEVAL_SCHEMA_VERSION = 2
 StoreScope = Literal["active", "archive"]
@@ -265,12 +266,16 @@ class RetrievalIndexStore:
         return [{"passage_id": row[0], "page_path": row[1], "content_hash": row[2], "text": row[3], "source_kind": row[4], "corpus": row[5]} for row in rows]
 
     def iter_vault_pages(self) -> Iterable[IndexedPage]:
+        # Windows paths over MAX_PATH are unreachable without the extended
+        # ``\\?\`` prefix; traverse through it so long raw/source trees are
+        # indexed instead of silently dropped.
+        root = filesystem_path(self.root)
         candidates = (
-            sorted([*self.root.glob("wiki/**/*.md"), *self.root.glob("raw/sources/chat/**/*")])
+            sorted([*root.glob("wiki/**/*.md"), *root.glob("raw/sources/chat/**/*")])
             if self.scope == "active"
-            else sorted((self.root / "archives" / "bundles").rglob("*.md"))
+            else sorted(filesystem_path(self.root / "archives" / "bundles").rglob("*.md"))
         )
-        return [page for path in candidates if path.is_file() for page in [page_from_file(self.root, path, scope=self.scope)] if page is not None]
+        return [page for path in candidates if path.is_file() for page in [page_from_file(root, path, scope=self.scope)] if page is not None]
 
     def _connect(self, path: Path | None = None, *, readonly: bool = False) -> sqlite3.Connection:
         target = path or self.path

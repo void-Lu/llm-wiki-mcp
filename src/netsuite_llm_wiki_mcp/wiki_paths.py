@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,24 @@ WINDOWS_RESERVED_CHARS = set('<>:"|?*')
 WINDOWS_RESERVED_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL"}
 WINDOWS_RESERVED_DEVICE_PREFIXES = ("COM", "LPT")
 WINDOWS_RESERVED_DEVICE_SUFFIXES = set("123456789¹²³")
+
+
+def filesystem_path(path: str | Path) -> Path:
+    """Return a Windows long-path-safe representation at filesystem boundaries.
+
+    Vault source trees can legitimately exceed ``MAX_PATH`` because their raw
+    provenance preserves the source hierarchy.  Keep relative logical paths in
+    index/metadata, but use the extended-length form for OS access.
+    """
+    resolved = Path(path).expanduser().resolve()
+    if os.name != "nt":
+        return resolved
+    value = str(resolved)
+    if value.startswith("\\\\?\\"):
+        return resolved
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    return Path("\\\\?\\" + value)
 
 TOP_LEVEL_DIRS = (
     Path("raw/sources"),

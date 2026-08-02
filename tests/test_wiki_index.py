@@ -8,7 +8,7 @@ from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
 from netsuite_llm_wiki_mcp.wiki_limits import HARD_PAGE_BYTES, utf8_size
 from netsuite_llm_wiki_mcp.wiki_models import WikiPage
-from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
+from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root, filesystem_path
 from netsuite_llm_wiki_mcp.wiki_query import wiki_query
 
 
@@ -164,9 +164,10 @@ def test_refresh_sources_stages_navigation_before_replacing_existing_pages(tmp_p
     write_wiki_page(root, _page("wiki/sources/bulk/second.md", "Second", "second"))
 
     original_write_text = Path.write_text
+    sources_root = filesystem_path(root / "wiki/sources")
 
     def fail_staged_writes(path: Path, text: str, *args: str | None, **kwargs: str | None) -> int:
-        if path.suffix == ".tmp" and path.parent.is_relative_to(root / "wiki/sources"):
+        if path.suffix == ".tmp" and path.parent.is_relative_to(sources_root):
             raise OSError("injected navigation write failure")
         return original_write_text(path, text, *args, **kwargs)
 

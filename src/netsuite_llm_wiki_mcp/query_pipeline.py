@@ -37,7 +37,7 @@ class QueryFilters:
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "QueryFilters":
         value = value or {}
-        tags = value.get("tags", ())
+        tags = value.get("tags", [])
         if not isinstance(tags, list) or not all(isinstance(item, str) for item in tags):
             raise ValueError("filters.tags must be a list of strings")
         page_type = value.get("type")

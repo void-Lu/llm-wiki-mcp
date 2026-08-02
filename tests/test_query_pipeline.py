@@ -13,6 +13,11 @@ def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) 
     write_wiki_page(root, WikiPage(Path(path), {"title": title, "generated": True, **frontmatter}, title, body), overwrite_generated_only=False)
 
 
+def test_query_filters_from_empty_mapping_uses_empty_tags() -> None:
+    assert QueryFilters.from_mapping({}) == QueryFilters()
+    assert QueryFilters.from_mapping(None) == QueryFilters()
+
+
 def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

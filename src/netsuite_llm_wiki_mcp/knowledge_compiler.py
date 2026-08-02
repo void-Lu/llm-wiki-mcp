@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,22 +24,7 @@ CAPSULE_SCHEMA = {"title": "string", "summary": "string", "aliases": ["string"],
 CHAT_CAPSULE_SCHEMA = {**CAPSULE_SCHEMA, "evidence": [{"kind": "claim|decision", "text": "string", "message_refs": ["message:N|lines:start-end"]}]}
 
 
-def filesystem_path(path: str | Path) -> Path:
-    """Return a Windows long-path-safe representation at filesystem boundaries.
-
-    Vault source trees can legitimately exceed ``MAX_PATH`` because their raw
-    provenance preserves the source hierarchy.  Keep relative logical paths in
-    queue/index metadata, but use the extended-length form for OS access.
-    """
-    resolved = Path(path).expanduser().resolve()
-    if os.name != "nt":
-        return resolved
-    value = str(resolved)
-    if value.startswith("\\\\?\\"):
-        return resolved
-    if value.startswith("\\\\"):
-        return Path("\\\\?\\UNC\\" + value[2:])
-    return Path("\\\\?\\" + value)
+from netsuite_llm_wiki_mcp.wiki_paths import filesystem_path
 
 
 def file_hash(path: Path) -> str:
