@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
 
 ArchiveReason = Literal["superseded", "deprecated", "retention", "migration", "manual"]
+ARCHIVE_REASONS = frozenset({"superseded", "deprecated", "retention", "migration", "manual"})
 OperationState = Literal["planned", "staged", "pending", "detaching", "committed", "rolling_back", "rolled_back", "failed_recoverable"]
+
+
+def is_archive_reason(value: object) -> TypeGuard[ArchiveReason]:
+    return isinstance(value, str) and value in ARCHIVE_REASONS
 
 
 class ArchiveError(RuntimeError):

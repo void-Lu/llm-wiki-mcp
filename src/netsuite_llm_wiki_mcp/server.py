@@ -22,6 +22,7 @@ from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
 from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
 from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
+from netsuite_llm_wiki_mcp.archive_models import ARCHIVE_REASONS, is_archive_reason
 from netsuite_llm_wiki_mcp.archive_service import ArchiveService
 
 
@@ -224,6 +225,8 @@ def wiki_archive(target: str, reason: str = "manual", cascade: bool = False, act
     """Plan/apply archive lifecycle operations; purge is intentionally not public."""
     if action not in {"plan", "apply"}:
         return {"ok": False, "code": "invalid_action", "error": "action must be plan or apply"}
+    if action == "plan" and not is_archive_reason(reason):
+        return {"ok": False, "code": "invalid_archive_reason", "error": f"reason must be one of: {', '.join(sorted(ARCHIVE_REASONS))}"}
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:

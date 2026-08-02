@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from netsuite_llm_wiki_mcp.archive_models import ArchiveError, ArchiveItem, ArchiveManifest
+from netsuite_llm_wiki_mcp.archive_models import ArchiveError, ArchiveItem, ArchiveManifest, is_archive_reason
 
 
 def content_hash(path: Path) -> str:
@@ -53,9 +53,12 @@ def load_manifest(bundle: Path) -> ArchiveManifest:
             )
             for item in payload["items"]
         )
-        reason = str(payload["reason"])
-        if reason not in ("superseded", "deprecated", "retention", "migration", "manual"):
+        raw_reason = payload["reason"]
+        if not isinstance(raw_reason, str) or not raw_reason:
             raise ArchiveError("archive_manifest_invalid", "archive manifest has an invalid reason")
+        # Older MCP versions accepted arbitrary reasons. Treat those committed
+        # manifests as the manual lifecycle class without rewriting the bundle.
+        reason = raw_reason if is_archive_reason(raw_reason) else "manual"
         manifest = ArchiveManifest(
             archive_id=str(payload["archive_id"]), operation_id=str(payload["operation_id"]),
             reason=reason, archived_at=str(payload["archived_at"]), items=items,

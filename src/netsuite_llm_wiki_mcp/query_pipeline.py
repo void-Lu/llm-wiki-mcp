@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -37,9 +38,9 @@ class QueryFilters:
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "QueryFilters":
         value = value or {}
-        tags = value.get("tags", [])
-        if not isinstance(tags, list) or not all(isinstance(item, str) for item in tags):
-            raise ValueError("filters.tags must be a list of strings")
+        tags = value.get("tags", ())
+        if isinstance(tags, (str, bytes)) or not isinstance(tags, Sequence) or not all(isinstance(item, str) for item in tags):
+            raise ValueError("filters.tags must be a sequence of strings")
         page_type = value.get("type")
         if page_type is not None and not isinstance(page_type, str):
             raise ValueError("filters.type must be a string")

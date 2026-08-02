@@ -29,6 +29,37 @@ def test_archive_restore_is_immutable_and_plan_gated(tmp_path: Path) -> None:
     assert (bundle / "manifest.yaml").read_bytes() == manifest_before
 
 
+def test_archive_rejects_new_reason_outside_manifest_contract(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page = _page(root, "wiki/concepts/example.md")
+
+    planned = ArchiveService(root).plan_archive("wiki/concepts/example.md", reason="mcp_crud_validation_cleanup")
+
+    assert planned["ok"] is False
+    assert planned["code"] == "invalid_archive_reason"
+    assert page.exists()
+
+
+def test_restore_accepts_legacy_custom_reason_without_mutating_bundle(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page = _page(root, "wiki/concepts/example.md")
+    service = ArchiveService(root)
+    archive_plan = service.plan_archive("wiki/concepts/example.md", reason="deprecated")
+    archive = service.apply(archive_plan["plan_id"])
+    bundle = next((root / "archives" / "bundles").glob("*/*/*"))
+    manifest = bundle / "manifest.yaml"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace("reason: deprecated", "reason: legacy_cleanup"), encoding="utf-8")
+    manifest_before = manifest.read_bytes()
+
+    assert service.rebuild_archive_index()["ok"] is True
+    restore_plan = service.plan_restore(archive["archive_id"])
+
+    assert restore_plan["ok"] is True
+    assert service.apply(restore_plan["plan_id"])["ok"] is True
+    assert page.exists()
+    assert manifest.read_bytes() == manifest_before
+
+
 def test_raw_active_dependency_blocks_unless_cascade(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     raw = root / "raw/sources/file/proj/source.md"; raw.parent.mkdir(parents=True); raw.write_text("source", encoding="utf-8")

@@ -10,7 +10,7 @@ from typing import Callable, Iterable, Literal
 from uuid import uuid4
 
 from netsuite_llm_wiki_mcp.archive_manifest import content_hash, load_manifest, vault_relative
-from netsuite_llm_wiki_mcp.archive_models import ArchiveError, ArchiveItem, ArchivePlan, ArchiveReason
+from netsuite_llm_wiki_mcp.archive_models import ArchiveError, ArchiveItem, ArchivePlan, ArchiveReason, is_archive_reason
 from netsuite_llm_wiki_mcp.knowledge_dependencies import KnowledgeDependencies
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 
@@ -22,8 +22,10 @@ class ArchivePlanner:
         self.plan_ttl = plan_ttl
         self.dependencies = KnowledgeDependencies(self.root)
 
-    def archive_plan(self, targets: str | Iterable[str], *, reason: ArchiveReason = "manual", cascade: bool = False, actor: str = "unknown", explicit: bool = True) -> ArchivePlan:
+    def archive_plan(self, targets: str | Iterable[str], *, reason: str = "manual", cascade: bool = False, actor: str = "unknown", explicit: bool = True) -> ArchivePlan:
         del actor
+        if not is_archive_reason(reason):
+            return self._plan("archive", (), blockers=[{"code": "invalid_archive_reason", "reason": reason}])
         values = [targets] if isinstance(targets, str) else list(targets)
         blockers: list[dict[str, object]] = []
         selected: dict[str, ArchiveItem] = {}

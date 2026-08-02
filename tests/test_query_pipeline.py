@@ -18,6 +18,20 @@ def test_query_filters_from_empty_mapping_uses_empty_tags() -> None:
     assert QueryFilters.from_mapping(None) == QueryFilters()
 
 
+def test_query_filters_accepts_any_sequence_of_string_tags() -> None:
+    assert QueryFilters.from_mapping({"tags": ("finance", "approved")}) == QueryFilters(tags=("finance", "approved"))
+    assert QueryFilters.from_mapping({"tags": ["finance", "approved"]}) == QueryFilters(tags=("finance", "approved"))
+
+
+def test_query_filters_rejects_non_sequence_or_non_string_tags() -> None:
+    for bad_tags in ("finance", b"finance", 42, {"finance"}, ["finance", 1]):
+        try:
+            QueryFilters.from_mapping({"tags": bad_tags})
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for tags={bad_tags!r}")
+
+
 def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

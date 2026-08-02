@@ -132,6 +132,13 @@ def test_archive_tools_use_shared_vault_resolver(monkeypatch: pytest.MonkeyPatch
     assert result["warnings"] == ["deprecated_vault_root"]  # type: ignore[index]
 
 
+def test_archive_rejects_invalid_reason_before_resolving_vault() -> None:
+    result = wiki_archive(target="wiki/concepts/example.md", reason="mcp_crud_validation_cleanup")
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_archive_reason"
+
+
 @pytest.mark.parametrize(
     ("tool", "kwargs", "expected_code"),
     [

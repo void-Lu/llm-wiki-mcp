@@ -72,7 +72,7 @@ class ArchiveService:
             """)
 
     def plan_archive(self, targets: str | list[str], *, reason: str = "manual", cascade: bool = False) -> dict[str, Any]:
-        plan = self.planner.archive_plan(targets, reason=reason, cascade=cascade, actor=self.actor)  # type: ignore[arg-type]
+        plan = self.planner.archive_plan(targets, reason=reason, cascade=cascade, actor=self.actor)
         self._save_plan(plan)
         return self._plan_payload(plan)
 
