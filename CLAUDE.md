@@ -22,7 +22,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### MCP 工具入口层
 
-[server.py](src/netsuite_llm_wiki_mcp/server.py) 用 FastMCP 注册所有公开工具，薄封装后委托到业务模块。人工笔记公开入口是 `wiki_write_note`；旧 `save_obsidian_note` 不应再注册。新增或调整 MCP 工具时，通常需要同时改：
+[server.py](src/netsuite_llm_wiki_mcp/server.py) 用 MCP Python SDK 2.x 的 `MCPServer` 注册所有公开工具，薄封装后委托到业务模块。人工笔记公开入口是 `wiki_write_note`；旧 `save_obsidian_note` 不应再注册。新增或调整 MCP 工具时，通常需要同时改：
 
 1. 业务模块中的纯函数实现。
 2. [server.py](src/netsuite_llm_wiki_mcp/server.py) 的 tool wrapper / `@mcp.tool()` 注册。

@@ -14,6 +14,12 @@ uv sync --extra dev --extra vector
 
 本仓库提交了 `uv.lock`；开发时优先使用 `uv sync --extra dev` 创建/同步 `.venv`，并安装 `dev` 可选依赖。
 
+### MCP SDK 2.x
+
+运行依赖固定在 `mcp>=2,<3`。stdio 启动方式和现有 MCP 客户端配置保持不变；服务器握手版本由运行时 provenance 通过 `MCPServer(..., version=...)` 公开上报。
+
+升级 SDK 后请重新生成由 `mcp dev` 或 `mcp install` 创建的客户端配置：这些命令会固定生成时的 SDK 版本。v2 的同步 tool handler 在线程中运行、工具结果在发送前强校验、streamable HTTP 的 lifespan 仅执行一次，URI 模板遵循 RFC 6570；WebSocket transport 与 Tasks API 已移除。本项目仅使用 stdio transport，不受已移除 transport 的影响。
+
 ## 运行
 
 ```bash

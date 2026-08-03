@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import sys
 from pathlib import Path
 
+import anyio
 import pytest
+from mcp import Client
 
 from netsuite_llm_wiki_mcp.runtime_config import ConfigRegistry, RuntimeConfigError, write_global_config
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
@@ -41,14 +44,36 @@ def _registry(tmp_path: Path) -> tuple[ConfigRegistry, Path]:
     return ConfigRegistry.from_file(config_path), root.resolve()
 
 
+async def _registered_tool_names(server: object) -> set[str]:
+    async with Client(server) as client: # type: ignore
+        return {tool.name for tool in (await client.list_tools()).tools}
+
+
+def _tool_result_payload(result: object) -> dict[str, object]:
+    structured_content = getattr(result, "structured_content", None)
+    if isinstance(structured_content, dict):
+        return structured_content
+    for content in getattr(result, "content", []):
+        text = getattr(content, "text", None)
+        if isinstance(text, str):
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                return payload
+    raise AssertionError("MCP tool result did not contain an object payload")
+
+
 def test_mcp_initialization_version_matches_runtime_provenance() -> None:
-    options = mcp._mcp_server.create_initialization_options()
-    assert options.server_name == "netsuite-llm-wiki-mcp"
-    assert options.server_version == RUNTIME_PROVENANCE.server_version
+    async def assert_handshake() -> None:
+        async with Client(mcp) as client:
+            assert client.server_info is not None
+            assert client.server_info.name == "netsuite-llm-wiki-mcp"
+            assert client.server_info.version == RUNTIME_PROVENANCE.server_version
+
+    anyio.run(assert_handshake)
 
 
 def test_registered_tools_match_core_public_surface() -> None:
-    assert {tool.name for tool in mcp._tool_manager.list_tools()} == CORE_TOOLS
+    assert anyio.run(_registered_tool_names, mcp) == CORE_TOOLS
 
 
 def test_worker_profile_adds_only_generation_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -66,9 +91,51 @@ def test_worker_profile_adds_only_generation_tool(monkeypatch: pytest.MonkeyPatc
     sys.modules[module_name] = worker_server
     try:
         spec.loader.exec_module(worker_server)
-        assert {tool.name for tool in worker_server.mcp._tool_manager.list_tools()} == CORE_TOOLS | {"wiki_generation"}
+        assert anyio.run(_registered_tool_names, worker_server.mcp) == CORE_TOOLS | {"wiki_generation"}
     finally:
         sys.modules.pop(module_name, None)
+
+
+def test_mcp_client_protocol_calls_status_and_query(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, _ = _registry(tmp_path)
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.server.CONFIG_REGISTRY", registry)
+    monkeypatch.setattr(
+        "netsuite_llm_wiki_mcp.server.wiki_status_tool",
+        lambda _: {
+            "ok": True,
+            "version": RUNTIME_PROVENANCE.package_version,
+            "runtime": RUNTIME_PROVENANCE.to_public_dict(),
+        },
+    )
+
+    class StubArchiveService:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+
+        def status(self) -> dict[str, object]:
+            return {"archive_index": {"state": "ready"}, "operations": {"pending": 0}}
+
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.server.ArchiveService", StubArchiveService)
+    monkeypatch.setattr(
+        "netsuite_llm_wiki_mcp.server.run_query_v2",
+        lambda root, question, **_: {"ok": True, "question": question, "results": []},
+    )
+
+    async def assert_protocol_calls() -> None:
+        async with Client(mcp) as client:
+            tools = (await client.list_tools()).tools
+            status_tool = next(tool for tool in tools if tool.name == "wiki_status")
+            assert isinstance(status_tool.input_schema, dict)
+
+            status_result = await client.call_tool("wiki_status", {"vault": "primary"})
+            query_result = await client.call_tool("wiki_query", {"vault": "primary", "question": "hello"})
+
+            assert status_result.is_error is False
+            assert query_result.is_error is False
+            assert _tool_result_payload(status_result)["vault"] == "primary"
+            assert _tool_result_payload(query_result) == {"ok": True, "question": "hello", "results": []}
+
+    anyio.run(assert_protocol_calls)
 
 
 def test_public_query_schema_has_logical_vault_and_no_runtime_overrides() -> None:

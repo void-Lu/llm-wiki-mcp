@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from netsuite_llm_wiki_mcp.note_writer import save_obsidian_note as run_write_note
 from netsuite_llm_wiki_mcp.wiki_update import apply_update as run_apply_update
@@ -41,8 +41,10 @@ def _load_registry() -> ConfigRegistry:
 
 
 CONFIG_REGISTRY = _load_registry()
-mcp = FastMCP("netsuite-llm-wiki-mcp")
-mcp._mcp_server.version = RUNTIME_PROVENANCE.server_version
+mcp = MCPServer(
+    "netsuite-llm-wiki-mcp",
+    version=RUNTIME_PROVENANCE.server_version,
+)
 
 
 def attach_warnings(payload: dict[str, Any], warnings: tuple[str, ...] | list[str]) -> dict[str, Any]:
