@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import queue
+import threading
 from typing import Any, Literal
 
 from mcp.server import MCPServer
@@ -41,6 +43,7 @@ def _load_registry() -> ConfigRegistry:
 
 
 CONFIG_REGISTRY = _load_registry()
+QUERY_TIMEOUT_SECONDS = 300
 mcp = MCPServer(
     "netsuite-llm-wiki-mcp",
     version=RUNTIME_PROVENANCE.server_version,
@@ -107,6 +110,39 @@ def _register(function: Any) -> Any:
     return mcp.tool()(function)
 
 
+def _with_timeout(function: Any, timeout_seconds: float) -> Any:
+    """Run a synchronous domain call under a wall-clock deadline.
+
+    MCP tool calls are synchronous, so a hung retrieval (corrupt index, slow
+    vector model, graph expansion over a large repository) would otherwise
+    block the tool indefinitely.  The worker is a daemon thread, so a timeout
+    never prevents interpreter shutdown; the caller receives a structured
+    error instead of waiting forever.
+    """
+
+    result_box: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
+
+    def runner() -> None:
+        try:
+            result_box.put(("ok", function()))
+        except BaseException as exc:  # noqa: BLE001 - transport errors back to the caller
+            result_box.put(("error", exc))
+
+    thread = threading.Thread(target=runner, daemon=True, name="wiki-query")
+    thread.start()
+    try:
+        status, value = result_box.get(timeout=timeout_seconds)
+    except queue.Empty:
+        return {
+            "ok": False,
+            "code": "query_timeout",
+            "error": f"query exceeded the {timeout_seconds:.0f}s execution limit",
+        }
+    if status == "ok":
+        return value
+    raise value
+
+
 @_register
 def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Return read-only health, index and policy status for a logical vault."""
@@ -138,15 +174,16 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
 QueryScope = Literal["auto", "knowledge", "history", "all", "archive"]
 
 
-@_register
-def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
-    """Query a vault using its immutable retrieval and context profile."""
-    if scope not in {"auto", "knowledge", "history", "all", "archive"}:
-        return {"ok": False, "code": "invalid_scope", "error": "scope must be auto, knowledge, history, all, or archive"}
-    if not question:
-        return {"ok": False, "code": "missing_question", "error": "question is required"}
-    if top_k < 1 or top_k > 100:
-        return {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 100"}
+def _run_wiki_query(
+    question: str,
+    scope: QueryScope,
+    project: str | None,
+    filters: dict[str, Any] | None,
+    top_k: int,
+    vault: str | None,
+    vault_root: str | None,
+    vaultRoot: str | None,
+) -> dict[str, Any]:
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
@@ -188,6 +225,21 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     if settings.context.response_mode == "legacy":
         result = legacy_response_from_v2(result)
     return attach_warnings(attach_no_results_outcome(result), resolution.warnings)
+
+
+@_register
+def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+    """Query a vault using its immutable retrieval and context profile."""
+    if scope not in {"auto", "knowledge", "history", "all", "archive"}:
+        return {"ok": False, "code": "invalid_scope", "error": "scope must be auto, knowledge, history, all, or archive"}
+    if not question:
+        return {"ok": False, "code": "missing_question", "error": "question is required"}
+    if top_k < 1 or top_k > 40:
+        return {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 40"}
+    return _with_timeout(
+        lambda: _run_wiki_query(question, scope, project, filters, top_k, vault, vault_root, vaultRoot),
+        QUERY_TIMEOUT_SECONDS,
+    )
 
 
 @_register

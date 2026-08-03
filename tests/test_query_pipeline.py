@@ -652,6 +652,153 @@ def test_v2_two_phase_pack_keeps_every_selected_page_represented(tmp_path: Path)
     assert second in pack_paths
 
 
+def test_v2_top_k_scales_context_budget(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/projects/example/troubleshooting/codegraph-fix.md",
+        "CodeGraph 修复：SuiteScript 解析",
+        (
+            "## 修复步骤\n\n"
+            "1. 停掉 codegraph daemon\n"
+            "2. 修改 tree-sitter.js\n"
+            "3. codegraph index 重建\n"
+        ),
+        type="troubleshooting",
+    )
+    refresh_indexes(root)
+
+    question = "如何修复 codegraph 解析失败，具体步骤是什么"
+    ten = run_query_v2(root, question, retrieval_mode="lexical", top_k=10)
+    twenty = run_query_v2(root, question, retrieval_mode="lexical", top_k=20)
+
+    assert ten["context_pack"]["budget"]["total"] == 4_000
+    assert twenty["context_pack"]["budget"]["total"] == 8_000
+
+
+def test_v2_step_guide_bonus_prefers_numbered_procedural_page(tmp_path: Path) -> None:
+    """Among pages with comparable lexical scores, the page written as numbered
+    steps wins the relaxed recovery even though no keyword list is involved."""
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    steps = "wiki/projects/example/troubleshooting/codegraph-fix-steps.md"
+    _write(
+        root,
+        steps,
+        "CodeGraph 修复：SuiteScript 解析",
+        (
+            "## 修复步骤\n\n"
+            "1. 停掉 codegraph daemon 并释放数据库锁\n"
+            "2. 修改 tree-sitter.js 补上名字回查\n"
+            "3. 用 codegraph index 重建 SuiteScript 索引\n"
+            "4. 用 codegraph explore 验证函数关系恢复\n"
+        ),
+        type="troubleshooting",
+    )
+    prose = "wiki/projects/example/troubleshooting/codegraph-fix-prose.md"
+    _write(
+        root,
+        prose,
+        "CodeGraph 修复：SuiteScript 解析",
+        (
+            "## 修复说明\n\n"
+            "停掉 codegraph daemon 释放数据库锁，修改 tree-sitter.js 补上名字回查，"
+            "然后用 codegraph index 重建 SuiteScript 索引，最后用 codegraph explore "
+            "验证函数关系恢复。\n"
+        ),
+        type="troubleshooting",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "如何修复 codegraph 解析失败，具体步骤是什么",
+        retrieval_mode="lexical",
+    )
+
+    assert result["results"][0]["path"] == steps
+
+
+def test_v2_adaptive_expand_keeps_close_scoring_pages_above_boundary(tmp_path: Path) -> None:
+    """With top_k=10, pages ranked 11+ that still score within 90% of the
+    boundary are kept (up to 40); a clear score drop stops the expansion."""
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    pages: list[str] = []
+    for index in range(14):
+        name = f"similar-{index:02d}"
+        path = f"wiki/projects/example/troubleshooting/{name}.md"
+        _write(
+            root,
+            path,
+            f"CodeGraph 修复：SuiteScript 解析 {index}",
+            (
+                "## 问题\n\n"
+                "codegraph 工具更新后，本地修复的 SuiteScript 脚本解析补丁失效。\n\n"
+                "## 修复步骤\n\n"
+                "1. 停掉 codegraph daemon 释放数据库锁\n"
+                "2. 修改 tree-sitter.js 补上名字回查\n"
+                "3. 用 codegraph index 重建 SuiteScript 索引\n"
+                "4. 用 codegraph explore 验证函数关系恢复\n"
+            ),
+            type="troubleshooting",
+        )
+        pages.append(path)
+    _write(
+        root,
+        "wiki/concepts/unrelated.md",
+        "Unrelated overview",
+        "这是一个完全无关的页面，介绍其他主题。",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "如何修复 codegraph 解析失败，具体步骤是什么",
+        retrieval_mode="lexical",
+        top_k=10,
+    )
+
+    returned = [item["path"] for item in result["results"]]
+    assert len(returned) > 10  # the score-driven expansion kept close-scoring pages
+    assert all(path in returned for path in pages[:12])
+    assert not any("unrelated" in path for path in returned)
+
+
+def test_v2_adaptive_expand_budget_scales_with_returned_count(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/projects/example/troubleshooting/codegraph-fix.md",
+        "CodeGraph 修复：SuiteScript 解析",
+        (
+            "## 修复步骤\n\n"
+            "1. 停掉 codegraph daemon\n"
+            "2. 修改 tree-sitter.js\n"
+            "3. codegraph index 重建\n"
+        ),
+        type="troubleshooting",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "如何修复 codegraph 解析失败，具体步骤是什么",
+        retrieval_mode="lexical",
+        top_k=10,
+    )
+
+    # A single-page vault keeps the intent floor (concept=4000): the budget
+    # never shrinks below the requested top_k base, and grows with returns.
+    assert result["context_pack"]["budget"]["total"] == 4_000
+    assert result["context_pack"]["budget"]["total"] >= 400 * len(result["results"])
+
+
 def test_v2_relaxes_multilingual_questions_after_strict_fts_returns_no_results(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

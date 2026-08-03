@@ -20,46 +20,22 @@ from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProv
 from netsuite_llm_wiki_mcp.wiki_query import QueryCandidate, _apply_graph_expansion, _build_graph
 
 
-RANKING_POLICY_VERSION = "query-v2-passage-rrf-4"
+RANKING_POLICY_VERSION = "query-v2-passage-rrf-7"
 RRF_K = 60
 RAW_FALLBACK_LIMIT = 20
 IDENTIFIER_PHRASE_BONUS = 20.0
-IDENTIFIER_GUIDE_TITLE_BONUS = 12.0
 IDENTIFIER_PHRASE_CANDIDATES = 200
 PAGE_FILL_LIMIT = 500
-PAGE_TOKEN_BUDGET = 1_200
+PAGE_TOKEN_BUDGET = 2_400
 PAGE_FULL_FILL_MIN_RATIO = 0.6
 PAGE_WEAK_HIT_LIMIT = 3
 FRESHNESS_BONUS_MAX = 12.0
 FRESHNESS_DECAY_DAYS = 90
-_GUIDE_TITLE_TERMS = (
-    "installing",
-    "install",
-    "setup",
-    "configure",
-    "configuring",
-    "connecting",
-    "connect",
-    "get started",
-    "using",
-    "overview",
-    "faq",
-    "best practices",
-    "required",
-    "permissions",
-    "guide",
-    "companion",
-)
-
-
-def _title_has_guide_term(title: str) -> bool:
-    """Match guide words on word boundaries so ``connect`` never matches
-    ``connector`` and every NetSuite AI Connector page is not boosted alike."""
-
-    lowered = title.casefold()
-    return any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None for term in _GUIDE_TITLE_TERMS)
-
-
+STEP_BONUS_MAX = 4.0
+STEP_COUNT_FULL = 5
+ADAPTIVE_EXPAND_MAX = 40
+ADAPTIVE_SCORE_RATIO = 0.9
+_STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
 def _freshness_bonus(hit: PassageHit, metadata: dict[str, dict[str, Any]]) -> float:
     """Reward recently updated wiki pages so a newer fix patch outranks an
     older note that happens to share the same vocabulary.
@@ -82,6 +58,67 @@ def _freshness_bonus(hit: PassageHit, metadata: dict[str, dict[str, Any]]) -> fl
     if days < 0 or days > FRESHNESS_DECAY_DAYS:
         return 0.0
     return round(FRESHNESS_BONUS_MAX * (1 - days / FRESHNESS_DECAY_DAYS), 3)
+
+
+def _step_counts_for_pages(
+    paths: list[str],
+    store: RetrievalIndexStore,
+    raw_store: RetrievalIndexStore | None,
+) -> dict[str, int]:
+    """Count ordered-list items per page as a topic- and language-agnostic
+    procedural signal.
+
+    How-to, install and fix pages are almost always written as numbered steps
+    (``1.``, ``1)``, ``1、`` or ``第一步``), while reference, FAQ and overview
+    pages typically are not.  Counting those list items needs no vocabulary:
+    it is a pure document-structure feature that works for any topic in any
+    language.
+    """
+
+    counts: dict[str, int] = {}
+    for sub_paths, sub_store in (
+        ([p for p in paths if not p.startswith("raw/")], store),
+        ([p for p in paths if p.startswith("raw/")], raw_store),
+    ):
+        if not sub_paths or sub_store is None:
+            continue
+        hits = sub_store.passages_for_pages(sub_paths, limit_per_page=PAGE_FILL_LIMIT)
+        for hit in hits:
+            counts[hit.page_path] = counts.get(hit.page_path, 0) + len(_STEP_ITEM_RE.findall(hit.text))
+    return counts
+
+
+def _adaptive_expand(
+    ranked: list[dict[str, Any]],
+    base_top_k: int,
+    *,
+    max_top_k: int = ADAPTIVE_EXPAND_MAX,
+    score_ratio: float = ADAPTIVE_SCORE_RATIO,
+) -> list[dict[str, Any]]:
+    """Extend the result list when scores stay close to the requested boundary.
+
+    The requested ``top_k`` is a floor, not a hard cap: pages ranked just
+    behind the boundary that still score within ``score_ratio`` of it are
+    plausibly part of the same answer set, so they are kept — up to
+    ``max_top_k`` (40).  The decision is purely score-driven, so it applies to
+    any topic and language without domain vocabulary.
+    """
+
+    selected = ranked[:base_top_k]
+    if len(ranked) <= base_top_k or base_top_k <= 0:
+        return selected
+    boundary = ranked[base_top_k - 1]["score"]
+    if boundary <= 0:
+        return selected
+    threshold = boundary * score_ratio
+    index = base_top_k
+    while index < min(len(ranked), max_top_k):
+        if ranked[index]["score"] >= threshold:
+            selected.append(ranked[index])
+            index += 1
+        else:
+            break
+    return selected
 
 
 def _build_page_ordered_context(
@@ -440,8 +477,8 @@ def run_query_v2(
     started = time.perf_counter()
     if not question.strip():
         return {"ok": False, "code": "missing_question", "error": "question is required"}
-    if not 1 <= top_k <= 100:
-        return {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 100"}
+    if not 1 <= top_k <= 40:
+        return {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 40"}
     if retrieval_mode not in {"lexical", "vector", "hybrid"}:
         return {
             "ok": False,
@@ -455,6 +492,7 @@ def run_query_v2(
     store = RetrievalIndexStore(root, scope="archive" if effective_scope == "archive" else "active")
     status = store.status()
     if not status.get("ok"):
+        k_budget = min(hard_budget_tokens, 400 * top_k)
         return {
             "ok": True,
             "code": str(status.get("code") or "index_unavailable"),
@@ -462,7 +500,7 @@ def run_query_v2(
             "question": question,
             "scope": scope,
             "results": [],
-            "context_pack": {"passages": [], "citations": [], "budget": {"total": min(hard_budget_tokens, 4_000), "used": 0}},
+            "context_pack": {"passages": [], "citations": [], "budget": {"total": k_budget, "used": 0}},
             "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}},
         }
 
@@ -560,7 +598,7 @@ def run_query_v2(
         if page_path not in selected_paths:
             selected.append(item)
             selected_paths.add(page_path)
-    selected = selected[:top_k]
+    selected = _adaptive_expand(selected, top_k)
     selected_paths = {item["hit"].page_path for item in selected}
     hit_stats: dict[str, dict[str, Any]] = {}
     pool_by_page: dict[str, list[dict[str, Any]]] = {}
@@ -703,8 +741,6 @@ def run_query_v2(
                     compact = f"{hit.title}\n{hit.text}".casefold()
                     if any(phrase in compact for phrase in query_identifier_phrases):
                         score += IDENTIFIER_PHRASE_BONUS
-                    if _title_has_guide_term(hit.title):
-                        score += IDENTIFIER_GUIDE_TITLE_BONUS
                 raw_items.append(
                     {
                         "hit": hit,
@@ -731,12 +767,15 @@ def run_query_v2(
             # signal.  It leads the merged pool; curated wiki evidence from
             # relaxed recovery is still merged afterwards so it is never
             # starved, while incidental relaxed raw noise is dropped.
+            # Freshness is deliberately not applied here: an exact identifier
+            # query targets official feature documentation, and a recently
+            # edited wiki note on a different topic must not outrank it merely
+            # because it is newer.
             for item in relaxed_items:
                 item["score"] = round(
                     item["hit"].score
                     + _authority_bonus(item["hit"], intent, effective_scope, metadata)
-                    + _title_overlap_bonus(item["hit"], question)
-                    + _freshness_bonus(item["hit"], metadata),
+                    + _title_overlap_bonus(item["hit"], question),
                     12,
                 )
             merged_items = raw_items + relaxed_items
@@ -768,6 +807,23 @@ def run_query_v2(
                         12,
                     )
         if merged_items:
+            if raw_lexical_mode != "qualified_code":
+                # Procedural-page preference: in fuzzy recovery, pages written
+                # as numbered steps receive a small structural bonus so a
+                # step-by-step guide outranks a same-scoring reference or FAQ
+                # page.  The bonus is capped and derived purely from document
+                # structure, so it applies to any topic and language.
+                step_counts = _step_counts_for_pages(
+                    sorted({item["hit"].page_path for item in merged_items}),
+                    store,
+                    raw_store,
+                )
+                for item in merged_items:
+                    count = step_counts.get(item["hit"].page_path, 0)
+                    item["score"] = round(
+                        item["score"] + STEP_BONUS_MAX * min(count, STEP_COUNT_FULL) / STEP_COUNT_FULL,
+                        12,
+                    )
             merged_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
             selected = []
             selected_paths = set()
@@ -776,7 +832,7 @@ def run_query_v2(
                 if page_path not in selected_paths:
                     selected.append(item)
                     selected_paths.add(page_path)
-            selected = selected[:top_k]
+            selected = _adaptive_expand(selected, top_k)
             selected_paths = {item["hit"].page_path for item in selected}
             hit_stats = {}
             pool_by_page = {}
@@ -811,7 +867,12 @@ def run_query_v2(
         )
         for item in context_items
     ]
-    packed: dict[str, Any] = pack_context(passages, hard_limit=hard_budget_tokens, intent=intent) if include_context_pack else {"passages": [], "citations": [], "budget": {"total": min(hard_budget_tokens, 16_000), "used": 0, "omitted": 0}}
+    k_budget = min(hard_budget_tokens, 400 * max(top_k, len(selected)))
+    packed: dict[str, Any] = (
+        pack_context(passages, hard_limit=hard_budget_tokens, intent=intent, budget_scale=k_budget)
+        if include_context_pack
+        else {"passages": [], "citations": [], "budget": {"total": k_budget, "used": 0, "omitted": 0}}
+    )
     fallback_payload = {
         "level": "raw" if raw_fallback else "none",
         "reasons": ["wiki_zero_results"] if raw_fallback else [],

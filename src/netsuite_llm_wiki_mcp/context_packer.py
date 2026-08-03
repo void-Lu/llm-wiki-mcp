@@ -38,9 +38,24 @@ def _deduplicate_overlap(previous: str, current: str) -> str:
     return current
 
 
-def pack_context(passages: Iterable[ContextPassage], *, hard_limit: int, intent: str) -> dict[str, object]:
-    """Keep bodies only in ``context_pack.passages`` and obey a hard limit."""
+def pack_context(
+    passages: Iterable[ContextPassage],
+    *,
+    hard_limit: int,
+    intent: str,
+    budget_scale: int | None = None,
+) -> dict[str, object]:
+    """Keep bodies only in ``context_pack.passages`` and obey a hard limit.
+
+    ``budget_scale`` lets callers grow the budget with the number of requested
+    results (for example 400 tokens per result).  The intent target remains a
+    floor: a ``research`` question keeps its deep budget even with a small
+    result count, while a wider result set scales the pack accordingly.
+    """
+
     target = {"exact_entity": 2_000, "concept": 4_000, "comparison": 8_000, "research": 16_000}.get(intent, 4_000)
+    if budget_scale is not None:
+        target = max(target, budget_scale)
     budget = min(max(1, hard_limit), target)
     candidates = list(passages)
     output: list[dict[str, object]] = []

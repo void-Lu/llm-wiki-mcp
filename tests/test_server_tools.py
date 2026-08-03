@@ -4,6 +4,7 @@ import importlib.util
 import inspect
 import json
 import sys
+import time
 from pathlib import Path
 
 import anyio
@@ -242,6 +243,28 @@ def test_archive_tools_return_structured_error_when_service_initialization_fails
 def test_query_rejects_runtime_override_filters_before_domain_call() -> None:
     result = wiki_query(question="hello", filters={"index_path": "bad"})
     assert result == {"ok": False, "code": "invalid_filters", "error": "filters may only contain type and tags"}
+
+
+def test_query_rejects_top_k_above_limit() -> None:
+    result = wiki_query(question="hello", top_k=41)
+    assert result == {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 40"}
+
+
+def test_query_enforces_wall_clock_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, vault_root = _registry(tmp_path)
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.server.CONFIG_REGISTRY", registry)
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.server.QUERY_TIMEOUT_SECONDS", 0.1)
+
+    def slow_query(*args: object, **kwargs: object) -> dict[str, object]:
+        time.sleep(0.5)
+        return {"ok": True, "results": []}
+
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.server.run_query_v2", slow_query)
+
+    result = wiki_query(question="hello", vault_root=str(vault_root))
+
+    assert result["ok"] is False
+    assert result["code"] == "query_timeout"
 
 
 def test_write_note_requires_note_type() -> None:
