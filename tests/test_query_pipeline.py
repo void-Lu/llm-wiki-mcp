@@ -282,6 +282,74 @@ def test_v2_raw_fallback_ranks_strong_raw_answer_above_noisy_wiki_relaxed_match(
     assert result["pipeline"]["counters"]["relaxed_fts_hits"] > 0
 
 
+def test_v2_context_pack_carries_multiple_answer_passages_from_the_leading_page(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    note = "wiki/concepts/netsuite-object-playbooks/typeid-cheatsheet.md"
+    _write(
+        root,
+        note,
+        "NetSuite 记录类型内部 ID 速查",
+        (
+            "# 类型对照\n\n"
+            "本页速查 NetSuite 标准记录在自定义 list 字段上的 selectrecordtype 数字。\n\n"
+            "## 标准记录 typeId 表\n\n"
+            "| 记录类型 | typeId |\n"
+            "| --- | --- |\n"
+            "| SUBSIDIARY | -117 |\n"
+            "| ACCOUNT | -112 |\n"
+            "| LOCATION | -103 |\n\n"
+            "## SDF 示例\n\n"
+            "<selectrecordtype>-117</selectrecordtype>"
+        ),
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "subsidiary在自定义list类型字段上的内部id是什么", retrieval_mode="lexical")
+
+    assert result["results"][0]["path"] == note
+    assert len(result["context_pack"]["passages"]) == 3
+    assert all(item["path"] == note for item in result["context_pack"]["passages"])
+    assert any("-117" in item["content"] for item in result["context_pack"]["passages"])
+    assert result["pipeline"]["lexical"]["mode"] == "relaxed"
+    assert result["pipeline"]["fallback"]["level"] == "none"
+
+
+def test_v2_list_record_field_label_does_not_trigger_qualified_code_priority(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    note = "wiki/concepts/netsuite-object-playbooks/typeid-cheatsheet.md"
+    _write(
+        root,
+        note,
+        "Subsidiary List/Record typeId 速查",
+        (
+            "# List/Record 字段\n\n"
+            "自定义 List/Record 字段关联 Subsidiary 标准记录时 selectrecordtype 是 -117。\n\n"
+            "## 对照表\n\n"
+            "| SUBSIDIARY | -117 |\n"
+            "| ACCOUNT | -112 |"
+        ),
+        type="concept",
+    )
+    raw = root / "raw" / "sources" / "references" / "list-record-fields.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# List/Record Fields\n\n"
+        "List/Record 字段的 selectrecordtype 值说明，N/record 模块方法参考。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "自定义 List/Record 字段关联 Subsidiary 标准记录 typeId 是多少", retrieval_mode="lexical")
+
+    assert result["results"][0]["path"] == note
+    assert any(item["path"] == "raw/sources/references/list-record-fields.md" for item in result["results"])
+    assert result["pipeline"]["lexical"]["mode"] == "relaxed"
+    assert result["pipeline"]["fallback"]["level"] == "none"
+
+
 def test_v2_raw_fallback_returns_only_the_best_matching_passage_per_source_file(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

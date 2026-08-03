@@ -48,7 +48,32 @@ def relaxed_fts_query(text: str) -> str:
 
 
 def qualified_code_fts_query(text: str) -> str:
-    """Extract slash-qualified code identifiers such as ``N/record`` for FTS recovery."""
+    """Extract slash-qualified identifiers and keep their verbatim slash term.
 
-    values = [segment.casefold() for match in _QUALIFIED_CODE.findall(text) for segment in match]
-    return _fts_expression(values, "AND")
+    Slash-qualified identifiers (for example ``N/record``) are recovered with
+    their parsed segments, and the verbatim slash term (for example
+    ``List/Record``) is preserved as an adjacent phrase.  Both forms are part
+    of the query so a generic English slash term keeps its original meaning
+    instead of being reduced to two disconnected tokens.
+    """
+
+    matches = _QUALIFIED_CODE.findall(text)
+    if not matches:
+        return ""
+    parsed = [segment.casefold() for match in matches for segment in match]
+    clauses = [_fts_expression(parsed, "AND")]
+    phrases = [" ".join(segment.casefold() for segment in match) for match in matches]
+    clauses.append(" OR ".join(f'"{phrase}"' for phrase in phrases))
+    return " OR ".join(clauses)
+
+
+def module_qualified(text: str) -> bool:
+    """True when every slash-qualified prefix is a single-letter namespace.
+
+    ``N/record`` is a SuiteScript module identifier and deserves the dedicated
+    qualified-code recovery path; ``List/Record`` is a NetSuite field-type
+    label and must fall back to ordinary multilingual recovery instead.
+    """
+
+    matches = _QUALIFIED_CODE.findall(text)
+    return bool(matches) and all(len(prefix.casefold()) == 1 for prefix, _ in matches)

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from netsuite_llm_wiki_mcp.context_packer import ContextPassage, pack_context
+from netsuite_llm_wiki_mcp.lexical_analyzer import module_qualified
 from netsuite_llm_wiki_mcp.query_telemetry import QueryTelemetry
 from netsuite_llm_wiki_mcp.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings, TelemetrySettings
@@ -21,6 +22,7 @@ from netsuite_llm_wiki_mcp.wiki_query import QueryCandidate, _apply_graph_expans
 RANKING_POLICY_VERSION = "query-v2-passage-rrf-1"
 RRF_K = 60
 RAW_FALLBACK_LIMIT = 20
+CONTEXT_PASSAGES_PER_PAGE = 3
 _HISTORY_RE = re.compile(r"(?:之前|上次|讨论|会话|当时|历史|previous|last\s+(?:time|session)|history)", re.I)
 _EXACT_RE = re.compile(r"(?:原文|逐字|代码|字段|field\s+id|api|record|script|exact|verbatim)", re.I)
 _COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
@@ -389,19 +391,26 @@ def run_query_v2(
         candidate = graph_candidates[hit.page_path]
         scored.append({"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0, "rrf": 0.0, "exact": False, "graph_score": candidate.graph_score, "graph_reasons": list(candidate.rank_breakdown.graph_reasons), "score": candidate.total_score})
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
-    # Retrieval is passage-first, but the public result list and compact pack
-    # must not repeat the same document merely because several of its passages
-    # matched.  Keep the highest ranked passage for each page deterministically.
+    # Retrieval is passage-first.  The public result list keeps the single
+    # best passage per page, while the context pack may carry several passages
+    # from the same page so an answer table or code block is not lost behind a
+    # higher-scoring intro passage.  Both lists consume the same
+    # score-ordered candidate pool.
     selected: list[dict[str, Any]] = []
+    context_items: list[dict[str, Any]] = []
     selected_paths: set[str] = set()
+    context_counts: dict[str, int] = {}
     for item in scored:
         page_path = item["hit"].page_path
-        if page_path in selected_paths:
-            continue
-        selected.append(item)
-        selected_paths.add(page_path)
-        if len(selected) >= top_k:
-            break
+        if page_path not in selected_paths:
+            selected.append(item)
+            selected_paths.add(page_path)
+        if page_path in selected_paths and context_counts.get(page_path, 0) < CONTEXT_PASSAGES_PER_PAGE:
+            context_items.append(item)
+            context_counts[page_path] = context_counts.get(page_path, 0) + 1
+    selected = selected[:top_k]
+    selected_paths = {item["hit"].page_path for item in selected}
+    context_items = [item for item in context_items if item["hit"].page_path in selected_paths]
     # A true Wiki zero-result query recovers evidence from two places: the
     # active store under relaxed multilingual lexical recovery, and the
     # dedicated raw-source store.  Both stores share the same tokenizer and
@@ -418,6 +427,7 @@ def run_query_v2(
     lexical_mode = "strict"
     if not has_primary_recall and effective_scope in {"knowledge", "all"}:
         # Stage one: bounded multilingual recovery over the curated wiki.
+        relaxed_items: list[dict[str, Any]] = []
         try:
             relaxed_hits = store.search_fts(
                 question,
@@ -431,32 +441,35 @@ def run_query_v2(
             relaxed_hits = []
             status = {**status, "code": exc.code}
         relaxed_fts_hits = len(relaxed_hits)
-        relaxed_by_path: dict[str, dict[str, Any]] = {}
         for rank, hit in enumerate(relaxed_hits, 1):
             if (
                 not _eligible(hit, metadata, scope=effective_scope)
                 or not _matches_request(hit, metadata, project=project, filters=filters)
-                or hit.page_path in relaxed_by_path
             ):
                 continue
-            relaxed_by_path[hit.page_path] = {
-                "hit": hit,
-                "fts_rank": rank,
-                "title_rank": None,
-                "vector_rank": None,
-                "vector_score": 0.0,
-                "rrf": 0.0,
-                "exact": False,
-                "graph_score": 0.0,
-                "graph_reasons": [],
-                "score": round(hit.score, 12),
-            }
+            relaxed_items.append(
+                {
+                    "hit": hit,
+                    "fts_rank": rank,
+                    "title_rank": None,
+                    "vector_rank": None,
+                    "vector_score": 0.0,
+                    "rrf": 0.0,
+                    "exact": False,
+                    "graph_score": 0.0,
+                    "graph_reasons": [],
+                    "score": round(hit.score, 12),
+                }
+            )
         # Stage two: dedicated raw-store fallback (strict, then slash-qualified
-        # code identifiers, then relaxed).
+        # identifiers, then relaxed).  A slash-qualified identifier wins
+        # outright only for a genuine module namespace such as ``N/record``;
+        # a generic slash term such as ``List/Record`` stays in the merged
+        # pool so curated wiki evidence is not starved by it.
+        raw_items: list[dict[str, Any]] = []
+        raw_lexical_mode = "strict"
         raw_store = RetrievalIndexStore(root, scope="raw")
         raw_status = raw_store.status()
-        raw_by_path: dict[str, dict[str, Any]] = {}
-        raw_lexical_mode = "strict"
         if raw_status.get("ok"):
             try:
                 raw_hits = raw_store.search_fts(
@@ -474,11 +487,11 @@ def run_query_v2(
                     tags=list(filters.tags),
                     mode="qualified_code",
                 )
-                # A slash-qualified identifier is a stronger signal than
-                # incidental English terms such as "record" or "methods".
+                # A slash-qualified module identifier is a stronger signal
+                # than incidental English terms such as "record" or "methods".
                 # Prefer its dedicated lookup whenever available, regardless
                 # of whether the surrounding question is Chinese or English.
-                if qualified_code_hits:
+                if qualified_code_hits and module_qualified(question):
                     raw_hits = qualified_code_hits
                     raw_lexical_mode = "qualified_code"
                 elif not raw_hits:
@@ -497,50 +510,60 @@ def run_query_v2(
                 raw_index_warning = exc.code
             raw_fts_hits = len(raw_hits)
             for rank, hit in enumerate(raw_hits, 1):
-                if hit.page_path in raw_by_path:
-                    continue
-                raw_by_path[hit.page_path] = {
-                    "hit": hit,
-                    "fts_rank": rank,
-                    "title_rank": None,
-                    "vector_rank": None,
-                    "vector_score": 0.0,
-                    "rrf": 0.0,
-                    "exact": False,
-                    "graph_score": 0.0,
-                    "graph_reasons": [],
-                    "score": hit.score,
-                }
+                raw_items.append(
+                    {
+                        "hit": hit,
+                        "fts_rank": rank,
+                        "title_rank": None,
+                        "vector_rank": None,
+                        "vector_score": 0.0,
+                        "rrf": 0.0,
+                        "exact": False,
+                        "graph_score": 0.0,
+                        "graph_reasons": [],
+                        "score": hit.score,
+                    }
+                )
         else:
             raw_index_warning = str(raw_status.get("code") or "raw_index_unavailable")
-        if relaxed_by_path and not raw_by_path:
-            # Wiki-only recovery keeps the curation bonus so an overlapping
-            # knowledge page still outranks weaker lexical neighbours.
-            for item in relaxed_by_path.values():
-                item["score"] = round(
-                    item["hit"].score
-                    + _authority_bonus(item["hit"], intent, effective_scope, metadata)
-                    + _title_overlap_bonus(item["hit"], question),
-                    12,
-                )
-        if raw_lexical_mode == "qualified_code":
-            # A slash-qualified identifier is a precise, strong signal.  The
-            # dedicated raw lookup wins outright over incidental wiki term
-            # overlap (for example "record" or "methods"), matching the
-            # pre-merge fallback precedence for this mode.
-            merged = dict(raw_by_path)
+        if raw_lexical_mode == "qualified_code" and module_qualified(question):
+            # A slash-qualified module identifier is a precise, strong signal.
+            # The dedicated raw lookup wins outright over incidental wiki term
+            # overlap (for example "record" or "methods").
+            merged_items = raw_items
         else:
-            merged = dict(relaxed_by_path)
-            for path, item in raw_by_path.items():
-                merged.setdefault(path, item)
-        if merged:
-            selected = sorted(
-                merged.values(),
-                key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id),
-            )[:top_k]
-            if raw_lexical_mode == "qualified_code":
+            merged_items = relaxed_items + raw_items
+            if relaxed_items and not raw_items:
+                # Wiki-only recovery keeps the curation bonus so an
+                # overlapping knowledge page still outranks weaker lexical
+                # neighbours.
+                for item in merged_items:
+                    item["score"] = round(
+                        item["hit"].score
+                        + _authority_bonus(item["hit"], intent, effective_scope, metadata)
+                        + _title_overlap_bonus(item["hit"], question),
+                        12,
+                    )
+        if merged_items:
+            merged_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
+            selected = []
+            context_items = []
+            selected_paths = set()
+            context_counts = {}
+            for item in merged_items:
+                page_path = item["hit"].page_path
+                if page_path not in selected_paths:
+                    selected.append(item)
+                    selected_paths.add(page_path)
+                if page_path in selected_paths and context_counts.get(page_path, 0) < CONTEXT_PASSAGES_PER_PAGE:
+                    context_items.append(item)
+                    context_counts[page_path] = context_counts.get(page_path, 0) + 1
+            selected = selected[:top_k]
+            selected_paths = {item["hit"].page_path for item in selected}
+            context_items = [item for item in context_items if item["hit"].page_path in selected_paths]
+            if raw_lexical_mode == "qualified_code" and module_qualified(question):
                 lexical_mode = "qualified_code"
-            elif raw_lexical_mode == "relaxed" or relaxed_by_path:
+            elif raw_lexical_mode == "relaxed" or relaxed_items:
                 lexical_mode = "relaxed"
             # A merged result set is a raw fallback only when the best-ranked
             # evidence is a raw source; a curated wiki page on top means the
@@ -556,7 +579,7 @@ def run_query_v2(
             "raw_evidence" if item["hit"].source_kind == "raw" else "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge",
             _citation_metadata(item["hit"], provenance),
         )
-        for item in selected
+        for item in context_items
     ]
     packed: dict[str, Any] = pack_context(passages, hard_limit=hard_budget_tokens, intent=intent) if include_context_pack else {"passages": [], "citations": [], "budget": {"total": min(hard_budget_tokens, 16_000), "used": 0, "omitted": 0}}
     fallback_payload = {
