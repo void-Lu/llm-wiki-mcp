@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from netsuite_llm_wiki_mcp.context_packer import ContextPassage, pack_context
+from netsuite_llm_wiki_mcp.context_packer import ContextPassage, estimate_tokens, pack_context
 from netsuite_llm_wiki_mcp.lexical_analyzer import identifier_phrases, module_qualified
 from netsuite_llm_wiki_mcp.query_telemetry import QueryTelemetry
 from netsuite_llm_wiki_mcp.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
@@ -19,14 +19,16 @@ from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProv
 from netsuite_llm_wiki_mcp.wiki_query import QueryCandidate, _apply_graph_expansion, _build_graph
 
 
-RANKING_POLICY_VERSION = "query-v2-passage-rrf-2"
+RANKING_POLICY_VERSION = "query-v2-passage-rrf-3"
 RRF_K = 60
 RAW_FALLBACK_LIMIT = 20
-CONTEXT_PASSAGES_PER_PAGE = 3
 IDENTIFIER_PHRASE_BONUS = 20.0
 IDENTIFIER_GUIDE_TITLE_BONUS = 12.0
-IDENTIFIER_HEADING_STEP_BONUS = 8.0
 IDENTIFIER_PHRASE_CANDIDATES = 200
+PAGE_FILL_LIMIT = 500
+PAGE_TOKEN_BUDGET = 1_200
+PAGE_FULL_FILL_MIN_RATIO = 0.6
+PAGE_WEAK_HIT_LIMIT = 3
 _GUIDE_TITLE_TERMS = (
     "installing",
     "install",
@@ -55,69 +57,68 @@ def _title_has_guide_term(title: str) -> bool:
     return any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None for term in _GUIDE_TITLE_TERMS)
 
 
-_HEADING_STEP_TERMS = (
-    "connect",
-    "connecting",
-    "install",
-    "installing",
-    "enable",
-    "enabling",
-    "setup",
-    "set up",
-    "configure",
-    "configuring",
-    "required",
-    "permission",
-    "permissions",
-    "role",
-    "feature",
-    "features",
-    "prerequisite",
-    "prerequisites",
-    "checklist",
-    "before you begin",
-)
+def _build_page_ordered_context(
+    selected: list[dict[str, Any]],
+    store: RetrievalIndexStore,
+    *,
+    raw_store: RetrievalIndexStore | None = None,
+    hit_stats: dict[str, dict[str, Any]] | None = None,
+    pool_by_page: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    """Group context candidates by page, then order them by reading order.
 
+    Paragraph-level BM25 decides which pages are relevant, but its per-segment
+    scores are not a document map: in a how-to or troubleshooting note the fix
+    or install steps usually live in later sections and contain code blocks or
+    tables that dilute BM25, so keeping only the top-scored passages per page
+    drops exactly those steps.  Once a page is selected, every passage of that
+    page is carried in ordinal (reading) order and the global pack budget
+    decides how much fits.  The approach is language- and topic-agnostic: no
+    step/guide keyword lists are involved, so it works for any answer that
+    spans several sections of one document.
+    """
 
-_FILL_GUIDE_TERMS = (
-    "install",
-    "installing",
-    "setup",
-    "configure",
-    "configuring",
-    "connect",
-    "connecting",
-    "get started",
-    "required",
-    "permissions",
-    "prerequisite",
-    "prerequisites",
-    "enable",
-    "enabling",
-    "steps",
-    "guide",
-)
-
-
-def _title_is_step_guide(title: str) -> bool:
-    """Distinguish actionable how-to pages (install/connect/enable/required)
-    from reference pages such as FAQ or overviews when filling the context
-    pack with the remaining sections of a selected raw guide page."""
-
-    lowered = title.casefold()
-    return any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None for term in _FILL_GUIDE_TERMS)
-
-
-def _heading_has_step_term(heading: str) -> bool:
-    """Prefer action-bearing sections (connection steps, checkboxes, role
-    grants) inside a raw guide page so the client-side steps are not crowded
-    out by log or note passages that share the same page-level boost.  Only
-    the deepest subheading is inspected: every passage under a "Connect using
-    Claude" section shares that prefix, so matching it would boost log and
-    note passages alike."""
-
-    lowered = heading.strip().casefold()
-    return any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None for term in _HEADING_STEP_TERMS)
+    hit_stats = hit_stats or {}
+    pool_by_page = pool_by_page or {}
+    top_score = max((stats.get("max", 0.0) for stats in hit_stats.values()), default=0.0)
+    context_items: list[dict[str, Any]] = []
+    for sel in selected:
+        page_path = sel["hit"].page_path
+        stats = hit_stats.get(page_path)
+        # A page whose best hit is far below the corpus-best score is usually a
+        # broad OR-match (an unrelated clipping or quiz note).  Filling such a
+        # page wholesale would let its many low-scoring sections crowd out
+        # real answers, so only its top scoring hit passages are kept.
+        strong_page = stats is None or top_score <= 0 or stats.get("max", 0.0) >= top_score * PAGE_FULL_FILL_MIN_RATIO
+        if not strong_page:
+            context_items.extend(pool_by_page.get(page_path, [])[:PAGE_WEAK_HIT_LIMIT])
+            continue
+        page_store = raw_store if raw_store is not None and page_path.startswith("raw/") else store
+        page_hits = page_store.passages_for_pages([page_path], limit_per_page=PAGE_FILL_LIMIT)
+        page_tokens = 0
+        for hit in page_hits:
+            tokens = estimate_tokens(hit.text)
+            # A per-page token budget keeps one long reference page (a FAQ or
+            # an overview with many sections) from consuming the whole pack
+            # before later selected pages contribute their fix or setup steps.
+            if page_tokens + tokens > PAGE_TOKEN_BUDGET:
+                break
+            page_tokens += tokens
+            context_items.append(
+                {
+                    "hit": hit,
+                    "fts_rank": sel.get("fts_rank"),
+                    "title_rank": None,
+                    "vector_rank": None,
+                    "vector_score": 0.0,
+                    "rrf": 0.0,
+                    "exact": False,
+                    "graph_score": 0.0,
+                    "graph_reasons": [],
+                    "score": sel.get("score", 0.0),
+                }
+            )
+    return context_items
 _HISTORY_RE = re.compile(r"(?:之前|上次|讨论|会话|当时|历史|previous|last\s+(?:time|session)|history)", re.I)
 _EXACT_RE = re.compile(r"(?:原文|逐字|代码|字段|field\s+id|api|record|script|exact|verbatim)", re.I)
 _COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
@@ -493,22 +494,27 @@ def run_query_v2(
     # best passage per page, while the context pack may carry several passages
     # from the same page so an answer table or code block is not lost behind a
     # higher-scoring intro passage.  Both lists consume the same
-    # score-ordered candidate pool.
+    # Retrieval is page-first: the public result list keeps one best passage
+    # per page, while the context pack is assembled page-by-page in reading
+    # order so multi-section answers (fix steps, install checklists) survive
+    # regardless of which sections carried the highest BM25 scores.
     selected: list[dict[str, Any]] = []
-    context_items: list[dict[str, Any]] = []
     selected_paths: set[str] = set()
-    context_counts: dict[str, int] = {}
     for item in scored:
         page_path = item["hit"].page_path
         if page_path not in selected_paths:
             selected.append(item)
             selected_paths.add(page_path)
-        if page_path in selected_paths and context_counts.get(page_path, 0) < CONTEXT_PASSAGES_PER_PAGE:
-            context_items.append(item)
-            context_counts[page_path] = context_counts.get(page_path, 0) + 1
     selected = selected[:top_k]
     selected_paths = {item["hit"].page_path for item in selected}
-    context_items = [item for item in context_items if item["hit"].page_path in selected_paths]
+    hit_stats: dict[str, dict[str, Any]] = {}
+    pool_by_page: dict[str, list[dict[str, Any]]] = {}
+    for item in scored:
+        page_path = item["hit"].page_path
+        pool_by_page.setdefault(page_path, []).append(item)
+        stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": "active"})
+        stats["max"] = max(stats["max"], item["hit"].score)
+    context_items = _build_page_ordered_context(selected, store, hit_stats=hit_stats, pool_by_page=pool_by_page)
     # A true Wiki zero-result query recovers evidence from two places: the
     # active store under relaxed multilingual lexical recovery, and the
     # dedicated raw-source store.  Both stores share the same tokenizer and
@@ -644,8 +650,6 @@ def run_query_v2(
                         score += IDENTIFIER_PHRASE_BONUS
                     if _title_has_guide_term(hit.title):
                         score += IDENTIFIER_GUIDE_TITLE_BONUS
-                    if _heading_has_step_term(hit.heading_path[-1] if hit.heading_path else ""):
-                        score += IDENTIFIER_HEADING_STEP_BONUS
                 raw_items.append(
                     {
                         "hit": hit,
@@ -696,53 +700,25 @@ def run_query_v2(
         if merged_items:
             merged_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
             selected = []
-            context_items = []
             selected_paths = set()
-            context_counts = {}
             for item in merged_items:
                 page_path = item["hit"].page_path
                 if page_path not in selected_paths:
                     selected.append(item)
                     selected_paths.add(page_path)
-                if page_path in selected_paths and context_counts.get(page_path, 0) < CONTEXT_PASSAGES_PER_PAGE:
-                    context_items.append(item)
-                    context_counts[page_path] = context_counts.get(page_path, 0) + 1
             selected = selected[:top_k]
             selected_paths = {item["hit"].page_path for item in selected}
-            context_items = [item for item in context_items if item["hit"].page_path in selected_paths]
-            if raw_lexical_mode == "identifier_phrase":
-                # A strict AND over the identifier tokens misses procedural
-                # sections (checkbox steps, SuiteApps install, client-side
-                # connection) that describe the same guide page without
-                # repeating the full feature name.  Fill the context pack from
-                # the remaining sections of selected how-to pages, in reading
-                # order, after every phrase-matched passage, so the composed
-                # answer keeps the action steps without changing the public
-                # result list.
-                existing_ids = {item["hit"].passage_id for item in context_items}
-                fill_paths = [
-                    item["hit"].page_path
-                    for item in selected
-                    if item["hit"].page_path.startswith("raw/") and _title_is_step_guide(item["hit"].title)
-                ]
-                for hit in raw_store.passages_for_pages(fill_paths, limit_per_page=CONTEXT_PASSAGES_PER_PAGE + 3):
-                    if hit.passage_id in existing_ids:
-                        continue
-                    existing_ids.add(hit.passage_id)
-                    context_items.append(
-                        {
-                            "hit": hit,
-                            "fts_rank": None,
-                            "title_rank": None,
-                            "vector_rank": None,
-                            "vector_score": 0.0,
-                            "rrf": 0.0,
-                            "exact": False,
-                            "graph_score": 0.0,
-                            "graph_reasons": [],
-                            "score": 0.0,
-                        }
-                    )
+            hit_stats = {}
+            pool_by_page = {}
+            for item in merged_items:
+                page_path = item["hit"].page_path
+                pool_by_page.setdefault(page_path, []).append(item)
+                store_key = "raw" if page_path.startswith("raw/") else "active"
+                stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": store_key})
+                stats["max"] = max(stats["max"], item["hit"].score)
+            context_items = _build_page_ordered_context(
+                selected, store, raw_store=raw_store, hit_stats=hit_stats, pool_by_page=pool_by_page
+            )
             if raw_lexical_mode == "qualified_code" and module_qualified(question):
                 lexical_mode = "qualified_code"
             elif raw_lexical_mode == "identifier_phrase":

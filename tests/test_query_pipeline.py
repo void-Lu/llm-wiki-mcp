@@ -470,6 +470,111 @@ def test_v2_identifier_phrase_fills_procedural_sections_of_selected_guide_pages(
     assert "REST Web Services" in combined
 
 
+def test_v2_page_ordered_context_keeps_fix_steps_in_later_sections(tmp_path: Path) -> None:
+    """A troubleshooting note whose fix steps live after long repro sections
+    must keep those steps in the context pack even though BM25 ranks the repro
+    paragraphs higher."""
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    note = "wiki/projects/example/troubleshooting/codegraph-patch.md"
+    _write(
+        root,
+        note,
+        "CodeGraph 修复：SuiteScript 解析失效",
+        (
+            "## 背景\n\n"
+            "codegraph 工具更新后本地补丁被覆盖，SuiteScript 脚本的解析失效。\n\n"
+            "## 复现\n\n"
+            "```javascript\n"
+            "define([\"N/search\"], function (search) {\n"
+            "  const helper = (x) => x * 2;\n"
+            "  return { helper };\n"
+            "});\n"
+            "```\n\n"
+            "## 最终处理方式\n\n"
+            "在 tree-sitter.js 的 visitFunctionBody 守卫门补上 variable_declarator "
+            "名字回查，然后重新安装 codegraph 并重建索引：\n\n"
+            "1. npm i -g @colbymchenry/codegraph\n"
+            "2. codegraph index\n"
+            "3. codegraph explore 验证函数关系\n"
+        ),
+        type="troubleshooting",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "codegraph工具更新后，本地修复的对suitescripts脚本的解析就会失效，具体修复步骤是什么",
+        retrieval_mode="lexical",
+    )
+
+    assert result["results"][0]["path"] == note
+    passages = result["context_pack"]["passages"]
+    combined = "\n".join(item["content"] for item in passages)
+    assert any("最终处理方式" in (item["heading"] or "") for item in passages)
+    assert "npm i -g" in combined
+    assert "codegraph index" in combined
+    assert "codegraph explore" in combined
+
+
+def test_v2_weak_pages_contribute_only_their_top_hits(tmp_path: Path) -> None:
+    """A page that matches many low-scoring OR tokens (a clipping or quiz note)
+    must not be filled wholesale; only its top hit passages join the pack."""
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    strong = "wiki/projects/example/troubleshooting/codegraph-fix.md"
+    _write(
+        root,
+        strong,
+        "CodeGraph 修复：SuiteScript 解析",
+        (
+            "## 问题\n\n"
+            "codegraph 工具更新后，本地修复的 SuiteScript 脚本解析补丁失效。"
+            "codegraph 对 SuiteScript AMD 模块的函数关系解析全部失效，"
+            "codegraph explore 和 codegraph index 无法解析脚本内部调用。\n\n"
+            "## 修复步骤\n\n"
+            "1. 停掉 codegraph daemon，释放 codegraph 数据库锁\n"
+            "2. 修改 tree-sitter.js，补上 SuiteScript 箭头函数名字回查\n"
+            "3. 用 codegraph index 全量重建 SuiteScript 索引\n"
+            "4. 用 codegraph explore 验证函数关系是否恢复\n"
+        ),
+        type="troubleshooting",
+    )
+    weak = "wiki/concepts/gstack-notes.md"
+    _write(
+        root,
+        weak,
+        "gstack 工具链深度分析",
+        (
+            "## 设计哲学\n\n"
+            "gstack 强调角色边界与流程驱动，每个角色只做一件事。\n\n"
+            "## 角色阵容\n\n"
+            "包含 23 个角色化 skill，覆盖产品、设计、开发与发布阶段。\n\n"
+            "## 安装步骤\n\n"
+            "介绍工具的安装步骤和配置方法。\n\n"
+            "## 兼容性\n\n"
+            "支持 Claude Code、Cursor 等多个客户端。\n\n"
+            "## 参考资料\n\n"
+            "更多背景阅读见延伸文档。\n"
+        ),
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "codegraph工具更新后，本地修复的对suitescripts脚本的解析就会失效，具体修复步骤是什么",
+        retrieval_mode="lexical",
+    )
+
+    strong_segs = [p for p in result["context_pack"]["passages"] if "codegraph-fix.md" in p["path"]]
+    weak_segs = [p for p in result["context_pack"]["passages"] if "gstack-notes.md" in p["path"]]
+    assert len(strong_segs) == 2  # the strongly matched page is filled wholesale
+    assert 1 <= len(weak_segs) <= 3  # the weak page keeps only its top hits
+
+
 def test_v2_relaxes_multilingual_questions_after_strict_fts_returns_no_results(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
