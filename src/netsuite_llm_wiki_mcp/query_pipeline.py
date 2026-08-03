@@ -442,6 +442,23 @@ def run_query_v2(
                 if qualified_code_hits:
                     raw_hits = qualified_code_hits
                     lexical_mode = "qualified_code"
+                elif not raw_hits:
+                    # Reference/raw sources are isolated from active Wiki
+                    # ranking, so give them the same bounded multilingual
+                    # lexical recovery before falling through to active
+                    # relaxed FTS.  This keeps raw evidence in stage two
+                    # while preventing CJK terms from turning a relevant
+                    # English reference page into a false zero-result.
+                    raw_hits = raw_store.search_fts(
+                        question,
+                        limit=min(top_k, RAW_FALLBACK_LIMIT),
+                        project=project,
+                        page_type=filters.type,
+                        tags=list(filters.tags),
+                        mode="relaxed",
+                    )
+                    if raw_hits:
+                        lexical_mode = "relaxed"
             except RetrievalIndexError as exc:
                 raw_hits = []
                 raw_index_warning = exc.code
@@ -549,7 +566,7 @@ def run_query_v2(
     warnings = [*filter(None, scope_rules), *vector_warnings]
     if raw_index_warning:
         warnings.append(raw_index_warning)
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "formal>capsule>raw>history", "intent": intent, "retrieval_mode": retrieval_mode, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>capsule>raw_chat;fallback:raw>active_relaxed", "intent": intent, "retrieval_mode": retrieval_mode, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000

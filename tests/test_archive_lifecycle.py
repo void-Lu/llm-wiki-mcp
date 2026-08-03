@@ -114,12 +114,15 @@ def test_legacy_migration_blocks_non_markdown_queries_and_is_repeatable(tmp_path
     chat.write_text("Authorization: token_verysecretvalue\n", encoding="utf-8")
     first = apply_legacy_migration(root)
     assert first["ok"] is True
-    migrated = root / "raw" / "sources" / "chat" / "legacy" / "session.md"
-    assert "source_kind: \"legacy_chatlog\"" in migrated.read_text(encoding="utf-8")
+    assert first["archive_id"]
+    migrated = next((root / "archives" / "bundles").glob(f"*/*/{first['archive_id']}/wiki/chatlog/session.md"))
+    assert migrated.read_text(encoding="utf-8") == "Authorization: token_verysecretvalue\n"
+    assert not chat.exists()
+    assert not (root / "raw" / "sources" / "chat" / "legacy" / "session.md").exists()
     assert apply_legacy_migration(root)["already_migrated"] is True
 
 
-def test_legacy_migration_serializes_date_frontmatter(tmp_path: Path) -> None:
+def test_legacy_migration_preserves_date_frontmatter(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     chat = root / "wiki" / "chatlog" / "session.md"
     chat.parent.mkdir(parents=True)
@@ -133,6 +136,24 @@ def test_legacy_migration_serializes_date_frontmatter(tmp_path: Path) -> None:
 
     migrated = apply_legacy_migration(root)
     assert migrated["ok"] is True
-    migrated_text = (root / "raw" / "sources" / "chat" / "legacy" / "session.md").read_text(encoding="utf-8")
-    assert "date: \"2026-07-28\"" in migrated_text
-    assert "source_kind: \"legacy_chatlog\"" in migrated_text
+    archived = next((root / "archives" / "bundles").glob(f"*/*/{migrated['archive_id']}/wiki/chatlog/session.md"))
+    migrated_text = archived.read_text(encoding="utf-8")
+    assert "date: 2026-07-28" in migrated_text
+
+
+def test_legacy_migration_archives_previously_migrated_chat_sources(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    legacy = root / "raw" / "sources" / "chat" / "legacy" / "2026" / "session.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("previously migrated legacy chat", encoding="utf-8")
+
+    migrated = apply_legacy_migration(root)
+
+    assert migrated["ok"] is True
+    assert not legacy.exists()
+    archived = next(
+        (root / "archives" / "bundles").glob(
+            f"*/*/{migrated['archive_id']}/raw/sources/chat/legacy/2026/session.md"
+        )
+    )
+    assert archived.read_text(encoding="utf-8") == "previously migrated legacy chat"

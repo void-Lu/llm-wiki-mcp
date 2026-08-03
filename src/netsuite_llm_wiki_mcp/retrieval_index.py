@@ -436,6 +436,12 @@ def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:
         return path.startswith("archives/bundles/")
     if scope == "raw":
         return path.startswith("raw/sources/") and not path.startswith("raw/sources/chat/")
+    # Legacy chatlogs have completed their retention period.  They are moved
+    # into immutable archive bundles by the legacy migration and must never
+    # re-enter the active retrieval projection while a pre-migration file is
+    # still present on disk.
+    if path.startswith("raw/sources/chat/legacy/"):
+        return False
     if path.startswith("raw/sources/chat/"):
         return True
     if not path.startswith("wiki/") or path.startswith("wiki/archives/"):

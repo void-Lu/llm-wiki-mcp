@@ -43,6 +43,7 @@ def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None
     assert "content" not in result["results"][0]
     assert result["context_pack"]["passages"][0]["content"]
     assert result["pipeline"]["corpus"] == "active"
+    assert result["pipeline"]["authority"] == "active:formal>project>capsule>raw_chat;fallback:raw>active_relaxed"
 
 
 def test_legacy_adapter_reuses_v2_selected_context_passages(tmp_path: Path) -> None:
@@ -252,6 +253,33 @@ def test_v2_raw_fallback_recovers_qualified_module_names_from_chinese_questions(
         assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
 
 
+def test_v2_raw_fallback_relaxes_multilingual_questions_before_active_recovery(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    reference = root / "raw" / "sources" / "references" / "location.md"
+    reference.parent.mkdir(parents=True, exist_ok=True)
+    reference.write_text(
+        "# Custom Record Type Object Custom Fields\n\nLocation uses selectrecordtype -103 for a SELECT field.",
+        encoding="utf-8",
+    )
+    _write(
+        root,
+        "wiki/concepts/noisy-location.md",
+        "Location overview",
+        "Location is a standard record that can be selected on transactions.",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "NetSuite 的 Location List/Record 字段 selectrecordtype 数字 ID 是多少？", retrieval_mode="lexical")
+
+    assert [item["path"] for item in result["results"]] == ["raw/sources/references/location.md"]
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert result["pipeline"]["lexical"]["mode"] == "relaxed"
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 1
+    assert result["pipeline"]["counters"]["relaxed_fts_hits"] == 0
+
+
 def test_v2_raw_fallback_returns_only_the_best_matching_passage_per_source_file(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -303,6 +331,28 @@ def test_v2_wiki_hits_do_not_fall_back_to_raw_fts(tmp_path: Path) -> None:
     assert [item["path"] for item in result["results"]] == ["wiki/entities/approval.md"]
     assert result["pipeline"]["fallback"]["level"] == "none"
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
+
+
+def test_v2_active_scope_excludes_legacy_chatlog_paths(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    legacy = root / "raw" / "sources" / "chat" / "legacy" / "session.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("legacy-only retrieval sentinel", encoding="utf-8")
+    refresh_indexes(root)
+
+    legacy_result = run_query_v2(root, "legacy-only retrieval sentinel", scope="all", retrieval_mode="lexical")
+
+    assert legacy_result["results"] == []
+
+    current = root / "raw" / "sources" / "chat" / "2026" / "08" / "03" / "session.md"
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text("current-chat-only marker", encoding="utf-8")
+    refresh_indexes(root)
+
+    current_result = run_query_v2(root, "current-chat-only marker", scope="all", retrieval_mode="lexical")
+
+    assert [item["path"] for item in current_result["results"]] == ["raw/sources/chat/2026/08/03/session.md"]
 
 
 def test_v2_raw_index_unavailable_yields_structured_warning(tmp_path: Path) -> None:
