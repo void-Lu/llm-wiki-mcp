@@ -524,6 +524,7 @@ def run_query_v2(
     telemetry: TelemetrySettings | None = None,
     debug: bool = False,
     include_context_pack: bool = True,
+    lexical_enabled: bool = True,
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid",
     expansion_terms: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
@@ -533,6 +534,8 @@ def run_query_v2(
         return {"ok": False, "code": "missing_question", "error": "question is required"}
     if not 1 <= top_k <= 40:
         return {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 40"}
+    if not lexical_enabled:
+        retrieval_mode = "vector"
     if retrieval_mode not in {"lexical", "vector", "hybrid"}:
         return {
             "ok": False,
@@ -545,6 +548,7 @@ def run_query_v2(
     root = Path(vault_root).expanduser().resolve()
     store = RetrievalIndexStore(root, scope="archive" if effective_scope == "archive" else "active")
     status = store.status()
+    index_warnings = ["index_stale"] if status.get("ok") and status.get("state") == "stale" else []
     if not status.get("ok"):
         k_budget = min(hard_budget_tokens, 400 * top_k)
         return {
@@ -555,7 +559,7 @@ def run_query_v2(
             "scope": scope,
             "results": [],
             "context_pack": {"passages": [], "citations": [], "budget": {"total": k_budget, "used": 0}},
-            "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}},
+            "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [*index_warnings, str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}},
         }
 
     metadata: dict[str, dict[str, Any]] = {}
@@ -730,6 +734,8 @@ def run_query_v2(
         raw_items: list[dict[str, Any]] = []
         raw_lexical_mode = "strict"
         raw_status = raw_store.status()
+        if raw_status.get("ok") and raw_status.get("state") == "stale":
+            raw_index_warning = "index_stale"
         if raw_status.get("ok"):
             try:
                 raw_hits = raw_store.search_fts(
@@ -971,10 +977,10 @@ def run_query_v2(
         }
         for item in selected
     ]
-    warnings = [*filter(None, scope_rules), *vector_warnings]
+    warnings = list(dict.fromkeys([*filter(None, scope_rules), *vector_warnings, *index_warnings]))
     if raw_index_warning:
-        warnings.append(raw_index_warning)
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw_identifier>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
+        warnings = list(dict.fromkeys([*warnings, raw_index_warning]))
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw_identifier>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical_enabled": lexical_enabled, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000

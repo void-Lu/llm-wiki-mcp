@@ -11,9 +11,9 @@ import yaml
 
 from netsuite_llm_wiki_mcp.knowledge_dependencies import KnowledgeDependencies
 from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
-from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
+from netsuite_llm_wiki_mcp.wiki_io import WikiWriteError, split_frontmatter, write_wiki_page
 from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
-from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
+from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry, WikiPage
 
 LOCKED_FIELDS = {"type", "concept_id", "entity_id", "entity_type", "created", "source_path", "source_hash"}
 _ALLOWED = ("wiki/concepts/", "wiki/entities/", "wiki/projects/")
@@ -74,12 +74,21 @@ def apply_update(vault_root: str | Path, page_path: str, incoming_body: str, *, 
         final["maintenance"] = "manual"
         final.setdefault("generation_provenance", {key: existing.get(key) for key in ("prompt_version", "schema_version", "source_hash") if key in existing})
     title = str(final.get("title") or target.stem)
-    target.write_text("---\n" + yaml.safe_dump(final, allow_unicode=True, sort_keys=False).strip() + f"\n---\n\n# {title}\n\n{incoming_body.strip()}\n", encoding="utf-8")
+    try:
+        write_result = write_wiki_page(
+            root,
+            WikiPage(Path(page_path), final, title, incoming_body),
+            overwrite_generated_only=False,
+        )
+    except WikiWriteError as exc:
+        return {"ok": False, "code": exc.code, "error": str(exc)}
+    updated_text = target.read_text(encoding="utf-8")
+    updated_hash = _digest(updated_text)
     sources = {source: "" for source in _sources(final)}
-    KnowledgeDependencies(root).update_page(page_path, _digest(target.read_text(encoding="utf-8")), sources, generated=bool(final.get("generated")), maintenance=str(final.get("maintenance") or "manual"))
+    KnowledgeDependencies(root).update_page(page_path, updated_hash, sources, generated=bool(final.get("generated")), maintenance=str(final.get("maintenance") or "manual"))
     navigation = refresh_indexes(root)
     append_log_entry(root, WikiLogEntry(operation="update", title=title, paths=[page_path], sources=list(sources), project=str(final.get("project") or ""), status="ok"))
-    return {"ok": True, "action": "apply", "page_path": page_path, "hash": _digest(target.read_text(encoding="utf-8")), "navigation": navigation}
+    return {"ok": True, "action": "apply", "page_path": page_path, "hash": updated_hash, "navigation": navigation, "retrieval_index": write_result.get("retrieval_index")}
 
 
 def _target(root: Path, page_path: str) -> Path | dict[str, Any]:

@@ -2,7 +2,6 @@ from pathlib import Path
 
 from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
-from netsuite_llm_wiki_mcp.runtime_config import decode_global_config
 import netsuite_llm_wiki_mcp.wiki_query as wiki_query_module
 from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
 from netsuite_llm_wiki_mcp.wiki_models import WikiPage
@@ -986,11 +985,6 @@ def test_v2_raw_content_never_enters_vector_records(tmp_path: Path) -> None:
     assert all("vector-leak" not in record["text"] for record in records)
 
 
-def test_query_version_flag_keeps_a_legacy_rollback_path(tmp_path: Path) -> None:
-    config = decode_global_config({"vaults": {"local": {"root": str(tmp_path), "retrieval": {"query_version": "v1"}}}}, tmp_path / "config.yaml")
-    assert config.vaults["local"].retrieval.query_version == "v1"
-
-
 def test_v2_adds_vector_only_passages_without_scanning_markdown(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -1026,6 +1020,37 @@ def test_v2_vector_mode_excludes_fts_recall(tmp_path: Path, monkeypatch) -> None
     assert [item["path"] for item in result["results"]] == ["wiki/concepts/vector.md"]
     assert result["pipeline"]["retrieval_mode"] == "vector"
     assert result["pipeline"]["counters"]["fts_hits"] == 0
+
+
+def test_v2_lexical_disabled_forces_vector_mode(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/vector.md", "Vector", "semantic meaning", type="concept")
+    refresh_indexes(root)
+    passage_id = next(iter(RetrievalIndexStore(root).vector_records()))["passage_id"]
+    monkeypatch.setattr(
+        "netsuite_llm_wiki_mcp.query_pipeline._vector_hits",
+        lambda *_args, **_kwargs: ({passage_id: (1, 0.9)}, []),
+    )
+
+    result = run_query_v2(root, "semantic query", lexical_enabled=False, retrieval_mode="hybrid")
+
+    assert result["pipeline"]["retrieval_mode"] == "vector"
+    assert result["pipeline"]["lexical_enabled"] is False
+    assert result["pipeline"]["counters"]["fts_hits"] == 0
+
+
+def test_v2_serves_stale_index_with_explicit_warning(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/stale.md", "Stale", "stale index sentinel", type="concept")
+    refresh_indexes(root)
+    RetrievalIndexStore(root)._mark_stale()
+
+    result = run_query_v2(root, "stale index sentinel", retrieval_mode="lexical")
+
+    assert result["results"]
+    assert "index_stale" in result["pipeline"]["warnings"]
 
 
 def test_v2_vector_only_recall_does_not_bypass_filters(tmp_path: Path, monkeypatch) -> None:

@@ -109,7 +109,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluation_parser.add_argument("--no-context-budget", action="store_true", help="Skip the separate context budget measurement pass.")
     evaluation_parser.add_argument("--context-budget-case-limit", type=int, default=1, help="Number of leading cases measured in the separate context budget pass (default: 1).")
     evaluation_parser.add_argument("--retrieval-mode", choices=("lexical", "vector", "hybrid"), default="lexical", help="Evaluation path (default: lexical).")
-    evaluation_parser.add_argument("--query-version", choices=("v1", "v2"), default="v2", help="Query contract to evaluate (default: v2; use v1 for a legacy baseline).")
+    evaluation_parser.add_argument("--query-version", choices=("v2",), default="v2", help="Query contract to evaluate (only v2 is supported).")
     evaluation_parser.add_argument("--scope", choices=("auto", "knowledge", "history", "all", "archive"), default="knowledge", help="Query V2 corpus scope (default: knowledge).")
     evaluation_parser.add_argument("--vector-model-path", help="Required local BGE-M3 directory for vector or hybrid evaluation.")
     evaluation_parser.add_argument("--vector-index-path", help="Optional vault-relative vector index directory for vector or hybrid evaluation.")

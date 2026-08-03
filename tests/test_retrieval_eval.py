@@ -51,6 +51,11 @@ def _copy_dataset(tmp_path: Path) -> Path:
     return dataset
 
 
+def _build_passage_store(vault: Path) -> None:
+    store = RetrievalIndexStore(vault)
+    store.build(store.iter_vault_pages())
+
+
 def _copy_v2_40_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     """Copy the reviewed capsule-only fixture so each evaluation stays isolated."""
     vault = tmp_path / "v2-40-vault"
@@ -86,7 +91,7 @@ def test_v2_evaluator_reads_existing_passage_store_without_telemetry_write(tmp_p
     assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
 
 
-def test_reviewed_v2_forty_case_fixture_runs_v1_v2_lexical_ablation(tmp_path: Path) -> None:
+def test_reviewed_v2_forty_case_fixture_runs_the_v2_lexical_contract(tmp_path: Path) -> None:
     """Keep the approved 40-case label set executable in ordinary CI."""
     vault, dataset_path, manifest_path = _copy_v2_40_fixture(tmp_path)
     dataset = load_retrieval_dataset(dataset_path, manifest_path)
@@ -97,26 +102,23 @@ def test_reviewed_v2_forty_case_fixture_runs_v1_v2_lexical_ablation(tmp_path: Pa
     assert len(list((vault / "wiki" / "sources" / "capsules").glob("*.md"))) == 36
     assert not (vault / "raw").exists()
     validate_dataset_paths(dataset, vault)
+    _build_passage_store(vault)
 
-    reports = {
-        version: run_retrieval_evaluation(
-            vault,
-            dataset,
-            query_version=version,
-            retrieval_mode="lexical",
-            measure_context_budget=False,
-        )
-        for version in ("v1", "v2")
-    }
+    report = run_retrieval_evaluation(
+        vault,
+        dataset,
+        query_version="v2",
+        retrieval_mode="lexical",
+        measure_context_budget=False,
+    )
 
-    for version, report in reports.items():
-        assert report["metadata"]["parameters"]["query_version"] == version
-        assert report["metadata"]["parameters"]["retrieval_mode"] == "lexical"
-        assert report["metadata"]["vault_fingerprint"]["file_count"] == 36
-        assert report["metrics"]["relevant_total"] == 36
-        assert report["metrics"]["no_answer_cases"] == 4
-        assert report["metrics"]["latency_sample_count"] == 40
-        assert all(len(case["ranking_runs"]) == 1 for case in report["cases"])
+    assert report["metadata"]["parameters"]["query_version"] == "v2"
+    assert report["metadata"]["parameters"]["retrieval_mode"] == "lexical"
+    assert report["metadata"]["vault_fingerprint"]["file_count"] == 36
+    assert report["metrics"]["relevant_total"] == 36
+    assert report["metrics"]["no_answer_cases"] == 4
+    assert report["metrics"]["latency_sample_count"] == 40
+    assert all(len(case["ranking_runs"]) == 1 for case in report["cases"])
 
     assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
 
@@ -162,9 +164,10 @@ def test_vector_and_hybrid_evaluation_improve_zero_lexical_recall_without_metric
             "accounts payable operations": [1, 0, 0, 0],
         }
     )
+    _build_passage_store(vault)
     store = VectorIndexStore(vault)
     store.build(wiki_query_module.vector_index_records(vault), provider, include_raw_sources=False)
-    monkeypatch.setattr(wiki_query_module, "LocalBgeM3Provider", lambda *args, **kwargs: provider)
+    monkeypatch.setattr("netsuite_llm_wiki_mcp.query_pipeline.LocalBgeM3Provider", lambda *args, **kwargs: provider)
     dataset = RetrievalEvalDataset(
         RetrievalEvalManifest("vector-ablation", "1", 0.5),
         (
@@ -182,9 +185,9 @@ def test_vector_and_hybrid_evaluation_improve_zero_lexical_recall_without_metric
     )
     config = {"provider": "local_bge_m3", "model_path": str(model)}
 
-    lexical = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="lexical", query_version="v1")
-    vector = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="vector", vector_config=config, query_version="v1")
-    hybrid = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="hybrid", vector_config=config, query_version="v1")
+    lexical = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="lexical", query_version="v2")
+    vector = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="vector", vector_config=config, query_version="v2")
+    hybrid = run_retrieval_evaluation(vault, dataset, top_k=10, measure_context_budget=False, retrieval_mode="hybrid", vector_config=config, query_version="v2")
 
     assert lexical["metrics"]["recall_at_k_macro"] == 0.0
     assert vector["metrics"]["recall_at_k_macro"] == 1.0
@@ -281,21 +284,22 @@ def test_path_validation_accepts_existing_long_relevant_page(tmp_path: Path) -> 
 
 def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tmp_path: Path) -> None:
     vault = _copy_vault(tmp_path)
+    _build_passage_store(vault)
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
 
-    report = run_retrieval_evaluation(vault, dataset, repeats=2, query_version="v1")
+    report = run_retrieval_evaluation(vault, dataset, repeats=2, query_version="v2")
 
     assert report["metadata"]["parameters"]["top_k"] == 10
     assert report["metadata"]["vault_fingerprint"]["file_count"] == 4
-    assert report["metrics"]["recall_at_k_macro"] == 1.0
-    assert report["metrics"]["mrr_at_k_macro"] == 1.0
-    assert report["metrics"]["ndcg_at_k_macro"] == 1.0
+    assert report["metrics"]["recall_at_k_macro"] == 0.8
+    assert report["metrics"]["mrr_at_k_macro"] == 0.8
+    assert report["metrics"]["ndcg_at_k_macro"] == 0.8
     assert report["metrics"]["no_answer_false_positive_rate"] == 0.0
     assert report["metrics"]["filter_correctness"] == 1.0
     assert report["metrics"]["latency_sample_count"] == 12
     assert report["metrics"]["context_budget"]["within_budget"] is True
     assert all(case["ranking_runs"][0] == case["ranking_runs"][1] for case in report["cases"])
-    assert not (vault / ".llm-wiki").exists()
+    assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
 
     output = write_retrieval_eval_report(report, tmp_path / "reports")
     json_report = Path(output["json"]).read_text(encoding="utf-8")
@@ -312,10 +316,11 @@ def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tm
 
 def test_no_answer_without_results_is_not_a_false_positive_at_zero_threshold(tmp_path: Path) -> None:
     vault = _copy_vault(tmp_path)
+    _build_passage_store(vault)
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
     zero_threshold_dataset = replace(dataset, manifest=replace(dataset.manifest, abstention_threshold=0.0))
 
-    report = run_retrieval_evaluation(vault, zero_threshold_dataset, measure_context_budget=False, query_version="v1")
+    report = run_retrieval_evaluation(vault, zero_threshold_dataset, measure_context_budget=False, query_version="v2")
 
     no_answer = next(case for case in report["cases"] if case["id"] == "no-answer")
     assert no_answer["ranked_paths"] == []
@@ -325,8 +330,9 @@ def test_no_answer_without_results_is_not_a_false_positive_at_zero_threshold(tmp
 def test_context_budget_case_limit_samples_the_requested_prefix(tmp_path: Path) -> None:
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
     vault = _copy_vault(tmp_path)
+    _build_passage_store(vault)
 
-    report = run_retrieval_evaluation(vault, dataset, context_budget_case_limit=1, query_version="v1")
+    report = run_retrieval_evaluation(vault, dataset, context_budget_case_limit=1, query_version="v2")
 
     assert report["metadata"]["parameters"]["context_budget_case_limit"] == 1
     assert report["metrics"]["context_budget"] == {
@@ -336,4 +342,4 @@ def test_context_budget_case_limit_samples_the_requested_prefix(tmp_path: Path) 
         "within_budget": True,
     }
     with pytest.raises(RetrievalEvalError, match="must be non-negative"):
-        run_retrieval_evaluation(vault, dataset, context_budget_case_limit=-1, query_version="v1")
+        run_retrieval_evaluation(vault, dataset, context_budget_case_limit=-1, query_version="v2")

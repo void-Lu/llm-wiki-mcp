@@ -157,7 +157,10 @@ class ArchiveService:
             self._transition(operation_id, "staged")
             pending.parent.mkdir(parents=True, exist_ok=True); os.replace(staging, pending)
             self._transition(operation_id, "pending")
-            recovery = pending / ".recovery"
+            # Keep rollback payload beside the pending bundle, rather than
+            # inside it, so the immutable bundle never contains recovery data.
+            recovery = self._recovery_path(operation_id)
+            recovery.mkdir(parents=True, exist_ok=True)
             for item in plan.items:
                 source = self.root / item.original_path
                 if not source.exists() or content_hash(source) != item.content_hash: raise ArchiveError("archive_plan_drift", "active payload changed")
@@ -168,10 +171,10 @@ class ArchiveService:
                 self._delete_active_index(item.original_path)
             final = self.archive_root / "bundles" / archive_id[:4] / archive_id[4:6] / archive_id
             final.parent.mkdir(parents=True, exist_ok=True)
-            # recovery payload is intentionally not part of the immutable bundle.
-            shutil.rmtree(recovery)
             os.replace(pending, final)
             self._transition(operation_id, "committed")
+            # Only the committed archive makes the rollback copy disposable.
+            shutil.rmtree(recovery, ignore_errors=True)
             self._event(operation_id, archive_id, "archived", {"items": [item.original_path for item in plan.items]})
             self._mark_plan_used(plan.plan_id)
             index = self.rebuild_archive_index()
@@ -220,7 +223,14 @@ class ArchiveService:
 
     def recover(self) -> dict[str, Any]:
         with self._connection() as conn:
-            ids = [row[0] for row in conn.execute("SELECT operation_id FROM archive_operations WHERE state NOT IN ('committed','rolled_back')")]
+            rows = list(conn.execute("SELECT operation_id,state FROM archive_operations"))
+        ids = [row[0] for row in rows if row[1] not in {"committed", "rolled_back"}]
+        for operation_id, state in rows:
+            if state in {"committed", "rolled_back"}:
+                # A process can die after the journal transition but before
+                # the normal post-commit cleanup.  Completed operations no
+                # longer need a rollback copy.
+                shutil.rmtree(self._recovery_path(operation_id), ignore_errors=True)
         return {"ok": True, "recovered": [self._recover_operation(operation_id) for operation_id in ids]}
 
     def _recover_operation(self, operation_id: str) -> str:
@@ -231,7 +241,10 @@ class ArchiveService:
             items = list(conn.execute(
                 "SELECT original_path,original_hash,staged_path FROM archive_operation_items WHERE operation_id=?", (operation_id,)
             ))
-        if operation is None or operation["state"] in {"committed", "rolled_back"}:
+        if operation is None:
+            return operation_id
+        if operation["state"] in {"committed", "rolled_back"}:
+            shutil.rmtree(self._recovery_path(operation_id), ignore_errors=True)
             return operation_id
         pending = self.archive_root / ".pending" / operation_id
         staging = self.archive_root / ".staging" / operation_id
@@ -263,14 +276,22 @@ class ArchiveService:
                         os.replace(temporary, target)
                         self._update_active_index(item["original_path"])
                 shutil.rmtree(final, ignore_errors=True)
+        # Support both the current sibling recovery directory and an older
+        # in-flight operation that still placed recovery under .pending/<id>.
+        recovery_roots = [self._recovery_path(operation_id)]
+        legacy_recovery = pending / ".recovery"
+        if legacy_recovery != recovery_roots[0]:
+            recovery_roots.append(legacy_recovery)
+        for recovery_root in recovery_roots:
+            if not recovery_root.exists():
+                continue
+            for source in sorted(recovery_root.rglob("*")):
+                if source.is_file():
+                    target = self.root / source.relative_to(recovery_root); target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.exists(): os.replace(source, target)
+                    self._update_active_index(target.relative_to(self.root).as_posix())
+            shutil.rmtree(recovery_root, ignore_errors=True)
         if pending.exists():
-            recovery = pending / ".recovery"
-            if recovery.exists():
-                for source in sorted(recovery.rglob("*")):
-                    if source.is_file():
-                        target = self.root / source.relative_to(recovery); target.parent.mkdir(parents=True, exist_ok=True)
-                        if not target.exists(): os.replace(source, target)
-                        self._update_active_index(target.relative_to(self.root).as_posix())
             shutil.rmtree(pending, ignore_errors=True)
         if staging.exists(): shutil.rmtree(staging, ignore_errors=True)
         with self._connection() as conn:
@@ -334,6 +355,9 @@ class ArchiveService:
         matches = list((self.archive_root / "bundles").glob(f"*/*/{archive_id}"))
         if len(matches) != 1: raise ArchiveError("archive_not_found", "archive id was not found")
         return matches[0]
+
+    def _recovery_path(self, operation_id: str) -> Path:
+        return self.archive_root / ".pending" / f"{operation_id}.recovery"
 
     def _archive_id(self) -> str:
         # Lexically sortable and collision-resistant; UTC timestamp remains audit friendly.

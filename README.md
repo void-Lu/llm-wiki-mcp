@@ -158,7 +158,7 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 worker profile 只会额外注册 `wiki_generation`。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 
-`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共查询契约，输出 JSON 与 Markdown 报告。默认 `--query-version v2`，只读取已构建的 passage/vector index，且关闭查询遥测；用 `--query-version v1` 生成可比的 legacy baseline，`--scope` 控制 V2 corpus。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
+`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共查询契约，输出 JSON 与 Markdown 报告。当前唯一查询引擎是 V2，`--query-version` 仅接受 `v2`；评测只读取已构建的 passage/vector index，且关闭查询遥测。`--scope` 控制 V2 corpus。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
 ### 可选本地向量检索
 
@@ -178,7 +178,7 @@ wiki_query(
 
 Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，先做 passage FTS/vector 召回，再以 RRF 和有界强-seed graph 扩展排序；source index、superseded 与 deprecated 页面不会进入正文。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
 
-回滚只修改 vault 配置的 `retrieval.query_version`：默认 `v2`；在兼容排障期设为 `v1` 会使用旧 façade 并返回 `query_v1_legacy_feature_flag` warning。该开关属于启动时配置快照，不能由 MCP query 参数覆盖。
+查询引擎固定为 V2；配置中的 `retrieval.query_version` 仅保留明确的 `v2` 值，旧 `v1` 配置会在启动解码时拒绝。若旧客户端只需要旧响应字段，可使用 `retrieval.context.response_mode=legacy`，它只适配已经完成的 V2 结果，不会切换检索引擎。
 
 使用 `netsuite-llm-wiki-mcp config validate|show|set-retrieval|set-privacy|set-telemetry|set-archive` 管理配置。配置修改在重启 MCP runtime 后生效；普通 MCP 调用不能修改脱敏、保留期、archive/purge 或索引路径。
 

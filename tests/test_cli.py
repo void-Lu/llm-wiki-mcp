@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from netsuite_llm_wiki_mcp.cli import main
+from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 
 
 def _make_vault(path: Path) -> Path:
@@ -182,6 +183,8 @@ def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys:
     shutil.copy2(fixture_root / "fixture.jsonl", dataset)
     shutil.copy2(fixture_root / "fixture.manifest.json", tmp_path / "fixture.manifest.json")
     output_dir = tmp_path / "reports"
+    store = RetrievalIndexStore(vault)
+    store.build(store.iter_vault_pages())
 
     exit_code = main(
         [
@@ -195,14 +198,14 @@ def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys:
             "--repeats",
             "2",
             "--query-version",
-            "v1",
+            "v2",
         ]
     )
 
     assert exit_code == 0
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
-    assert output["metrics"]["recall_at_k_macro"] == 1.0
+    assert output["metrics"]["recall_at_k_macro"] == 0.8
     assert Path(output["reports"]["json"]).is_file()
     assert Path(output["reports"]["markdown"]).is_file()
 

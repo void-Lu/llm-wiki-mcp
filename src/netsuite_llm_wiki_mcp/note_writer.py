@@ -9,7 +9,6 @@ from typing import Any
 import yaml
 
 from netsuite_llm_wiki_mcp.redaction import count_redactions, redact_sensitive_text
-from netsuite_llm_wiki_mcp.runtime_config import RuntimeConfigError, resolve_runtime_config
 from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
 from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry
@@ -27,17 +26,6 @@ WINDOWS_RESERVED_DEVICE_SUFFIXES = set("123456789¹²³")
 
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "code": code, "error": message}
-
-
-def _vault_root(vault_root: str | None) -> tuple[Path | None, dict[str, Any] | None]:
-    try:
-        runtime = resolve_runtime_config(vault_root_arg=vault_root, require_sources_config=False)
-    except RuntimeConfigError as exc:
-        payload = _error(exc.code, str(exc))
-        if exc.config_path is not None:
-            payload["config_path"] = str(exc.config_path)
-        return None, payload
-    return runtime.vault_root, None
 
 
 def _has_path_traversal(value: str) -> bool:
@@ -165,15 +153,14 @@ def save_obsidian_note(
     filename: str | None = None,
     overwrite: bool = False,
     auto_index: bool = True,
-    vault_root: str | None = None,
+    vault_root: str | Path | None = None,
     chat_metadata: dict[str, Any] | None = None,
     chat_derived: bool = False,
     chat_sources: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    root, root_error = _vault_root(vault_root)
-    if root_error is not None:
-        return root_error
-    assert root is not None
+    if vault_root is None or not str(vault_root).strip():
+        return _error("missing_vault_root", "vault_root is required")
+    root = Path(vault_root).expanduser().resolve()
     create_wiki_root(root)
 
     if note_type not in NOTE_TYPES:

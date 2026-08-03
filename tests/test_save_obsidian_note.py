@@ -319,35 +319,13 @@ def test_no_sensitive_body_returns_zero_redactions(vault: Path):
     assert "普通需求说明" in body
 
 
-def test_save_note_uses_global_config_without_cwd_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    from netsuite_llm_wiki_mcp.runtime_config import write_global_config
-
-    configured_vault = tmp_path / "configured-vault"
-    configured_vault.mkdir()
+def test_save_note_requires_explicit_vault_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     cwd_vault = tmp_path / "cwd-vault"
     cwd_vault.mkdir()
     monkeypatch.chdir(cwd_vault)
     monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
-    write_global_config(tmp_path / "config" / "config.yaml", vault_name="homework", vault_root=configured_vault, make_default=True)
 
     result = save_obsidian_note(note_type="knowledge", title="Runtime Config Note", content="Body", domain="common-errors", auto_index=False)
-
-    assert result["ok"] is True
-    assert Path(str(result["absolute_path"])).is_relative_to(configured_vault.resolve())
-    assert not (cwd_vault / "wiki").exists()
-
-
-def test_save_note_missing_config_does_not_use_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    cwd_vault = tmp_path / "cwd-vault"
-    cwd_vault.mkdir()
-    monkeypatch.chdir(cwd_vault)
-    monkeypatch.delenv("NETSUITE_LLM_WIKI_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("NETSUITE_LLM_WIKI_CONFIG_DIR", str(tmp_path / "missing-config"))
-    monkeypatch.setenv("NETSUITE_LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
-
-    result = save_obsidian_note(note_type="spec", title="No config", content="Body", project="project-a", auto_index=False)
 
     assert result["ok"] is False
     assert result["code"] == "missing_vault_root"

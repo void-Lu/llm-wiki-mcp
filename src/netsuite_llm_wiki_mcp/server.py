@@ -22,9 +22,8 @@ from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_files import wiki_status as run_wiki_status
 from netsuite_llm_wiki_mcp.ingest_service import ingest_file as run_ingest_file
 from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
-from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, wiki_query as run_wiki_query
+from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K
 from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
-from netsuite_llm_wiki_mcp.vector_index import vector_settings_from_embedding
 from netsuite_llm_wiki_mcp.archive_models import ARCHIVE_REASONS, is_archive_reason
 from netsuite_llm_wiki_mcp.archive_service import ArchiveService
 
@@ -235,24 +234,7 @@ def _run_wiki_query(
         typed_filters = QueryFilters.from_mapping(filter_values)
     except ValueError as exc:
         return {"ok": False, "code": "invalid_filters", "error": str(exc)}
-    if settings.query_version == "v1":
-        warnings = ["query_v1_legacy_feature_flag"]
-        if expansion_terms:
-            warnings.append("expansion_terms_ignored_for_v1")
-        legacy = run_wiki_query(
-            resolution.root, question, project, top_k,
-            include_content=True,
-            context_window_tokens=settings.context.hard_budget_tokens,
-            include_context_pack=settings.context.response_mode == "context_pack",
-            enable_vector=settings.embedding.enabled,
-            vector_settings=vector_settings_from_embedding(resolution.root, settings.embedding),
-            filter_type=typed_filters.type,
-            filter_tags=list(typed_filters.tags),
-            scope="archive" if scope == "archive" else "active",
-        )
-        legacy["scope"] = scope
-        legacy.setdefault("warnings", []).extend(warnings)
-        return attach_warnings(attach_no_results_outcome(legacy), resolution.warnings)
+    retrieval_mode = "vector" if not settings.lexical_enabled else "hybrid" if settings.embedding.enabled else "lexical"
     result = run_query_v2(
         resolution.root,
         question,
@@ -263,6 +245,8 @@ def _run_wiki_query(
         hard_budget_tokens=settings.context.hard_budget_tokens,
         embedding=settings.embedding,
         telemetry=resolution.resolved.settings.telemetry,
+        lexical_enabled=settings.lexical_enabled,
+        retrieval_mode=retrieval_mode,
         expansion_terms=expansion_terms,
     )
     if settings.context.response_mode == "legacy":

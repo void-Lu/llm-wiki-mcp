@@ -418,19 +418,17 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
     if not eligible_path(rel, scope=scope):
         return None
     raw = path.read_text(encoding="utf-8", errors="ignore")
-    frontmatter, body = split_frontmatter(raw) if path.suffix.lower() == ".md" else ({}, raw)
     redacted = redact_for_index(raw)
-    _, redacted_body = split_frontmatter(redacted.text) if path.suffix.lower() == ".md" else ({}, redacted.text)
+    frontmatter, redacted_body = split_frontmatter(redacted.text) if path.suffix.lower() == ".md" else ({}, redacted.text)
+    frontmatter = dict(frontmatter)
     stat = path.stat()
     is_chat = rel.startswith("raw/sources/chat/")
     is_raw = rel.startswith("raw/sources/") and not is_chat
     if is_chat:
-        frontmatter = dict(frontmatter)
         # Chat storage is date/session based, not project based.  Never label
         # a date segment as a project in public historical evidence.
         frontmatter.setdefault("project", "unknown")
     elif is_raw:
-        frontmatter = dict(frontmatter)
         parts = rel.split("/")
         # Ingest snapshots use raw/sources/<type>/<project>/<name>/... .
         # Preserve an explicit frontmatter project, but make that stable path
@@ -438,6 +436,10 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
         if len(parts) >= 5:
             frontmatter.setdefault("project", parts[3])
         frontmatter.setdefault("type", "raw")
+    elif rel.startswith("wiki/projects/"):
+        parts = rel.split("/")
+        if len(parts) >= 3:
+            frontmatter.setdefault("project", parts[2])
     occurred_at = str(frontmatter.get("occurred_at") or frontmatter.get("date") or datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat())
     corpus = "history" if is_chat else "raw" if is_raw else "knowledge"
     authority = "low" if is_chat or is_raw else "high"

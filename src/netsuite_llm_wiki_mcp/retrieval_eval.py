@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
-from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K, RANKING_VERSION, wiki_query
+from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K
 from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, RANKING_POLICY_VERSION, run_query_v2
 from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings, TelemetrySettings
 from netsuite_llm_wiki_mcp.vector_index import parse_vector_settings
@@ -208,8 +208,8 @@ def run_retrieval_evaluation(
         raise RetrievalEvalError("invalid_retrieval_mode", "retrieval_mode must be lexical, vector, or hybrid")
     if retrieval_mode != "lexical" and not vector_config:
         raise RetrievalEvalError("vector_config_missing", "vector and hybrid evaluation require a local vector configuration")
-    if query_version not in {"v1", "v2"}:
-        raise RetrievalEvalError("invalid_query_version", "query_version must be v1 or v2")
+    if query_version != "v2":
+        raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
     if scope not in {"auto", "knowledge", "history", "all", "archive"}:
         raise RetrievalEvalError("invalid_scope", "scope must be auto, knowledge, history, all, or archive")
     root = filesystem_path(vault_root)
@@ -329,7 +329,7 @@ def run_retrieval_evaluation(
             "abstention_threshold": dataset.manifest.abstention_threshold,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "runtime_provenance": RUNTIME_PROVENANCE.to_public_dict(),
-            "ranking": {"version": RANKING_POLICY_VERSION if query_version == "v2" else RANKING_VERSION},
+            "ranking": {"version": RANKING_POLICY_VERSION},
             "experiment": _normalise_experiment_metadata(experiment_metadata),
             "parameters": {
                 "top_k": top_k,
@@ -495,35 +495,23 @@ def _query_case(
     query_version: str = "v2",
     scope: Literal["auto", "knowledge", "history", "all", "archive"] = "knowledge",
 ) -> dict[str, Any]:
-    if query_version == "v2":
-        embedding: EmbeddingSettings | None = None
-        if retrieval_mode != "lexical":
-            settings = parse_vector_settings(root, dict(vector_config or {}))
-            embedding = EmbeddingSettings(enabled=True, provider=settings.provider, model_path=settings.model_path, index_path=settings.index_path, device=settings.device, batch_size=settings.batch_size, max_sequence_length=settings.max_sequence_length, candidate_limit=settings.candidate_limit, rrf_k=settings.rrf_k, min_vector_score=settings.min_vector_score)
-        return run_query_v2(
-            root,
-            case.query,
-            scope=scope,
-            project=case.filters.get("project"),
-            filters=QueryFilters(case.filters.get("filter_type"), tuple(case.filters.get("filter_tags") or ())),
-            top_k=top_k,
-            embedding=embedding,
-            telemetry=TelemetrySettings(enabled=False),
-            include_context_pack=include_context_pack,
-            retrieval_mode=retrieval_mode,
-        )
-    return wiki_query(
+    if query_version != "v2":
+        raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
+    embedding: EmbeddingSettings | None = None
+    if retrieval_mode != "lexical":
+        settings = parse_vector_settings(root, dict(vector_config or {}))
+        embedding = EmbeddingSettings(enabled=True, provider=settings.provider, model_path=settings.model_path, index_path=settings.index_path, device=settings.device, batch_size=settings.batch_size, max_sequence_length=settings.max_sequence_length, candidate_limit=settings.candidate_limit, rrf_k=settings.rrf_k, min_vector_score=settings.min_vector_score)
+    return run_query_v2(
         root,
         case.query,
-        top_k=top_k,
-        include_content=False,
-        include_context_pack=include_context_pack,
-        enable_vector=retrieval_mode != "lexical",
-        vector_config=dict(vector_config) if vector_config is not None else None,
-        retrieval_mode=retrieval_mode,
+        scope=scope,
         project=case.filters.get("project"),
-        filter_type=case.filters.get("filter_type"),
-        filter_tags=case.filters.get("filter_tags"),
+        filters=QueryFilters(case.filters.get("filter_type"), tuple(case.filters.get("filter_tags") or ())),
+        top_k=top_k,
+        embedding=embedding,
+        telemetry=TelemetrySettings(enabled=False),
+        include_context_pack=include_context_pack,
+        retrieval_mode=retrieval_mode,
     )
 
 
@@ -613,4 +601,3 @@ def _normalise_experiment_metadata(metadata: Mapping[str, Any] | None) -> dict[s
     if not isinstance(value, dict):
         raise RetrievalEvalError("invalid_experiment_metadata", "experiment metadata must be an object")
     return value
-

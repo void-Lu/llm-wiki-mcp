@@ -46,7 +46,7 @@ class ContextSettings:
 @dataclass(frozen=True)
 class RetrievalSettings:
     lexical_enabled: bool = True
-    query_version: Literal["v1", "v2"] = "v2"
+    query_version: Literal["v2"] = "v2"
     embedding: EmbeddingSettings = EmbeddingSettings()
     context: ContextSettings = ContextSettings()
 
@@ -156,6 +156,14 @@ def _mapping(value: object, name: str, path: Path) -> Mapping[str, Any]:
     return value
 
 
+def _merge_mapping(existing: object, updates: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge nested profile updates without discarding sibling settings."""
+    merged = dict(existing) if isinstance(existing, Mapping) else {}
+    for key, value in updates.items():
+        merged[key] = _merge_mapping(merged.get(key), value) if isinstance(value, Mapping) else value
+    return merged
+
+
 def _unknown_keys(values: Mapping[str, Any], allowed: set[str], name: str, path: Path) -> None:
     unknown = sorted(set(values) - allowed)
     if unknown:
@@ -224,8 +232,12 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     retrieval_raw = _mapping(raw.get("retrieval", {}), "retrieval", path)
     _unknown_keys(retrieval_raw, {"lexical_enabled", "query_version", "embedding", "context"}, "retrieval", path)
     query_version = retrieval_raw.get("query_version", "v2")
-    if query_version not in {"v1", "v2"}:
-        raise RuntimeConfigError("retrieval.query_version must be v1 or v2", code="invalid_config", config_path=path)
+    if query_version != "v2":
+        raise RuntimeConfigError("retrieval.query_version only supports v2", code="invalid_config", config_path=path)
+    lexical_enabled = _bool(retrieval_raw.get("lexical_enabled"), True, "retrieval.lexical_enabled", path)
+    embedding = _decode_embedding(retrieval_raw.get("embedding", {}), path)
+    if not lexical_enabled and not embedding.enabled:
+        raise RuntimeConfigError("retrieval.lexical_enabled=false requires local embedding to be enabled", code="invalid_config", config_path=path)
     context_raw = _mapping(retrieval_raw.get("context", {}), "retrieval.context", path)
     _unknown_keys(context_raw, {"response_mode", "hard_budget_tokens"}, "retrieval.context", path)
     response_mode = context_raw.get("response_mode", "context_pack")
@@ -253,9 +265,9 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
         name=name,
         root=_resolve_required_absolute_path(root, description=f"global config {path} value vaults.{name}.root"),
         retrieval=RetrievalSettings(
-            lexical_enabled=_bool(retrieval_raw.get("lexical_enabled"), True, "retrieval.lexical_enabled", path),
+            lexical_enabled=lexical_enabled,
             query_version=query_version,
-            embedding=_decode_embedding(retrieval_raw.get("embedding", {}), path),
+            embedding=embedding,
             context=ContextSettings(response_mode=response_mode, hard_budget_tokens=_integer(context_raw.get("hard_budget_tokens"), 16_000, 512, 200_000, "retrieval.context.hard_budget_tokens", path)),
         ),
         privacy=PrivacySettings(
@@ -383,7 +395,7 @@ def write_global_config(config_path: str | Path | None, *, vault_name: str, vaul
     entry["root"] = str(_resolve_required_absolute_path(vault_root, description="vault root"))
     for key, value in (("retrieval", retrieval), ("privacy", privacy), ("telemetry", telemetry), ("archive", archive)):
         if value is not None:
-            entry[key] = dict(value)
+            entry[key] = _merge_mapping(entry.get(key), value)
     vaults[vault_name] = entry
     raw["schema_version"] = CONFIG_SCHEMA_VERSION
     if tool_profile is not None:

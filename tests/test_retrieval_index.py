@@ -58,6 +58,24 @@ def test_chat_projection_uses_a_full_session_locator_and_never_uses_year_as_proj
     assert page["occurred_at"]
 
 
+def test_index_projection_redacts_frontmatter_as_well_as_body(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    secret = "token=abc1234567890"
+    _write(
+        root,
+        "wiki/concepts/security.md",
+        f"---\ntitle: Security\nsources: [{secret}]\n---\n\n# Security\n\nbody {secret}",
+    )
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+
+    candidates = store.page_candidates()
+    records = store.vector_records()
+    assert candidates
+    assert all(secret not in str(candidate) for candidate in candidates)
+    assert all(secret not in str(record) for record in records)
+
+
 def test_failed_staged_build_keeps_the_previous_searchable_store(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "vault"
     _write(root, "wiki/concepts/a.md", "# A\n\nprevious content")

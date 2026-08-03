@@ -260,6 +260,8 @@ def test_registry_decodes_profiles_and_redacts_public_status(tmp_path: Path) -> 
         ({"retrieval": {"embedding": {"provider": "remote"}}}, "vector_provider_unsupported"),
         ({"retrieval": {"embedding": {"api_key": "secret"}}}, "unknown_config_field"),
         ({"retrieval": {"embedding": {"device": 42}}}, "invalid_config"),
+        ({"retrieval": {"query_version": "v1"}}, "invalid_config"),
+        ({"retrieval": {"lexical_enabled": False}}, "invalid_config"),
         ({"privacy": {"redaction_rule_version": "token=secret"}}, "invalid_config"),
         ({"telemetry": {"retention_days": 0}}, "invalid_config"),
         ({"telemetry": {"store_query_body": True}}, "invalid_config"),
@@ -281,6 +283,40 @@ def test_registry_rejects_enabled_missing_local_model(tmp_path: Path) -> None:
     with pytest.raises(RuntimeConfigError) as exc_info:
         ConfigRegistry.from_file(config_path)
     assert exc_info.value.code == "model_missing"
+
+
+def test_write_global_config_recursively_merges_nested_retrieval_profile(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path / "vault")
+    model = tmp_path / "model"
+    model.mkdir()
+    config_path = tmp_path / "config.yaml"
+    write_global_config(
+        config_path,
+        vault_name="primary",
+        vault_root=vault,
+        retrieval={
+            "lexical_enabled": False,
+            "query_version": "v2",
+            "embedding": {"enabled": True, "model_path": str(model), "candidate_limit": 40},
+            "context": {"response_mode": "legacy", "hard_budget_tokens": 2048},
+        },
+    )
+
+    write_global_config(
+        config_path,
+        vault_name="primary",
+        vault_root=vault,
+        make_default=False,
+        retrieval={"embedding": {"candidate_limit": 80}},
+    )
+
+    registry = ConfigRegistry.from_file(config_path)
+    settings = registry.resolve_vault().settings.retrieval
+    assert settings.lexical_enabled is False
+    assert settings.query_version == "v2"
+    assert settings.embedding.candidate_limit == 80
+    assert settings.context.response_mode == "legacy"
+    assert settings.context.hard_budget_tokens == 2048
 
 
 def test_registry_snapshot_vaults_cannot_be_mutated(tmp_path: Path) -> None:

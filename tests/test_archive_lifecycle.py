@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import netsuite_llm_wiki_mcp.archive_service as archive_service_module
 from netsuite_llm_wiki_mcp.archive_migration import apply_legacy_migration, plan_legacy_migration
 from netsuite_llm_wiki_mcp.archive_service import ArchiveService
 from netsuite_llm_wiki_mcp.knowledge_dependencies import KnowledgeDependencies
@@ -80,6 +81,25 @@ def test_recovery_restores_active_file_after_detaching_fault(tmp_path: Path) -> 
     failed = service.apply(planned["plan_id"])
     assert failed["ok"] is False and page.exists()
     assert service.recover()["ok"]
+
+
+def test_final_bundle_rename_failure_restores_active_file(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"; page = _page(root, "wiki/concepts/example.md")
+    service = ArchiveService(root)
+    planned = service.plan_archive("wiki/concepts/example.md", reason="deprecated")
+    original_replace = archive_service_module.os.replace
+
+    def fail_final_rename(source, destination):
+        if "bundles" in Path(destination).parts:
+            raise OSError("injected final bundle rename failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(archive_service_module.os, "replace", fail_final_rename)
+    failed = service.apply(planned["plan_id"])
+
+    assert failed["ok"] is False
+    assert page.exists()
+    assert not list((root / "archives" / ".pending").glob("*.recovery"))
 
 
 def test_restore_failure_rolls_back_files_created_by_that_operation(tmp_path: Path) -> None:
