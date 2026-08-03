@@ -15,8 +15,15 @@ from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
 def sync_retrieval_index(vault_root: str | Path, *, full_build: bool = False) -> dict[str, object]:
     """Shared post-write projection boundary for MCP, batch, and adapters."""
 
-    store = RetrievalIndexStore(vault_root)
-    return store.reconcile() if store.path.exists() and not full_build else store.build(store.iter_vault_pages())
+    active = RetrievalIndexStore(vault_root)
+    raw = RetrievalIndexStore(vault_root, scope="raw")
+    active_result = active.reconcile() if active.path.exists() and not full_build else active.build(active.iter_vault_pages())
+    raw_result = raw.reconcile() if raw.path.exists() and not full_build else raw.build(raw.iter_vault_pages())
+    return {
+        "ok": bool(active_result.get("ok")) and bool(raw_result.get("ok")),
+        "active": active_result,
+        "raw": raw_result,
+    }
 
 
 def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name: str, project: str = "", source_type: str = "file") -> dict[str, Any]:
@@ -51,14 +58,16 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     if type_value != "chat" and operation != "unchanged":
         compiler = KnowledgeCompiler(root)
         compiler_result = compiler.raw_changed(target.relative_to(root))
-    indexed = page_from_file(root, target, scope="active")
+    index_scope = "active" if type_value == "chat" else "raw"
+    indexed = page_from_file(root, target, scope=index_scope)
     if indexed is None:
         index = {"ok": True, "state": "not_eligible", "code": "not_eligible"}
-    elif RetrievalIndexStore(root).path.exists():
-        index = RetrievalIndexStore(root).update_page(indexed)
+    elif RetrievalIndexStore(root, scope=index_scope).path.exists():
+        index = RetrievalIndexStore(root, scope=index_scope).update_page(indexed)
     else:
-        index = sync_retrieval_index(root)
-    response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "index": index}
+        store = RetrievalIndexStore(root, scope=index_scope)
+        index = store.build(store.iter_vault_pages())
+    response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "index_scope": index_scope, "index": index}
     if compiler_result is not None:
         response["generation"] = compiler_result.get("enqueued")
         response["stale_pages"] = compiler_result.get("stale", [])

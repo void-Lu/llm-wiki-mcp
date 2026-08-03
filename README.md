@@ -170,7 +170,7 @@ wiki_query(
 )
 ```
 
-Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，先做 passage FTS/vector 召回，再以 RRF 和有界强-seed graph 扩展排序；source index、superseded 与 deprecated 页面不会进入正文。需要精确原文、低覆盖或 stale 证据时，`pipeline.fallback` 会说明原因，并且只追加已声明 source 的 capsule 或相关 raw passage，绝不返回整份 raw。
+Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，先做 passage FTS/vector 召回，再以 RRF 和有界强-seed graph 扩展排序；source index、superseded 与 deprecated 页面不会进入正文。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
 
 回滚只修改 vault 配置的 `retrieval.query_version`：默认 `v2`；在兼容排障期设为 `v1` 会使用旧 façade 并返回 `query_v1_legacy_feature_flag` warning。该开关属于启动时配置快照，不能由 MCP query 参数覆盖。
 

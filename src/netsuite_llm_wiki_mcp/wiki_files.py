@@ -25,6 +25,7 @@ def wiki_status(vault_root: str | Path) -> dict[str, Any]:
         "retrieval": {
             "active": RetrievalIndexStore(root).status(),
             "archive": RetrievalIndexStore(root, scope="archive").status(),
+            "raw": RetrievalIndexStore(root, scope="raw").status(),
         },
         "version": RUNTIME_PROVENANCE.package_version,
         "runtime": RUNTIME_PROVENANCE.to_public_dict(),

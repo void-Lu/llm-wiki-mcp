@@ -89,3 +89,19 @@ def test_active_and_archive_stores_are_physically_isolated(tmp_path: Path) -> No
     assert active.path != archive.path
     assert [hit.page_path for hit in active.search_fts("invoice")] == ["wiki/concepts/live.md"]
     assert [hit.page_path for hit in archive.search_fts("invoice")] == ["archives/bundles/a/archived.md"]
+
+
+def test_raw_store_is_physically_isolated_and_queryable_without_source_reads(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    _write(root, "wiki/concepts/live.md", "# Live\n\nactive invoice")
+    _write(root, "raw/sources/file/finance/manual/invoice.txt", "raw-only custbody_approval_state")
+    active = RetrievalIndexStore(root)
+    raw = RetrievalIndexStore(root, scope="raw")
+
+    active.build(active.iter_vault_pages())
+    raw.build(raw.iter_vault_pages())
+
+    assert active.path != raw.path
+    assert not active.search_fts("custbody_approval_state")
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source scan")))
+    assert [hit.page_path for hit in raw.search_fts("custbody_approval_state")] == ["raw/sources/file/finance/manual/invoice.txt"]

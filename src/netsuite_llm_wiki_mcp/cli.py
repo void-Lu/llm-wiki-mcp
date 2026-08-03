@@ -131,7 +131,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for action in ("status", "build", "update"):
         action_parser = index_actions.add_parser(action, help=f"{action.title()} a passage retrieval store.")
         action_parser.add_argument("--vault", required=True)
-        action_parser.add_argument("--scope", choices=("active", "archive"), default="active")
+        action_parser.add_argument("--scope", choices=("active", "archive", "raw"), default="active")
 
     generation_parser = subparsers.add_parser("generation", help="Private worker management for durable generation jobs.")
     generation_parser.add_argument("action", choices=("status", "claim", "release", "fail"))
@@ -328,7 +328,7 @@ def _run_index(args: argparse.Namespace) -> int:
     if args.scope == "active":
         _print_json(sync_retrieval_index(args.vault, full_build=args.index_action == "build"))
         return 0
-    _print_json(store.build(store.iter_vault_pages()))
+    _print_json(store.reconcile() if args.index_action == "update" and store.path.exists() else store.build(store.iter_vault_pages()))
     return 0
 
 

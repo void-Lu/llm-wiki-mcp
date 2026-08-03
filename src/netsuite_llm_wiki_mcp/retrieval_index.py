@@ -25,7 +25,7 @@ from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 from netsuite_llm_wiki_mcp.wiki_paths import filesystem_path
 
 RETRIEVAL_SCHEMA_VERSION = 2
-StoreScope = Literal["active", "archive"]
+StoreScope = Literal["active", "archive", "raw"]
 
 
 class RetrievalIndexError(RuntimeError):
@@ -67,11 +67,16 @@ class PassageHit:
 
 class RetrievalIndexStore:
     def __init__(self, vault_root: str | Path, *, scope: StoreScope = "active", path: str | Path | None = None) -> None:
-        if scope not in {"active", "archive"}:
-            raise RetrievalIndexError("invalid_store_scope", "scope must be active or archive")
+        if scope not in {"active", "archive", "raw"}:
+            raise RetrievalIndexError("invalid_store_scope", "scope must be active, archive, or raw")
         self.root = Path(vault_root).expanduser().resolve()
         self.scope: StoreScope = scope
-        default = self.root / ".llm-wiki" / ("retrieval.sqlite3" if scope == "active" else "archive-index.sqlite3")
+        filenames = {
+            "active": "retrieval.sqlite3",
+            "archive": "archive-index.sqlite3",
+            "raw": "raw-retrieval.sqlite3",
+        }
+        default = self.root / ".llm-wiki" / filenames[scope]
         self.path = Path(path).expanduser().resolve() if path is not None else default
         if not self.path.is_relative_to(self.root):
             raise RetrievalIndexError("invalid_index_path", "retrieval store must remain inside the vault")
@@ -154,7 +159,7 @@ class RetrievalIndexStore:
 
     def reconcile(self) -> dict[str, object]:
         """Explicitly compare source stats and update changed eligible files only."""
-        if self.scope != "active":
+        if self.scope == "archive":
             return {"ok": False, "code": "reconcile_unsupported", "error": "archive stores are rebuilt from bundles"}
         if not self.path.exists():
             return self.status()
@@ -181,8 +186,6 @@ class RetrievalIndexStore:
         tags: list[str] | None = None,
         include_navigation: bool = False,
     ) -> list[PassageHit]:
-        if self.scope != "active" and self.scope != "archive":
-            return []
         phrase = fts_query(query)
         if not phrase or not self.path.exists():
             return []
@@ -289,7 +292,11 @@ class RetrievalIndexStore:
         candidates = (
             sorted([*root.glob("wiki/**/*.md"), *root.glob("raw/sources/chat/**/*")])
             if self.scope == "active"
-            else sorted(filesystem_path(self.root / "archives" / "bundles").rglob("*.md"))
+            else (
+                sorted(path for path in (root / "raw" / "sources").rglob("*") if not path.is_relative_to(root / "raw" / "sources" / "chat"))
+                if self.scope == "raw"
+                else sorted(filesystem_path(self.root / "archives" / "bundles").rglob("*.md"))
+            )
         )
         return [page for path in candidates if path.is_file() for page in [page_from_file(root, path, scope=self.scope)] if page is not None]
 
@@ -392,19 +399,35 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
     _, redacted_body = split_frontmatter(redacted.text) if path.suffix.lower() == ".md" else ({}, redacted.text)
     stat = path.stat()
     is_chat = rel.startswith("raw/sources/chat/")
+    is_raw = rel.startswith("raw/sources/") and not is_chat
     if is_chat:
         frontmatter = dict(frontmatter)
         # Chat storage is date/session based, not project based.  Never label
         # a date segment as a project in public historical evidence.
         frontmatter.setdefault("project", "unknown")
+    elif is_raw:
+        frontmatter = dict(frontmatter)
+        parts = rel.split("/")
+        # Ingest snapshots use raw/sources/<type>/<project>/<name>/... .
+        # Preserve an explicit frontmatter project, but make that stable path
+        # projection available to FTS filtering when no frontmatter exists.
+        if len(parts) >= 5:
+            frontmatter.setdefault("project", parts[3])
+        frontmatter.setdefault("type", "raw")
     occurred_at = str(frontmatter.get("occurred_at") or frontmatter.get("date") or datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat())
-    return IndexedPage(rel, str(frontmatter.get("title") or path.stem), redacted_body, frontmatter, "history" if is_chat else "knowledge", "low" if is_chat else "high", "active" if scope == "active" else "archived", "raw_chat" if is_chat else str(frontmatter.get("type") or "wiki"), redacted.original_hash, redacted.redacted_hash, stat.st_mtime_ns, stat.st_size, _chat_session(rel) if is_chat else "", occurred_at)
+    corpus = "history" if is_chat else "raw" if is_raw else "knowledge"
+    authority = "low" if is_chat or is_raw else "high"
+    lifecycle = "active" if scope != "archive" else "archived"
+    source_kind = "raw_chat" if is_chat else "raw" if is_raw else str(frontmatter.get("type") or "wiki")
+    return IndexedPage(rel, str(frontmatter.get("title") or path.stem), redacted_body, frontmatter, corpus, authority, lifecycle, source_kind, redacted.original_hash, redacted.redacted_hash, stat.st_mtime_ns, stat.st_size, _chat_session(rel) if is_chat else "", occurred_at)
 
 
 def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:
     path = relative_path.replace("\\", "/")
     if scope == "archive":
         return path.startswith("archives/bundles/")
+    if scope == "raw":
+        return path.startswith("raw/sources/") and not path.startswith("raw/sources/chat/")
     if path.startswith("raw/sources/chat/"):
         return True
     if not path.startswith("wiki/") or path.startswith("wiki/archives/"):

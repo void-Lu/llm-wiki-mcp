@@ -10,20 +10,17 @@ from pathlib import Path
 from typing import Any, Literal
 
 from netsuite_llm_wiki_mcp.context_packer import ContextPassage, pack_context
-from netsuite_llm_wiki_mcp.content_redaction import redact_for_index
-from netsuite_llm_wiki_mcp.fallback_policy import decide_fallback
-from netsuite_llm_wiki_mcp.passage_chunker import chunk_markdown
 from netsuite_llm_wiki_mcp.query_telemetry import QueryTelemetry
 from netsuite_llm_wiki_mcp.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings, TelemetrySettings
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexError, VectorIndexStore, vector_settings_from_embedding
 from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProviderError
 from netsuite_llm_wiki_mcp.wiki_query import QueryCandidate, _apply_graph_expansion, _build_graph
-from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 
 
 RANKING_POLICY_VERSION = "query-v2-passage-rrf-1"
 RRF_K = 60
+RAW_FALLBACK_LIMIT = 20
 _HISTORY_RE = re.compile(r"(?:之前|上次|讨论|会话|当时|历史|previous|last\s+(?:time|session)|history)", re.I)
 _EXACT_RE = re.compile(r"(?:原文|逐字|代码|字段|field\s+id|api|record|script|exact|verbatim)", re.I)
 _COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
@@ -268,44 +265,6 @@ def _graph_expand(
     return scored, store.passages_for_pages(added, limit_per_page=1)
 
 
-def _fallback_passages(
-    root: Path,
-    store: RetrievalIndexStore,
-    metadata: dict[str, dict[str, Any]],
-    question: str,
-    decision_level: str,
-    allowed_source_paths: tuple[str, ...],
-) -> list[ContextPassage]:
-    """Append only explicitly-authorized capsules/raw chunks, never full raw."""
-    allowed = set(allowed_source_paths)
-    result: list[ContextPassage] = []
-    if decision_level in {"capsule", "raw"} and allowed:
-        capsule_paths = [
-            path for path, frontmatter in metadata.items()
-            if "/capsules/" in path
-            and bool(set(frontmatter.get("sources", []) if isinstance(frontmatter.get("sources"), list) else [frontmatter.get("sources")]) & allowed)
-        ]
-        for hit in store.passages_for_pages(capsule_paths, limit_per_page=1):
-            result.append(ContextPassage(hit.passage_id, hit.page_path, _heading(hit), hit.text, 0.0, "source_capsule"))
-    if decision_level != "raw":
-        return result
-    terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", question) if len(term) > 1}
-    for relative in sorted(allowed):
-        candidate = (root / relative).resolve()
-        if not candidate.is_relative_to(root / "raw") or not candidate.is_file():
-            continue
-        try:
-            _frontmatter, body = split_frontmatter(candidate.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            continue
-        chunks = chunk_markdown(relative, redact_for_index(body).text)
-        ranked = sorted(chunks, key=lambda chunk: (-sum(chunk.text.casefold().count(term) for term in terms), chunk.ordinal))
-        if ranked and (not terms or sum(ranked[0].text.casefold().count(term) for term in terms) > 0):
-            chunk = ranked[0]
-            result.append(ContextPassage(chunk.passage_id, relative, " / ".join(chunk.heading_path) or Path(relative).name, chunk.text, 0.0, "raw_evidence"))
-    return result
-
-
 def run_query_v2(
     vault_root: str | Path,
     question: str,
@@ -424,6 +383,47 @@ def run_query_v2(
         selected_paths.add(page_path)
         if len(selected) >= top_k:
             break
+    # Raw source documents have their own FTS store and are intentionally not
+    # ranked alongside Wiki evidence.  Only a true Wiki zero-result query may
+    # fall through to this store; the fallback reads SQLite projections only,
+    # never walks raw files or loads an embedding model.
+    raw_fts_hits = 0
+    raw_index_warning = ""
+    raw_fallback = False
+    if not selected and effective_scope in {"knowledge", "all"}:
+        raw_store = RetrievalIndexStore(root, scope="raw")
+        raw_status = raw_store.status()
+        if raw_status.get("ok"):
+            try:
+                raw_hits = raw_store.search_fts(
+                    question,
+                    limit=min(top_k, RAW_FALLBACK_LIMIT),
+                    project=project,
+                    page_type=filters.type,
+                    tags=list(filters.tags),
+                )
+            except RetrievalIndexError as exc:
+                raw_hits = []
+                raw_index_warning = exc.code
+            raw_fts_hits = len(raw_hits)
+            selected = [
+                {
+                    "hit": hit,
+                    "fts_rank": rank,
+                    "title_rank": None,
+                    "vector_rank": None,
+                    "vector_score": 0.0,
+                    "rrf": 0.0,
+                    "exact": False,
+                    "graph_score": 0.0,
+                    "graph_reasons": [],
+                    "score": hit.score,
+                }
+                for rank, hit in enumerate(raw_hits, 1)
+            ]
+            raw_fallback = bool(selected)
+        else:
+            raw_index_warning = str(raw_status.get("code") or "raw_index_unavailable")
     passages = [
         ContextPassage(
             item["hit"].passage_id,
@@ -431,35 +431,43 @@ def run_query_v2(
             _heading(item["hit"]),
             item["hit"].text,
             item["score"],
-            "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge",
+            "raw_evidence" if item["hit"].source_kind == "raw" else "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge",
             _citation_metadata(item["hit"], provenance),
         )
         for item in selected
     ]
     packed: dict[str, Any] = pack_context(passages, hard_limit=hard_budget_tokens, intent=intent) if include_context_pack else {"passages": [], "citations": [], "budget": {"total": min(hard_budget_tokens, 16_000), "used": 0, "omitted": 0}}
-    stale = any(str(metadata.get(item["hit"].page_path, {}).get("freshness") or "") in {"stale", "review_required"} for item in selected)
-    sources: list[str] = []
-    for item in selected:
-        raw_sources = metadata.get(item["hit"].page_path, {}).get("sources", [])
-        values = raw_sources if isinstance(raw_sources, (list, tuple)) else [raw_sources]
-        sources.extend(str(path) for path in values if isinstance(path, str))
-    fallback = decide_fallback(intent=intent, top_score=selected[0]["score"] if selected else 0.0, eligible_formal_count=sum(item["hit"].corpus != "history" for item in selected), citation_count=len(packed["citations"]), stale=stale, source_paths=sources)
-    fallback_evidence = _fallback_passages(root, store, metadata, question, fallback.level, fallback.allowed_source_paths) if include_context_pack else []
-    if fallback_evidence:
-        before = int(packed["budget"]["used"])
-        packed = pack_context([*passages, *fallback_evidence], hard_limit=hard_budget_tokens, intent=intent)
-        fallback_payload = fallback.as_dict()
-        fallback_payload["added_token_usage"] = max(0, int(packed["budget"]["used"]) - before)
-    else:
-        fallback_payload = fallback.as_dict()
-        fallback_payload["added_token_usage"] = 0
-    results = [{"path": item["hit"].page_path, "heading": _heading(item["hit"]), "snippet": item["hit"].text[:240], "score": item["score"], "scores": {"fts": item["hit"].score, "vector": item["vector_score"], "rrf": item["rrf"], "graph": item["graph_score"]}, "source_kind": item["hit"].source_kind, "metadata": {"type": metadata.get(item["hit"].page_path, {}).get("type"), "tags": metadata.get(item["hit"].page_path, {}).get("tags", [])}} for item in selected]
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "archive" if effective_scope == "archive" else "active", "authority": "formal>capsule>raw>history", "intent": intent, "retrieval_mode": retrieval_mode, "counters": {"fts_hits": len(fts), "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": [*filter(None, scope_rules), *vector_warnings], "fallback": fallback_payload}
+    fallback_payload = {
+        "level": "raw" if raw_fallback else "none",
+        "reasons": ["wiki_zero_results"] if raw_fallback else [],
+        "allowed_source_paths": [item["hit"].page_path for item in selected] if raw_fallback else [],
+        "added_token_usage": 0,
+    }
+    results = [
+        {
+            "path": item["hit"].page_path,
+            "heading": _heading(item["hit"]),
+            "snippet": item["hit"].text[:240],
+            "score": item["score"],
+            "scores": {"fts": item["hit"].score, "vector": item["vector_score"], "rrf": item["rrf"], "graph": item["graph_score"]},
+            "source_kind": item["hit"].source_kind,
+            "metadata": (
+                {"type": item["hit"].source_kind, "tags": []}
+                if raw_fallback
+                else {"type": metadata.get(item["hit"].page_path, {}).get("type"), "tags": metadata.get(item["hit"].page_path, {}).get("tags", [])}
+            ),
+        }
+        for item in selected
+    ]
+    warnings = [*filter(None, scope_rules), *vector_warnings]
+    if raw_index_warning:
+        warnings.append(raw_index_warning)
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "formal>capsule>raw>history", "intent": intent, "retrieval_mode": retrieval_mode, "counters": {"fts_hits": len(fts), "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000
     if telemetry is None or telemetry.enabled:
-        QueryTelemetry(root).record(question=question, scope=scope, project=project, passage_ids=[item["hit"].passage_id for item in selected], fallback_level=fallback.level, token_count=int(packed["budget"]["used"]), latency_ms=elapsed, retention_days=(telemetry.retention_days if telemetry else 90))
+        QueryTelemetry(root).record(question=question, scope=scope, project=project, passage_ids=[item["hit"].passage_id for item in selected], fallback_level=str(fallback_payload["level"]), token_count=int(packed["budget"]["used"]), latency_ms=elapsed, retention_days=(telemetry.retention_days if telemetry else 90))
     return {"ok": True, "question": question, "scope": scope, "project": project or "", "results": results, "context_pack": packed, "pipeline": pipeline}
 
 

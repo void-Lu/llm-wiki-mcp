@@ -21,3 +21,15 @@ def test_single_file_ingest_handles_new_unchanged_and_modified_chat(tmp_path: Pa
 def test_single_file_ingest_rejects_a_directory(tmp_path: Path) -> None:
     result = ingest_file(vault_root=tmp_path / "vault", source_path=tmp_path, source_name="nope")
     assert result["code"] == "source_not_file"
+
+
+def test_single_file_ingest_indexes_non_chat_sources_in_the_raw_store(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    source = tmp_path / "manual.txt"
+    source.write_text("raw-only invoice approval field", encoding="utf-8")
+
+    result = ingest_file(vault_root=root, source_path=source, source_name="manual", project="finance")
+
+    assert result["index_scope"] == "raw"
+    assert RetrievalIndexStore(root, scope="raw").search_fts("raw-only invoice")
+    assert not RetrievalIndexStore(root).search_fts("raw-only invoice")

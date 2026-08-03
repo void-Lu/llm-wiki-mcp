@@ -3,6 +3,7 @@ from pathlib import Path
 from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 from netsuite_llm_wiki_mcp.runtime_config import decode_global_config
+import netsuite_llm_wiki_mcp.wiki_query as wiki_query_module
 from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
 from netsuite_llm_wiki_mcp.wiki_models import WikiPage
 from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
@@ -211,19 +212,83 @@ def test_v2_graph_expansion_requires_every_requested_tag(tmp_path: Path) -> None
     assert [item["path"] for item in result["results"]] == ["wiki/concepts/seed.md"]
 
 
-def test_v2_raw_fallback_reads_only_selected_source_chunks(tmp_path: Path) -> None:
+def test_v2_raw_fallback_uses_the_dedicated_fts_store_without_scanning_sources(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
     raw = root / "raw" / "sources" / "manual.md"
     raw.parent.mkdir(parents=True, exist_ok=True)
-    raw.write_text("# API evidence\n\nfield_id is custbody_approval_state token=super-secret\n\n# Unrelated\n\n" + "noise " * 500, encoding="utf-8")
-    _write(root, "wiki/entities/approval.md", "Approval", "Approval field id reference", type="entity", sources=["raw/sources/manual.md"])
+    raw.write_text("# API evidence\n\nfield_id is custbody_approval_state token=super-secret", encoding="utf-8")
     refresh_indexes(root)
-    result = run_query_v2(root, "field id reference")
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("raw source scan")))
+    result = run_query_v2(root, "custbody_approval_state", retrieval_mode="lexical")
+
     raw_passages = [item for item in result["context_pack"]["passages"] if item["evidence_kind"] == "raw_evidence"]
     assert raw_passages and "custbody_approval_state" in raw_passages[0]["content"]
     assert "super-secret" not in raw_passages[0]["content"]
     assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert result["pipeline"]["fallback"]["reasons"] == ["wiki_zero_results"]
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 1
+
+
+def test_v2_wiki_hits_do_not_fall_back_to_raw_fts(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw" / "sources" / "manual.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("invoice approval raw-only evidence", encoding="utf-8")
+    _write(root, "wiki/entities/approval.md", "Approval", "invoice approval workflow", type="entity")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "invoice approval", retrieval_mode="lexical")
+
+    assert [item["path"] for item in result["results"]] == ["wiki/entities/approval.md"]
+    assert result["pipeline"]["fallback"]["level"] == "none"
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
+
+
+def test_v2_raw_index_unavailable_yields_structured_warning(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    result = run_query_v2(root, "unique missing term", retrieval_mode="lexical")
+
+    assert result["ok"] is True
+    assert result["results"] == []
+    assert "index_missing" in result["pipeline"]["warnings"]
+    assert result["pipeline"]["fallback"]["level"] == "none"
+
+
+def test_v2_raw_fallback_respects_project_and_type_filters(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    alpha = root / "raw" / "sources" / "file" / "alpha" / "manual" / "a.txt"
+    alpha.parent.mkdir(parents=True, exist_ok=True)
+    alpha.write_text("unique raw retrieval needle alpha", encoding="utf-8")
+    beta = root / "raw" / "sources" / "file" / "beta" / "manual" / "b.txt"
+    beta.parent.mkdir(parents=True, exist_ok=True)
+    beta.write_text("unique raw retrieval needle beta", encoding="utf-8")
+    refresh_indexes(root)
+
+    scoped = run_query_v2(root, "unique raw retrieval needle", project="alpha", retrieval_mode="lexical")
+    raw_type = run_query_v2(root, "unique raw retrieval needle", filters=QueryFilters(type="raw"), retrieval_mode="lexical")
+    other_type = run_query_v2(root, "unique raw retrieval needle", filters=QueryFilters(type="concept"), retrieval_mode="lexical")
+
+    assert [item["path"] for item in scoped["results"]] == ["raw/sources/file/alpha/manual/a.txt"]
+    assert len(raw_type["results"]) == 2
+    assert other_type["results"] == []
+
+
+def test_v2_raw_content_never_enters_vector_records(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw" / "sources" / "manual.txt"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("raw-only vector-leak sentinel", encoding="utf-8")
+    refresh_indexes(root)
+
+    records = wiki_query_module.vector_index_records(root)
+
+    assert all("vector-leak" not in record["text"] for record in records)
 
 
 def test_query_version_flag_keeps_a_legacy_rollback_path(tmp_path: Path) -> None:
