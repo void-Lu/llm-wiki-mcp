@@ -43,7 +43,7 @@ def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None
     assert "content" not in result["results"][0]
     assert result["context_pack"]["passages"][0]["content"]
     assert result["pipeline"]["corpus"] == "active"
-    assert result["pipeline"]["authority"] == "active:formal>project>capsule>raw_chat;fallback:raw>active_relaxed"
+    assert result["pipeline"]["authority"] == "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw"
 
 
 def test_legacy_adapter_reuses_v2_selected_context_passages(tmp_path: Path) -> None:
@@ -253,7 +253,7 @@ def test_v2_raw_fallback_recovers_qualified_module_names_from_chinese_questions(
         assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
 
 
-def test_v2_raw_fallback_relaxes_multilingual_questions_before_active_recovery(tmp_path: Path) -> None:
+def test_v2_raw_fallback_ranks_strong_raw_answer_above_noisy_wiki_relaxed_match(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
     reference = root / "raw" / "sources" / "references" / "location.md"
@@ -273,11 +273,13 @@ def test_v2_raw_fallback_relaxes_multilingual_questions_before_active_recovery(t
 
     result = run_query_v2(root, "NetSuite 的 Location List/Record 字段 selectrecordtype 数字 ID 是多少？", retrieval_mode="lexical")
 
-    assert [item["path"] for item in result["results"]] == ["raw/sources/references/location.md"]
+    paths = [item["path"] for item in result["results"]]
+    assert paths[0] == "raw/sources/references/location.md"
+    assert "wiki/concepts/noisy-location.md" in paths
     assert result["pipeline"]["fallback"]["level"] == "raw"
     assert result["pipeline"]["lexical"]["mode"] == "relaxed"
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 1
-    assert result["pipeline"]["counters"]["relaxed_fts_hits"] == 0
+    assert result["pipeline"]["counters"]["relaxed_fts_hits"] > 0
 
 
 def test_v2_raw_fallback_returns_only_the_best_matching_passage_per_source_file(tmp_path: Path) -> None:

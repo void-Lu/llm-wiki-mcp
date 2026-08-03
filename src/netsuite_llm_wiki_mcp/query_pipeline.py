@@ -402,93 +402,22 @@ def run_query_v2(
         selected_paths.add(page_path)
         if len(selected) >= top_k:
             break
-    # Raw source documents have their own FTS store and are intentionally not
-    # ranked alongside Wiki evidence.  Only a true Wiki zero-result query may
-    # fall through to this store; the fallback reads SQLite projections only,
-    # never walks raw files or loads an embedding model.
+    # A true Wiki zero-result query recovers evidence from two places: the
+    # active store under relaxed multilingual lexical recovery, and the
+    # dedicated raw-source store.  Both stores share the same tokenizer and
+    # schema, so their bm25 scores are directly comparable and the candidates
+    # are ranked together.  Wiki pages are curated and carry an authority
+    # bonus when only wiki candidates exist; against raw evidence the raw
+    # bm25 score is the comparable lexical signal.  The fallback still reads
+    # SQLite projections only, never walks raw files or loads an embedding
+    # model.
     raw_fts_hits = 0
     relaxed_fts_hits = 0
     raw_index_warning = ""
     raw_fallback = False
     lexical_mode = "strict"
-    if (
-        not raw_fallback
-        and not has_primary_recall
-        and effective_scope in {"knowledge", "all"}
-    ):
-        raw_store = RetrievalIndexStore(root, scope="raw")
-        raw_status = raw_store.status()
-        if raw_status.get("ok"):
-            try:
-                raw_hits = raw_store.search_fts(
-                    question,
-                    limit=min(top_k, RAW_FALLBACK_LIMIT),
-                    project=project,
-                    page_type=filters.type,
-                    tags=list(filters.tags),
-                )
-                qualified_code_hits = raw_store.search_fts(
-                    question,
-                    limit=min(top_k, RAW_FALLBACK_LIMIT),
-                    project=project,
-                    page_type=filters.type,
-                    tags=list(filters.tags),
-                    mode="qualified_code",
-                )
-                # A slash-qualified identifier is a stronger signal than
-                # incidental English terms such as "record" or "methods".
-                # Prefer its dedicated lookup whenever available, regardless
-                # of whether the surrounding question is Chinese or English.
-                if qualified_code_hits:
-                    raw_hits = qualified_code_hits
-                    lexical_mode = "qualified_code"
-                elif not raw_hits:
-                    # Reference/raw sources are isolated from active Wiki
-                    # ranking, so give them the same bounded multilingual
-                    # lexical recovery before falling through to active
-                    # relaxed FTS.  This keeps raw evidence in stage two
-                    # while preventing CJK terms from turning a relevant
-                    # English reference page into a false zero-result.
-                    raw_hits = raw_store.search_fts(
-                        question,
-                        limit=min(top_k, RAW_FALLBACK_LIMIT),
-                        project=project,
-                        page_type=filters.type,
-                        tags=list(filters.tags),
-                        mode="relaxed",
-                    )
-                    if raw_hits:
-                        lexical_mode = "relaxed"
-            except RetrievalIndexError as exc:
-                raw_hits = []
-                raw_index_warning = exc.code
-            raw_fts_hits = len(raw_hits)
-            unique_raw_hits: list[PassageHit] = []
-            raw_paths: set[str] = set()
-            for hit in raw_hits:
-                if hit.page_path in raw_paths:
-                    continue
-                unique_raw_hits.append(hit)
-                raw_paths.add(hit.page_path)
-            selected = [
-                {
-                    "hit": hit,
-                    "fts_rank": rank,
-                    "title_rank": None,
-                    "vector_rank": None,
-                    "vector_score": 0.0,
-                    "rrf": 0.0,
-                    "exact": False,
-                    "graph_score": 0.0,
-                    "graph_reasons": [],
-                    "score": hit.score,
-                }
-                for rank, hit in enumerate(unique_raw_hits, 1)
-            ]
-            raw_fallback = bool(selected)
-        else:
-            raw_index_warning = str(raw_status.get("code") or "raw_index_unavailable")
-    if not selected and effective_scope in {"knowledge", "all"}:
+    if not has_primary_recall and effective_scope in {"knowledge", "all"}:
+        # Stage one: bounded multilingual recovery over the curated wiki.
         try:
             relaxed_hits = store.search_fts(
                 question,
@@ -520,14 +449,103 @@ def run_query_v2(
                 "exact": False,
                 "graph_score": 0.0,
                 "graph_reasons": [],
-                "score": round(hit.score + _authority_bonus(hit, intent, effective_scope, metadata) + _title_overlap_bonus(hit, question), 12),
+                "score": round(hit.score, 12),
             }
-        if relaxed_by_path:
+        # Stage two: dedicated raw-store fallback (strict, then slash-qualified
+        # code identifiers, then relaxed).
+        raw_store = RetrievalIndexStore(root, scope="raw")
+        raw_status = raw_store.status()
+        raw_by_path: dict[str, dict[str, Any]] = {}
+        raw_lexical_mode = "strict"
+        if raw_status.get("ok"):
+            try:
+                raw_hits = raw_store.search_fts(
+                    question,
+                    limit=min(top_k, RAW_FALLBACK_LIMIT),
+                    project=project,
+                    page_type=filters.type,
+                    tags=list(filters.tags),
+                )
+                qualified_code_hits = raw_store.search_fts(
+                    question,
+                    limit=min(top_k, RAW_FALLBACK_LIMIT),
+                    project=project,
+                    page_type=filters.type,
+                    tags=list(filters.tags),
+                    mode="qualified_code",
+                )
+                # A slash-qualified identifier is a stronger signal than
+                # incidental English terms such as "record" or "methods".
+                # Prefer its dedicated lookup whenever available, regardless
+                # of whether the surrounding question is Chinese or English.
+                if qualified_code_hits:
+                    raw_hits = qualified_code_hits
+                    raw_lexical_mode = "qualified_code"
+                elif not raw_hits:
+                    raw_hits = raw_store.search_fts(
+                        question,
+                        limit=min(top_k, RAW_FALLBACK_LIMIT),
+                        project=project,
+                        page_type=filters.type,
+                        tags=list(filters.tags),
+                        mode="relaxed",
+                    )
+                    if raw_hits:
+                        raw_lexical_mode = "relaxed"
+            except RetrievalIndexError as exc:
+                raw_hits = []
+                raw_index_warning = exc.code
+            raw_fts_hits = len(raw_hits)
+            for rank, hit in enumerate(raw_hits, 1):
+                if hit.page_path in raw_by_path:
+                    continue
+                raw_by_path[hit.page_path] = {
+                    "hit": hit,
+                    "fts_rank": rank,
+                    "title_rank": None,
+                    "vector_rank": None,
+                    "vector_score": 0.0,
+                    "rrf": 0.0,
+                    "exact": False,
+                    "graph_score": 0.0,
+                    "graph_reasons": [],
+                    "score": hit.score,
+                }
+        else:
+            raw_index_warning = str(raw_status.get("code") or "raw_index_unavailable")
+        if relaxed_by_path and not raw_by_path:
+            # Wiki-only recovery keeps the curation bonus so an overlapping
+            # knowledge page still outranks weaker lexical neighbours.
+            for item in relaxed_by_path.values():
+                item["score"] = round(
+                    item["hit"].score
+                    + _authority_bonus(item["hit"], intent, effective_scope, metadata)
+                    + _title_overlap_bonus(item["hit"], question),
+                    12,
+                )
+        if raw_lexical_mode == "qualified_code":
+            # A slash-qualified identifier is a precise, strong signal.  The
+            # dedicated raw lookup wins outright over incidental wiki term
+            # overlap (for example "record" or "methods"), matching the
+            # pre-merge fallback precedence for this mode.
+            merged = dict(raw_by_path)
+        else:
+            merged = dict(relaxed_by_path)
+            for path, item in raw_by_path.items():
+                merged.setdefault(path, item)
+        if merged:
             selected = sorted(
-                relaxed_by_path.values(),
+                merged.values(),
                 key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id),
             )[:top_k]
-            lexical_mode = "relaxed"
+            if raw_lexical_mode == "qualified_code":
+                lexical_mode = "qualified_code"
+            elif raw_lexical_mode == "relaxed" or relaxed_by_path:
+                lexical_mode = "relaxed"
+            # A merged result set is a raw fallback only when the best-ranked
+            # evidence is a raw source; a curated wiki page on top means the
+            # wiki answered the question and raw evidence is supplementary.
+            raw_fallback = bool(selected) and selected[0]["hit"].source_kind == "raw"
     passages = [
         ContextPassage(
             item["hit"].passage_id,
@@ -544,7 +562,7 @@ def run_query_v2(
     fallback_payload = {
         "level": "raw" if raw_fallback else "none",
         "reasons": ["wiki_zero_results"] if raw_fallback else [],
-        "allowed_source_paths": [item["hit"].page_path for item in selected] if raw_fallback else [],
+        "allowed_source_paths": [item["hit"].page_path for item in selected if item["hit"].source_kind == "raw"] if raw_fallback else [],
         "added_token_usage": 0,
     }
     results = [
@@ -557,7 +575,7 @@ def run_query_v2(
             "source_kind": item["hit"].source_kind,
             "metadata": (
                 {"type": item["hit"].source_kind, "tags": []}
-                if raw_fallback
+                if item["hit"].source_kind == "raw"
                 else {"type": metadata.get(item["hit"].page_path, {}).get("type"), "tags": metadata.get(item["hit"].page_path, {}).get("tags", [])}
             ),
         }
@@ -566,7 +584,7 @@ def run_query_v2(
     warnings = [*filter(None, scope_rules), *vector_warnings]
     if raw_index_warning:
         warnings.append(raw_index_warning)
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>capsule>raw_chat;fallback:raw>active_relaxed", "intent": intent, "retrieval_mode": retrieval_mode, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000
