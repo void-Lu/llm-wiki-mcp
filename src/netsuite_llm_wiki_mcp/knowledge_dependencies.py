@@ -46,13 +46,26 @@ class KnowledgeDependencies:
               CREATE INDEX IF NOT EXISTS source_edges_source ON source_edges(source_path);
             """)
 
-    def update_page(self, path: str, page_hash: str, sources: dict[str, str], *, generated: bool, maintenance: str = "auto", lifecycle: str = "active", replaced_by: str | None = None) -> None:
+    def update_page(
+        self,
+        path: str,
+        page_hash: str,
+        sources: dict[str, str],
+        *,
+        generated: bool,
+        maintenance: str = "auto",
+        lifecycle: str = "active",
+        replaced_by: str | None = None,
+        freshness: str = "fresh",
+    ) -> None:
         if lifecycle not in VALID_LIFECYCLE:
             raise ValueError("invalid lifecycle")
         if lifecycle == "superseded" and not replaced_by:
             raise ValueError("superseded pages require replaced_by")
+        if freshness not in {"fresh", "stale", "review_required"}:
+            raise ValueError("invalid freshness")
         with self._connection() as conn:
-            conn.execute("INSERT INTO knowledge_pages(path,page_hash,freshness,lifecycle,generated,maintenance,replaced_by,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET page_hash=excluded.page_hash,freshness=excluded.freshness,lifecycle=excluded.lifecycle,generated=excluded.generated,maintenance=excluded.maintenance,replaced_by=excluded.replaced_by,updated_at=excluded.updated_at", (path, page_hash, "fresh", lifecycle, int(generated), maintenance, replaced_by, _now()))
+            conn.execute("INSERT INTO knowledge_pages(path,page_hash,freshness,lifecycle,generated,maintenance,replaced_by,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET page_hash=excluded.page_hash,freshness=excluded.freshness,lifecycle=excluded.lifecycle,generated=excluded.generated,maintenance=excluded.maintenance,replaced_by=excluded.replaced_by,updated_at=excluded.updated_at", (path, page_hash, freshness, lifecycle, int(generated), maintenance, replaced_by, _now()))
             conn.execute("DELETE FROM source_edges WHERE page_path=?", (path,))
             conn.executemany("INSERT INTO source_edges(source_path,source_hash,page_path) VALUES(?,?,?)", [(source, digest, path) for source, digest in sources.items()])
 

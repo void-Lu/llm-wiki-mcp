@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from netsuite_llm_wiki_mcp.archive_models import ArchiveError, ArchiveItem, ArchiveManifest, is_archive_reason
+from netsuite_llm_wiki_mcp.archive_models import ArchiveAttachment, ArchiveError, ArchiveItem, ArchiveManifest, is_archive_reason
 
 
 def content_hash(path: Path) -> str:
@@ -65,6 +65,13 @@ def load_manifest(bundle: Path) -> ArchiveManifest:
             actor=str(payload.get("actor", "unknown")), replaced_by=payload.get("replaced_by"),
             restorable=bool(payload.get("restorable", True)), schema_version=int(payload["schema_version"]),
             dependencies=tuple(map(str, payload.get("dependencies", []))), passage_ids=tuple(map(str, payload.get("passage_ids", []))),
+            attachments=tuple(
+                ArchiveAttachment(
+                    archive_path=str(item["archive_path"]),
+                    content_hash=str(item["content_hash"]),
+                )
+                for item in payload.get("attachments", [])
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ArchiveError("archive_manifest_invalid", "archive manifest has invalid fields") from exc
@@ -75,6 +82,18 @@ def load_manifest(bundle: Path) -> ArchiveManifest:
         for item in manifest.items
     ):
         raise ArchiveError("archive_manifest_invalid", "archive manifest contains an unsafe path")
+    item_paths = {item.archive_path for item in manifest.items}
+    attachment_paths = [attachment.archive_path for attachment in manifest.attachments]
+    if (
+        len(attachment_paths) != len(set(attachment_paths))
+        or any(
+            not _safe_relative(path)
+            or path == "manifest.yaml"
+            or path in item_paths
+            for path in attachment_paths
+        )
+    ):
+        raise ArchiveError("archive_manifest_invalid", "archive manifest contains an unsafe attachment path")
     return manifest
 
 
@@ -88,6 +107,12 @@ def verify_bundle(root: Path, bundle: Path) -> ArchiveManifest:
             raise ArchiveError("archive_payload_missing", f"missing archive payload: {item.original_path}")
         if content_hash(payload) != item.content_hash:
             raise ArchiveError("archive_hash_mismatch", f"archive payload hash differs: {item.original_path}")
+    for attachment in manifest.attachments:
+        payload = bundle / attachment.archive_path
+        if not payload.is_file() or not payload.resolve().is_relative_to(bundle.resolve()):
+            raise ArchiveError("archive_payload_missing", f"missing archive attachment: {attachment.archive_path}")
+        if content_hash(payload) != attachment.content_hash:
+            raise ArchiveError("archive_hash_mismatch", f"archive attachment hash differs: {attachment.archive_path}")
     return manifest
 
 

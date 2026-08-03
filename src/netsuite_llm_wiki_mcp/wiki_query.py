@@ -274,7 +274,11 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False, *, scope: st
                 source_kind="raw" if str(item["source_kind"]) == "raw_chat" else "wiki",
             )
             for item in store.page_candidates()
-            if scope == "archive" or include_raw_sources or not str(item["path"]).startswith("raw/")
+            if scope == "archive"
+            or (
+                not str(item["path"]).startswith("wiki/sources/")
+                and (include_raw_sources or not str(item["path"]).startswith("raw/"))
+            )
         ]
         return candidates
     # Compatibility fallback for a vault that has not received its first
@@ -290,7 +294,8 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False, *, scope: st
         for path in sorted(wiki.rglob("*.md")):
             if _is_structural_page(path):
                 continue
-            if path.relative_to(root).parts[:2] == ("wiki", "archives"):
+            relative = path.relative_to(root).as_posix()
+            if relative.startswith(("wiki/archives/", "wiki/sources/")):
                 continue
             candidates.append(_wiki_candidate(path, root))
     raw_sources = root / "raw" / "sources"
@@ -316,7 +321,7 @@ def _in_project_scope(rel: str, project: str) -> bool:
     parts = Path(rel).parts
     if rel.startswith(f"wiki/projects/{project}/"):
         return True
-    if rel.startswith(("wiki/concepts/", "wiki/sources/", "wiki/entities/")):
+    if rel.startswith(("wiki/concepts/", "wiki/entities/")):
         return True
     if len(parts) >= 5 and parts[0] == "raw" and parts[1] == "sources" and parts[3] == project:
         return True
@@ -582,7 +587,8 @@ def vector_index_records(vault_root: str | Path, *, include_raw_sources: bool = 
                 corpus="active",
             )
             for record in store.vector_records()
-            if include_raw_sources or record["corpus"] != "history"
+            if not record["page_path"].startswith("wiki/sources/")
+            and (include_raw_sources or record["corpus"] != "history")
         ]
     return _vector_records(_candidate_pages(root, include_raw_sources=include_raw_sources))
 

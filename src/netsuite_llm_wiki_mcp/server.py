@@ -21,7 +21,6 @@ from netsuite_llm_wiki_mcp.runtime_config import (
 from netsuite_llm_wiki_mcp.runtime_provenance import RUNTIME_PROVENANCE
 from netsuite_llm_wiki_mcp.wiki_files import wiki_status as run_wiki_status
 from netsuite_llm_wiki_mcp.ingest_service import ingest_file as run_ingest_file
-from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K
 from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
 from netsuite_llm_wiki_mcp.archive_models import ARCHIVE_REASONS, is_archive_reason
@@ -356,32 +355,6 @@ def wiki_restore(archive_id: str, action: str = "plan", plan_id: str | None = No
     except Exception as exc:
         result = {"ok": False, "code": getattr(exc, "code", "restore_apply_failed"), "error": str(exc)}
     return attach_warnings(result, resolution.warnings)
-
-
-if CONFIG_REGISTRY.config.tool_profile == "worker":
-    @_register
-    def wiki_generation(action: str = "status", job_id: str | None = None, lease_token: str | None = None, result: dict[str, Any] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
-        """Worker-only generation queue bridge; not registered in the core profile."""
-        try:
-            resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-        except RuntimeConfigError as exc:
-            return _tool_error(exc)
-        compiler = KnowledgeCompiler(resolution.root)
-        if action == "status":
-            payload = compiler.queue.status()
-        elif action == "claim":
-            payload = compiler.claim("mcp-worker")
-        elif action == "apply" and job_id and lease_token and result is not None:
-            payload = compiler.apply_capsule(job_id, lease_token, result)
-        elif action == "fail" and job_id and lease_token:
-            payload = compiler.queue.fail(job_id, lease_token, "worker_failed")
-        elif action == "release" and job_id and lease_token:
-            payload = compiler.queue.release(job_id, lease_token)
-        elif action not in {"apply", "fail", "release"}:
-            return {"ok": False, "code": "invalid_action", "error": "invalid generation action"}
-        else:
-            payload = {"ok": False, "code": "missing_generation_arguments"}
-        return attach_warnings(payload, resolution.warnings)
 
 
 def main() -> None:

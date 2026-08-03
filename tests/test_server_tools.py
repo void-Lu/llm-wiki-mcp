@@ -106,7 +106,7 @@ def test_wiki_query_rejects_invalid_expansion_terms() -> None:
     assert payload["code"] == "invalid_expansion_terms"
 
 
-def test_worker_profile_adds_only_generation_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_worker_profile_does_not_reintroduce_retired_generation_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root = tmp_path / "vault"
     root.mkdir()
     config_dir = tmp_path / "config"
@@ -121,7 +121,7 @@ def test_worker_profile_adds_only_generation_tool(monkeypatch: pytest.MonkeyPatc
     sys.modules[module_name] = worker_server
     try:
         spec.loader.exec_module(worker_server)
-        assert anyio.run(_registered_tool_names, worker_server.mcp) == CORE_TOOLS | {"wiki_generation"}
+        assert anyio.run(_registered_tool_names, worker_server.mcp) == CORE_TOOLS
     finally:
         sys.modules.pop(module_name, None)
 

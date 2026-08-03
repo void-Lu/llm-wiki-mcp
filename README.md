@@ -149,14 +149,14 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 | 工具                | 说明                                                                                                                                            |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `wiki_status`     | 聚合逻辑 vault、检索配置、active/archive index、generation queue、版本与运行身份；不回显绝对路径、模型路径、凭据或脱敏规则正文。`detail=summary |
-| `wiki_ingest`     | 摄入一个明确文件，写入`raw/sources/`，同步检索索引并把知识编译任务加入 durable queue。                                                        |
+| `wiki_ingest`     | 摄入一个明确文件，写入 `raw/sources/` 并同步 raw/检索索引；不会生成 Wiki 页面或 capsule 任务。                                      |
 | `wiki_write_note` | 仅创建人工知识页，已有目标不会被覆盖。                                                                                                          |
 | `wiki_update`     | 对既有页面执行 `preview                                                                                                                         |
 | `wiki_query`      | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；模型、预算、索引和隐私策略全部来自启动时配置快照。                     |
 | `wiki_archive`    | 归档生命周期的 `plan                                                                                                                            |
 | `wiki_restore`    | 不可变归档包的 `plan                                                                                                                            |
 
-worker profile 只会额外注册 `wiki_generation`。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
+不再注册 `wiki_generation` worker 工具。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 
 `retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测公共查询契约，输出 JSON 与 Markdown 报告。当前唯一查询引擎是 V2，`--query-version` 仅接受 `v2`；评测只读取已构建的 passage/vector index，且关闭查询遥测。`--scope` 控制 V2 corpus。报告包含 Recall@10、MRR@10、nDCG@10、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
@@ -176,7 +176,7 @@ wiki_query(
 )
 ```
 
-Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，先做 passage FTS/vector 召回，再以 RRF 和有界强-seed graph 扩展排序；source index、superseded 与 deprecated 页面不会进入正文。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
+Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，先做 passage FTS/vector 召回，再以 RRF 和有界强-seed graph 扩展排序；退役的 `wiki/sources`、superseded 与 deprecated 页面不会进入 active 正文。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
 
 查询引擎固定为 V2；配置中的 `retrieval.query_version` 仅保留明确的 `v2` 值，旧 `v1` 配置会在启动解码时拒绝。若旧客户端只需要旧响应字段，可使用 `retrieval.context.response_mode=legacy`，它只适配已经完成的 V2 结果，不会切换检索引擎。
 
@@ -208,7 +208,6 @@ vault_root/
 │   │       ├── architecture/
 │   │       ├── troubleshooting/
 │   │       └── researches/
-│   ├── sources/index.md
 │   ├── entities/
 │   └── archives/
 ├── archives/
@@ -229,7 +228,7 @@ vault_root/
 推荐循环：
 
 1. 用 CLI 注册 vault：`netsuite-llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
-2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步检索索引，并把知识编译任务加入 durable queue。
+2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
 3. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。
 4. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
 5. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑；preview 返回 hash、plan_id、锁定字段和 diff，apply 在内容变化前校验这些不变量。
@@ -237,9 +236,18 @@ vault_root/
 
 对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
 
-### 知识编译与 worker
+### Raw provenance 与退役 capsule
 
-`wiki_ingest` 只负责 raw snapshot 和入队，不直接调用 LLM。知识编译由 [knowledge_compiler.py](src/netsuite_llm_wiki_mcp/knowledge_compiler.py) 和 durable [generation_queue.py](src/netsuite_llm_wiki_mcp/generation_queue.py) 管理。worker profile 额外注册 `wiki_generation`，提供 `status`、`claim`、`apply`、`fail`、`release`；CLI `generation` 提供同一队列的管理入口。
+`wiki_ingest` 只负责 raw snapshot、hash 和索引投影，不调用 LLM，也不生成 `wiki/sources` 页面。`knowledge_compiler.py` 仅保留兼容边界：旧的 `source_capsule` / `chat_source_capsule` job 会被拒绝或 supersede，不再 claim/apply；活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes`。一次性归档由 `scripts/archive_wiki_sources.py` 完成，不注册为 MCP 常态工具。
+
+执行一次性归档时先预检，再显式提交：
+
+```bash
+python scripts/archive_wiki_sources.py --vault-root <vault-root>
+python scripts/archive_wiki_sources.py --vault-root <vault-root> --apply
+```
+
+脚本会把整个退役 namespace 作为一个不可恢复 bundle 归档；raw 文件不移动、不删除。缺失或冲突的 raw 映射会在页面标记 `review_required`，但不会阻断归档，完整映射审计保存在 bundle 的 `source-remap.json` 中。
 
 批量或重建立索引不是 MCP 工具职责：`retrieval-eval`、`vector build/update`、`index build/update`、archive admin 和 migration 都保留在 CLI 边界。
 
@@ -250,13 +258,11 @@ vault_root/
 ```
 wiki_ingest
     → raw/sources/<source_type>/<project>/<source_name>/<file>
-    → RetrievalIndexStore 增量更新
-    → 非 chat 且内容变化时，KnowledgeCompiler 入队
-    → worker `wiki_generation` claim/apply
-    → 写 wiki 页面 + refresh index/overview/log
+    → raw/active RetrievalIndexStore 增量更新
+    → 显式 wiki_write_note / wiki_update 维护 formal Wiki
 ```
 
-`wiki_ingest` 只接受一个已存在文件，不接受目录或自动下载。raw snapshot 按字节复制，检索投影在复制后同步；若 raw 内容未变化，不会重复入队知识编译。
+`wiki_ingest` 只接受一个已存在文件，不接受目录或自动下载。raw snapshot 按字节复制，检索投影在复制后同步；若 raw 内容未变化，不会重复复制或刷新该 snapshot。
 
 ### 受控更新与归档
 

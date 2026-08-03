@@ -16,6 +16,7 @@ from netsuite_llm_wiki_mcp.wiki_log import append_log_entry
 from netsuite_llm_wiki_mcp.wiki_models import WikiLogEntry, WikiPage
 
 LOCKED_FIELDS = {"type", "concept_id", "entity_id", "entity_type", "created", "source_path", "source_hash"}
+REMOVED_FIELDS = {"source_capsules", "source_capsule"}
 _ALLOWED = ("wiki/concepts/", "wiki/entities/", "wiki/projects/")
 
 
@@ -39,6 +40,9 @@ def preview_update(vault_root: str | Path, page_path: str, incoming_body: str, i
     if fm.get("lifecycle", "active") != "active":
         return {"ok": False, "code": "inactive_page"}
     incoming = dict(incoming_frontmatter or {})
+    removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
+    if removed_fields:
+        return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
     violations = _locked_violations(fm, incoming)
     removed_sources = set(_sources(fm)) - set(_sources(incoming)) if "sources" in incoming else set()
     return {"ok": True, "action": "preview", "page_path": page_path, "current_hash": _digest(text), "plan_id": _plan_id(page_path, _digest(text), incoming_body, incoming), "locked_fields": sorted(LOCKED_FIELDS), "locked_field_violations": violations, "removed_sources": sorted(removed_sources), "diff": "".join(difflib.unified_diff(old_body.splitlines(True), incoming_body.splitlines(True), fromfile="current", tofile="incoming"))}
@@ -55,6 +59,9 @@ def apply_update(vault_root: str | Path, page_path: str, incoming_body: str, *, 
     existing, _ = split_frontmatter(text)
     current_hash = _digest(text)
     incoming = dict(incoming_frontmatter or {})
+    removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
+    if removed_fields:
+        return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
     expected_plan = _plan_id(page_path, current_hash, incoming_body, incoming)
     if expected_hash and expected_hash != current_hash:
         return {"ok": False, "code": "expected_hash_mismatch"}

@@ -4,10 +4,10 @@ from netsuite_llm_wiki_mcp.concept_registry import ConceptRegistry
 from netsuite_llm_wiki_mcp.ingest_service import sync_retrieval_index
 
 
-def test_alias_resolution_and_promotion_rules(tmp_path) -> None:
+def test_alias_resolution_and_raw_source_promotion_rules(tmp_path) -> None:
     path = tmp_path / "wiki/concepts/finance/invoice.md"
     path.parent.mkdir(parents=True)
-    path.write_text("---\ntype: concept\nconcept_id: concept_invoice\naliases: [Invoice Approval, 发票审批]\nsource_capsules: [wiki/sources/a/capsules/one.md, wiki/sources/b/capsules/two.md]\n---\n\n# Invoice\n", encoding="utf-8")
+    path.write_text("---\ntype: concept\nconcept_id: concept_invoice\naliases: [Invoice Approval, 发票审批]\nsources: [raw/sources/file/a/one.md, raw/sources/file/b/two.md]\n---\n\n# Invoice\n", encoding="utf-8")
     registry = ConceptRegistry(tmp_path)
     assert registry.resolve("发票审批")["action"] == "existing"
     assert registry.promotion(["a", "b"]) == "promote"

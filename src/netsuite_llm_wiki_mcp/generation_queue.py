@@ -19,6 +19,7 @@ from typing import Any, Iterator, Mapping
 
 ACTIVE_STATES = {"pending", "leased", "failed"}
 TERMINAL_STATES = {"applied", "superseded"}
+DISABLED_JOB_TYPES = frozenset({"source_capsule", "chat_source_capsule"})
 
 
 def _now() -> datetime:
@@ -88,6 +89,8 @@ class GenerationQueue:
     def create(self, *, job_type: str, target_path: str, sources: Mapping[str, str], prompt_version: str, schema_version: int, expected_target_hash: str | None = None) -> dict[str, Any]:
         if not sources:
             raise ValueError("generation jobs require at least one source")
+        if job_type in DISABLED_JOB_TYPES:
+            raise ValueError(f"generation job type is disabled: {job_type}")
         job_id = _job_id(job_type, target_path, sources, prompt_version, schema_version)
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM generation_jobs WHERE job_id=?", (job_id,)).fetchone()
@@ -104,7 +107,11 @@ class GenerationQueue:
     def claim(self, owner: str, *, lease_seconds: int = 300) -> dict[str, Any]:
         with self._connection() as conn:
             self._expire(conn)
-            row = conn.execute("SELECT job_id FROM generation_jobs WHERE state IN ('pending','failed') ORDER BY created_at, job_id LIMIT 1").fetchone()
+            disabled_marks = ",".join("?" for _ in DISABLED_JOB_TYPES)
+            row = conn.execute(
+                f"SELECT job_id FROM generation_jobs WHERE state IN ('pending','failed') AND job_type NOT IN ({disabled_marks}) ORDER BY created_at, job_id LIMIT 1",
+                tuple(sorted(DISABLED_JOB_TYPES)),
+            ).fetchone()
             if row is None:
                 return {"ok": True, "job": None}
             token = uuid.uuid4().hex
@@ -146,6 +153,26 @@ class GenerationQueue:
             for job_id in ids:
                 conn.execute("UPDATE generation_jobs SET state='superseded',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE job_id=?", (_stamp(), job_id))
                 self._event(conn, job_id, "superseded", {"changed_sources": sorted(source_paths)})
+            return ids
+
+    def supersede_job_types(self, job_types: set[str], *, reason: str = "disabled_job_type") -> list[str]:
+        """Terminally cancel queued jobs for a retired generation pipeline."""
+        values = sorted({str(item) for item in job_types})
+        if not values:
+            return []
+        marks = ",".join("?" for _ in values)
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"SELECT job_id FROM generation_jobs WHERE state IN ('pending','leased','failed') AND job_type IN ({marks})",
+                tuple(values),
+            ).fetchall()
+            ids = [str(row["job_id"]) for row in rows]
+            for job_id in ids:
+                conn.execute(
+                    "UPDATE generation_jobs SET state='superseded',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE job_id=?",
+                    (_stamp(), job_id),
+                )
+                self._event(conn, job_id, "superseded", {"reason": reason, "job_type": "retired"})
             return ids
 
     def add_review(self, job_id: str, reason: str, payload: Mapping[str, Any]) -> str:

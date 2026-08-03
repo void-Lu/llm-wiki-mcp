@@ -46,7 +46,7 @@ class ConceptRegistry:
             if fm.get("type") != "concept" or fm.get("redirect_to"):
                 continue
             aliases = tuple(str(item) for item in fm.get("aliases", []) if isinstance(item, str))
-            sources = tuple(str(item) for item in fm.get("source_capsules", fm.get("sources", [])) if isinstance(item, str))
+            sources = tuple(str(item) for item in fm.get("sources", []) if isinstance(item, str))
             records.append(ConceptRecord(str(fm.get("concept_id") or canonical_id(page.title)), page.relative_path.as_posix(), page.title, aliases, str(fm.get("domain") or "general"), sources, str(fm.get("lifecycle") or "active")))
         self.records = records
         return records
@@ -99,12 +99,12 @@ class ConceptRegistry:
         return {"available": False, "reason": "core_profile_does_not_load_embedding_model"}
 
     @staticmethod
-    def promotion(source_capsules: Iterable[str], *, query_frequency: int = 0, has_chat_source: bool = False, threshold: int = 2) -> str:
+    def promotion(sources: Iterable[str], *, query_frequency: int = 0, has_chat_source: bool = False, threshold: int = 2) -> str:
         if has_chat_source:
             return "review_required"
-        if len(set(source_capsules)) >= threshold or query_frequency >= threshold:
+        if len(set(sources)) >= threshold or query_frequency >= threshold:
             return "promote"
-        return "keep_capsule"
+        return "review_required"
 
     def redirect_frontmatter(self, old_id: str, replacement: ConceptRecord) -> dict[str, Any]:
         return {"type": "concept", "concept_id": old_id, "redirect_to": replacement.path, "replaced_by": replacement.concept_id, "aliases": [old_id], "generated": True, "maintenance": "auto", "lifecycle": "superseded"}

@@ -223,12 +223,14 @@ class RetrievalIndexStore:
             for tag in tags:
                 clauses.append("pages.frontmatter_json LIKE ?"); params.append(f'%"{tag}"%')
         if not include_navigation:
-            # Source/navigation pages can dominate an FTS prefix match while
-            # the query pipeline intentionally excludes them from results.
-            # Exclude them before applying the bounded candidate limit so they
-            # cannot starve searchable capsules or knowledge pages.
+            # Navigation pages can dominate an FTS prefix match while the
+            # query pipeline intentionally excludes them from results. Exclude
+            # them before applying the bounded candidate limit.
             clauses.append("pages.page_type NOT IN (?, ?, ?, ?)")
             params.extend(("source_index", "source-index", "index", "source_summary"))
+        if self.scope != "archive":
+            clauses.append("pages.path NOT LIKE ?")
+            params.append("wiki/sources/%")
         params.append(limit)
         sql = """
             SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
@@ -462,12 +464,12 @@ def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:
         return False
     if path.startswith("raw/sources/chat/"):
         return True
-    if not path.startswith("wiki/") or path.startswith("wiki/archives/"):
+    if not path.startswith("wiki/") or path.startswith("wiki/archives/") or path.startswith("wiki/sources/"):
         return False
     name = Path(path).name.casefold()
     if name in {"index.md", "overview.md", "log.md"}:
         return False
-    return any(path.startswith(prefix) for prefix in ("wiki/concepts/", "wiki/entities/", "wiki/projects/", "wiki/sources/"))
+    return any(path.startswith(prefix) for prefix in ("wiki/concepts/", "wiki/entities/", "wiki/projects/"))
 
 
 def _chat_session(relative_path: str) -> str:

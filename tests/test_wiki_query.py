@@ -461,10 +461,10 @@ def test_wiki_query_length_normalization_keeps_exact_title_above_generated_body(
     _write(root, "wiki/concepts/3d-secure.md", "3D Secure Payment Authentication", "short reference", type="concept")
     _write(
         root,
-        "wiki/sources/help-noise.md",
-        "Commerce index",
+        "wiki/concepts/help-noise.md",
+        "Commerce Reference",
         "3d secure payment authentication commerce web stores " * 4_000,
-        type="source_index",
+        type="concept",
     )
     refresh_indexes(root)
 
@@ -472,7 +472,7 @@ def test_wiki_query_length_normalization_keeps_exact_title_above_generated_body(
 
     assert [item["path"] for item in result["results"]] == [
         "wiki/concepts/3d-secure.md",
-        "wiki/sources/help-noise.md",
+        "wiki/concepts/help-noise.md",
     ]
     assert result["results"][0]["scores"]["keyword"] > result["results"][1]["scores"]["keyword"]
 
@@ -514,24 +514,17 @@ def test_wiki_query_excludes_structural_pages_from_results(tmp_path: Path):
     assert "wiki/overview.md" not in paths
 
 
-def test_wiki_query_excludes_generated_navigation_but_keeps_source_index_entries(tmp_path: Path):
+def test_wiki_query_excludes_retired_source_namespace(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    _write(root, "wiki/sources/index-02.md", "Navigation", "navigation needle", type="index", navigation=True)
-    _write(
-        root,
-        "wiki/sources/provider/_entries.md",
-        "Source Leaf",
-        "source index needle",
-        type="source_index",
-        index_kind="lightweight_source_index",
-    )
+    source = root / "wiki/sources/provider/_entries.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("---\ntype: source_index\ngenerated: true\n---\n\n# Source Leaf\n\nsource index needle", encoding="utf-8")
 
     result = wiki_query(root, "needle", top_k=5)
 
     paths = [item["path"] for item in result["results"]]
-    assert "wiki/sources/index-02.md" not in paths
-    assert "wiki/sources/provider/_entries.md" in paths
+    assert "wiki/sources/provider/_entries.md" not in paths
 
 def test_wiki_query_graph_expands_escaped_table_wikilinks(tmp_path: Path):
     root = tmp_path / "vault"

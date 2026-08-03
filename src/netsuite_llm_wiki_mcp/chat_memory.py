@@ -120,9 +120,9 @@ class ChatMemoryService:
             latest_path, latest = existing[-1]
             if latest.frontmatter.get("redacted_hash") == redacted_hash:
                 response = self._response(latest_path, latest.frontmatter, idempotent=True)
-                # A crash after the immutable write but before index/queue
-                # creation must be recoverable by the idempotent retry.
-                response["enqueued"] = self._refresh_and_enqueue(latest_path)
+                # A crash after the immutable write but before index refresh
+                # must be recoverable by the idempotent retry.
+                response["index"] = self._refresh_and_index(latest_path)
                 return response
             parent_body = latest.body
             append_only = redacted_transcript.startswith(parent_body) and len(redacted_transcript) > len(parent_body)
@@ -155,23 +155,20 @@ class ChatMemoryService:
             frontmatter["project"] = redacted_metadata["project"]
         serialized = self._serialize(frontmatter, redacted_transcript)
         self._atomic_write(self.root / relative, serialized)
-        queued = self._refresh_and_enqueue(self.root / relative)
+        indexed = self._refresh_and_index(self.root / relative)
         append_log_entry(self.root, WikiLogEntry(operation="chat_source", title=str(redacted_metadata["session_id"]), paths=[relative.as_posix()], sources=[], project=str(redacted_metadata.get("project", "")), status="ok"))
         response = self._response(self.root / relative, frontmatter, idempotent=False)
-        response["enqueued"] = queued
+        response["index"] = indexed
         return response
 
-    def _refresh_and_enqueue(self, source_path: Path) -> dict[str, Any]:
-        from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
+    def _refresh_and_index(self, source_path: Path) -> dict[str, Any]:
+        del source_path
         from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 
         refreshed = refresh_indexes(self.root)
         if not refreshed.get("ok"):
             raise ChatMemoryError("retrieval_index_stale", "chat source was saved but retrieval indexing failed")
-        queued = KnowledgeCompiler(self.root).enqueue_capsule(source_path.relative_to(self.root))
-        if not queued.get("ok"):
-            raise ChatMemoryError("queue_enqueue_failed", "chat source was saved but capsule enqueue failed")
-        return queued
+        return {"ok": True, "generation": {"enabled": False, "reason": "raw_only"}, "retrieval_index": refreshed.get("retrieval_index")}
 
     def provenance(self, sources: object) -> dict[str, Any]:
         if not isinstance(sources, list) or not sources:

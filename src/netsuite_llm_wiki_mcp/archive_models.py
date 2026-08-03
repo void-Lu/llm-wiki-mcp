@@ -40,6 +40,24 @@ class ArchiveItem:
 
 
 @dataclass(frozen=True)
+class ArchiveAttachment:
+    """An immutable, non-searchable file carried by an archive bundle."""
+
+    archive_path: str
+    content_hash: str
+    content: str | None = None
+
+    def to_dict(self, *, include_content: bool = False) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "archive_path": self.archive_path,
+            "content_hash": self.content_hash,
+        }
+        if include_content and self.content is not None:
+            result["content"] = self.content
+        return result
+
+
+@dataclass(frozen=True)
 class ArchiveManifest:
     archive_id: str
     operation_id: str
@@ -52,6 +70,7 @@ class ArchiveManifest:
     schema_version: int = 1
     dependencies: tuple[str, ...] = ()
     passage_ids: tuple[str, ...] = ()
+    attachments: tuple[ArchiveAttachment, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -66,6 +85,7 @@ class ArchiveManifest:
             "passage_ids": list(self.passage_ids),
             "actor": self.actor,
             "restorable": self.restorable,
+            "attachments": [attachment.to_dict() for attachment in sorted(self.attachments, key=lambda value: value.archive_path)],
         }
 
 
@@ -81,6 +101,9 @@ class ArchivePlan:
     reason: ArchiveReason | None = None
     blockers: tuple[dict[str, Any], ...] = ()
     cascade: bool = False
+    force_namespace: str | None = None
+    restorable: bool = True
+    attachments: tuple[ArchiveAttachment, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +118,9 @@ class ArchivePlan:
             "plan_hash": self.plan_hash,
             "blockers": list(self.blockers),
             "cascade": self.cascade,
+            "force_namespace": self.force_namespace,
+            "restorable": self.restorable,
+            "attachments": [attachment.to_dict(include_content=True) for attachment in sorted(self.attachments, key=lambda value: value.archive_path)],
         }
 
 

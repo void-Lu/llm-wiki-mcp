@@ -94,4 +94,5 @@ tests/fixtures
 !tests/fixtures/retrieval/v2_40/
 !tests/fixtures/retrieval/v2_40/**
 .pytest-tmp
-scripts
+scripts/*
+!scripts/archive_wiki_sources.py

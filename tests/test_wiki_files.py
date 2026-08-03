@@ -50,5 +50,6 @@ def test_wiki_status_reports_missing_structure_without_creating_it(tmp_path: Pat
     assert result["ok"] is True
     assert result["initialized"] is False
     assert "wiki/index.md" in result["missing_required_paths"]
+    assert all(not path.startswith("wiki/sources") for path in result["missing_required_paths"])
     assert not root.exists()
 

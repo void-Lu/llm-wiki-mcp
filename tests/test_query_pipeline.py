@@ -51,7 +51,7 @@ def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None
     assert "content" not in result["results"][0]
     assert result["context_pack"]["passages"][0]["content"]
     assert result["pipeline"]["corpus"] == "active"
-    assert result["pipeline"]["authority"] == "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw_identifier>raw"
+    assert result["pipeline"]["authority"] == "active:formal>project>raw_chat;fallback:active_relaxed>raw_identifier>raw"
 
 
 def test_legacy_adapter_reuses_v2_selected_context_passages(tmp_path: Path) -> None:
@@ -184,65 +184,32 @@ def test_v2_expansion_suggestions_stay_empty_when_primary_recall_exists(tmp_path
     assert result["expansion_suggestions"] == []
 
 
-def test_v2_title_signal_recalls_a_terse_entity_query_without_full_body_match(tmp_path: Path) -> None:
+def test_v2_excludes_retired_source_namespace_even_when_legacy_files_remain(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
-    _write(root, "wiki/sources/capsules/action-examples.md", "Action Examples", "workflow transition reference", type="source_capsule")
+    legacy = root / "wiki/sources/capsules/action-examples.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("---\ntype: source_capsule\ngenerated: true\n---\n\n# Action Examples\n\nlegacy retrieval noise", encoding="utf-8")
     refresh_indexes(root)
 
-    result = run_query_v2(root, "NetSuite action examples")
+    result = run_query_v2(root, "legacy retrieval noise")
 
-    assert [item["path"] for item in result["results"]] == ["wiki/sources/capsules/action-examples.md"]
+    assert result["results"] == []
 
 
-def test_v2_provenance_signal_recalls_source_named_entity_without_raw_read(tmp_path: Path) -> None:
+def test_v2_raw_fallback_uses_raw_documents_after_formal_miss(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
-    _write(root, "wiki/sources/capsules/reports.md", "Reports Menu Links", "navigation reference", type="source_capsule", sources=["raw/sources/help/Access to Reports.md"])
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("---\ntitle: Reports Help\n---\n\nAccess reports from the Reports menu.", encoding="utf-8")
     refresh_indexes(root)
 
-    result = run_query_v2(root, "access reports")
+    result = run_query_v2(root, "access reports", retrieval_mode="lexical")
 
-    assert [item["path"] for item in result["results"]] == ["wiki/sources/capsules/reports.md"]
-    assert all("raw_evidence" != item["evidence_kind"] for item in result["context_pack"]["passages"])
-
-
-def test_v2_never_returns_source_index_pages_regardless_of_filename(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
-    create_wiki_root(root)
-    _write(root, "wiki/sources/catalog/index-04.md", "Catalog index", "shared source retrieval term", type="index")
-    _write(root, "wiki/sources/capsules/catalog.md", "Catalog capsule", "shared source retrieval term", type="source_capsule")
-    refresh_indexes(root)
-
-    result = run_query_v2(root, "shared source retrieval term")
-
-    assert [item["path"] for item in result["results"]] == ["wiki/sources/capsules/catalog.md"]
-
-
-def test_v2_lexical_recall_is_not_starved_by_source_indexes(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
-    create_wiki_root(root)
-    for number in range(55):
-        _write(
-            root,
-            f"wiki/sources/catalog/{number:02d}/index.md",
-            f"Navigation {number}",
-            "uncommon lexical retrieval token",
-            type="source_index",
-        )
-    _write(
-        root,
-        "wiki/sources/capsules/target.md",
-        "Target capsule",
-        "uncommon lexical retrieval token",
-        type="source_capsule",
-    )
-    refresh_indexes(root)
-
-    result = run_query_v2(root, "uncommon lexical retrieval token", retrieval_mode="lexical")
-
-    assert [item["path"] for item in result["results"]] == ["wiki/sources/capsules/target.md"]
-    assert result["pipeline"]["counters"]["fts_hits"] == 1
+    assert result["results"]
+    assert result["results"][0]["path"] == "raw/sources/file/default/help.md"
+    assert result["results"][0]["source_kind"] == "raw"
 
 
 def test_v2_archive_scope_is_physically_isolated(tmp_path: Path) -> None:

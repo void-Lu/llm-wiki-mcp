@@ -19,7 +19,6 @@ class WikiWriteError(ValueError):
 _ALLOWED_PREFIXES = (
     Path("wiki/projects"),
     Path("wiki/concepts"),
-    Path("wiki/sources"),
     Path("wiki/entities"),
     Path("wiki/archives"),
 )
@@ -50,7 +49,6 @@ _RESERVED_STRUCTURE_PARTS = {
     "wiki",
     "projects",
     "concepts",
-    "sources",
     "entities",
     "archives",
     *_PROJECT_SUBDIRS,
@@ -90,6 +88,9 @@ def write_wiki_page(
     title = redact_sensitive_text(page.title)
     body = redact_sensitive_text(page.body)
     frontmatter = _redact_value(dict(page.frontmatter))
+    removed_fields = sorted({key for key in ("source_capsules", "source_capsule") if key in frontmatter})
+    if removed_fields:
+        raise WikiWriteError("source_capsules_removed", "source capsule provenance fields are retired; use raw sources instead")
     frontmatter.setdefault("title", title)
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
     text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{body.strip()}\n"

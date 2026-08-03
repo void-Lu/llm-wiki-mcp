@@ -22,7 +22,6 @@ def refresh_overview(vault_root: str | Path) -> dict[str, Any]:
         }
     projects = [path for path in (wiki_root / "projects").iterdir() if path.is_dir()] if (wiki_root / "projects").exists() else []
     markdown_pages = [path for path in wiki_root.rglob("*.md") if path.name not in {"index.md", "log.md", "overview.md"}]
-    source_pages = [path for path in (wiki_root / "sources").rglob("*.md") if path.name not in {"index.md", "log.md", "overview.md"}] if (wiki_root / "sources").exists() else []
     generated = 0
     manual = 0
     for path in markdown_pages:
@@ -43,7 +42,6 @@ def refresh_overview(vault_root: str | Path) -> dict[str, Any]:
         "",
         "## Counts",
         f"- Projects: {len(projects)}",
-        f"- Source pages: {len(source_pages)}",
         f"- Generated pages: {generated}",
         f"- Manual pages: {manual}",
         "",

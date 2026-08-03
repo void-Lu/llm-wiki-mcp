@@ -37,7 +37,6 @@ TOP_LEVEL_DIRS = (
     Path("raw/assets"),
     Path("wiki/projects"),
     Path("wiki/concepts"),
-    Path("wiki/sources"),
     Path("wiki/entities"),
     Path("archives/bundles"),
     Path("archives/.staging"),
@@ -56,10 +55,10 @@ DEFAULT_SCHEMA_TEXT = """# Schema
 ## LLM Wiki 维护原则
 
 1. `raw/` 是来源事实层：保存 source snapshot、manifest 和项目原始资料；除 ingest/update 生命周期外，不把它当成普通可编辑笔记。
-2. `wiki/` 是知识编译层：页面可以总结、关联、比较、综合，但必须能通过 `sources` 字段追溯到 raw snapshot、外部搜索结果或人工 note。
+2. `wiki/` 是知识编译层：页面可以总结、关联、比较、综合；声明来源时必须通过 `sources` / `source_hashes` 追溯到具体 raw snapshot，不使用来源索引或 capsule。
 3. `purpose.md` 描述当前 vault 的研究范围；`schema.md` 描述维护规则；`wiki/index.md` 是内容目录；`wiki/log.md` 是时间线。
 4. 优先维护可读 Markdown、YAML frontmatter 和 `[[wikilink]]` 图谱；不要把 embedding/vector DB 作为主路径。
-5. 生成内容要小步、可审计：raw snapshot 先入队知识编译，再由 worker 校验并 apply。
+5. 生成内容要小步、可审计：raw snapshot 先落盘并建立 raw 索引；正式 Wiki 页面只通过显式 note/update 或人工 review 工作流产生。
 
 ## 页面类型与目录
 
@@ -73,7 +72,6 @@ DEFAULT_SCHEMA_TEXT = """# Schema
 | `concept` / `knowledge` | `wiki/concepts/<domain>/` | 领域知识、API 参考、场景实践 | `true` 或 `false` |
 | `entity` | `wiki/entities/<entity>/` | 构建完毕的实体页面 | `true` 或 `false` |
 | `archive` | `wiki/archives/<yyyy>/<mm>/<dd>/` | 过时、废弃或超限归档的 wiki 文档；不参与索引 | `true` 或 `false` |
-| `source_index` | `wiki/sources/` 或项目来源索引 | 来源索引/溯源页 | `true` |
 | `index` | `wiki/index.md` | 内容目录，按类别列出页面和摘要 | `true` |
 | `project_index` | `wiki/projects/<project>/index.md` | 项目内目录 | `true` |
 | `overview` | `wiki/overview.md` | 自动统计和最近日志摘要 | `true` |
@@ -110,7 +108,7 @@ tags:
 
 ## 写入与覆盖规则
 
-1. 只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/sources/`、`wiki/entities/<entity>/`、`wiki/archives/<yyyy>/<mm>/<dd>/`。
+1. 只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/entities/<entity>/`、`wiki/archives/<yyyy>/<mm>/<dd>/`。
 2. 工具生成页只能覆盖已有 `generated: true` 页面；遇到 `generated: false` 必须停止并报告。
 3. 受控更新时保留锁定字段：`type`、`title`、`created`、来源和人工维护字段；数组字段采用去重合并。
 4. 文件名和路径段必须是 Windows 安全的单段名称：不得包含 `<>:"|?*`、控制字符、ADS 冒号、保留设备名、尾随点或空格。
@@ -124,9 +122,7 @@ tags:
 wiki_ingest
     -> raw/sources/<source_type>/<project>/<source_name>/<file>
     -> RetrievalIndexStore 增量更新
-    -> 非 chat 且内容变化时，KnowledgeCompiler 入队
-    -> worker wiki_generation claim/apply
-    -> 写 wiki 页面 + refresh index/overview/log
+    -> raw provenance 失效标记与 raw index 更新
 ```
 
 `wiki_ingest` 只接受一个已存在文件；目录、批量摄入和 reconcile 不再属于 MCP 工具职责。
@@ -163,7 +159,7 @@ wiki_ingest
 - project: project-a
 - status: ok
 - paths:
-    - wiki/sources/example.md
+    - raw/sources/file/project-a/docs/source.md
 - sources:
     - raw/sources/file/project-a/docs/source.md
 ```
@@ -172,7 +168,7 @@ wiki_ingest
 
 - 可能覆盖 `generated: false` 人工页。
 - 页面路径逃逸 vault root 或落入未确认目录。
-- 生成页缺少可追溯来源且不是结构页。
+- 生成页缺少可追溯 raw 来源且不是结构页。
 - 写入内容包含未脱敏敏感信息。
 - 引入 Chroma、sentence-transformers、`.rag-index/`、`.models/` 或 embedding 主路径。
 """
@@ -185,7 +181,6 @@ DEFAULT_FILES = {
     Path("wiki/log.md"): "# Log\n\n",
     Path("wiki/overview.md"): "---\ntype: overview\ngenerated: true\n---\n\n# Overview\n\n",
     Path("wiki/concepts/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Concepts\n\n",
-    Path("wiki/sources/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Sources\n\n",
     Path("wiki/entities/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Entities\n\n",
     Path("archives/log.md"): "# Archives Log\n\n",
 }
@@ -237,14 +232,8 @@ class WikiPaths:
     def project_researches_dir(self, project: str) -> Path:
         return self.project_root(project) / "researches"
 
-    def project_sources_dir(self, project: str) -> Path:
-        return self.root / "wiki" / "sources" / "projects" / safe_segment(project)
-
     def concepts_dir(self) -> Path:
         return self.root / "wiki" / "concepts"
-
-    def sources_dir(self) -> Path:
-        return self.root / "wiki" / "sources"
 
     def entities_dir(self) -> Path:
         return self.root / "wiki" / "entities"

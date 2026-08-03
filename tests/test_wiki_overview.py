@@ -31,15 +31,6 @@ def test_refresh_overview_writes_deterministic_counts_and_recent_log(tmp_path: P
         ),
         overwrite_generated_only=False,
     )
-    write_wiki_page(
-        root,
-        WikiPage(
-            relative_path=Path("wiki/sources/source-a.md"),
-            frontmatter={"title": "Source A", "generated": True, "sources": ["raw/sources/a.md"]},
-            title="Source A",
-            body="source",
-        ),
-    )
     append_log_entry(
         root,
         WikiLogEntry(
@@ -58,8 +49,7 @@ def test_refresh_overview_writes_deterministic_counts_and_recent_log(tmp_path: P
     assert result["ok"] is True
     overview = (root / "wiki/overview.md").read_text(encoding="utf-8")
     assert "- Projects: 1" in overview
-    assert "- Source pages: 1" in overview
-    assert "- Generated pages: 2" in overview
+    assert "- Generated pages: 1" in overview
     assert "- Manual pages: 1" in overview
     assert "## [2026-05-26T10:20:30Z] ingest | Alpha" in overview
 

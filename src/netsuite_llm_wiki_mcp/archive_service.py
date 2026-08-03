@@ -19,7 +19,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from netsuite_llm_wiki_mcp.archive_manifest import content_hash, verify_bundle, write_manifest
-from netsuite_llm_wiki_mcp.archive_models import ArchiveError, ArchiveItem, ArchiveManifest, ArchivePlan, Tombstone
+from netsuite_llm_wiki_mcp.archive_models import ArchiveAttachment, ArchiveError, ArchiveItem, ArchiveManifest, ArchivePlan, Tombstone
 from netsuite_llm_wiki_mcp.archive_planner import ArchivePlanner
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore, page_from_file
 
@@ -71,8 +71,25 @@ class ArchiveService:
             CREATE TABLE IF NOT EXISTS tombstones(archive_id TEXT PRIMARY KEY, purged_at TEXT NOT NULL, reason TEXT NOT NULL, payload TEXT NOT NULL);
             """)
 
-    def plan_archive(self, targets: str | list[str], *, reason: str = "manual", cascade: bool = False) -> dict[str, Any]:
-        plan = self.planner.archive_plan(targets, reason=reason, cascade=cascade, actor=self.actor)
+    def plan_archive(
+        self,
+        targets: str | list[str],
+        *,
+        reason: str = "manual",
+        cascade: bool = False,
+        force_namespace: str | None = None,
+        restorable: bool = True,
+        attachments: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        plan = self.planner.archive_plan(
+            targets,
+            reason=reason,
+            cascade=cascade,
+            actor=self.actor,
+            force_namespace=force_namespace,
+            restorable=restorable,
+            attachments=attachments,
+        )
         self._save_plan(plan)
         return self._plan_payload(plan)
 
@@ -116,7 +133,29 @@ class ArchiveService:
             if datetime.fromisoformat(row["expires_at"]) < datetime.now(UTC): raise ArchiveError("archive_plan_expired", "archive plan has expired")
             raw = json.loads(row["payload"])
         items = tuple(ArchiveItem(item["original_path"], item["archive_path"], item["content_hash"], item["kind"], tuple(item.get("dependencies", [])), tuple(item.get("passage_ids", []))) for item in raw["items"])
-        return ArchivePlan(raw["plan_id"], raw["operation_type"], raw.get("archive_id"), raw["created_at"], raw["expires_at"], items, raw["plan_hash"], raw.get("reason"), tuple(raw.get("blockers", [])), bool(raw.get("cascade")))
+        attachments = tuple(
+            ArchiveAttachment(
+                archive_path=str(item["archive_path"]),
+                content_hash=str(item["content_hash"]),
+                content=item.get("content"),
+            )
+            for item in raw.get("attachments", [])
+        )
+        return ArchivePlan(
+            plan_id=raw["plan_id"],
+            operation_type=raw["operation_type"],
+            archive_id=raw.get("archive_id"),
+            created_at=raw["created_at"],
+            expires_at=raw["expires_at"],
+            items=items,
+            plan_hash=raw["plan_hash"],
+            reason=raw.get("reason"),
+            blockers=tuple(raw.get("blockers", [])),
+            cascade=bool(raw.get("cascade")),
+            force_namespace=raw.get("force_namespace"),
+            restorable=bool(raw.get("restorable", True)),
+            attachments=attachments,
+        )
 
     def _operation(self, plan: ArchivePlan, archive_id: str) -> str:
         operation_id = uuid4().hex
@@ -137,22 +176,55 @@ class ArchiveService:
 
     def _apply_archive(self, plan: ArchivePlan) -> dict[str, Any]:
         # Re-plan before touching the filesystem: plan payload contains the CAS hashes.
-        current = self.planner.archive_plan([item.original_path for item in plan.items], reason=plan.reason or "manual", cascade=plan.cascade, actor=self.actor)
+        attachment_contents = {
+            attachment.archive_path: attachment.content
+            for attachment in plan.attachments
+            if attachment.content is not None
+        }
+        current = self.planner.archive_plan(
+            [item.original_path for item in plan.items],
+            reason=plan.reason or "manual",
+            cascade=plan.cascade,
+            actor=self.actor,
+            force_namespace=plan.force_namespace,
+            restorable=plan.restorable,
+            attachments=attachment_contents,
+        )
         if current.blockers: return {"ok": False, "code": current.blockers[0]["code"], "blockers": list(current.blockers)}
         if {item.original_path: item.content_hash for item in current.items} != {item.original_path: item.content_hash for item in plan.items}:
+            return {"ok": False, "code": "archive_plan_drift"}
+        if {item.archive_path: item.content_hash for item in current.attachments} != {item.archive_path: item.content_hash for item in plan.attachments}:
             return {"ok": False, "code": "archive_plan_drift"}
         archive_id = self._archive_id()
         operation_id = self._operation(plan, archive_id)
         staging = self.archive_root / ".staging" / operation_id
         pending = self.archive_root / ".pending" / operation_id
         try:
-            manifest = ArchiveManifest(archive_id, operation_id, plan.reason or "manual", _now(), plan.items, actor=self.actor)
+            manifest = ArchiveManifest(
+                archive_id,
+                operation_id,
+                plan.reason or "manual",
+                _now(),
+                plan.items,
+                actor=self.actor,
+                restorable=plan.restorable,
+                attachments=tuple(ArchiveAttachment(item.archive_path, item.content_hash) for item in plan.attachments),
+            )
             for item in plan.items:
                 source = self.root / item.original_path
                 target = staging / item.archive_path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
                 if content_hash(target) != item.content_hash: raise ArchiveError("archive_hash_mismatch", "staged archive payload differs")
+            for attachment in plan.attachments:
+                if attachment.content is None:
+                    raise ArchiveError("archive_plan_invalid", "archive attachment content is missing")
+                target = staging / attachment.archive_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("w", encoding="utf-8", newline="") as handle:
+                    handle.write(attachment.content)
+                if content_hash(target) != attachment.content_hash:
+                    raise ArchiveError("archive_hash_mismatch", "staged archive attachment differs")
             write_manifest(staging, manifest)
             self._transition(operation_id, "staged")
             pending.parent.mkdir(parents=True, exist_ok=True); os.replace(staging, pending)

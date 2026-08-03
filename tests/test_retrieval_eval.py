@@ -26,6 +26,7 @@ from netsuite_llm_wiki_mcp.retrieval_eval import (
 )
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexStore
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
+from netsuite_llm_wiki_mcp.archive_service import ArchiveService
 from netsuite_llm_wiki_mcp.knowledge_compiler import filesystem_path
 from netsuite_llm_wiki_mcp.vector_provider import DeterministicFakeProvider
 from netsuite_llm_wiki_mcp.wiki_io import write_wiki_page
@@ -57,7 +58,7 @@ def _build_passage_store(vault: Path) -> None:
 
 
 def _copy_v2_40_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Copy the reviewed capsule-only fixture so each evaluation stays isolated."""
+    """Copy the historical source-only fixture so each evaluation stays isolated."""
     vault = tmp_path / "v2-40-vault"
     shutil.copytree(_V2_40_FIXTURE_ROOT / "vault", vault)
     dataset = tmp_path / "v2-40-cases.jsonl"
@@ -91,18 +92,38 @@ def test_v2_evaluator_reads_existing_passage_store_without_telemetry_write(tmp_p
     assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
 
 
-def test_reviewed_v2_forty_case_fixture_runs_the_v2_lexical_contract(tmp_path: Path) -> None:
-    """Keep the approved 40-case label set executable in ordinary CI."""
+def test_reviewed_v2_forty_case_fixture_is_archive_only(tmp_path: Path) -> None:
+    """Keep the historical label set out of active retrieval and test it only in archive scope."""
     vault, dataset_path, manifest_path = _copy_v2_40_fixture(tmp_path)
     dataset = load_retrieval_dataset(dataset_path, manifest_path)
 
     assert len(dataset.cases) == 40
     assert sum(case.answerable for case in dataset.cases) == 36
     assert sum(not case.answerable for case in dataset.cases) == 4
-    assert len(list((vault / "wiki" / "sources" / "capsules").glob("*.md"))) == 36
+    source_count = len(list((vault / "wiki" / "sources" / "capsules").glob("*.md")))
+    assert source_count == 36
     assert not (vault / "raw").exists()
-    validate_dataset_paths(dataset, vault)
     _build_passage_store(vault)
+    assert RetrievalIndexStore(vault).page_candidates() == []
+
+    service = ArchiveService(vault, actor="test-archive")
+    archive_plan = service.plan_archive(
+        [path.relative_to(vault).as_posix() for path in (vault / "wiki" / "sources").rglob("*.md")],
+        reason="retention",
+        force_namespace="wiki/sources",
+        restorable=False,
+    )
+    archive = service.apply(archive_plan["plan_id"])
+    assert archive["ok"] is True
+    prefix = f"archives/bundles/{archive['archive_id'][:4]}/{archive['archive_id'][4:6]}/{archive['archive_id']}/"
+    dataset = replace(
+        dataset,
+        cases=tuple(
+            replace(case, relevant=tuple(replace(item, path=prefix + item.path) for item in case.relevant))
+            for case in dataset.cases
+        ),
+    )
+    validate_dataset_paths(dataset, vault)
 
     report = run_retrieval_evaluation(
         vault,
@@ -110,17 +131,17 @@ def test_reviewed_v2_forty_case_fixture_runs_the_v2_lexical_contract(tmp_path: P
         query_version="v2",
         retrieval_mode="lexical",
         measure_context_budget=False,
+        scope="archive",
     )
 
     assert report["metadata"]["parameters"]["query_version"] == "v2"
     assert report["metadata"]["parameters"]["retrieval_mode"] == "lexical"
-    assert report["metadata"]["vault_fingerprint"]["file_count"] == 36
+    assert report["metadata"]["parameters"]["scope"] == "archive"
     assert report["metrics"]["relevant_total"] == 36
     assert report["metrics"]["no_answer_cases"] == 4
     assert report["metrics"]["latency_sample_count"] == 40
     assert all(len(case["ranking_runs"]) == 1 for case in report["cases"])
 
-    assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
 
 
 def test_v2_vector_evaluation_uses_the_requested_vault_relative_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -266,10 +287,10 @@ def test_path_validation_rejects_missing_relevant_page(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows extended-length paths are platform-specific")
 def test_path_validation_accepts_existing_long_relevant_page(tmp_path: Path) -> None:
-    relative = Path("wiki/sources/references")
+    relative = Path("raw/sources/references")
     for index in range(9):
         relative /= f"deep-capsule-provenance-segment-{index:02d}-with-descriptive-name"
-    relative /= "capsules/source.md"
+    relative /= "source.md"
     target = filesystem_path(tmp_path / relative)
     target.parent.mkdir(parents=True)
     target.write_text("# capsule\n", encoding="utf-8")

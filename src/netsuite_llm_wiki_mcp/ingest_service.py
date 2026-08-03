@@ -7,8 +7,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from netsuite_llm_wiki_mcp.generation_queue import GenerationQueue
+from netsuite_llm_wiki_mcp.knowledge_dependencies import KnowledgeDependencies
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore, page_from_file
-from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
 from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
 
 
@@ -51,13 +52,11 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     if previous_hash != incoming_hash:
         shutil.copyfile(source, target)
     operation = "new" if previous_hash is None else "unchanged" if previous_hash == incoming_hash else "modified"
-    # Raw snapshots are the source of truth.  Knowledge compilation is queued
-    # only after a new/changed non-chat snapshot exists; queue deduplication is
-    # content-addressed and durable independently of retrieval state.
-    compiler_result: dict[str, Any] | None = None
+    # Raw snapshots are the source of truth.  A changed snapshot only
+    # invalidates dependent page provenance; it never creates a derived page.
+    provenance_result: dict[str, Any] | None = None
     if type_value != "chat" and operation != "unchanged":
-        compiler = KnowledgeCompiler(root)
-        compiler_result = compiler.raw_changed(target.relative_to(root))
+        provenance_result = _invalidate_raw_provenance(root, target.relative_to(root))
     index_scope = "active" if type_value == "chat" else "raw"
     indexed = page_from_file(root, target, scope=index_scope)
     if indexed is None:
@@ -68,10 +67,24 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
         store = RetrievalIndexStore(root, scope=index_scope)
         index = store.build(store.iter_vault_pages())
     response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "index_scope": index_scope, "index": index}
-    if compiler_result is not None:
-        response["generation"] = compiler_result.get("enqueued")
-        response["stale_pages"] = compiler_result.get("stale", [])
+    if provenance_result is not None:
+        response["generation"] = provenance_result["generation"]
+        response["stale_pages"] = provenance_result["stale"]
+        response["superseded_jobs"] = provenance_result["superseded"]
     return response
+
+
+def _invalidate_raw_provenance(root: Path, relative_path: Path) -> dict[str, Any]:
+    """Mark raw dependents stale without invoking the retired compiler path."""
+
+    relative = relative_path.as_posix()
+    stale = KnowledgeDependencies(root).source_changed(relative)
+    superseded = GenerationQueue(root).supersede_sources({relative})
+    return {
+        "stale": stale,
+        "superseded": superseded,
+        "generation": {"enabled": False, "reason": "raw_only"},
+    }
 
 
 def _hash_file(path: Path) -> str:

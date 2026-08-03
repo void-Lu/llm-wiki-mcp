@@ -79,6 +79,24 @@ def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
     assert "Keep me" in target.read_text(encoding="utf-8")
 
 
+def test_write_wiki_page_rejects_retired_source_capsule_field(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    with pytest.raises(WikiWriteError) as exc_info:
+        write_wiki_page(
+            root,
+            WikiPage(
+                relative_path=Path("wiki/concepts/general/page.md"),
+                frontmatter={"generated": True, "source_capsules": ["legacy.md"]},
+                title="Page",
+                body="body",
+            ),
+        )
+
+    assert exc_info.value.code == "source_capsules_removed"
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [

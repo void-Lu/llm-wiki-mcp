@@ -309,8 +309,15 @@ def _is_source_index(path: str, frontmatter: dict[str, Any]) -> bool:
     )
 
 
+def _is_retired_source_namespace(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return normalized == "wiki/sources" or normalized.startswith("wiki/sources/")
+
+
 def _eligible(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, scope: str) -> bool:
     fm = metadata.get(hit.page_path, {})
+    if scope != "archive" and _is_retired_source_namespace(hit.page_path):
+        return False
     lifecycle = str(fm.get("lifecycle") or fm.get("lifecycle_status") or "active")
     # An archive store contains only archived material.  Its rows must not be
     # rejected merely because their lifecycle is correctly marked archived.
@@ -337,11 +344,9 @@ def _matches_request(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, pr
 
 
 def _authority_bonus(hit: PassageHit, intent: str, scope: str, metadata: dict[str, dict[str, Any]]) -> float:
-    values = {"formal_knowledge": 0.35, "concept": 0.35, "entity": 0.35, "project": 0.23, "capsule": 0.22, "raw": 0.0, "raw_chat": -0.15}
+    values = {"formal_knowledge": 0.35, "concept": 0.35, "entity": 0.35, "project": 0.23, "raw": 0.0, "raw_chat": -0.15}
     if hit.corpus == "history" or hit.source_kind == "raw_chat":
         authority = "raw_chat"
-    elif "/capsules/" in hit.page_path or hit.source_kind == "capsule":
-        authority = "capsule"
     elif "/entities/" in hit.page_path:
         authority = "entity"
     elif "/projects/" in hit.page_path:
@@ -484,6 +489,7 @@ def _graph_expand(
         lifecycle = str(frontmatter.get("lifecycle") or frontmatter.get("lifecycle_status") or "active")
         if (
             not path.startswith("wiki/")
+            or _is_retired_source_namespace(path)
             or lifecycle in {"superseded", "deprecated", "archived"}
             or _is_source_index(path, frontmatter)
             or not _eligible(probe, metadata, scope=scope)
@@ -980,7 +986,7 @@ def run_query_v2(
     warnings = list(dict.fromkeys([*filter(None, scope_rules), *vector_warnings, *index_warnings]))
     if raw_index_warning:
         warnings = list(dict.fromkeys([*warnings, raw_index_warning]))
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw_identifier>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical_enabled": lexical_enabled, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>raw_chat;fallback:active_relaxed>raw_identifier>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical_enabled": lexical_enabled, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000

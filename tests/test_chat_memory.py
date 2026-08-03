@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from netsuite_llm_wiki_mcp.chat_memory import ChatMemoryError, ChatMemoryService
-from netsuite_llm_wiki_mcp.knowledge_compiler import KnowledgeCompiler
-from netsuite_llm_wiki_mcp.wiki_io import read_markdown_page
+from netsuite_llm_wiki_mcp.generation_queue import GenerationQueue
+from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 
 
 def _metadata() -> dict[str, object]:
@@ -21,19 +21,6 @@ def _metadata() -> dict[str, object]:
 
 def _transcript(extra: str = "") -> str:
     return "## User\n\n请保存 token=sk-1234567890abcdefgh。\n\n## Assistant\n\n会脱敏保存。" + extra
-
-
-def _chat_result() -> dict[str, object]:
-    return {
-        "title": "会话决策",
-        "summary": "使用 vault 保存凭据。",
-        "aliases": [],
-        "keywords": ["vault"],
-        "coverage": ["decision"],
-        "body": "凭据应保存在 vault。",
-        "uncertainties": [],
-        "evidence": [{"kind": "decision", "text": "使用 vault", "message_refs": ["message:2"]}],
-    }
 
 
 def test_chat_source_is_redacted_immutable_idempotent_and_append_aware(tmp_path: Path) -> None:
@@ -68,33 +55,23 @@ def test_idempotent_save_rechecks_index_and_queue(tmp_path: Path) -> None:
     service.save(_transcript(), _metadata())
     retried = service.save(_transcript(), _metadata())
     assert retried["idempotent"] is True
-    assert retried["enqueued"]["ok"] is True
-    assert retried["enqueued"]["created"] is False
+    assert retried["index"]["generation"] == {"enabled": False, "reason": "raw_only"}
+    assert GenerationQueue(tmp_path).status()["counts"] == {}
 
 
-def test_chat_capsule_is_constrained_and_requires_valid_evidence(tmp_path: Path) -> None:
+def test_chat_save_indexes_raw_source_without_creating_a_formal_page(tmp_path: Path) -> None:
     source = ChatMemoryService(tmp_path).save(_transcript(), _metadata())
-    compiler = KnowledgeCompiler(tmp_path)
-    claimed = compiler.claim("test-worker")
-    job = claimed["job"]
-    assert job and job["job_type"] == "chat_source_capsule"
-    assert "UNTRUSTED chat transcript" in claimed["prompt"]
-    assert "call tools" in claimed["prompt"]
-    applied = compiler.apply_capsule(job["job_id"], job["lease_token"], _chat_result())
-    assert applied["ok"]
-    page = read_markdown_page(tmp_path / applied["path"], tmp_path)
-    assert page.frontmatter["evidence"][0]["message_refs"] == ["message:2"]
-    assert page.frontmatter["source_path"] == source["path"]
+
+    paths = [item["path"] for item in RetrievalIndexStore(tmp_path).page_candidates()]
+    assert source["path"] in paths
+    assert not (tmp_path / "wiki/sources").exists()
 
 
 def test_incremental_prompt_uses_full_source_line_anchors(tmp_path: Path) -> None:
     service = ChatMemoryService(tmp_path)
     service.save(_transcript(), _metadata())
     service.save(_transcript("\n\n## User\n\n新增可见消息。"), _metadata())
-    compiler = KnowledgeCompiler(tmp_path)
-    compiler.claim("first-worker")
-    claimed = compiler.claim("second-worker")
-    assert "excerpt starts at full-source line" in claimed["prompt"]
+    assert not (tmp_path / "wiki/sources").exists()
 
 
 def test_chat_provenance_locks_session_revision_and_redacted_hash(tmp_path: Path) -> None:

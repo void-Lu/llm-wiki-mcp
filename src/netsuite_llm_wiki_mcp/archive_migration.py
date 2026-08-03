@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from netsuite_llm_wiki_mcp.archive_service import ArchiveService
-from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 
 
 _STRUCTURAL = {"index.md", "log.md", "overview.md"}
@@ -44,7 +43,6 @@ def _remove_legacy_directories(root: Path) -> None:
         root / "wiki" / "queries",
         root / "wiki" / "chatlog",
         root / "raw" / "sources" / "chat" / "legacy",
-        root / "wiki" / "sources" / "chatlog",
         root / "wiki" / "archives",
     ):
         if directory.exists():
@@ -64,14 +62,6 @@ def plan_legacy_migration(vault_root: str | Path) -> dict[str, Any]:
         ]
         if non_structural:
             blockers.extend({"code": "legacy_queries_not_empty", "path": path.relative_to(root).as_posix()} for path in non_structural)
-    source_indexes = root / "wiki" / "sources" / "chatlog"
-    if source_indexes.exists():
-        for source in sorted(source_indexes.rglob("*.md")):
-            fm, _ = split_frontmatter(source.read_text(encoding="utf-8"))
-            sources = fm.get("sources", [])
-            values = sources if isinstance(sources, list) else [sources]
-            if any(str(value).startswith("raw/sources/chat/") and not (root / str(value)).exists() for value in values):
-                blockers.append({"code": "legacy_chat_source_orphan", "path": source.relative_to(root).as_posix()})
     for source in _legacy_archive_targets(root):
         source_name = source.relative_to(root).as_posix()
         moves.append(
