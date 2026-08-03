@@ -133,7 +133,13 @@ def test_mcp_client_protocol_calls_status_and_query(monkeypatch: pytest.MonkeyPa
             assert status_result.is_error is False
             assert query_result.is_error is False
             assert _tool_result_payload(status_result)["vault"] == "primary"
-            assert _tool_result_payload(query_result) == {"ok": True, "question": "hello", "results": []}
+            assert _tool_result_payload(query_result) == {
+                "ok": True,
+                "code": "no_results",
+                "message": "No indexed documentation matched the query.",
+                "question": "hello",
+                "results": [],
+            }
 
     anyio.run(assert_protocol_calls)
 

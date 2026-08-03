@@ -7,6 +7,7 @@ from collections.abc import Iterable
 
 _LATIN_OR_CODE = re.compile(r"[a-z0-9_]+")
 _CJK_RUN = re.compile(r"[一-鿿]+")
+_QUALIFIED_CODE = re.compile(r"(?<![a-z0-9_])([a-z][a-z0-9_]*)/([a-z][a-z0-9_]*)(?![a-z0-9_])", re.I)
 _STOPWORDS = frozenset({"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "of", "on", "or", "the", "to", "with"})
 
 
@@ -30,7 +31,24 @@ def normalize(text: str | Iterable[str]) -> str:
     return " ".join(values)
 
 
-def fts_query(text: str) -> str:
-    """Produce a safe AND query for the pre-tokenised FTS column."""
+def _fts_expression(values: Iterable[str], operator: str) -> str:
+    return f" {operator} ".join(f'"{value.replace(chr(34), chr(34) * 2)}"' for value in values)
 
-    return " AND ".join(f'"{value.replace(chr(34), chr(34) * 2)}"' for value in tokens(text))
+
+def fts_query(text: str) -> str:
+    """Produce a safe, precise AND query for the pre-tokenised FTS column."""
+
+    return _fts_expression(tokens(text), "AND")
+
+
+def relaxed_fts_query(text: str) -> str:
+    """Produce a bounded OR recovery query after a natural-language miss."""
+
+    return _fts_expression(tokens(text), "OR")
+
+
+def qualified_code_fts_query(text: str) -> str:
+    """Extract slash-qualified code identifiers such as ``N/record`` for FTS recovery."""
+
+    values = [segment.casefold() for match in _QUALIFIED_CODE.findall(text) for segment in match]
+    return _fts_expression(values, "AND")

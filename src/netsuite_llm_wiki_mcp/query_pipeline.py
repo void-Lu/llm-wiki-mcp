@@ -126,8 +126,14 @@ def _title_overlap_bonus(hit: PassageHit, question: str) -> float:
     question_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", question) if len(term) > 1}
     title_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", hit.title) if len(term) > 1}
     if not question_terms or not title_terms:
-        return 0.0
-    return 0.15 * len(question_terms & title_terms) / len(question_terms)
+        overlap_bonus = 0.0
+    else:
+        overlap_bonus = 0.15 * len(question_terms & title_terms) / len(question_terms)
+    latin_terms = re.findall(r"[a-z0-9_]+", question.casefold())
+    compact_title = re.sub(r"[^a-z0-9_]+", "", hit.title.casefold())
+    if any(len(left + right) >= 5 and left + right in compact_title for left, right in zip(latin_terms, latin_terms[1:])):
+        return overlap_bonus + 2.0
+    return overlap_bonus
 
 
 def _citation_metadata(hit: PassageHit, provenance: dict[str, dict[str, str]]) -> dict[str, str]:
@@ -299,7 +305,16 @@ def run_query_v2(
     store = RetrievalIndexStore(root, scope="archive" if effective_scope == "archive" else "active")
     status = store.status()
     if not status.get("ok"):
-        return {"ok": True, "question": question, "scope": scope, "results": [], "context_pack": {"passages": [], "citations": [], "budget": {"total": min(hard_budget_tokens, 4_000), "used": 0}}, "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}}}
+        return {
+            "ok": True,
+            "code": str(status.get("code") or "index_unavailable"),
+            "message": "The retrieval index is unavailable; the query was not executed.",
+            "question": question,
+            "scope": scope,
+            "results": [],
+            "context_pack": {"passages": [], "citations": [], "budget": {"total": min(hard_budget_tokens, 4_000), "used": 0}},
+            "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}},
+        }
 
     metadata: dict[str, dict[str, Any]] = {}
     provenance: dict[str, dict[str, str]] = {}
@@ -338,6 +353,10 @@ def run_query_v2(
         if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
         ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0})
+    # A title-only match is deliberately not primary retrieval.  A generic
+    # title overlap (such as "script") must not prevent a natural-language
+    # question, in any language, from using relaxed lexical recovery.
+    has_primary_recall = bool(ranked)
     for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters), 1):
         ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": rank, "vector_rank": None, "vector_score": 0.0})
         ranked[hit.passage_id]["title_rank"] = rank
@@ -388,9 +407,15 @@ def run_query_v2(
     # fall through to this store; the fallback reads SQLite projections only,
     # never walks raw files or loads an embedding model.
     raw_fts_hits = 0
+    relaxed_fts_hits = 0
     raw_index_warning = ""
     raw_fallback = False
-    if not selected and effective_scope in {"knowledge", "all"}:
+    lexical_mode = "strict"
+    if (
+        not raw_fallback
+        and not has_primary_recall
+        and effective_scope in {"knowledge", "all"}
+    ):
         raw_store = RetrievalIndexStore(root, scope="raw")
         raw_status = raw_store.status()
         if raw_status.get("ok"):
@@ -402,10 +427,32 @@ def run_query_v2(
                     page_type=filters.type,
                     tags=list(filters.tags),
                 )
+                qualified_code_hits = raw_store.search_fts(
+                    question,
+                    limit=min(top_k, RAW_FALLBACK_LIMIT),
+                    project=project,
+                    page_type=filters.type,
+                    tags=list(filters.tags),
+                    mode="qualified_code",
+                )
+                # A slash-qualified identifier is a stronger signal than
+                # incidental English terms such as "record" or "methods".
+                # Prefer its dedicated lookup whenever available, regardless
+                # of whether the surrounding question is Chinese or English.
+                if qualified_code_hits:
+                    raw_hits = qualified_code_hits
+                    lexical_mode = "qualified_code"
             except RetrievalIndexError as exc:
                 raw_hits = []
                 raw_index_warning = exc.code
             raw_fts_hits = len(raw_hits)
+            unique_raw_hits: list[PassageHit] = []
+            raw_paths: set[str] = set()
+            for hit in raw_hits:
+                if hit.page_path in raw_paths:
+                    continue
+                unique_raw_hits.append(hit)
+                raw_paths.add(hit.page_path)
             selected = [
                 {
                     "hit": hit,
@@ -419,11 +466,51 @@ def run_query_v2(
                     "graph_reasons": [],
                     "score": hit.score,
                 }
-                for rank, hit in enumerate(raw_hits, 1)
+                for rank, hit in enumerate(unique_raw_hits, 1)
             ]
             raw_fallback = bool(selected)
         else:
             raw_index_warning = str(raw_status.get("code") or "raw_index_unavailable")
+    if not selected and effective_scope in {"knowledge", "all"}:
+        try:
+            relaxed_hits = store.search_fts(
+                question,
+                limit=50,
+                project=project,
+                page_type=filters.type,
+                tags=list(filters.tags),
+                mode="relaxed",
+            )
+        except RetrievalIndexError as exc:
+            relaxed_hits = []
+            status = {**status, "code": exc.code}
+        relaxed_fts_hits = len(relaxed_hits)
+        relaxed_by_path: dict[str, dict[str, Any]] = {}
+        for rank, hit in enumerate(relaxed_hits, 1):
+            if (
+                not _eligible(hit, metadata, scope=effective_scope)
+                or not _matches_request(hit, metadata, project=project, filters=filters)
+                or hit.page_path in relaxed_by_path
+            ):
+                continue
+            relaxed_by_path[hit.page_path] = {
+                "hit": hit,
+                "fts_rank": rank,
+                "title_rank": None,
+                "vector_rank": None,
+                "vector_score": 0.0,
+                "rrf": 0.0,
+                "exact": False,
+                "graph_score": 0.0,
+                "graph_reasons": [],
+                "score": round(hit.score + _authority_bonus(hit, intent, effective_scope, metadata) + _title_overlap_bonus(hit, question), 12),
+            }
+        if relaxed_by_path:
+            selected = sorted(
+                relaxed_by_path.values(),
+                key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id),
+            )[:top_k]
+            lexical_mode = "relaxed"
     passages = [
         ContextPassage(
             item["hit"].passage_id,
@@ -462,13 +549,19 @@ def run_query_v2(
     warnings = [*filter(None, scope_rules), *vector_warnings]
     if raw_index_warning:
         warnings.append(raw_index_warning)
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "formal>capsule>raw>history", "intent": intent, "retrieval_mode": retrieval_mode, "counters": {"fts_hits": len(fts), "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "formal>capsule>raw>history", "intent": intent, "retrieval_mode": retrieval_mode, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000
     if telemetry is None or telemetry.enabled:
         QueryTelemetry(root).record(question=question, scope=scope, project=project, passage_ids=[item["hit"].passage_id for item in selected], fallback_level=str(fallback_payload["level"]), token_count=int(packed["budget"]["used"]), latency_ms=elapsed, retention_days=(telemetry.retention_days if telemetry else 90))
-    return {"ok": True, "question": question, "scope": scope, "project": project or "", "results": results, "context_pack": packed, "pipeline": pipeline}
+    response = {"ok": True, "question": question, "scope": scope, "project": project or "", "results": results, "context_pack": packed, "pipeline": pipeline}
+    if not results:
+        response.update(
+            code="no_results",
+            message="No indexed documentation matched the query.",
+        )
+    return response
 
 
 def legacy_response_from_v2(payload: dict[str, Any]) -> dict[str, Any]:

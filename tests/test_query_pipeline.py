@@ -230,6 +230,65 @@ def test_v2_raw_fallback_uses_the_dedicated_fts_store_without_scanning_sources(t
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 1
 
 
+def test_v2_raw_fallback_recovers_qualified_module_names_from_chinese_questions(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    for module, expected_path in (("record", "raw/sources/references/n-record.md"), ("search", "raw/sources/references/n-search.md")):
+        source = root / expected_path
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(f"# N/{module} Module\n\nN/{module} module methods and API reference.", encoding="utf-8")
+    refresh_indexes(root)
+
+    for question, expected_path in (
+        ("N/record模块有哪些方法？", "raw/sources/references/n-record.md"),
+        ("N/search模块有哪些方法？", "raw/sources/references/n-search.md"),
+        ("N/record module methods", "raw/sources/references/n-record.md"),
+        ("N/search module methods", "raw/sources/references/n-search.md"),
+    ):
+        result = run_query_v2(root, question, retrieval_mode="lexical")
+
+        assert [item["path"] for item in result["results"]] == [expected_path]
+        assert result["pipeline"]["fallback"]["level"] == "raw"
+        assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
+
+
+def test_v2_raw_fallback_returns_only_the_best_matching_passage_per_source_file(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = root / "raw" / "sources" / "manual.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("# Raw source\n\n" + "unique raw de-duplication sentinel " * 1_000, encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "unique raw de-duplication sentinel", retrieval_mode="lexical")
+
+    assert [item["path"] for item in result["results"]] == ["raw/sources/manual.md"]
+    assert result["pipeline"]["counters"]["raw_fts_hits"] > 1
+
+
+def test_v2_relaxes_multilingual_questions_after_strict_fts_returns_no_results(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/map-reduce-limits.md",
+        "MapReduce 脚本各阶段点数消耗与用时上限",
+        "MapReduce 脚本执行各阶段限制。 MapReduce script phases have governance limits.",
+        type="concept",
+    )
+    _write(root, "wiki/concepts/noisy.md", "Generic script reference", "map reduce script", type="concept")
+    refresh_indexes(root)
+
+    for question in ("mr脚本执行各阶段限制。", "map reduce script phases limits"):
+        result = run_query_v2(root, question, retrieval_mode="lexical")
+
+        assert result["results"][0]["path"] == "wiki/concepts/map-reduce-limits.md"
+        assert result["pipeline"]["fallback"]["level"] == "none"
+        assert result["pipeline"]["counters"]["fts_hits"] == 0
+        assert result["pipeline"]["counters"]["relaxed_fts_hits"] > 0
+        assert result["pipeline"]["lexical"]["mode"] == "relaxed"
+
+
 def test_v2_wiki_hits_do_not_fall_back_to_raw_fts(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -253,9 +312,26 @@ def test_v2_raw_index_unavailable_yields_structured_warning(tmp_path: Path) -> N
     result = run_query_v2(root, "unique missing term", retrieval_mode="lexical")
 
     assert result["ok"] is True
+    assert result["code"] == "index_missing"
+    assert result["message"] == "The retrieval index is unavailable; the query was not executed."
     assert result["results"] == []
     assert "index_missing" in result["pipeline"]["warnings"]
     assert result["pipeline"]["fallback"]["level"] == "none"
+
+
+def test_v2_returns_explicit_no_results_without_scanning_source_files(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/known.md", "Known topic", "A known indexed topic.", type="concept")
+    refresh_indexes(root)
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source scan")))
+
+    result = run_query_v2(root, "unmatched retrieval sentinel", retrieval_mode="lexical")
+
+    assert result["ok"] is True
+    assert result["code"] == "no_results"
+    assert result["message"] == "No indexed documentation matched the query."
+    assert result["results"] == []
 
 
 def test_v2_raw_fallback_respects_project_and_type_filters(tmp_path: Path) -> None:

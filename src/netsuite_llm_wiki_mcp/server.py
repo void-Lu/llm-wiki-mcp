@@ -55,6 +55,16 @@ def attach_warnings(payload: dict[str, Any], warnings: tuple[str, ...] | list[st
     return result
 
 
+def attach_no_results_outcome(payload: dict[str, Any]) -> dict[str, Any]:
+    """Make an empty successful query explicit without broadening its source boundary."""
+    if payload.get("ok") is not True or payload.get("results") != [] or "code" in payload:
+        return payload
+    result = dict(payload)
+    result["code"] = "no_results"
+    result["message"] = "No indexed documentation matched the query."
+    return result
+
+
 def _legacy_vault(value: str, registry: ConfigRegistry) -> ToolVaultResolution:
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -163,7 +173,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
         )
         legacy["scope"] = scope
         legacy.setdefault("warnings", []).append("query_v1_legacy_feature_flag")
-        return attach_warnings(legacy, resolution.warnings)
+        return attach_warnings(attach_no_results_outcome(legacy), resolution.warnings)
     result = run_query_v2(
         resolution.root,
         question,
@@ -177,7 +187,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     )
     if settings.context.response_mode == "legacy":
         result = legacy_response_from_v2(result)
-    return attach_warnings(result, resolution.warnings)
+    return attach_warnings(attach_no_results_outcome(result), resolution.warnings)
 
 
 @_register
