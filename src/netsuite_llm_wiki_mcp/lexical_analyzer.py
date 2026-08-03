@@ -8,6 +8,7 @@ from collections.abc import Iterable
 _LATIN_OR_CODE = re.compile(r"[a-z0-9_]+")
 _CJK_RUN = re.compile(r"[一-鿿]+")
 _QUALIFIED_CODE = re.compile(r"(?<![a-z0-9_])([a-z][a-z0-9_]*)/([a-z][a-z0-9_]*)(?![a-z0-9_])", re.I)
+_MULTIWORD_RUN = re.compile(r"[a-z0-9_]+(?:\s+[a-z0-9_]+)+", re.I)
 _STOPWORDS = frozenset({"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "of", "on", "or", "the", "to", "with"})
 
 
@@ -77,3 +78,37 @@ def module_qualified(text: str) -> bool:
 
     matches = _QUALIFIED_CODE.findall(text)
     return bool(matches) and all(len(prefix.casefold()) == 1 for prefix, _ in matches)
+
+
+def identifier_phrases(text: str) -> list[str]:
+    """Return space-separated English runs such as ``ai connector``.
+
+    A genuine multi-word English run signals a product or feature name (for
+    example ``NetSuite AI Connector``).  Slash-qualified identifiers such as
+    ``List/Record`` and ``N/record`` do not form a run and keep their own
+    dedicated handling.
+    """
+
+    return [match.casefold() for match in _MULTIWORD_RUN.findall(text)]
+
+
+def identifier_phrase_tokens(text: str) -> list[str]:
+    """Return Latin content tokens only when the text has a multi-word run.
+
+    Without a run the Latin words are incidental vocabulary mixed into a
+    Chinese question; with a run they name a precise identifier and deserve a
+    strict AND lookup instead of being diluted by relaxed bigram noise.
+    Single-letter tokens (for example the ``N`` in ``N/record``) are dropped
+    because they carry no identifier signal of their own.
+    """
+
+    if not _MULTIWORD_RUN.search(text):
+        return []
+    return [value for value in tokens(text) if re.fullmatch(r"[a-z0-9_]+", value) and len(value) > 1]
+
+
+def identifier_phrase_fts_query(text: str) -> str:
+    """Produce a precise AND query over the identifier phrase's Latin tokens."""
+
+    values = identifier_phrase_tokens(text)
+    return _fts_expression(values, "AND") if len(values) >= 2 else ""

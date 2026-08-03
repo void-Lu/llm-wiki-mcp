@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from netsuite_llm_wiki_mcp.context_packer import ContextPassage, pack_context
-from netsuite_llm_wiki_mcp.lexical_analyzer import module_qualified
+from netsuite_llm_wiki_mcp.lexical_analyzer import identifier_phrases, module_qualified
 from netsuite_llm_wiki_mcp.query_telemetry import QueryTelemetry
 from netsuite_llm_wiki_mcp.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings, TelemetrySettings
@@ -19,14 +19,110 @@ from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProv
 from netsuite_llm_wiki_mcp.wiki_query import QueryCandidate, _apply_graph_expansion, _build_graph
 
 
-RANKING_POLICY_VERSION = "query-v2-passage-rrf-1"
+RANKING_POLICY_VERSION = "query-v2-passage-rrf-2"
 RRF_K = 60
 RAW_FALLBACK_LIMIT = 20
 CONTEXT_PASSAGES_PER_PAGE = 3
+IDENTIFIER_PHRASE_BONUS = 20.0
+IDENTIFIER_GUIDE_TITLE_BONUS = 12.0
+IDENTIFIER_HEADING_STEP_BONUS = 8.0
+IDENTIFIER_PHRASE_CANDIDATES = 200
+_GUIDE_TITLE_TERMS = (
+    "installing",
+    "install",
+    "setup",
+    "configure",
+    "configuring",
+    "connecting",
+    "connect",
+    "get started",
+    "using",
+    "overview",
+    "faq",
+    "best practices",
+    "required",
+    "permissions",
+    "guide",
+    "companion",
+)
+
+
+def _title_has_guide_term(title: str) -> bool:
+    """Match guide words on word boundaries so ``connect`` never matches
+    ``connector`` and every NetSuite AI Connector page is not boosted alike."""
+
+    lowered = title.casefold()
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None for term in _GUIDE_TITLE_TERMS)
+
+
+_HEADING_STEP_TERMS = (
+    "connect",
+    "connecting",
+    "install",
+    "installing",
+    "enable",
+    "enabling",
+    "setup",
+    "set up",
+    "configure",
+    "configuring",
+    "required",
+    "permission",
+    "permissions",
+    "role",
+    "feature",
+    "features",
+    "prerequisite",
+    "prerequisites",
+    "checklist",
+    "before you begin",
+)
+
+
+_FILL_GUIDE_TERMS = (
+    "install",
+    "installing",
+    "setup",
+    "configure",
+    "configuring",
+    "connect",
+    "connecting",
+    "get started",
+    "required",
+    "permissions",
+    "prerequisite",
+    "prerequisites",
+    "enable",
+    "enabling",
+    "steps",
+    "guide",
+)
+
+
+def _title_is_step_guide(title: str) -> bool:
+    """Distinguish actionable how-to pages (install/connect/enable/required)
+    from reference pages such as FAQ or overviews when filling the context
+    pack with the remaining sections of a selected raw guide page."""
+
+    lowered = title.casefold()
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None for term in _FILL_GUIDE_TERMS)
+
+
+def _heading_has_step_term(heading: str) -> bool:
+    """Prefer action-bearing sections (connection steps, checkboxes, role
+    grants) inside a raw guide page so the client-side steps are not crowded
+    out by log or note passages that share the same page-level boost.  Only
+    the deepest subheading is inspected: every passage under a "Connect using
+    Claude" section shares that prefix, so matching it would boost log and
+    note passages alike."""
+
+    lowered = heading.strip().casefold()
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None for term in _HEADING_STEP_TERMS)
 _HISTORY_RE = re.compile(r"(?:之前|上次|讨论|会话|当时|历史|previous|last\s+(?:time|session)|history)", re.I)
 _EXACT_RE = re.compile(r"(?:原文|逐字|代码|字段|field\s+id|api|record|script|exact|verbatim)", re.I)
 _COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
 _RESEARCH_RE = re.compile(r"(?:研究|深入|调研|research|deep\s+dive)", re.I)
+_HOWTO_RE = re.compile(r"(?:步骤|怎么|如何|怎样|流程|做法|配置|安装|介绍|指南|guide|how\s+to|steps?|setup|configure|install)", re.I)
 
 
 @dataclass(frozen=True)
@@ -51,6 +147,7 @@ def classify_intent(question: str) -> str:
     if _EXACT_RE.search(question): return "exact_evidence"
     if _COMPARE_RE.search(question): return "comparison"
     if _RESEARCH_RE.search(question): return "research"
+    if _HOWTO_RE.search(question): return "concept"
     if re.search(r"\b[A-Za-z][\w.:-]{2,}\b", question): return "exact_entity"
     return "concept"
 
@@ -68,6 +165,7 @@ def _is_source_index(path: str, frontmatter: dict[str, Any]) -> bool:
     return (
         page_type in {"source_index", "source-index", "index", "source_summary"}
         or path.endswith("/index.md") and "/sources/" in path and "/capsules/" not in path
+        or re.search(r"/(?:manifest|_toc_manifest|_path_aliases)\.json$", path.casefold()) is not None
     )
 
 
@@ -462,10 +560,11 @@ def run_query_v2(
                 }
             )
         # Stage two: dedicated raw-store fallback (strict, then slash-qualified
-        # identifiers, then relaxed).  A slash-qualified identifier wins
-        # outright only for a genuine module namespace such as ``N/record``;
-        # a generic slash term such as ``List/Record`` stays in the merged
-        # pool so curated wiki evidence is not starved by it.
+        # identifiers, then multi-word English identifiers, then relaxed).
+        # A slash-qualified identifier wins outright only for a genuine module
+        # namespace such as ``N/record``; a generic slash term such as
+        # ``List/Record`` stays in the merged pool so curated wiki evidence is
+        # not starved by it.
         raw_items: list[dict[str, Any]] = []
         raw_lexical_mode = "strict"
         raw_store = RetrievalIndexStore(root, scope="raw")
@@ -487,6 +586,19 @@ def run_query_v2(
                     tags=list(filters.tags),
                     mode="qualified_code",
                 )
+                identifier_phrase_hits: list[PassageHit] = []
+                if not raw_hits and not (qualified_code_hits and module_qualified(question)):
+                    try:
+                        identifier_phrase_hits = raw_store.search_fts(
+                            question,
+                            limit=IDENTIFIER_PHRASE_CANDIDATES,
+                            project=project,
+                            page_type=filters.type,
+                            tags=list(filters.tags),
+                            mode="identifier_phrase",
+                        )
+                    except RetrievalIndexError:
+                        identifier_phrase_hits = []
                 # A slash-qualified module identifier is a stronger signal
                 # than incidental English terms such as "record" or "methods".
                 # Prefer its dedicated lookup whenever available, regardless
@@ -494,6 +606,14 @@ def run_query_v2(
                 if qualified_code_hits and module_qualified(question):
                     raw_hits = qualified_code_hits
                     raw_lexical_mode = "qualified_code"
+                elif identifier_phrase_hits:
+                    # A multi-word English run such as ``NetSuite AI
+                    # Connector`` names a precise feature.  Its strict AND
+                    # lookup is a stronger recovery signal than incidental
+                    # Chinese bigram overlap, so it replaces the noisy
+                    # relaxed raw pool.
+                    raw_hits = identifier_phrase_hits
+                    raw_lexical_mode = "identifier_phrase"
                 elif not raw_hits:
                     raw_hits = raw_store.search_fts(
                         question,
@@ -509,7 +629,23 @@ def run_query_v2(
                 raw_hits = []
                 raw_index_warning = exc.code
             raw_fts_hits = len(raw_hits)
+            query_identifier_phrases = identifier_phrases(question) if raw_lexical_mode == "identifier_phrase" else []
             for rank, hit in enumerate(raw_hits, 1):
+                # Raw pages are not present in the active-store metadata map,
+                # so project/type/tag boundaries are already enforced by the
+                # raw FTS query itself.  Only eligibility (lifecycle and
+                # navigation metadata) is re-checked here.
+                if not _eligible(hit, metadata, scope=effective_scope):
+                    continue
+                score = hit.score
+                if query_identifier_phrases:
+                    compact = f"{hit.title}\n{hit.text}".casefold()
+                    if any(phrase in compact for phrase in query_identifier_phrases):
+                        score += IDENTIFIER_PHRASE_BONUS
+                    if _title_has_guide_term(hit.title):
+                        score += IDENTIFIER_GUIDE_TITLE_BONUS
+                    if _heading_has_step_term(hit.heading_path[-1] if hit.heading_path else ""):
+                        score += IDENTIFIER_HEADING_STEP_BONUS
                 raw_items.append(
                     {
                         "hit": hit,
@@ -521,7 +657,7 @@ def run_query_v2(
                         "exact": False,
                         "graph_score": 0.0,
                         "graph_reasons": [],
-                        "score": hit.score,
+                        "score": score,
                     }
                 )
         else:
@@ -531,6 +667,19 @@ def run_query_v2(
             # The dedicated raw lookup wins outright over incidental wiki term
             # overlap (for example "record" or "methods").
             merged_items = raw_items
+        elif raw_lexical_mode == "identifier_phrase":
+            # A multi-word English identifier is the strongest recovery
+            # signal.  It leads the merged pool; curated wiki evidence from
+            # relaxed recovery is still merged afterwards so it is never
+            # starved, while incidental relaxed raw noise is dropped.
+            for item in relaxed_items:
+                item["score"] = round(
+                    item["hit"].score
+                    + _authority_bonus(item["hit"], intent, effective_scope, metadata)
+                    + _title_overlap_bonus(item["hit"], question),
+                    12,
+                )
+            merged_items = raw_items + relaxed_items
         else:
             merged_items = relaxed_items + raw_items
             if relaxed_items and not raw_items:
@@ -561,8 +710,43 @@ def run_query_v2(
             selected = selected[:top_k]
             selected_paths = {item["hit"].page_path for item in selected}
             context_items = [item for item in context_items if item["hit"].page_path in selected_paths]
+            if raw_lexical_mode == "identifier_phrase":
+                # A strict AND over the identifier tokens misses procedural
+                # sections (checkbox steps, SuiteApps install, client-side
+                # connection) that describe the same guide page without
+                # repeating the full feature name.  Fill the context pack from
+                # the remaining sections of selected how-to pages, in reading
+                # order, after every phrase-matched passage, so the composed
+                # answer keeps the action steps without changing the public
+                # result list.
+                existing_ids = {item["hit"].passage_id for item in context_items}
+                fill_paths = [
+                    item["hit"].page_path
+                    for item in selected
+                    if item["hit"].page_path.startswith("raw/") and _title_is_step_guide(item["hit"].title)
+                ]
+                for hit in raw_store.passages_for_pages(fill_paths, limit_per_page=CONTEXT_PASSAGES_PER_PAGE + 3):
+                    if hit.passage_id in existing_ids:
+                        continue
+                    existing_ids.add(hit.passage_id)
+                    context_items.append(
+                        {
+                            "hit": hit,
+                            "fts_rank": None,
+                            "title_rank": None,
+                            "vector_rank": None,
+                            "vector_score": 0.0,
+                            "rrf": 0.0,
+                            "exact": False,
+                            "graph_score": 0.0,
+                            "graph_reasons": [],
+                            "score": 0.0,
+                        }
+                    )
             if raw_lexical_mode == "qualified_code" and module_qualified(question):
                 lexical_mode = "qualified_code"
+            elif raw_lexical_mode == "identifier_phrase":
+                lexical_mode = "identifier_phrase"
             elif raw_lexical_mode == "relaxed" or relaxed_items:
                 lexical_mode = "relaxed"
             # A merged result set is a raw fallback only when the best-ranked
@@ -607,7 +791,7 @@ def run_query_v2(
     warnings = [*filter(None, scope_rules), *vector_warnings]
     if raw_index_warning:
         warnings.append(raw_index_warning)
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw_identifier>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from netsuite_llm_wiki_mcp.content_redaction import REDACTION_POLICY_VERSION, redact_for_index
-from netsuite_llm_wiki_mcp.lexical_analyzer import fts_query, normalize, qualified_code_fts_query, relaxed_fts_query
+from netsuite_llm_wiki_mcp.lexical_analyzer import fts_query, identifier_phrase_fts_query, normalize, qualified_code_fts_query, relaxed_fts_query
 from netsuite_llm_wiki_mcp.passage_chunker import CHUNK_SCHEMA_VERSION, PassageChunk, chunk_markdown
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 from netsuite_llm_wiki_mcp.wiki_paths import filesystem_path
@@ -185,15 +185,16 @@ class RetrievalIndexStore:
         page_type: str | None = None,
         tags: list[str] | None = None,
         include_navigation: bool = False,
-        mode: Literal["strict", "relaxed", "qualified_code"] = "strict",
+        mode: Literal["strict", "relaxed", "qualified_code", "identifier_phrase"] = "strict",
     ) -> list[PassageHit]:
         phrase_builder = {
             "strict": fts_query,
             "relaxed": relaxed_fts_query,
             "qualified_code": qualified_code_fts_query,
+            "identifier_phrase": identifier_phrase_fts_query,
         }.get(mode)
         if phrase_builder is None:
-            raise RetrievalIndexError("invalid_fts_mode", "FTS mode must be strict, relaxed, or qualified_code")
+            raise RetrievalIndexError("invalid_fts_mode", "FTS mode must be strict, relaxed, qualified_code, or identifier_phrase")
         phrase = phrase_builder(query)
         if not phrase or not self.path.exists():
             return []

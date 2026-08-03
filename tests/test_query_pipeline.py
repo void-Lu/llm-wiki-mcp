@@ -10,6 +10,15 @@ from netsuite_llm_wiki_mcp.wiki_paths import create_wiki_root
 from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 
 
+def test_classify_intent_treats_multiword_howto_questions_as_concepts() -> None:
+    from netsuite_llm_wiki_mcp.query_pipeline import classify_intent
+
+    assert classify_intent("配置netsuite系统内ai connector的mcp工具的完整步骤是什么，需要详细介绍需要安装和勾选的配置内容") == "concept"
+    assert classify_intent("subsidiary在自定义list类型字段上的内部id是什么") == "exact_evidence"
+    assert classify_intent("N/record模块有哪些方法？") == "exact_evidence"
+    assert classify_intent("invoice approval") == "exact_entity"
+
+
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
     write_wiki_page(root, WikiPage(Path(path), {"title": title, "generated": True, **frontmatter}, title, body), overwrite_generated_only=False)
 
@@ -43,7 +52,7 @@ def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None
     assert "content" not in result["results"][0]
     assert result["context_pack"]["passages"][0]["content"]
     assert result["pipeline"]["corpus"] == "active"
-    assert result["pipeline"]["authority"] == "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw"
+    assert result["pipeline"]["authority"] == "active:formal>project>capsule>raw_chat;fallback:active_relaxed>raw_identifier>raw"
 
 
 def test_legacy_adapter_reuses_v2_selected_context_passages(tmp_path: Path) -> None:
@@ -350,6 +359,69 @@ def test_v2_list_record_field_label_does_not_trigger_qualified_code_priority(tmp
     assert result["pipeline"]["fallback"]["level"] == "none"
 
 
+def test_v2_raw_fallback_combines_identifier_phrase_docs_above_bigram_noise(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    install = root / "raw" / "sources" / "references" / "install-mcp-std-tools.md"
+    install.parent.mkdir(parents=True, exist_ok=True)
+    install.write_text(
+        "# Installing the MCP Standard Tools SuiteApp\n\n"
+        "To install the MCP Standard Tools SuiteApp for the NetSuite AI Connector Service: "
+        "check the Server SuiteScript box and the REST Web Services box on the SuiteCloud subtab. "
+        "Then go to the SuiteApps tab and install MCP Standard Tools. "
+        "Connect using https://<accountid>.suitetalk.api.netsuite.com/services/mcp/v1/suiteapp/com.netsuite.mcpstandardtools",
+        encoding="utf-8",
+    )
+    permissions = root / "raw" / "sources" / "references" / "required-features-permissions.md"
+    permissions.parent.mkdir(parents=True, exist_ok=True)
+    permissions.write_text(
+        "# Required Features and Permissions\n\n"
+        "The NetSuite AI Connector Service needs Server SuiteScript and OAuth 2.0 enabled. "
+        "Add the MCP Server Connection permission and Log in using OAuth 2.0 Access Tokens to each role.",
+        encoding="utf-8",
+    )
+    connect = root / "raw" / "sources" / "references" / "connect-ai-connector.md"
+    connect.parent.mkdir(parents=True, exist_ok=True)
+    connect.write_text(
+        "# Connect to the NetSuite AI Connector Service\n\n"
+        "In claude.ai go to Search and tools and add the NetSuite AI connector, "
+        "paste the MCP server URL, then connect to the NetSuite AI Connector Service.",
+        encoding="utf-8",
+    )
+    noise = root / "raw" / "sources" / "references" / "netsuite_quiz" / "ai-notes.md"
+    noise.parent.mkdir(parents=True, exist_ok=True)
+    noise.write_text(
+        "# AI 综合测验\n\n"
+        "mcp.json 配置 CDKB 和 IDS Tool 的 Account ID。需要安装工具，勾选配置内容，介绍完整步骤，系统要求详细说明。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "配置netsuite系统内ai connector的mcp工具的完整步骤是什么，需要详细介绍需要安装和勾选的配置内容",
+        retrieval_mode="lexical",
+    )
+
+    paths = [item["path"] for item in result["results"]]
+    expected = {
+        "raw/sources/references/install-mcp-std-tools.md",
+        "raw/sources/references/required-features-permissions.md",
+        "raw/sources/references/connect-ai-connector.md",
+    }
+    assert set(paths[:3]) == expected
+    assert result["pipeline"]["lexical"]["mode"] == "identifier_phrase"
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+    combined = "\n".join(item["content"] for item in result["context_pack"]["passages"])
+    assert "Server SuiteScript" in combined
+    assert "suitetalk.api.netsuite.com" in combined
+    assert "MCP Server Connection" in combined
+    assert "claude.ai" in combined
+    noise_path = noise.relative_to(root).as_posix()
+    assert noise_path not in paths
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 3
+
+
 def test_v2_raw_fallback_returns_only_the_best_matching_passage_per_source_file(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -362,6 +434,40 @@ def test_v2_raw_fallback_returns_only_the_best_matching_passage_per_source_file(
 
     assert [item["path"] for item in result["results"]] == ["raw/sources/manual.md"]
     assert result["pipeline"]["counters"]["raw_fts_hits"] > 1
+
+
+def test_v2_identifier_phrase_fills_procedural_sections_of_selected_guide_pages(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    guide = root / "raw" / "sources" / "references" / "connect-ai-connector.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
+    guide.write_text(
+        "# Connect to the NetSuite AI Connector Service\n\n"
+        "## Connect using Claude\n\n"
+        "In claude.ai go to Search and tools, add the NetSuite AI connector "
+        "and paste the MCP server URL for the NetSuite AI Connector Service.\n\n"
+        "## Enable the required features\n\n"
+        "Go to Setup > Company > Enable Features, check the Server SuiteScript "
+        "and REST Web Services boxes on the SuiteCloud subtab, then click Save.\n\n"
+        "## Note\n\n"
+        "Execution log data is retained for 21 days in production.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "配置netsuite系统内ai connector的mcp工具的完整步骤是什么，需要详细介绍需要安装和勾选的配置内容",
+        retrieval_mode="lexical",
+    )
+
+    assert result["pipeline"]["lexical"]["mode"] == "identifier_phrase"
+    passages = result["context_pack"]["passages"]
+    combined = "\n".join(item["content"] for item in passages)
+    assert "claude.ai" in combined
+    assert any("Enable the required features" in (item["heading"] or "") for item in passages)
+    assert "Server SuiteScript" in combined
+    assert "REST Web Services" in combined
 
 
 def test_v2_relaxes_multilingual_questions_after_strict_fts_returns_no_results(tmp_path: Path) -> None:
