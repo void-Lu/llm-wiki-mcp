@@ -575,6 +575,83 @@ def test_v2_weak_pages_contribute_only_their_top_hits(tmp_path: Path) -> None:
     assert 1 <= len(weak_segs) <= 3  # the weak page keeps only its top hits
 
 
+def test_v2_freshness_ranks_newer_fix_note_above_older_one(tmp_path: Path) -> None:
+    """Among wiki pages with comparable lexical scores, the one updated most
+    recently wins the relaxed fallback so the latest fix patch is preferred."""
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    older = root / "wiki" / "projects" / "example" / "troubleshooting" / "old-patch.md"
+    newer = root / "wiki" / "projects" / "example" / "troubleshooting" / "new-patch.md"
+    older.parent.mkdir(parents=True, exist_ok=True)
+    newer.parent.mkdir(parents=True, exist_ok=True)
+    body = (
+        "## 问题\n\n"
+        "codegraph 工具更新后本地补丁被覆盖，SuiteScript 解析失效。\n\n"
+        "## 修复\n\n"
+        "重新安装 resolver 并重建索引。\n"
+    )
+    older.write_text(
+        f"---\ntitle: \"旧补丁\"\nupdated_at: \"2026-06-01\"\n---\n\n{body}",
+        encoding="utf-8",
+    )
+    newer.write_text(
+        f"---\ntitle: \"新补丁\"\nupdated_at: \"2026-07-22\"\n---\n\n{body}",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "codegraph工具更新后，本地修复的对suitescripts脚本的解析就会失效，具体修复步骤是什么",
+        retrieval_mode="lexical",
+    )
+
+    paths = [item["path"] for item in result["results"]]
+    assert paths.index(str(newer.relative_to(root)).replace("\\", "/")) < paths.index(str(older.relative_to(root)).replace("\\", "/"))
+
+
+def test_v2_two_phase_pack_keeps_every_selected_page_represented(tmp_path: Path) -> None:
+    """A long leading page must not starve later relevant pages entirely out of
+    the context pack: every selected page contributes at least its best hit."""
+
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    long_page = "wiki/projects/example/troubleshooting/long-guide.md"
+    _write(
+        root,
+        long_page,
+        "Long guide",
+        (
+            "## 背景\n\n"
+            + "这是很长的背景段落，包含大量填充词。" * 80
+            + "\n\n## 修复步骤\n\n"
+            "执行 codegraph index --force 并重启 daemon。\n"
+        ),
+        type="troubleshooting",
+    )
+    second = "wiki/projects/example/troubleshooting/second-note.md"
+    _write(
+        root,
+        second,
+        "Second note",
+        "codegraph 重建索引后，需要验证 SuiteScript 函数关系恢复。",
+        type="troubleshooting",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "codegraph工具更新后，本地修复的对suitescripts脚本的解析就会失效，具体修复步骤是什么",
+        retrieval_mode="lexical",
+        top_k=5,
+    )
+
+    pack_paths = [item["path"] for item in result["context_pack"]["passages"]]
+    assert long_page in pack_paths
+    assert second in pack_paths
+
+
 def test_v2_relaxes_multilingual_questions_after_strict_fts_returns_no_results(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

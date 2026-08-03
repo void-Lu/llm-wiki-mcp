@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import re
 import time
 from collections.abc import Sequence
@@ -19,7 +20,7 @@ from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProv
 from netsuite_llm_wiki_mcp.wiki_query import QueryCandidate, _apply_graph_expansion, _build_graph
 
 
-RANKING_POLICY_VERSION = "query-v2-passage-rrf-3"
+RANKING_POLICY_VERSION = "query-v2-passage-rrf-4"
 RRF_K = 60
 RAW_FALLBACK_LIMIT = 20
 IDENTIFIER_PHRASE_BONUS = 20.0
@@ -29,6 +30,8 @@ PAGE_FILL_LIMIT = 500
 PAGE_TOKEN_BUDGET = 1_200
 PAGE_FULL_FILL_MIN_RATIO = 0.6
 PAGE_WEAK_HIT_LIMIT = 3
+FRESHNESS_BONUS_MAX = 12.0
+FRESHNESS_DECAY_DAYS = 90
 _GUIDE_TITLE_TERMS = (
     "installing",
     "install",
@@ -57,6 +60,30 @@ def _title_has_guide_term(title: str) -> bool:
     return any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None for term in _GUIDE_TITLE_TERMS)
 
 
+def _freshness_bonus(hit: PassageHit, metadata: dict[str, dict[str, Any]]) -> float:
+    """Reward recently updated wiki pages so a newer fix patch outranks an
+    older note that happens to share the same vocabulary.
+
+    The signal decays linearly over ``FRESHNESS_DECAY_DAYS``.  Raw source pages
+    are absent from the active metadata map, so they never receive this bonus:
+    official documentation stays stable while project troubleshooting notes
+    compete on how current their fix is.
+    """
+
+    frontmatter = metadata.get(hit.page_path, {})
+    raw_date = str(frontmatter.get("updated_at") or frontmatter.get("created") or "")
+    if not raw_date:
+        return 0.0
+    try:
+        updated = datetime.date.fromisoformat(raw_date[:10])
+    except ValueError:
+        return 0.0
+    days = (datetime.date.today() - updated).days
+    if days < 0 or days > FRESHNESS_DECAY_DAYS:
+        return 0.0
+    return round(FRESHNESS_BONUS_MAX * (1 - days / FRESHNESS_DECAY_DAYS), 3)
+
+
 def _build_page_ordered_context(
     selected: list[dict[str, Any]],
     store: RetrievalIndexStore,
@@ -81,22 +108,43 @@ def _build_page_ordered_context(
     hit_stats = hit_stats or {}
     pool_by_page = pool_by_page or {}
     top_score = max((stats.get("max", 0.0) for stats in hit_stats.values()), default=0.0)
-    context_items: list[dict[str, Any]] = []
+    # Two-phase assembly.  Phase one guarantees every selected page contributes
+    # its single best-scored passage, so a long FAQ page cannot starve later
+    # relevant pages entirely out of the pack.  Phase two deep-fills the
+    # remaining budget page by page in reading order, so fix steps that live in
+    # later sections of a document are still carried.  The packer consumes
+    # items in this exact order, making the guarantee effective.
+    guaranteed: list[dict[str, Any]] = []
+    deep_fill: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for sel in selected:
+        page_path = sel["hit"].page_path
+        pool = pool_by_page.get(page_path, [])
+        if not pool:
+            continue
+        best = max(pool, key=lambda item: item["score"])
+        if best["hit"].passage_id not in seen_ids:
+            seen_ids.add(best["hit"].passage_id)
+            guaranteed.append(best)
     for sel in selected:
         page_path = sel["hit"].page_path
         stats = hit_stats.get(page_path)
         # A page whose best hit is far below the corpus-best score is usually a
-        # broad OR-match (an unrelated clipping or quiz note).  Filling such a
-        # page wholesale would let its many low-scoring sections crowd out
-        # real answers, so only its top scoring hit passages are kept.
+        # broad OR-match (an unrelated clipping or quiz note).  Only its top
+        # scoring hit passages join the pack instead of the whole page.
         strong_page = stats is None or top_score <= 0 or stats.get("max", 0.0) >= top_score * PAGE_FULL_FILL_MIN_RATIO
         if not strong_page:
-            context_items.extend(pool_by_page.get(page_path, [])[:PAGE_WEAK_HIT_LIMIT])
+            for item in pool_by_page.get(page_path, [])[:PAGE_WEAK_HIT_LIMIT]:
+                if item["hit"].passage_id not in seen_ids:
+                    seen_ids.add(item["hit"].passage_id)
+                    deep_fill.append(item)
             continue
         page_store = raw_store if raw_store is not None and page_path.startswith("raw/") else store
         page_hits = page_store.passages_for_pages([page_path], limit_per_page=PAGE_FILL_LIMIT)
         page_tokens = 0
         for hit in page_hits:
+            if hit.passage_id in seen_ids:
+                continue
             tokens = estimate_tokens(hit.text)
             # A per-page token budget keeps one long reference page (a FAQ or
             # an overview with many sections) from consuming the whole pack
@@ -104,7 +152,8 @@ def _build_page_ordered_context(
             if page_tokens + tokens > PAGE_TOKEN_BUDGET:
                 break
             page_tokens += tokens
-            context_items.append(
+            seen_ids.add(hit.passage_id)
+            deep_fill.append(
                 {
                     "hit": hit,
                     "fts_rank": sel.get("fts_rank"),
@@ -118,7 +167,7 @@ def _build_page_ordered_context(
                     "score": sel.get("score", 0.0),
                 }
             )
-    return context_items
+    return guaranteed + deep_fill
 _HISTORY_RE = re.compile(r"(?:之前|上次|讨论|会话|当时|历史|previous|last\s+(?:time|session)|history)", re.I)
 _EXACT_RE = re.compile(r"(?:原文|逐字|代码|字段|field\s+id|api|record|script|exact|verbatim)", re.I)
 _COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
@@ -474,7 +523,13 @@ def run_query_v2(
             + (1 / (RRF_K + item["vector_rank"]) if item["vector_rank"] else 0.0)
         )
         exact = int(question.casefold() in {hit.title.casefold(), hit.page_path.casefold()})
-        total = round(rrf * (RRF_K + 1) + _authority_bonus(hit, intent, effective_scope, metadata) + _title_overlap_bonus(hit, question) + exact * 0.5, 12)
+        total = round(
+            rrf * (RRF_K + 1)
+            + _authority_bonus(hit, intent, effective_scope, metadata)
+            + _title_overlap_bonus(hit, question)
+            + exact * 0.5,
+            12,
+        )
         scored.append({**item, "score": total, "rrf": rrf, "exact": bool(exact), "graph_score": 0.0, "graph_reasons": []})
     graph_candidates, graph_passages = _graph_expand(
         root, store, metadata, scope=effective_scope, project=project, filters=filters,
@@ -535,7 +590,7 @@ def run_query_v2(
         try:
             relaxed_hits = store.search_fts(
                 question,
-                limit=50,
+                limit=IDENTIFIER_PHRASE_CANDIDATES,
                 project=project,
                 page_type=filters.type,
                 tags=list(filters.tags),
@@ -680,21 +735,36 @@ def run_query_v2(
                 item["score"] = round(
                     item["hit"].score
                     + _authority_bonus(item["hit"], intent, effective_scope, metadata)
-                    + _title_overlap_bonus(item["hit"], question),
+                    + _title_overlap_bonus(item["hit"], question)
+                    + _freshness_bonus(item["hit"], metadata),
                     12,
                 )
             merged_items = raw_items + relaxed_items
         else:
             merged_items = relaxed_items + raw_items
             if relaxed_items and not raw_items:
-                # Wiki-only recovery keeps the curation bonus so an
+                # Wiki-only recovery keeps the full curation bonus so an
                 # overlapping knowledge page still outranks weaker lexical
                 # neighbours.
                 for item in merged_items:
                     item["score"] = round(
                         item["hit"].score
                         + _authority_bonus(item["hit"], intent, effective_scope, metadata)
-                        + _title_overlap_bonus(item["hit"], question),
+                        + _title_overlap_bonus(item["hit"], question)
+                        + _freshness_bonus(item["hit"], metadata),
+                        12,
+                    )
+            else:
+                # When raw evidence is also present, curated wiki pages compete
+                # on lexical score plus their freshness signal, while raw hits
+                # keep a bare score: a raw answer with a strong exact match
+                # must still beat a generic wiki overview, and a broad raw
+                # OR-match (clipping, quiz note) cannot silently outrank a
+                # recent wiki fix note.
+                for item in relaxed_items:
+                    item["score"] = round(
+                        item["hit"].score
+                        + _freshness_bonus(item["hit"], metadata),
                         12,
                     )
         if merged_items:
