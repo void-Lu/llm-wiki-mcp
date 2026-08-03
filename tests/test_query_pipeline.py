@@ -121,6 +121,70 @@ def test_v2_history_scope_is_traceable_and_cannot_outrank_formal_knowledge(tmp_p
     assert len(citation["metadata"]["content_hash"]) == 64
 
 
+def test_v2_reports_unresolved_fuzzy_terms_when_primary_recall_is_empty(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/chatbot-guide.md",
+        "NetSuite ChatBot Guide",
+        "The ChatBot page script uses N/llm and Suitelet to render the page.",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "我想写一个llm chatbox的sl页面脚本", top_k=5)
+
+    assert result["ok"] is True
+    # chatbox is bridged by edit distance to the title word ChatBot, so it is
+    # not suggested; llm and sl have no corpus variant and are the fuzzy hints
+    # the caller's model should resolve.
+    assert result["expansion_suggestions"] == ["llm", "sl"]
+    assert result["results"][0]["path"] == "wiki/concepts/chatbot-guide.md"
+
+
+def test_v2_agent_supplied_expansion_terms_reach_documents_with_abbreviated_query(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/suitelet-guide.md",
+        "Suitelet Guide",
+        "A Suitelet script renders a server-side page in the NetSuite UI.",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    first = run_query_v2(root, "sl 页面脚本", top_k=5)
+    assert first["ok"] is True
+    assert first["results"] == []
+    assert first["expansion_suggestions"] == ["sl"]
+
+    # The agent resolves sl -> suitelet with its own model and retries.
+    retried = run_query_v2(root, "sl 页面脚本", top_k=5, expansion_terms={"sl": ["suitelet"]})
+    assert retried["results"][0]["path"] == "wiki/concepts/suitelet-guide.md"
+    assert retried["expansion_suggestions"] == []
+
+
+def test_v2_expansion_suggestions_stay_empty_when_primary_recall_exists(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/invoice.md",
+        "Invoice",
+        "Invoice approval requires a role with the approval permission.",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "invoice approval", top_k=5)
+
+    assert result["ok"] is True
+    assert result["results"]
+    assert result["expansion_suggestions"] == []
+
+
 def test_v2_title_signal_recalls_a_terse_entity_query_without_full_body_match(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

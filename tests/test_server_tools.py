@@ -18,6 +18,7 @@ from netsuite_llm_wiki_mcp.server import (
     attach_warnings,
     mcp,
     resolve_tool_vault,
+    _validate_expansion_terms,
     wiki_archive,
     wiki_restore,
     wiki_query,
@@ -75,6 +76,34 @@ def test_mcp_initialization_version_matches_runtime_provenance() -> None:
 
 def test_registered_tools_match_core_public_surface() -> None:
     assert anyio.run(_registered_tool_names, mcp) == CORE_TOOLS
+
+
+def test_validate_expansion_terms_normalizes_and_rejects_bad_maps() -> None:
+    normalized, error = _validate_expansion_terms({"sl": ["Suitelet", "suitelet"], "Chatbox": ["chatbot"]})
+    assert error is None
+    assert normalized == {"sl": ["suitelet"], "chatbox": ["chatbot"]}
+
+    assert _validate_expansion_terms(None) == (None, None)
+
+    for bad in (
+        "sl",
+        ["suitelet"],
+        {"sl": "suitelet"},
+        {"sl": []},
+        {"sl": [1]},
+        {"": ["suitelet"]},
+        {"sl; drop": ["suitelet"]},
+        {"sl": ['suitelet"; drop']},
+    ):
+        normalized, error = _validate_expansion_terms(bad)
+        assert normalized is None
+        assert error is not None
+
+
+def test_wiki_query_rejects_invalid_expansion_terms() -> None:
+    payload = wiki_query(question="sl 页面脚本", expansion_terms={"sl": 1})
+    assert payload["ok"] is False
+    assert payload["code"] == "invalid_expansion_terms"
 
 
 def test_worker_profile_adds_only_generation_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

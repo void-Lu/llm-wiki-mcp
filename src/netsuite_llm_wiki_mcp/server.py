@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import queue
+import re
 import threading
 from typing import Any, Literal
 
@@ -172,6 +173,43 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
 
 
 QueryScope = Literal["auto", "knowledge", "history", "all", "archive"]
+_SAFE_EXPANSION = re.compile(r"^[a-z0-9_\-/\.\s]+$")
+
+
+def _validate_expansion_terms(value: object) -> tuple[dict[str, list[str]] | None, str | None]:
+    """Normalize and validate caller-supplied query-expansion maps.
+
+    The MCP server itself never talks to a model: the agent driving the tool
+    resolves fuzzy terms with its own model and passes the resulting map back
+    here.  Keys are the query's original terms and values are the spellings
+    that may appear in vault documents (for example ``sl`` ->
+    ``["suitelet"]``).  Values are case-folded and restricted to safe FTS
+    characters so they can be embedded in MATCH expressions verbatim.
+    """
+
+    if value is None:
+        return None, None
+    if not isinstance(value, dict):
+        return None, "expansion_terms must be an object mapping terms to term lists"
+    result: dict[str, list[str]] = {}
+    for raw_key, raw_values in value.items():
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            return None, "expansion_terms keys must be non-empty strings"
+        if not isinstance(raw_values, list) or not raw_values or not all(isinstance(item, str) and item.strip() for item in raw_values):
+            return None, f"expansion_terms[{raw_key!r}] must be a non-empty list of strings"
+        key = raw_key.strip().casefold()
+        if not _SAFE_EXPANSION.fullmatch(key):
+            return None, f"expansion_terms key {raw_key!r} contains unsupported characters"
+        aliases: list[str] = []
+        for raw_alias in raw_values:
+            alias = raw_alias.strip().casefold()
+            if not _SAFE_EXPANSION.fullmatch(alias):
+                return None, f"expansion_terms value {raw_alias!r} contains unsupported characters"
+            if alias != key and alias not in aliases:
+                aliases.append(alias)
+        if aliases:
+            result[key] = aliases
+    return result or None, None
 
 
 def _run_wiki_query(
@@ -180,6 +218,7 @@ def _run_wiki_query(
     project: str | None,
     filters: dict[str, Any] | None,
     top_k: int,
+    expansion_terms: dict[str, list[str]] | None,
     vault: str | None,
     vault_root: str | None,
     vaultRoot: str | None,
@@ -197,6 +236,9 @@ def _run_wiki_query(
     except ValueError as exc:
         return {"ok": False, "code": "invalid_filters", "error": str(exc)}
     if settings.query_version == "v1":
+        warnings = ["query_v1_legacy_feature_flag"]
+        if expansion_terms:
+            warnings.append("expansion_terms_ignored_for_v1")
         legacy = run_wiki_query(
             resolution.root, question, project, top_k,
             include_content=True,
@@ -209,7 +251,7 @@ def _run_wiki_query(
             scope="archive" if scope == "archive" else "active",
         )
         legacy["scope"] = scope
-        legacy.setdefault("warnings", []).append("query_v1_legacy_feature_flag")
+        legacy.setdefault("warnings", []).extend(warnings)
         return attach_warnings(attach_no_results_outcome(legacy), resolution.warnings)
     result = run_query_v2(
         resolution.root,
@@ -221,6 +263,7 @@ def _run_wiki_query(
         hard_budget_tokens=settings.context.hard_budget_tokens,
         embedding=settings.embedding,
         telemetry=resolution.resolved.settings.telemetry,
+        expansion_terms=expansion_terms,
     )
     if settings.context.response_mode == "legacy":
         result = legacy_response_from_v2(result)
@@ -228,16 +271,27 @@ def _run_wiki_query(
 
 
 @_register
-def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
-    """Query a vault using its immutable retrieval and context profile."""
+def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, expansion_terms: dict[str, list[str]] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+    """Query a vault using its immutable retrieval and context profile.
+
+    When the vault has no indexed answer, the response includes
+    ``expansion_suggestions``: the Latin terms in the question that do not
+    appear in any page title and have no spelling variant yet.  Resolve those
+    terms with your own model (for example ``sl`` -> ``suitelet``) and retry
+    with ``expansion_terms`` set to the mapping so the relaxed recovery can
+    reach documents that use different vocabulary.
+    """
     if scope not in {"auto", "knowledge", "history", "all", "archive"}:
         return {"ok": False, "code": "invalid_scope", "error": "scope must be auto, knowledge, history, all, or archive"}
     if not question:
         return {"ok": False, "code": "missing_question", "error": "question is required"}
     if top_k < 1 or top_k > 40:
         return {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 40"}
+    normalized_expansion, expansion_error = _validate_expansion_terms(expansion_terms)
+    if expansion_error:
+        return {"ok": False, "code": "invalid_expansion_terms", "error": expansion_error}
     return _with_timeout(
-        lambda: _run_wiki_query(question, scope, project, filters, top_k, vault, vault_root, vaultRoot),
+        lambda: _run_wiki_query(question, scope, project, filters, top_k, normalized_expansion, vault, vault_root, vaultRoot),
         QUERY_TIMEOUT_SECONDS,
     )
 

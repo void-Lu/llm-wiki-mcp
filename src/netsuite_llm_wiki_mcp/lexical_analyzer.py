@@ -12,6 +12,24 @@ _MULTIWORD_RUN = re.compile(r"[a-z0-9_]+(?:\s+[a-z0-9_]+)+", re.I)
 _STOPWORDS = frozenset({"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "of", "on", "or", "the", "to", "with"})
 
 
+def edit_distance(left: str, right: str) -> int:
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for index, left_char in enumerate(left, 1):
+        current = [index]
+        for inner, right_char in enumerate(right, 1):
+            current.append(
+                min(
+                    previous[inner] + 1,
+                    current[inner - 1] + 1,
+                    previous[inner - 1] + (left_char != right_char),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
 def tokens(text: str) -> list[str]:
     """Return stable English/code tokens and CJK unigrams/bigrams.
 
@@ -46,6 +64,41 @@ def relaxed_fts_query(text: str) -> str:
     """Produce a bounded OR recovery query after a natural-language miss."""
 
     return _fts_expression(tokens(text), "OR")
+
+
+def expanded_relaxed_fts_query(text: str, extra_terms: Iterable[str]) -> str:
+    """OR query including query-expansion terms (abbreviations, near-miss
+    variants) so a relaxed recovery can reach documents whose vocabulary
+    differs from the user's phrasing."""
+
+    values = tokens(text)
+    for term in extra_terms:
+        if term not in values:
+            values.append(term)
+    return _fts_expression(values, "OR")
+
+
+def expanded_identifier_phrase_fts_query(
+    text: str,
+    term_variants: dict[str, list[str]],
+) -> str:
+    """AND query whose clauses are OR-groups per original term.
+
+    ``identifier_phrase`` normally ANDs the strict phrase tokens, which misses
+    documents that spell a concept differently (``chatbox`` vs ``ChatBot``) or
+    abbreviate it (``sl`` vs ``Suitelet``).  Each original token becomes an
+    OR-group of itself plus its variants, so the phrase keeps its precision
+    while each component may match a variant spelling.
+    """
+
+    base = identifier_phrase_tokens(text)
+    if not base:
+        return ""
+    clauses = []
+    for token in base:
+        group = [token, *[v for v in term_variants.get(token, ()) if v != token]]
+        clauses.append("(" + _fts_expression(group, "OR") + ")")
+    return " AND ".join(clauses)
 
 
 def qualified_code_fts_query(text: str) -> str:

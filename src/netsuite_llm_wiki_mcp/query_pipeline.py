@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from netsuite_llm_wiki_mcp.context_packer import ContextPassage, estimate_tokens, pack_context
-from netsuite_llm_wiki_mcp.lexical_analyzer import identifier_phrases, module_qualified
+from netsuite_llm_wiki_mcp.lexical_analyzer import (
+    edit_distance,
+    identifier_phrases,
+    module_qualified,
+    tokens,
+)
 from netsuite_llm_wiki_mcp.query_telemetry import QueryTelemetry
 from netsuite_llm_wiki_mcp.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from netsuite_llm_wiki_mcp.runtime_config import EmbeddingSettings, TelemetrySettings
@@ -20,7 +25,7 @@ from netsuite_llm_wiki_mcp.vector_provider import LocalBgeM3Provider, VectorProv
 from netsuite_llm_wiki_mcp.wiki_query import QueryCandidate, _apply_graph_expansion, _build_graph
 
 
-RANKING_POLICY_VERSION = "query-v2-passage-rrf-7"
+RANKING_POLICY_VERSION = "query-v2-passage-rrf-8"
 RRF_K = 60
 RAW_FALLBACK_LIMIT = 20
 IDENTIFIER_PHRASE_BONUS = 20.0
@@ -119,6 +124,54 @@ def _adaptive_expand(
         else:
             break
     return selected
+
+
+def _query_expansion(
+    question: str,
+    store: RetrievalIndexStore,
+    raw_store: RetrievalIndexStore | None,
+    agent_terms: dict[str, list[str]] | None = None,
+) -> tuple[list[str], dict[str, list[str]], list[str]]:
+    """Build query-expansion terms from page titles and caller-supplied maps.
+
+    A user's phrasing often differs from document vocabulary by one edit
+    (``chatbox`` vs ``ChatBot``), which the corpus-driven title matcher covers
+    automatically.  Semantic gaps such as abbreviations (``sl`` vs
+    ``Suitelet``) cannot be bridged by character-level matching, so the caller
+    (the agent driving this MCP) supplies the mapping via ``agent_terms``
+    after consulting its own model.  The third return value lists the terms
+    that still lack a variant: they are the fuzzy hints the caller may want to
+    resolve before retrying the query.
+    """
+
+    title_words: set[str] = set()
+    for page in store.page_candidates():
+        title_words.update(tokens(str(page.get("title") or "")))
+    if raw_store is not None:
+        for page in raw_store.page_candidates():
+            title_words.update(tokens(str(page.get("title") or "")))
+    base_latin = [
+        value
+        for value in tokens(question)
+        if len(value) >= 2 and re.fullmatch(r"[a-z0-9_]+", value)
+    ]
+    variants: dict[str, list[str]] = {}
+    for term in base_latin:
+        close: list[str] = []
+        if title_words:
+            close = [
+                word
+                for word in title_words
+                if word != term and len(word) >= 4 and edit_distance(term, word) <= 1
+            ]
+        for alias in (agent_terms or {}).get(term, ()):
+            if alias != term and alias not in close:
+                close.append(alias)
+        if close:
+            variants[term] = close
+    extra_terms = [value for values in variants.values() for value in values]
+    suggestions = [term for term in base_latin if term not in title_words and term not in variants]
+    return extra_terms, variants, suggestions
 
 
 def _build_page_ordered_context(
@@ -472,6 +525,7 @@ def run_query_v2(
     debug: bool = False,
     include_context_pack: bool = True,
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid",
+    expansion_terms: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Read only existing passage/vector projections and return compact context."""
     started = time.perf_counter()
@@ -545,6 +599,7 @@ def run_query_v2(
     # title overlap (such as "script") must not prevent a natural-language
     # question, in any language, from using relaxed lexical recovery.
     has_primary_recall = bool(ranked)
+    expansion_suggestions: list[str] = []
     for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters), 1):
         ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": rank, "vector_rank": None, "vector_score": 0.0})
         ranked[hit.passage_id]["title_rank"] = rank
@@ -623,8 +678,15 @@ def run_query_v2(
     raw_fallback = False
     lexical_mode = "strict"
     if not has_primary_recall and effective_scope in {"knowledge", "all"}:
+        raw_store = RetrievalIndexStore(root, scope="raw")
         # Stage one: bounded multilingual recovery over the curated wiki.
         relaxed_items: list[dict[str, Any]] = []
+        query_extra_terms, query_term_variants, expansion_suggestions = _query_expansion(
+            question,
+            store,
+            raw_store,
+            expansion_terms,
+        )
         try:
             relaxed_hits = store.search_fts(
                 question,
@@ -633,6 +695,7 @@ def run_query_v2(
                 page_type=filters.type,
                 tags=list(filters.tags),
                 mode="relaxed",
+                extra_terms=query_extra_terms,
             )
         except RetrievalIndexError as exc:
             relaxed_hits = []
@@ -666,7 +729,6 @@ def run_query_v2(
         # not starved by it.
         raw_items: list[dict[str, Any]] = []
         raw_lexical_mode = "strict"
-        raw_store = RetrievalIndexStore(root, scope="raw")
         raw_status = raw_store.status()
         if raw_status.get("ok"):
             try:
@@ -695,6 +757,7 @@ def run_query_v2(
                             page_type=filters.type,
                             tags=list(filters.tags),
                             mode="identifier_phrase",
+                            term_variants=query_term_variants,
                         )
                     except RetrievalIndexError:
                         identifier_phrase_hits = []
@@ -721,6 +784,7 @@ def run_query_v2(
                         page_type=filters.type,
                         tags=list(filters.tags),
                         mode="relaxed",
+                        extra_terms=query_extra_terms,
                     )
                     if raw_hits:
                         raw_lexical_mode = "relaxed"
@@ -741,6 +805,18 @@ def run_query_v2(
                     compact = f"{hit.title}\n{hit.text}".casefold()
                     if any(phrase in compact for phrase in query_identifier_phrases):
                         score += IDENTIFIER_PHRASE_BONUS
+                    elif any(
+                        variant in compact
+                        for variants in query_term_variants.values()
+                        for variant in variants
+                    ):
+                        # A variant-expanded identifier match (for example
+                        # chatbox -> ChatBot) proves every query term or its
+                        # spelling variant appears in the document even when
+                        # the exact phrase does not.  Reward it partially so
+                        # expanded evidence can compete with relaxed wiki
+                        # hits instead of being buried below them.
+                        score += IDENTIFIER_PHRASE_BONUS * 0.5
                 raw_items.append(
                     {
                         "hit": hit,
@@ -904,7 +980,16 @@ def run_query_v2(
     elapsed = (time.perf_counter() - started) * 1_000
     if telemetry is None or telemetry.enabled:
         QueryTelemetry(root).record(question=question, scope=scope, project=project, passage_ids=[item["hit"].passage_id for item in selected], fallback_level=str(fallback_payload["level"]), token_count=int(packed["budget"]["used"]), latency_ms=elapsed, retention_days=(telemetry.retention_days if telemetry else 90))
-    response = {"ok": True, "question": question, "scope": scope, "project": project or "", "results": results, "context_pack": packed, "pipeline": pipeline}
+    response = {
+        "ok": True,
+        "question": question,
+        "scope": scope,
+        "project": project or "",
+        "results": results,
+        "expansion_suggestions": expansion_suggestions,
+        "context_pack": packed,
+        "pipeline": pipeline,
+    }
     if not results:
         response.update(
             code="no_results",

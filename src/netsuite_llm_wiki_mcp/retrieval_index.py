@@ -19,7 +19,15 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from netsuite_llm_wiki_mcp.content_redaction import REDACTION_POLICY_VERSION, redact_for_index
-from netsuite_llm_wiki_mcp.lexical_analyzer import fts_query, identifier_phrase_fts_query, normalize, qualified_code_fts_query, relaxed_fts_query
+from netsuite_llm_wiki_mcp.lexical_analyzer import (
+    expanded_identifier_phrase_fts_query,
+    expanded_relaxed_fts_query,
+    fts_query,
+    identifier_phrase_fts_query,
+    normalize,
+    qualified_code_fts_query,
+    relaxed_fts_query,
+)
 from netsuite_llm_wiki_mcp.passage_chunker import CHUNK_SCHEMA_VERSION, PassageChunk, chunk_markdown
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 from netsuite_llm_wiki_mcp.wiki_paths import filesystem_path
@@ -186,6 +194,8 @@ class RetrievalIndexStore:
         tags: list[str] | None = None,
         include_navigation: bool = False,
         mode: Literal["strict", "relaxed", "qualified_code", "identifier_phrase"] = "strict",
+        extra_terms: list[str] | None = None,
+        term_variants: dict[str, list[str]] | None = None,
     ) -> list[PassageHit]:
         phrase_builder = {
             "strict": fts_query,
@@ -195,7 +205,12 @@ class RetrievalIndexStore:
         }.get(mode)
         if phrase_builder is None:
             raise RetrievalIndexError("invalid_fts_mode", "FTS mode must be strict, relaxed, qualified_code, or identifier_phrase")
-        phrase = phrase_builder(query)
+        if mode == "relaxed" and extra_terms:
+            phrase = expanded_relaxed_fts_query(query, extra_terms)
+        elif mode == "identifier_phrase" and term_variants:
+            phrase = expanded_identifier_phrase_fts_query(query, term_variants)
+        else:
+            phrase = phrase_builder(query)
         if not phrase or not self.path.exists():
             return []
         clauses = ["passages_fts MATCH ?"]
