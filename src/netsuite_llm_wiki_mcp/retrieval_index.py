@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from netsuite_llm_wiki_mcp.content_redaction import REDACTION_POLICY_VERSION, redact_for_index
+from netsuite_llm_wiki_mcp.codegraph_policy import is_codegraph_raw_path
 from netsuite_llm_wiki_mcp.lexical_analyzer import (
     expanded_identifier_phrase_fts_query,
     expanded_relaxed_fts_query,
@@ -215,13 +216,12 @@ class RetrievalIndexStore:
             return []
         clauses = ["passages_fts MATCH ?"]
         params: list[object] = [phrase]
-        if project:
-            clauses.append("pages.project = ?"); params.append(project)
         if page_type:
             clauses.append("pages.page_type = ?"); params.append(page_type)
         if tags:
             for tag in tags:
-                clauses.append("pages.frontmatter_json LIKE ?"); params.append(f'%"{tag}"%')
+                clauses.append("EXISTS (SELECT 1 FROM json_each(pages.frontmatter_json, '$.tags') WHERE json_each.value = ?)")
+                params.append(tag)
         if not include_navigation:
             # Navigation pages can dominate an FTS prefix match while the
             # query pipeline intentionally excludes them from results. Exclude
@@ -231,6 +231,22 @@ class RetrievalIndexStore:
         if self.scope != "archive":
             clauses.append("pages.path NOT LIKE ?")
             params.append("wiki/sources/%")
+        # CodeGraph keeps its JSON provenance in raw, but those files are not
+        # knowledge pages and must never become raw FTS evidence.  The
+        # project-code boundary is applied before LIMIT so unrelated project
+        # pages cannot consume the bounded candidate set.
+        clauses.append("pages.path NOT LIKE ?")
+        params.append("raw/sources/projects/%/codegraph/%")
+        retrieval_scope = "json_extract(pages.frontmatter_json, '$.retrieval_scope')"
+        page_project = "COALESCE(NULLIF(pages.project, ''), json_extract(pages.frontmatter_json, '$.project'), '')"
+        if project:
+            clauses.append(f"({page_project} = '' OR {page_project} = ?)")
+            params.append(project)
+            clauses.append(f"({retrieval_scope} IS NULL OR {retrieval_scope} != ? OR {page_project} = ?)")
+            params.extend(("project_code", project))
+        else:
+            clauses.append(f"({retrieval_scope} IS NULL OR {retrieval_scope} != ?)")
+            params.append("project_code")
         params.append(limit)
         sql = """
             SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
@@ -455,7 +471,7 @@ def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:
     if scope == "archive":
         return path.startswith("archives/bundles/")
     if scope == "raw":
-        return path.startswith("raw/sources/") and not path.startswith("raw/sources/chat/")
+        return path.startswith("raw/sources/") and not path.startswith("raw/sources/chat/") and not is_codegraph_raw_path(path)
     # Legacy chatlogs have completed their retention period.  They are moved
     # into immutable archive bundles by the legacy migration and must never
     # re-enter the active retrieval projection while a pre-migration file is

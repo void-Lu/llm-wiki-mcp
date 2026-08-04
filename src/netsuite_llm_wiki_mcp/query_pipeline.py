@@ -8,9 +8,10 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from netsuite_llm_wiki_mcp.context_packer import ContextPassage, estimate_tokens, pack_context
+from netsuite_llm_wiki_mcp.codegraph_policy import is_project_code_page
 from netsuite_llm_wiki_mcp.lexical_analyzer import (
     edit_distance,
     identifier_phrases,
@@ -131,6 +132,7 @@ def _query_expansion(
     store: RetrievalIndexStore,
     raw_store: RetrievalIndexStore | None,
     agent_terms: dict[str, list[str]] | None = None,
+    project: str | None = None,
 ) -> tuple[list[str], dict[str, list[str]], list[str]]:
     """Build query-expansion terms from page titles and caller-supplied maps.
 
@@ -146,9 +148,15 @@ def _query_expansion(
 
     title_words: set[str] = set()
     for page in store.page_candidates():
+        frontmatter = page.get("frontmatter") if isinstance(page.get("frontmatter"), dict) else {}
+        if not _project_page_allowed(frontmatter, project):
+            continue
         title_words.update(tokens(str(page.get("title") or "")))
     if raw_store is not None:
         for page in raw_store.page_candidates():
+            frontmatter = page.get("frontmatter") if isinstance(page.get("frontmatter"), dict) else {}
+            if not _project_page_allowed(frontmatter, project):
+                continue
             title_words.update(tokens(str(page.get("title") or "")))
     base_latin = [
         value
@@ -332,9 +340,24 @@ def _eligible(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, scope: st
 def _matches_request(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, project: str | None, filters: QueryFilters) -> bool:
     """Apply the same boundary filters to FTS and vector-only candidates."""
     frontmatter = metadata.get(hit.page_path, {})
-    if project and str(frontmatter.get("project") or "") != project:
+    if not _project_page_allowed(frontmatter, project):
         return False
-    if filters.type and str(frontmatter.get("type") or hit.source_kind) != filters.type:
+    return _filters_allow_page(frontmatter, hit.source_kind, filters)
+
+
+def _project_page_allowed(frontmatter: Mapping[str, Any], project: str | None) -> bool:
+    """Apply the logical project corpus boundary consistently after recall."""
+
+    page_project = str(frontmatter.get("project") or "").casefold()
+    if is_project_code_page(frontmatter):
+        return project is not None and page_project == project.casefold()
+    if project and page_project and page_project != project.casefold():
+        return False
+    return True
+
+
+def _filters_allow_page(frontmatter: Mapping[str, Any], source_kind: str, filters: QueryFilters) -> bool:
+    if filters.type and str(frontmatter.get("type") or source_kind) != filters.type:
         return False
     if filters.tags:
         tags = frontmatter.get("tags") or ()
@@ -430,7 +453,14 @@ def _title_candidates(
     return store.passages_for_pages(paths, limit_per_page=1)
 
 
-def _vector_hits(root: Path, question: str, embedding: EmbeddingSettings | None, *, scope: str) -> tuple[dict[str, tuple[int, float]], list[str]]:
+def _vector_hits(
+    root: Path,
+    question: str,
+    embedding: EmbeddingSettings | None,
+    *,
+    scope: str,
+    allowed_paths: set[str] | None = None,
+) -> tuple[dict[str, tuple[int, float]], list[str]]:
     if embedding is None or not embedding.enabled or scope == "archive":
         return {}, []
     try:
@@ -443,7 +473,7 @@ def _vector_hits(root: Path, question: str, embedding: EmbeddingSettings | None,
             return {}, ["model_missing"]
         provider = LocalBgeM3Provider(settings.model_path, device=settings.device, batch_size=settings.batch_size, max_sequence_length=settings.max_sequence_length)
         store.validate_provider(provider.identity(), include_raw_sources=False)
-        results = store.search(provider.embed_query(question), limit=settings.candidate_limit)
+        results = store.search(provider.embed_query(question), allowed_paths=allowed_paths, limit=settings.candidate_limit)
         return {
             result.passage_id: (result.rank, result.score)
             for result in results
@@ -549,6 +579,10 @@ def run_query_v2(
             "error": "retrieval_mode must be lexical, vector, or hybrid",
         }
     filters = filters or QueryFilters()
+    if filters.type and filters.type.casefold() == "code_fact" and not project:
+        return {"ok": False, "code": "project_required_for_codegraph", "error": "project is required to query CodeGraph pages"}
+    if project:
+        project = project.casefold()
     intent = classify_intent(question)
     effective_scope, scope_rules = _effective_scope(scope, intent)
     root = Path(vault_root).expanduser().resolve()
@@ -587,8 +621,23 @@ def run_query_v2(
     except RetrievalIndexError as exc:
         fts = []
         status = {**status, "code": exc.code}
+    allowed_vector_paths = {
+        str(item["path"])
+        for item in store.page_candidates()
+        if _project_page_allowed(item.get("frontmatter") if isinstance(item.get("frontmatter"), dict) else {}, project)
+        and _filters_allow_page(
+            item.get("frontmatter") if isinstance(item.get("frontmatter"), dict) else {},
+            str(item.get("source_kind") or ""),
+            filters,
+        )
+        and _eligible(
+            PassageHit("", str(item["path"]), str(item["title"]), (), "", 0.0, str(item.get("corpus") or "active"), str(item.get("authority") or ""), str(item.get("source_kind") or "")),
+            metadata,
+            scope=effective_scope,
+        )
+    }
     vector, vector_warnings = (
-        _vector_hits(root, question, embedding, scope=effective_scope)
+        _vector_hits(root, question, embedding, scope=effective_scope, allowed_paths=allowed_vector_paths)
         if retrieval_mode != "lexical"
         else ({}, [])
     )
@@ -696,6 +745,7 @@ def run_query_v2(
             store,
             raw_store,
             expansion_terms,
+            project,
         )
         try:
             relaxed_hits = store.search_fts(

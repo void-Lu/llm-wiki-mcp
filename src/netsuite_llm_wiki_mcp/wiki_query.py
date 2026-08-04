@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from netsuite_llm_wiki_mcp.codegraph_policy import is_codegraph_raw_path, is_project_code_page
 from netsuite_llm_wiki_mcp.lexical_analyzer import tokens as lexical_tokens
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 from netsuite_llm_wiki_mcp.vector_index import VectorIndexError, VectorIndexStore, VectorRecord, VectorSettings, parse_vector_settings
@@ -163,18 +164,21 @@ def _execute_query(
 ) -> dict[str, Any]:
     if retrieval_mode not in {"lexical", "vector", "hybrid"}:
         raise ValueError("retrieval_mode must be lexical, vector, or hybrid")
+    if project:
+        project = project.casefold()
     root = Path(vault_root).expanduser().resolve()
     tokens = _tokens(question)
     all_candidates = _candidate_pages(root, include_raw_sources=include_raw_sources, scope=scope)
-    candidates = all_candidates
+    all_candidates = [candidate for candidate in all_candidates if project or not is_project_code_page(candidate.frontmatter)]
     if project:
-        candidates = [candidate for candidate in candidates if _in_project_scope(candidate.rel, project)]
+        all_candidates = [candidate for candidate in all_candidates if _in_project_scope(candidate.rel, project)]
+    candidates = all_candidates
     if filter_type:
         candidates = [candidate for candidate in candidates if str(candidate.frontmatter.get("type") or "") == filter_type]
     if filter_tags:
         tag_set = set(filter_tags)
         candidates = [candidate for candidate in candidates if tag_set & set(_as_list(candidate.frontmatter.get("tags")))]
-    graph = _build_graph(root, all_candidates)
+    graph = _build_graph(root, candidates)
     token_weights = _token_weights(candidates, tokens)
 
     scored: dict[str, QueryCandidate] = {}
@@ -301,7 +305,7 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False, *, scope: st
     raw_sources = root / "raw" / "sources"
     if include_raw_sources and raw_sources.exists():
         for path in sorted(raw_sources.rglob("*")):
-            if path.is_file() and path.suffix.lower() in {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}:
+            if path.is_file() and not is_codegraph_raw_path(path.relative_to(root).as_posix()) and path.suffix.lower() in {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}:
                 candidates.append(_raw_candidate(path, root))
     return candidates
 

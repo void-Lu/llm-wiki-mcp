@@ -387,7 +387,7 @@ class ArchiveService:
             )
             if active: return {"ok": False, "code": "purge_active_reference", "paths": active}
             path_hashes = () if forget else tuple("sha256:" + sha256(item.original_path.encode()).hexdigest() for item in manifest.items)
-            tombstone = Tombstone(archive_id, _now(), reason, path_hashes, forget)
+            tombstone = Tombstone(archive_id=archive_id, purged_at=_now(), reason=reason, path_hashes=path_hashes, forget=forget)
             with self._connection() as conn:
                 conn.execute("INSERT OR REPLACE INTO tombstones VALUES(?,?,?,?)", (archive_id, tombstone.purged_at, reason, json.dumps(tombstone.to_dict(), ensure_ascii=False)))
             shutil.rmtree(bundle)

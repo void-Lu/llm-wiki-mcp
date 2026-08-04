@@ -25,6 +25,7 @@ from netsuite_llm_wiki_mcp.wiki_query import DEFAULT_TOP_K
 from netsuite_llm_wiki_mcp.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
 from netsuite_llm_wiki_mcp.archive_models import ARCHIVE_REASONS, is_archive_reason
 from netsuite_llm_wiki_mcp.archive_service import ArchiveService
+from netsuite_llm_wiki_mcp.codegraph_sync import CodeGraphSyncError, sync_codegraph as run_codegraph_sync
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,8 @@ def _run_wiki_query(
         typed_filters = QueryFilters.from_mapping(filter_values)
     except ValueError as exc:
         return {"ok": False, "code": "invalid_filters", "error": str(exc)}
+    if typed_filters.type and typed_filters.type.casefold() == "code_fact" and not project:
+        return {"ok": False, "code": "project_required_for_codegraph", "error": "project is required to query CodeGraph pages"}
     retrieval_mode = "vector" if not settings.lexical_enabled else "hybrid" if settings.embedding.enabled else "lexical"
     result = run_query_v2(
         resolution.root,
@@ -295,13 +298,31 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
 
 @_register
 def wiki_ingest(source_path: str, source_name: str, project: str = "", source_type: str = "file", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Ingest one explicit file; directory/batch orchestration belongs to CLI/workers."""
+    """Ingest one explicit file; text is indexed and other files become raw assets."""
     del metadata
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
     result = run_ingest_file(vault_root=resolution.root, project=project, source_name=source_name, source_path=source_path, source_type=source_type)
+    return attach_warnings(result, resolution.warnings)
+
+
+@_register
+def wiki_codegraph_import(sync: Literal["sync"] = "sync", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+    """Synchronise the current workspace's CodeGraph snapshot into the Wiki."""
+    if sync != "sync":
+        return {"ok": False, "code": "invalid_codegraph_operation", "error": "only sync is supported"}
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    try:
+        result = run_codegraph_sync(resolution.root)
+    except CodeGraphSyncError as exc:
+        result = {"ok": False, "code": exc.code, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - keep the MCP boundary structured
+        result = {"ok": False, "code": "codegraph_sync_failed", "error": str(exc)}
     return attach_warnings(result, resolution.warnings)
 
 

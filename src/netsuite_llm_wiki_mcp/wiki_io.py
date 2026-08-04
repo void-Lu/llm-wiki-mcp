@@ -5,6 +5,7 @@ from typing import Any
 
 import yaml
 
+from netsuite_llm_wiki_mcp.codegraph_policy import is_codegraph_managed_path
 from netsuite_llm_wiki_mcp.redaction import count_redactions, redact_sensitive_text
 from netsuite_llm_wiki_mcp.wiki_models import WikiPage
 from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
@@ -82,8 +83,14 @@ def write_wiki_page(
         raise WikiWriteError("path_escape", "resolved page path escapes wiki root")
     if target.exists() and overwrite_generated_only:
         existing_frontmatter, _ = split_frontmatter(target.read_text(encoding="utf-8"))
+        if is_codegraph_managed_path(relative_path, existing_frontmatter):
+            raise WikiWriteError("codegraph_managed_page", f"CodeGraph-managed page is tool-owned: {relative_path.as_posix()}")
         if existing_frontmatter.get("generated") is not True:
             raise WikiWriteError("manual_page_exists", f"refusing to overwrite non-generated wiki page: {relative_path.as_posix()}")
+    elif target.exists():
+        existing_frontmatter, _ = split_frontmatter(target.read_text(encoding="utf-8"))
+        if is_codegraph_managed_path(relative_path, existing_frontmatter):
+            raise WikiWriteError("codegraph_managed_page", f"CodeGraph-managed page is tool-owned: {relative_path.as_posix()}")
 
     title = redact_sensitive_text(page.title)
     body = redact_sensitive_text(page.body)

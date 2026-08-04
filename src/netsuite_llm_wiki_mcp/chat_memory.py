@@ -130,6 +130,7 @@ class ChatMemoryService:
         else:
             append_only = False
             parent_revision = None
+            parent_body = ""
         revision = (parent_revision or 0) + 1
         processing_mode = "incremental" if append_only else "full"
         relative = session_dir.relative_to(self.root) / f"revision-{revision:06d}.md"

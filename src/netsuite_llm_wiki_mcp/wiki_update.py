@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from netsuite_llm_wiki_mcp.codegraph_policy import is_codegraph_managed_path
 from netsuite_llm_wiki_mcp.knowledge_dependencies import KnowledgeDependencies
 from netsuite_llm_wiki_mcp.wiki_index import refresh_indexes
 from netsuite_llm_wiki_mcp.wiki_io import WikiWriteError, split_frontmatter, write_wiki_page
@@ -37,6 +38,8 @@ def preview_update(vault_root: str | Path, page_path: str, incoming_body: str, i
         return {"ok": False, "code": "page_not_found"}
     text = target.read_text(encoding="utf-8")
     fm, old_body = split_frontmatter(text)
+    if is_codegraph_managed_path(page_path, fm):
+        return {"ok": False, "code": "codegraph_managed_page", "error": "CodeGraph-managed pages can only be updated by wiki_codegraph_import"}
     if fm.get("lifecycle", "active") != "active":
         return {"ok": False, "code": "inactive_page"}
     incoming = dict(incoming_frontmatter or {})
@@ -57,6 +60,8 @@ def apply_update(vault_root: str | Path, page_path: str, incoming_body: str, *, 
         return {"ok": False, "code": "page_not_found"}
     text = target.read_text(encoding="utf-8")
     existing, _ = split_frontmatter(text)
+    if is_codegraph_managed_path(page_path, existing):
+        return {"ok": False, "code": "codegraph_managed_page", "error": "CodeGraph-managed pages can only be updated by wiki_codegraph_import"}
     current_hash = _digest(text)
     incoming = dict(incoming_frontmatter or {})
     removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
@@ -99,10 +104,14 @@ def apply_update(vault_root: str | Path, page_path: str, incoming_body: str, *, 
 
 
 def _target(root: Path, page_path: str) -> Path | dict[str, Any]:
-    path = (root / page_path).resolve()
+    normalized = page_path.replace("\\", "/")
+    relative = Path(normalized)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        return {"ok": False, "code": "path_escape"}
+    path = (root / relative).resolve()
     if not path.is_relative_to(root):
         return {"ok": False, "code": "path_escape"}
-    if not any(page_path.replace("\\", "/").startswith(prefix) for prefix in _ALLOWED) or path.name == "index.md":
+    if not any(normalized.startswith(prefix) for prefix in _ALLOWED) or path.name == "index.md":
         return {"ok": False, "code": "update_path_not_allowed"}
     return path
 

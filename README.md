@@ -1,6 +1,6 @@
 # NetSuite LLM Wiki MCP
 
-一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。内容通过 MCP 工具摄入、查询、维护和归档；代码事实不再走 CodeGraph 摄入主路径，CodeGraph 只保留在 `wiki_status` 的只读可用性字段中。
+一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。内容通过 MCP 工具摄入、查询、维护和归档；脚本代码事实由外部 CodeGraph 解析后通过专用同步入口导入。
 
 默认不使用 embedding 或向量数据库；关键词、图检索和 `[[wikilinks]]` 始终可独立运行。需要语义召回时可显式启用本地 BGE-M3 索引，绝不自动下载模型或向外部服务发送 vault 内容。
 
@@ -144,17 +144,18 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 ## 工具
 
-默认 core profile 只注册以下 7 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。
+默认 core profile 只注册以下 8 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。
 
-| 工具                | 说明                                                                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wiki_status`     | 聚合逻辑 vault、检索配置、active/archive index、generation queue、版本与运行身份；不回显绝对路径、模型路径、凭据或脱敏规则正文。`detail=summary |
-| `wiki_ingest`     | 摄入一个明确文件，写入 `raw/sources/` 并同步 raw/检索索引；不会生成 Wiki 页面或 capsule 任务。                                      |
-| `wiki_write_note` | 仅创建人工知识页，已有目标不会被覆盖。                                                                                                          |
-| `wiki_update`     | 对既有页面执行 `preview                                                                                                                         |
-| `wiki_query`      | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；模型、预算、索引和隐私策略全部来自启动时配置快照。                     |
-| `wiki_archive`    | 归档生命周期的 `plan                                                                                                                            |
-| `wiki_restore`    | 不可变归档包的 `plan                                                                                                                            |
+| 工具                      | 说明                                                                                                                                                |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wiki_status`           | 聚合逻辑 vault、检索配置、active/archive index、generation queue、版本与运行身份；不回显绝对路径、模型路径、凭据或脱敏规则正文。`detail=summary     |
+| `wiki_ingest`           | UTF-8 Markdown/纯文本写入`raw/sources/` 并同步 raw FTS；PDF、Office、媒体、脚本等原文件写入 `raw/assets/`，只保存字节/hash，不建立语义索引。    |
+| `wiki_codegraph_import` | 固定执行`sync`：读取当前工作目录 `.codegraph/codegraph.db`，更新最新 CodeGraph raw 快照、项目 architecture 页面和 active retrieval projection。 |
+| `wiki_write_note`       | 仅创建人工知识页，已有目标不会被覆盖。                                                                                                              |
+| `wiki_update`           | 对既有页面执行 `preview                                                                                                                             |
+| `wiki_query`            | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；模型、预算、索引和隐私策略全部来自启动时配置快照。                         |
+| `wiki_archive`          | 归档生命周期的 `plan                                                                                                                                |
+| `wiki_restore`          | 不可变归档包的 `plan                                                                                                                                |
 
 不再注册 `wiki_generation` worker 工具。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 
@@ -206,6 +207,9 @@ vault_root/
 │   │       ├── specs/
 │   │       ├── plans/
 │   │       ├── architecture/
+│   │       │   ├── code-facts/<source-relative-path>.md
+│   │       │   ├── pipelines/<pipeline>.md
+│   │       │   └── code-overview.md
 │   │       ├── troubleshooting/
 │   │       └── researches/
 │   ├── entities/
@@ -229,10 +233,11 @@ vault_root/
 
 1. 用 CLI 注册 vault：`netsuite-llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
 2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
-3. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。
-4. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
-5. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑；preview 返回 hash、plan_id、锁定字段和 diff，apply 在内容变化前校验这些不变量。
-6. 用 `wiki_archive`/`wiki_restore` 管理归档生命周期；purge 只保留在 CLI/admin 边界。
+3. 对脚本项目在对应工作目录调用 `wiki_codegraph_import(sync="sync")`。它只接受外部 CodeGraph 已生成的数据库，不复制源码或数据库；生成页位于 `wiki/projects/<project-lowercase>/architecture/`。
+4. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。项目代码页默认隔离；Agent 需要先向用户确认项目，再原样保留自然语言问题并传入小写 `project`。
+5. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
+6. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑；CodeGraph 管理页只能由 `wiki_codegraph_import` 同步更新。
+7. 用 `wiki_archive`/`wiki_restore` 管理归档生命周期；purge 只保留在 CLI/admin 边界。
 
 对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
 

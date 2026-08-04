@@ -30,6 +30,7 @@ from netsuite_llm_wiki_mcp.server import (
 CORE_TOOLS = {
     "wiki_status",
     "wiki_ingest",
+    "wiki_codegraph_import",
     "wiki_write_note",
     "wiki_update",
     "wiki_query",

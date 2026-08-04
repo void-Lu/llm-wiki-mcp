@@ -120,12 +120,15 @@ tags:
 
 ```text
 wiki_ingest
-    -> raw/sources/<source_type>/<project>/<source_name>/<file>
-    -> RetrievalIndexStore 增量更新
-    -> raw provenance 失效标记与 raw index 更新
+    ├─ UTF-8 Markdown/纯文本 -> raw/sources/<source_type>/<project>/<source_name>/<file>
+    │                         -> RetrievalIndexStore 增量更新
+    │                         -> raw provenance 失效标记与 raw index 更新
+    └─ 其他原文件            -> raw/assets/<project>/<source_name>/<file>
+                              -> 仅保存原文件/hash，不建立语义索引
 ```
 
 `wiki_ingest` 只接受一个已存在文件；目录、批量摄入和 reconcile 不再属于 MCP 工具职责。
+非文本文件是 `wiki_ingest` 的 asset 分流场景，不会进入 raw FTS；不额外注册 `wiki_store_asset` MCP 工具。
 
 ## Query、更新与归档规则
 
@@ -223,8 +226,14 @@ class WikiPaths:
     def project_architecture_dir(self, project: str) -> Path:
         return self.project_root(project) / "architecture"
 
+    def project_code_facts_dir(self, project: str) -> Path:
+        return self.project_architecture_dir(project) / "code-facts"
+
     def project_pipelines_dir(self, project: str) -> Path:
-        return self.project_root(project) / "pipelines"
+        return self.project_architecture_dir(project) / "pipelines"
+
+    def project_code_overview_path(self, project: str) -> Path:
+        return self.project_architecture_dir(project) / "code-overview.md"
 
     def project_troubleshooting_dir(self, project: str) -> Path:
         return self.project_root(project) / "troubleshooting"

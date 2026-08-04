@@ -12,6 +12,22 @@ from netsuite_llm_wiki_mcp.knowledge_dependencies import KnowledgeDependencies
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore, page_from_file
 from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
 
+TEXT_SOURCE_SUFFIXES = {
+    ".md",
+    ".markdown",
+    ".txt",
+    ".text",
+    ".log",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".xml",
+    ".html",
+    ".htm",
+}
+
 
 def sync_retrieval_index(vault_root: str | Path, *, full_build: bool = False) -> dict[str, object]:
     """Shared post-write projection boundary for MCP, batch, and adapters."""
@@ -28,11 +44,12 @@ def sync_retrieval_index(vault_root: str | Path, *, full_build: bool = False) ->
 
 
 def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name: str, project: str = "", source_type: str = "file") -> dict[str, Any]:
-    """Snapshot one explicit source and synchronise its eligible FTS projection.
+    """Snapshot one explicit source and index it only when it is text knowledge.
 
     This function intentionally accepts neither a directory nor model/index
-    configuration. Raw sources are copied byte-for-byte; redaction happens only
-    in retrieval projections.
+    configuration. Text sources are copied to ``raw/sources`` and projected to
+    raw FTS; every other file is copied byte-for-byte to ``raw/assets`` without
+    semantic indexing.
     """
 
     root = Path(vault_root).expanduser().resolve()
@@ -45,13 +62,29 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
         project_value = safe_segment(project) if project else "default"
     except ValueError as exc:
         return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": str(exc)}
-    target = root / "raw" / "sources" / type_value / project_value / name_value / source.name
+    is_text_source = _is_text_knowledge_source(source)
+    target = (
+        root / "raw" / "sources" / type_value / project_value / name_value / source.name
+        if is_text_source
+        else root / "raw" / "assets" / project_value / name_value / source.name
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     incoming_hash = _hash_file(source)
     previous_hash = _hash_file(target) if target.exists() else None
     if previous_hash != incoming_hash:
         shutil.copyfile(source, target)
     operation = "new" if previous_hash is None else "unchanged" if previous_hash == incoming_hash else "modified"
+    if not is_text_source:
+        return {
+            "ok": True,
+            "operation": operation,
+            "source": target.relative_to(root).as_posix(),
+            "content_hash": incoming_hash,
+            "storage_kind": "asset",
+            "semantic_indexed": False,
+            "index_scope": None,
+            "index": {"ok": True, "state": "not_indexed", "code": "asset_not_indexed"},
+        }
     # Raw snapshots are the source of truth.  A changed snapshot only
     # invalidates dependent page provenance; it never creates a derived page.
     provenance_result: dict[str, Any] | None = None
@@ -66,7 +99,7 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     else:
         store = RetrievalIndexStore(root, scope=index_scope)
         index = store.build(store.iter_vault_pages())
-    response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "index_scope": index_scope, "index": index}
+    response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "storage_kind": "text_source", "semantic_indexed": bool(index.get("ok")), "index_scope": index_scope, "index": index}
     if provenance_result is not None:
         response["generation"] = provenance_result["generation"]
         response["stale_pages"] = provenance_result["stale"]
@@ -93,3 +126,18 @@ def _hash_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _is_text_knowledge_source(source: Path) -> bool:
+    """Return whether a file is safe to treat as a UTF-8 text knowledge source."""
+
+    if source.suffix.casefold() not in TEXT_SOURCE_SUFFIXES:
+        return False
+    try:
+        content = source.read_bytes()
+        if b"\x00" in content:
+            raise UnicodeError("binary content")
+        content.decode("utf-8")
+    except (OSError, UnicodeError):
+        return False
+    return True
