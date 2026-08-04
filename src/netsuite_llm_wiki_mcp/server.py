@@ -309,16 +309,20 @@ def wiki_ingest(source_path: str, source_name: str, project: str = "", source_ty
 
 
 @_register
-def wiki_codegraph_import(sync: Literal["sync"] = "sync", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+def wiki_codegraph_import(sync: Literal["sync"] = "sync", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, workspace_root: str | None = None, workspaceRoot: str | None = None) -> dict[str, Any]:
     """Synchronise the current workspace's CodeGraph snapshot into the Wiki."""
     if sync != "sync":
         return {"ok": False, "code": "invalid_codegraph_operation", "error": "only sync is supported"}
+    workspace_values = [value for value in (workspace_root, workspaceRoot) if value]
+    if len(set(workspace_values)) > 1:
+        return {"ok": False, "code": "ambiguous_workspace_selector", "error": "workspace_root and workspaceRoot disagree"}
+    workspace = workspace_values[0] if workspace_values else None
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
     try:
-        result = run_codegraph_sync(resolution.root)
+        result = run_codegraph_sync(resolution.root, workspace_root=workspace)
     except CodeGraphSyncError as exc:
         result = {"ok": False, "code": exc.code, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001 - keep the MCP boundary structured
