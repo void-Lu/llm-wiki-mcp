@@ -144,7 +144,7 @@ NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
 
 ## 工具
 
-默认 core profile 只注册以下 8 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。
+默认 core profile 只注册以下 8 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。`wiki_codegraph_import` 使用 `workspace_root` 指定 CodeGraph 工作区，未传时读取 `NETSUITE_LLM_WIKI_WORKSPACE_ROOT`。
 
 | 工具                      | 说明                                                                                                                                                |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -233,7 +233,7 @@ vault_root/
 
 1. 用 CLI 注册 vault：`netsuite-llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
 2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
-3. 对脚本项目在对应工作目录调用 `wiki_codegraph_import(sync="sync")`。它只接受外部 CodeGraph 已生成的数据库，不复制源码或数据库；生成页位于 `wiki/projects/<project-lowercase>/architecture/`。
+3. 对脚本项目在对应工作目录调用 `wiki_codegraph_import(sync="sync", workspace_root="<workspace-root>")`。它只接受外部 CodeGraph 已生成的数据库，不复制源码或数据库；生成页位于 `wiki/projects/<project-lowercase>/architecture/`。
 4. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。项目代码页默认隔离；Agent 需要先向用户确认项目，再原样保留自然语言问题并传入小写 `project`。
 5. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
 6. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑；CodeGraph 管理页只能由 `wiki_codegraph_import` 同步更新。

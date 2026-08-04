@@ -181,6 +181,17 @@ def test_public_query_schema_has_logical_vault_and_no_runtime_overrides() -> Non
     assert {"enable_vector", "context_window_tokens", "include_raw_sources", "max_graph_hops"}.isdisjoint(parameters)
 
 
+def test_codegraph_import_schema_uses_snake_case_workspace_root() -> None:
+    async def assert_schema() -> None:
+        async with Client(mcp) as client:
+            tool = next(item for item in (await client.list_tools()).tools if item.name == "wiki_codegraph_import")
+            properties = tool.input_schema.get("properties", {})
+            assert "workspace_root" in properties
+            assert "workspaceRoot" not in properties
+
+    anyio.run(assert_schema)
+
+
 def test_resolver_uses_default_logical_vault(tmp_path: Path) -> None:
     registry, root = _registry(tmp_path)
     result = resolve_tool_vault(registry=registry)
