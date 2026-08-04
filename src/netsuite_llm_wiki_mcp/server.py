@@ -310,7 +310,12 @@ def wiki_ingest(source_path: str, source_name: str, project: str = "", source_ty
 
 @_register
 def wiki_codegraph_import(sync: Literal["sync"] = "sync", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, workspace_root: str | None = None, workspaceRoot: str | None = None) -> dict[str, Any]:
-    """Synchronise the current workspace's CodeGraph snapshot into the Wiki."""
+    """Synchronise the current workspace's CodeGraph snapshot into the Wiki.
+
+    workspace_root is required — pass it explicitly or set the
+    NETSUITE_LLM_WIKI_WORKSPACE_ROOT environment variable (e.g. the client's
+    workspace folder); it never falls back to the server process cwd.
+    """
     if sync != "sync":
         return {"ok": False, "code": "invalid_codegraph_operation", "error": "only sync is supported"}
     workspace_values = [value for value in (workspace_root, workspaceRoot) if value]

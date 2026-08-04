@@ -146,11 +146,24 @@ class PipelineSnapshot:
     pipeline_status: str
 
 
-def sync_codegraph(vault_root: str | Path, *, workspace_root: str | Path | None = None) -> dict[str, Any]:
-    """Read the current workspace CodeGraph database and atomically sync it."""
+WORKSPACE_ROOT_ENV = "NETSUITE_LLM_WIKI_WORKSPACE_ROOT"
 
+
+def sync_codegraph(vault_root: str | Path, *, workspace_root: str | Path | None = None) -> dict[str, Any]:
+    """Read the current workspace CodeGraph database and atomically sync it.
+
+    workspace_root is required: pass it explicitly or set the
+    NETSUITE_LLM_WIKI_WORKSPACE_ROOT environment variable. It never falls back
+    to the process cwd, which is unreliable for long-lived MCP servers.
+    """
     vault = Path(vault_root).expanduser().resolve()
-    workspace = Path(workspace_root or Path.cwd()).expanduser().resolve()
+    workspace_value = workspace_root or os.environ.get(WORKSPACE_ROOT_ENV)
+    if not workspace_value:
+        raise CodeGraphSyncError(
+            "missing_workspace_root",
+            f"workspace_root is required: pass it explicitly or set {WORKSPACE_ROOT_ENV}",
+        )
+    workspace = Path(workspace_value).expanduser().resolve()
     project = workspace.name.lower()
     try:
         safe_segment(project)
