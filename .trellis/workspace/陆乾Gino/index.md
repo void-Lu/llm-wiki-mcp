@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 13
+- **Total Sessions**: 14
 - **Last Active**: 2026-08-04
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~479 | Active |
+| `journal-1.md` | ~513 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 14 | 2026-08-04 | 明确 CodeGraph 页面查询结论 | `ca2ce46`, `efbdcaf` | `v0.9.17` |
 | 13 | 2026-08-04 | 完成 CodeGraph 同步与任务归档 | `ca2ce46` | `v0.9.17` |
 | 12 | 2026-08-01 | 实现可审计会话记忆与可溯源 Capsule | `268c228` | `v0.9.13` |
 | 11 | 2026-07-31 | 完成 Query V2 评测与 Concept-first 集成归档 | `e04b25c` | `v0.9.11` |

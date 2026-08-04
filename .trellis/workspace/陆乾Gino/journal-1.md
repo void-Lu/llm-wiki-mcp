@@ -477,3 +477,37 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: 明确 CodeGraph 页面查询结论
+
+**Date**: 2026-08-04
+**Task**: 明确 CodeGraph 页面查询结论
+**Branch**: `v0.9.17`
+
+### Summary
+
+补充说明 code-facts 与 pipelines 页面可通过显式 project 查询，分别支持文件事实、符号关系、入口可达范围、未解析边界和影响范围推断；不能替代运行时分析、业务意图或正确性判断。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ca2ce46` | (see git log) |
+| `efbdcaf` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
