@@ -5,7 +5,12 @@ import json
 import sqlite3
 from pathlib import Path
 
-from netsuite_llm_wiki_mcp.codegraph_sync import CodeGraphSyncError, _is_trusted_entrypoint, sync_codegraph
+from netsuite_llm_wiki_mcp.codegraph_sync import (
+    SUITESCRIPT_ENTRYPOINT_NAMES,
+    CodeGraphSyncError,
+    _is_trusted_entrypoint,
+    sync_codegraph,
+)
 from netsuite_llm_wiki_mcp.query_pipeline import run_query_v2
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 
@@ -62,6 +67,50 @@ def test_js_ts_and_suitescript_entrypoints_are_recognized() -> None:
     assert _is_trusted_entrypoint({"kind": "method", "name": "run", "language": "typescript", "is_exported": 1})
     assert _is_trusted_entrypoint({"kind": "function", "name": "afterSubmit", "language": "suitescript", "is_exported": 1})
     assert not _is_trusted_entrypoint({"kind": "function", "name": "afterSubmit", "language": "suitescript", "is_exported": 0})
+
+
+def test_all_fixed_suitescript_entrypoints_are_trusted_roots() -> None:
+    expected = {
+        "get",
+        "post",
+        "put",
+        "delete",
+        "getinputdata",
+        "map",
+        "reduce",
+        "summarize",
+        "onrequest",
+        "beforeload",
+        "beforesubmit",
+        "aftersubmit",
+        "pageinit",
+        "fieldchanged",
+        "lineinit",
+        "localizationcontextenter",
+        "localizationcontextexit",
+        "postsourcing",
+        "saverecord",
+        "sublistchanged",
+        "validatedelete",
+        "validatefield",
+        "validateinsert",
+        "validateline",
+        "execute",
+        "each",
+        "render",
+        "onaction",
+        "afterinstall",
+        "afterupdate",
+        "beforeinstall",
+        "beforeuninstall",
+        "beforeupdate",
+        "run",
+        "initializespa",
+    }
+    assert SUITESCRIPT_ENTRYPOINT_NAMES == expected
+    for name in expected:
+        assert _is_trusted_entrypoint({"kind": "function", "name": name, "language": "suitescript", "is_exported": 1})
+        assert _is_trusted_entrypoint({"kind": "function", "name": name, "language": "javascript", "is_exported": 1})
 
 
 def test_sync_rejects_missing_database_before_writes(tmp_path: Path) -> None:

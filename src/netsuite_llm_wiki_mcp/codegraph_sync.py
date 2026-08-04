@@ -35,23 +35,53 @@ IMPORT_SCHEMA_VERSION = 1
 MAX_SUPPORTED_CODEGRAPH_SCHEMA_VERSION = 6
 SUPPORTED_LANGUAGES = {"python", "javascript", "typescript", "js", "ts", "node", "suiteScript".casefold()}
 ENTRYPOINT_NAMES = {"main", "run", "handler", "execute", "entrypoint"}
+# Fixed SuiteScript 2.x/2.1 entry points. Custom Tool methods are defined by
+# the tool JSON schema, so they intentionally cannot be represented by this
+# name set and must be resolved from schema-aware CodeGraph metadata instead.
 SUITESCRIPT_ENTRYPOINT_NAMES = {
+    # RESTlet
     "get",
     "post",
     "put",
     "delete",
+    # Map/Reduce
     "getinputdata",
     "map",
     "reduce",
     "summarize",
+    # Suitelet
+    "onRequest".casefold(),
+    # User Event
     "beforeload",
     "beforesubmit",
     "aftersubmit",
+    # Client
     "pageinit",
+    "fieldChanged".casefold(),
+    "lineInit".casefold(),
+    "localizationContextEnter".casefold(),
+    "localizationContextExit".casefold(),
+    "postSourcing".casefold(),
     "saveRecord".casefold(),
-    "validateField".casefold(),
-    "validateLine".casefold(),
     "sublistChanged".casefold(),
+    "validateDelete".casefold(),
+    "validateField".casefold(),
+    "validateInsert".casefold(),
+    "validateLine".casefold(),
+    # Scheduled, Mass Update, Portlet, and Workflow Action
+    "execute",
+    "each",
+    "render",
+    "onAction".casefold(),
+    # Bundle Installation
+    "afterInstall".casefold(),
+    "afterUpdate".casefold(),
+    "beforeInstall".casefold(),
+    "beforeUninstall".casefold(),
+    "beforeUpdate".casefold(),
+    # SDF Installation and SPA scripts
+    "run",
+    "initializeSpa".casefold(),
 }
 TRAVERSAL_EDGE_KINDS = {"calls", "instantiates"}
 NODE_FIELDS = (
