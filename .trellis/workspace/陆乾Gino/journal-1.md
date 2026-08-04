@@ -444,3 +444,36 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: 完成 CodeGraph 同步与任务归档
+
+**Date**: 2026-08-04
+**Task**: 完成 CodeGraph 同步与任务归档
+**Branch**: `v0.9.17`
+
+### Summary
+
+完成 CodeGraph latest-only 同步、项目代码查询隔离，以及 wiki_ingest 的文本与 raw asset 分流；归档任务 08-04-codegraph-sync-project-scope。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ca2ce46` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
