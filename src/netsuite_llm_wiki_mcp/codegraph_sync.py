@@ -32,7 +32,7 @@ from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
 
 CODEGRAPH_SOURCE_NAME = "codegraph"
 IMPORT_SCHEMA_VERSION = 1
-MAX_SUPPORTED_CODEGRAPH_SCHEMA_VERSION = 6
+MAX_SUPPORTED_CODEGRAPH_SCHEMA_VERSION = 8
 SUPPORTED_LANGUAGES = {"python", "javascript", "typescript", "js", "ts", "node", "suiteScript".casefold()}
 ENTRYPOINT_NAMES = {"main", "run", "handler", "execute", "entrypoint"}
 # Fixed SuiteScript 2.x/2.1 entry points. Custom Tool methods are defined by
