@@ -117,7 +117,7 @@ def _frontmatter(
         "project": project or "",
         "author": "copilot",
         "updated_at": date.today().isoformat(),
-        "tags": ["netsuite", note_type, *(tags or [])],
+        "tags": [note_type, *(tags or [])],
         "title": title,
     }
     if note_type == "spec":
