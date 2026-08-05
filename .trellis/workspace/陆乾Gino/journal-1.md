@@ -511,3 +511,36 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: 修复 wiki_query raw fallback
+
+**Date**: 2026-08-05
+**Task**: 修复 wiki_query raw fallback
+**Branch**: `v0.9.18`
+
+### Summary
+
+完成 Wiki-first Query V2 编排、raw FTS exact/qualified/prefix/relaxed fallback、fresh-only warning、页级去重重排与 legacy raw projection；107 项相关测试通过，ruff/compileall 通过，真实 vault 仅做只读 status/search。归档任务 08-05-wiki-query-raw-fallback-correctness；保留 .netsuite-mcp/ 未提交改动。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `87bea9f` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

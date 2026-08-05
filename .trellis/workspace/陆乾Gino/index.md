@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 14
-- **Last Active**: 2026-08-04
+- **Total Sessions**: 15
+- **Last Active**: 2026-08-05
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~513 | Active |
+| `journal-1.md` | ~546 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 15 | 2026-08-05 | 修复 wiki_query raw fallback | `87bea9f` | `v0.9.18` |
 | 14 | 2026-08-04 | 明确 CodeGraph 页面查询结论 | `ca2ce46`, `efbdcaf` | `v0.9.17` |
 | 13 | 2026-08-04 | 完成 CodeGraph 同步与任务归档 | `ca2ce46` | `v0.9.17` |
 | 12 | 2026-08-01 | 实现可审计会话记忆与可溯源 Capsule | `268c228` | `v0.9.13` |
