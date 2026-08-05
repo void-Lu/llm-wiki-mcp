@@ -30,14 +30,14 @@ ALGORITHM_VERSION = "raw-source-remap-v1"
 if str(REPOSITORY_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
-from netsuite_llm_wiki_mcp.archive_planner import ArchivePlanner  # noqa: E402
-from netsuite_llm_wiki_mcp.archive_service import ArchiveService  # noqa: E402
-from netsuite_llm_wiki_mcp.generation_queue import DISABLED_JOB_TYPES, GenerationQueue  # noqa: E402
-from netsuite_llm_wiki_mcp.knowledge_dependencies import KnowledgeDependencies  # noqa: E402
-from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore  # noqa: E402
-from netsuite_llm_wiki_mcp.vector_index import VectorIndexStore  # noqa: E402
-from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter  # noqa: E402
-from netsuite_llm_wiki_mcp.wiki_query import vector_index_records  # noqa: E402
+from archive.archive_planner import ArchivePlanner  # noqa: E402
+from archive.archive_service import ArchiveService  # noqa: E402
+from wiki.generation_queue import DISABLED_JOB_TYPES, GenerationQueue  # noqa: E402
+from wiki.knowledge_dependencies import KnowledgeDependencies  # noqa: E402
+from retrieval.retrieval_index import RetrievalIndexStore  # noqa: E402
+from retrieval.vector_index import VectorIndexStore  # noqa: E402
+from wiki.wiki_io import split_frontmatter  # noqa: E402
+from wiki.wiki_query import vector_index_records  # noqa: E402
 
 
 def _sha256_bytes(value: bytes) -> str:

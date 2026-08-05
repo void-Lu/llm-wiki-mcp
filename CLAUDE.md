@@ -8,76 +8,76 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - 安装/同步开发环境：`uv sync --extra dev`
 - 运行全部测试：`uv run pytest`
-- 运行单个测试文件：`uv run pytest tests/test_wiki_query.py`
-- 运行单个测试函数：`uv run pytest tests/test_wiki_query.py::test_function_name -v`
-- 启动 MCP server：`uv run netsuite-llm-wiki-mcp-server`、`uv run netsuite-llm-wiki-mcp server` 或 `uv run python -m netsuite_llm_wiki_mcp.server`
-- CLI 初始化 vault：`uv run netsuite-llm-wiki-mcp init --vault <name> --root <path> --default`
-- CLI 查看状态：`uv run netsuite-llm-wiki-mcp status`
+- 运行单个测试文件：`uv run pytest tests/wiki/test_wiki_query.py`
+- 运行单个测试函数：`uv run pytest tests/wiki/test_wiki_query.py::test_function_name -v`
+- 启动 MCP server：`uv run llm-wiki-mcp-server`、`uv run llm-wiki-mcp server` 或 `uv run python -m app.server`
+- CLI 初始化 vault：`uv run llm-wiki-mcp init --vault <name> --root <path> --default`
+- CLI 查看状态：`uv run llm-wiki-mcp status`
 
 项目使用 `uv.lock` 管理开发环境。Ruff 配置在 pyproject.toml（`select = ["E9", "F"]`），运行 `uv run ruff check src/`；完成前至少运行相关 `uv run pytest`，较大改动运行全量 `uv run pytest` 和 `uv run ruff check src/`。
 
 ## 架构总览
 
-Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依赖是 `pytest`。入口点在 [pyproject.toml](pyproject.toml)：`netsuite-llm-wiki-mcp` 调 [cli.py](src/netsuite_llm_wiki_mcp/cli.py)，`netsuite-llm-wiki-mcp-server` 调 [server.py](src/netsuite_llm_wiki_mcp/server.py)。
+Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依赖是 `pytest`。入口点在 [pyproject.toml](pyproject.toml)：`llm-wiki-mcp` 调 [cli.py](src/app/cli.py)，`llm-wiki-mcp-server` 调 [server.py](src/app/server.py)。
 
 ### MCP 工具入口层
 
-[server.py](src/netsuite_llm_wiki_mcp/server.py) 用 MCP Python SDK 2.x 的 `MCPServer` 注册所有公开工具，薄封装后委托到业务模块。人工笔记公开入口是 `wiki_write_note`；旧 `save_obsidian_note` 不应再注册。新增或调整 MCP 工具时，通常需要同时改：
+[server.py](src/app/server.py) 用 MCP Python SDK 2.x 的 `MCPServer` 注册所有公开工具，薄封装后委托到业务模块。人工笔记公开入口是 `wiki_write_note`；旧 `save_obsidian_note` 不应再注册。新增或调整 MCP 工具时，通常需要同时改：
 
 1. 业务模块中的纯函数实现。
-2. [server.py](src/netsuite_llm_wiki_mcp/server.py) 的 tool wrapper / `@mcp.tool()` 注册。
+2. [server.py](src/app/server.py) 的 tool wrapper / `@mcp.tool()` 注册。
 3. [README.md](README.md) 的工具说明（如果公开行为变化）。
-4. [tests/test_server_tools.py](tests/test_server_tools.py) 和对应业务测试。
+4. [tests/app/test_server_tools.py](tests/app/test_server_tools.py) 和对应业务测试。
 
 注册工具清单（8 个）：`wiki_status`、`wiki_ingest`、`wiki_codegraph_import`、`wiki_write_note`、`wiki_update`、`wiki_query`、`wiki_archive`、`wiki_restore`。`wiki_generation` worker 工具不再注册；init/config、retrieval-eval、vector/index 生命周期、generation admin、archive admin 和 migration 只保留在 CLI 边界。
 
 ### Vault 与路径模型
 
-- `vault_root` 解析优先级在 [runtime_config.py](src/netsuite_llm_wiki_mcp/runtime_config.py)：工具参数 > `NETSUITE_LLM_WIKI_VAULT_ROOT` > 全局 `config.yaml` 的 `default_vault`。
-- 跨平台配置/数据目录在 [platform_paths.py](src/netsuite_llm_wiki_mcp/platform_paths.py)，测试通过 [tests/conftest.py](tests/conftest.py) 自动隔离这些环境变量。
-- Wiki 目录创建和 path segment 校验在 [wiki_paths.py](src/netsuite_llm_wiki_mcp/wiki_paths.py)。外部 Obsidian root 固定包含 `purpose.md`、`schema.md`、`raw/sources/{projects,file,references,chat}/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/entities/`、`wiki/archives/`、`archives/bundles/`、`.obsidian/`、`.llm-wiki/state.sqlite3`。
+- `vault_root` 解析优先级在 [runtime_config.py](src/runtime/runtime_config.py)：工具参数 > `LLM_WIKI_VAULT_ROOT` > 全局 `config.yaml` 的 `default_vault`。
+- 跨平台配置/数据目录在 [platform_paths.py](src/runtime/platform_paths.py)，测试通过 [tests/conftest.py](tests/conftest.py) 自动隔离这些环境变量。
+- Wiki 目录创建和 path segment 校验在 [wiki_paths.py](src/wiki/wiki_paths.py)。外部 Obsidian root 固定包含 `purpose.md`、`schema.md`、`raw/sources/{projects,file,references,chat}/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/entities/`、`wiki/archives/`、`archives/bundles/`、`.obsidian/`、`.llm-wiki/state.sqlite3`。
 - `raw/sources/` 是来源事实层；`wiki_ingest` 只复制明确文件并同步检索投影。`wiki/` 是可读 Markdown 层；`wiki/sources/` 命名空间已退役（一次性归档由 `scripts/archive_wiki_sources.py` 完成），活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes` 溯源。
 - Durable generation 状态在 `.llm-wiki/state.sqlite3`；`wiki_files.wiki_status` 兼容读取旧 `.llm-wiki/ingest-queue.json` 队列摘要。
-- Markdown/frontmatter 读写、覆盖保护和脱敏在 [wiki_io.py](src/netsuite_llm_wiki_mcp/wiki_io.py)。生成页只能覆盖 `generated: true` 页面；人工页不能被静默覆盖。
+- Markdown/frontmatter 读写、覆盖保护和脱敏在 [wiki_io.py](src/wiki/wiki_io.py)。生成页只能覆盖 `generated: true` 页面；人工页不能被静默覆盖。
 
 ### 写入与维护流水线
 
-- 单文件摄入在 [ingest_service.py](src/netsuite_llm_wiki_mcp/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时，通过 [knowledge_compiler.py](src/netsuite_llm_wiki_mcp/knowledge_compiler.py) 入队知识编译。MCP 工具名为 `wiki_ingest`。
-- 知识编译由 [generation_queue.py](src/netsuite_llm_wiki_mcp/generation_queue.py) 提供 durable job；worker profile 通过 `wiki_generation` 暴露 `status/claim/apply/fail/release`，CLI `generation` 提供同一队列的管理入口。MCP 工具层不直接接收或回显大段 prompt/generation。
-- 人工笔记写入在 [note_writer.py](src/netsuite_llm_wiki_mcp/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
-- 写入后维护集中在 [wiki_index.py](src/netsuite_llm_wiki_mcp/wiki_index.py)、[wiki_overview.py](src/netsuite_llm_wiki_mcp/wiki_overview.py)、[wiki_log.py](src/netsuite_llm_wiki_mcp/wiki_log.py)。会产生或变更页面的工具通常要刷新 index/overview 并 append log。
-- 受控更新在 [wiki_update.py](src/netsuite_llm_wiki_mcp/wiki_update.py)：`preview_update` 返回 hash、plan_id、locked fields、removed sources 和 diff；`apply_update` 在校验 hash/plan、锁定字段、来源与 active lifecycle 后写页面，并更新 knowledge dependencies、index 和 log。MCP 工具为 `wiki_update`。
-- 归档在 [archive_service.py](src/netsuite_llm_wiki_mcp/archive_service.py)：`wiki_archive`/`wiki_restore` 只公开 `plan|apply`；purge、recover、rebuild-index 和 migration 只保留在 CLI/admin 边界。
+- 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时，通过 [knowledge_compiler.py](src/wiki/knowledge_compiler.py) 入队知识编译。MCP 工具名为 `wiki_ingest`。
+- 知识编译由 [generation_queue.py](src/wiki/generation_queue.py) 提供 durable job；worker profile 通过 `wiki_generation` 暴露 `status/claim/apply/fail/release`，CLI `generation` 提供同一队列的管理入口。MCP 工具层不直接接收或回显大段 prompt/generation。
+- 人工笔记写入在 [note_writer.py](src/wiki/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
+- 写入后维护集中在 [wiki_index.py](src/wiki/wiki_index.py)、[wiki_overview.py](src/wiki/wiki_overview.py)、[wiki_log.py](src/wiki/wiki_log.py)。会产生或变更页面的工具通常要刷新 index/overview 并 append log。
+- 受控更新在 [wiki_update.py](src/wiki/wiki_update.py)：`preview_update` 返回 hash、plan_id、locked fields、removed sources 和 diff；`apply_update` 在校验 hash/plan、锁定字段、来源与 active lifecycle 后写页面，并更新 knowledge dependencies、index 和 log。MCP 工具为 `wiki_update`。
+- 归档在 [archive_service.py](src/archive/archive_service.py)：`wiki_archive`/`wiki_restore` 只公开 `plan|apply`；purge、recover、rebuild-index 和 migration 只保留在 CLI/admin 边界。
 
 ### 查询与图谱能力
 
-[wiki_query.py](src/netsuite_llm_wiki_mcp/wiki_query.py) 主路径是关键词/CJK bigram 命中 → wikilink、shared source、common neighbor、same type 图扩展 → token budget 裁剪 → numbered citation context pack。可选的本地混合向量检索（`enable_vector=true` + `vector` extra + 显式 `vector build`）在词法和向量独立召回后使用 RRF 融合（缩放后叠加到 `fusion_score`），再加图扩展；默认关闭，不引入 Chroma、`.rag-index` 或外部 embedding 主路径。
+[wiki_query.py](src/wiki/wiki_query.py) 主路径是关键词/CJK bigram 命中 → wikilink、shared source、common neighbor、same type 图扩展 → token budget 裁剪 → numbered citation context pack。可选的本地混合向量检索（`enable_vector=true` + `vector` extra + 显式 `vector build`）在词法和向量独立召回后使用 RRF 融合（缩放后叠加到 `fusion_score`），再加图扩展；默认关闭，不引入 Chroma、`.rag-index` 或外部 embedding 主路径。
 
-[wikilinks.py](src/netsuite_llm_wiki_mcp/wikilinks.py) 提供 wikilink 格式化和解析工具函数：`format_wikilink`（含表格内 `\| 转义）、`normalize_wikilink_targets`（小写化 + 表格别名处理）、`wikilink_targets`、`split_wikilink_inner`、`table_wikilink_alias_pipe_lines` 等。query、update 等模块统一使用此模块处理 wikilink，不内嵌正则。
+[wikilinks.py](src/wiki/wikilinks.py) 提供 wikilink 格式化和解析工具函数：`format_wikilink`（含表格内 `\| 转义）、`normalize_wikilink_targets`（小写化 + 表格别名处理）、`wikilink_targets`、`split_wikilink_inner`、`table_wikilink_alias_pipe_lines` 等。query、update 等模块统一使用此模块处理 wikilink，不内嵌正则。
 
-[wiki_files.py](src/netsuite_llm_wiki_mcp/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、generation queue、版本与运行身份，以及 CodeGraph executable 的只读可用性。MCP 工具为 `wiki_status`。
+[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、generation queue、版本与运行身份，以及 CodeGraph executable 的只读可用性。MCP 工具为 `wiki_status`。
 
-[wiki_models.py](src/netsuite_llm_wiki_mcp/wiki_models.py) 定义核心数据结构 `WikiPage`、`WikiLogEntry`。
+[wiki_models.py](src/wiki/wiki_models.py) 定义核心数据结构 `WikiPage`、`WikiLogEntry`。
 
-[query_pipeline.py](src/netsuite_llm_wiki_mcp/query_pipeline.py) 是查询引擎核心（V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack。支持 `expansion_terms` 模糊词扩展和 `legacy_response_from_v2` 兼容响应。
+[query_pipeline.py](src/retrieval/query_pipeline.py) 是查询引擎核心（V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack。支持 `expansion_terms` 模糊词扩展和 `legacy_response_from_v2` 兼容响应。
 
-[chat_memory.py](src/netsuite_llm_wiki_mcp/chat_memory.py) 提供不可变、脱敏的 chat source 持久化；`wiki_write_note` 通过 `chat_metadata`/`chat_derived`/`chat_sources` 参数写入 chat source。
+[chat_memory.py](src/wiki/chat_memory.py) 提供不可变、脱敏的 chat source 持久化；`wiki_write_note` 通过 `chat_metadata`/`chat_derived`/`chat_sources` 参数写入 chat source。
 
-[lexical_analyzer.py](src/netsuite_llm_wiki_mcp/lexical_analyzer.py) 提供 FTS 和检索共用的词法归一化（Latin/CJK 分词、停用词、编辑距离）。
+[lexical_analyzer.py](src/retrieval/lexical_analyzer.py) 提供 FTS 和检索共用的词法归一化（Latin/CJK 分词、停用词、编辑距离）。
 
-[runtime_provenance.py](src/netsuite_llm_wiki_mcp/runtime_provenance.py) 提供服务器版本与运行身份快照，用于 `wiki_status` 和 MCP 握手。
+[runtime_provenance.py](src/runtime/runtime_provenance.py) 提供服务器版本与运行身份快照，用于 `wiki_status` 和 MCP 握手。
 
-[wiki_limits.py](src/netsuite_llm_wiki_mcp/wiki_limits.py) 定义页面/日志/导航条目字节上限（HARD_PAGE_BYTES=200_000 等）。
+[wiki_limits.py](src/wiki/wiki_limits.py) 定义页面/日志/导航条目字节上限（HARD_PAGE_BYTES=200_000 等）。
 
-[git_utils.py](src/netsuite_llm_wiki_mcp/git_utils.py) 提供 `get_git_commit`、`get_git_revision`、`get_git_dirty`、`is_git_dirty`、`get_git_branch` 等零外部依赖 git 辅助函数，用于 runtime provenance。
+[git_utils.py](src/common/git_utils.py) 提供 `get_git_commit`、`get_git_revision`、`get_git_dirty`、`is_git_dirty`、`get_git_branch` 等零外部依赖 git 辅助函数，用于 runtime provenance。
 
 归档相关模块：`archive_models.py` 定义 bundle/plan/tombstone 数据，`archive_manifest.py` 负责 manifest 哈希与校验，`archive_planner.py` 生成归档计划，`archive_migration.py` 处理 legacy migration，`archive_service.py` 是 MCP/CLI 的公开服务边界。
 
 ### CodeGraph 同步
 
-[codegraph_sync.py](src/netsuite_llm_wiki_mcp/codegraph_sync.py) 是 CodeGraph 快照导入器：读取工作目录 `.codegraph/codegraph.db`，将结构化代码事实投影为 `wiki/projects/<project>/architecture/` 下的 code-facts、pipelines 和 code-overview 页面，并同步 active retrieval projection。MCP 工具为 `wiki_codegraph_import`（固定 `sync="sync"`）。[codegraph_policy.py](src/netsuite_llm_wiki_mcp/codegraph_policy.py) 提供所有权检查（`managed_by=codegraph`、`retrieval_scope=project_code`、`source_name=codegraph`），CodeGraph 管理页只能由 `wiki_codegraph_import` 更新，`wiki_update` 不覆盖。
+[codegraph_sync.py](src/codegraph/codegraph_sync.py) 是 CodeGraph 快照导入器：读取工作目录 `.codegraph/codegraph.db`，将结构化代码事实投影为 `wiki/projects/<project>/architecture/` 下的 code-facts、pipelines 和 code-overview 页面，并同步 active retrieval projection。MCP 工具为 `wiki_codegraph_import`（固定 `sync="sync"`）。[codegraph_policy.py](src/codegraph/codegraph_policy.py) 提供所有权检查（`managed_by=codegraph`、`retrieval_scope=project_code`、`source_name=codegraph`），CodeGraph 管理页只能由 `wiki_codegraph_import` 更新，`wiki_update` 不覆盖。
 
-旧的 `context_budget.py`、`page_merge.py`、`wiki_dedup.py`、`wiki_delete.py`、`wiki_enrich.py`、`wiki_gap.py`、`wiki_ingest.py`、`wiki_insights.py`、`wiki_lint.py`、`wiki_repair.py`、`wiki_research.py`、`wiki_source_index.py`、`wiki_synthesis.py`、`wiki_verify.py`、`wiki_batch.py`、`pipeline_detector.py`、`louvain.py` 已删除；不要重新注册这些模块或 MCP 工具。旧 `codegraph_client.py` 已被 [codegraph_sync.py](src/netsuite_llm_wiki_mcp/codegraph_sync.py) + [codegraph_policy.py](src/netsuite_llm_wiki_mcp/codegraph_policy.py) 替代。
+旧的 `context_budget.py`、`page_merge.py`、`wiki_dedup.py`、`wiki_delete.py`、`wiki_enrich.py`、`wiki_gap.py`、`wiki_ingest.py`、`wiki_insights.py`、`wiki_lint.py`、`wiki_repair.py`、`wiki_research.py`、`wiki_source_index.py`、`wiki_synthesis.py`、`wiki_verify.py`、`wiki_batch.py`、`pipeline_detector.py`、`louvain.py` 已删除；不要重新注册这些模块或 MCP 工具。旧 `codegraph_client.py` 已被 [codegraph_sync.py](src/codegraph/codegraph_sync.py) + [codegraph_policy.py](src/codegraph/codegraph_policy.py) 替代。
 
 ## 必守约定
 
@@ -86,12 +86,12 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - `knowledge` 写入 `wiki/concepts/<domain>/`，禁止 `project`。
 - 项目目录固定为 `wiki/projects/<project>/{index.md,specs/,plans/,architecture/,troubleshooting/,researches/}`；`wiki_write_note` 只写 spec/plan/troubleshooting/researches，架构页由 `wiki_update` 维护。
 - Windows 路径相关逻辑要覆盖非法字符、冒号 ADS、保留设备名、控制字符、尾随点/空格等边界。
-- 不要在代码、测试或文档中硬编码个人 Vault 路径、API key、token、邮箱、手机号等敏感信息；脱敏逻辑在 [redaction.py](src/netsuite_llm_wiki_mcp/redaction.py)。
+- 不要在代码、测试或文档中硬编码个人 Vault 路径、API key、token、邮箱、手机号等敏感信息；脱敏逻辑在 [redaction.py](src/common/redaction.py)。
 - 所有 MCP 工具写入文件统一使用 `encoding="utf-8"`（无 BOM）；读取 Obsidian 文件时可用 `utf-8-sig` 以兼容 BOM，但写入绝不产生 BOM。禁止使用 PowerShell `Set-Content` 默认编码（UTF-16 LE）修改项目文件。
 
 ## 测试定位
 
-测试文件按模块一一对应，命令为 `uv run pytest tests/test_<module>.py`：
+测试文件按功能包分组，命令为 `uv run pytest tests/<package>/test_<module>.py`：
 - CLI/runtime/config/provenance：`test_cli.py`、`test_runtime_config.py`、`test_runtime_provenance.py`、`test_readme_global_mcp_docs.py`
 - Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
 - MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_save_obsidian_note.py`、`test_ingest_service.py`、`test_codegraph_sync.py`

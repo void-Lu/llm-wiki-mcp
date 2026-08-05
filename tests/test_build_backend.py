@@ -9,8 +9,8 @@ import zipfile
 from pathlib import Path
 
 FULL_REVISION = "b" * 40
-BUILD_REVISION_ENV = "NETSUITE_LLM_WIKI_BUILD_REVISION"
-BUILD_DIRTY_ENV = "NETSUITE_LLM_WIKI_BUILD_DIRTY"
+BUILD_REVISION_ENV = "LLM_WIKI_BUILD_REVISION"
+BUILD_DIRTY_ENV = "LLM_WIKI_BUILD_DIRTY"
 
 
 def _copy_project(tmp_path: Path) -> Path:
@@ -92,22 +92,18 @@ def test_wheel_embeds_revision_and_imports_without_git_metadata(
         dirty="false",
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
-    assert not (
-        project / "src" / "netsuite_llm_wiki_mcp" / "_build_info.py"
-    ).exists()
+    assert not (project / "src" / "_build_info.py").exists()
 
     wheel = next(output_dir.glob("*.whl"))
     with zipfile.ZipFile(wheel) as archive:
-        build_info = archive.read(
-            "netsuite_llm_wiki_mcp/_build_info.py"
-        ).decode("utf-8")
+        build_info = archive.read("_build_info.py").decode("utf-8")
     assert f'REVISION = "{FULL_REVISION}"' in build_info
     assert "DIRTY = False" in build_info
 
     code = (
         "import json,sys;"
         f"sys.path.insert(0,{str(wheel)!r});"
-        "from netsuite_llm_wiki_mcp.runtime_provenance import "
+        "from runtime.runtime_provenance import "
         "RUNTIME_PROVENANCE;"
         "print(json.dumps(RUNTIME_PROVENANCE.to_public_dict()))"
     )

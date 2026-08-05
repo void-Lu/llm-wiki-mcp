@@ -1,4 +1,4 @@
-# NetSuite LLM Wiki MCP
+# LLM Wiki MCP
 
 一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。内容通过 MCP 工具摄入、查询、维护和归档；脚本代码事实由外部 CodeGraph 解析后通过专用同步入口导入。
 
@@ -24,23 +24,23 @@ uv sync --extra dev --extra vector
 
 ```bash
 # 启动 MCP server
-uv run netsuite-llm-wiki-mcp-server
+uv run llm-wiki-mcp-server
 
 # 或通过 CLI / module 启动
-uv run netsuite-llm-wiki-mcp server
-uv run python -m netsuite_llm_wiki_mcp.server
+uv run llm-wiki-mcp server
+uv run python -m app.server
 ```
 
 ### CLI
 
 ```bash
-uv run netsuite-llm-wiki-mcp init --vault <name> --root <path> --default
-uv run netsuite-llm-wiki-mcp status
-uv run netsuite-llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir>
-uv run netsuite-llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir> --retrieval-mode hybrid --vector-model-path <local-bge-m3-path>
-uv run netsuite-llm-wiki-mcp vector status --vault <path>
-uv run netsuite-llm-wiki-mcp vector build --vault <path> --model-path <local-bge-m3-path>
-uv run netsuite-llm-wiki-mcp vector update --vault <path> --model-path <local-bge-m3-path>
+uv run llm-wiki-mcp init --vault <name> --root <path> --default
+uv run llm-wiki-mcp status
+uv run llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir>
+uv run llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir> --retrieval-mode hybrid --vector-model-path <local-bge-m3-path>
+uv run llm-wiki-mcp vector status --vault <path>
+uv run llm-wiki-mcp vector build --vault <path> --model-path <local-bge-m3-path>
+uv run llm-wiki-mcp vector update --vault <path> --model-path <local-bge-m3-path>
 ```
 
 ## 配置
@@ -48,20 +48,20 @@ uv run netsuite-llm-wiki-mcp vector update --vault <path> --model-path <local-bg
 server 按以下顺序解析 wiki 根目录（vault）：
 
 1. 工具参数 `vault_root`
-2. 环境变量 `NETSUITE_LLM_WIKI_VAULT_ROOT`
+2. 环境变量 `LLM_WIKI_VAULT_ROOT`
 3. 全局配置 `config.yaml` → `default_vault`
 
-**推荐方式**：将 vault 绝对路径存入系统环境变量 `NETSUITE_LLM_WIKI_VAULT_ROOT`，配置文件中只使用变量引用，避免硬编码绝对路径。
+**推荐方式**：将 vault 绝对路径存入系统环境变量 `LLM_WIKI_VAULT_ROOT`，配置文件中只使用变量引用，避免硬编码绝对路径。
 
-`config.yaml` 位于 `netsuite-llm-wiki-mcp` 的平台用户配置目录（可选，环境变量优先）：
+`config.yaml` 位于 `llm-wiki-mcp` 的平台用户配置目录（可选，环境变量优先）：
 
-- Windows: `%APPDATA%\\netsuite-llm-wiki-mcp\\config.yaml`
-- macOS: `~/Library/Application Support/netsuite-llm-wiki-mcp/config.yaml`
-- Linux: `${XDG_CONFIG_HOME:-~/.config}/netsuite-llm-wiki-mcp/config.yaml`
+- Windows: `%APPDATA%\\llm-wiki-mcp\\config.yaml`
+- macOS: `~/Library/Application Support/llm-wiki-mcp/config.yaml`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/llm-wiki-mcp/config.yaml`
 
-也可以用 `netsuite-llm-wiki-mcp init --vault <name> --root <path> --default` 写入 `config.yaml`。
+也可以用 `llm-wiki-mcp init --vault <name> --root <path> --default` 写入 `config.yaml`。
 
-开发和测试时，可以用 `NETSUITE_LLM_WIKI_CONFIG_DIR` 和 `NETSUITE_LLM_WIKI_USER_DATA_DIR` 覆盖配置/数据目录。
+开发和测试时，可以用 `LLM_WIKI_CONFIG_DIR` 和 `LLM_WIKI_USER_DATA_DIR` 覆盖配置/数据目录。
 
 ### MCP 客户端配置
 
@@ -69,8 +69,8 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 | 变量                             | 含义                                    | 示例（Windows）                                         |
 | -------------------------------- | --------------------------------------- | ------------------------------------------------------- |
-| `NETSUITE_LLM_WIKI_MCP_DIR`    | 本仓库（MCP server 安装目录）的绝对路径 | `c:\Users\<you>\VSCodeProjects\netsuite-llm-wiki-mcp` |
-| `NETSUITE_LLM_WIKI_VAULT_ROOT` | Obsidian wiki vault 的绝对路径          | `c:\Users\<you>\Documents\Obsidian Vault\codingwork`  |
+| `LLM_WIKI_MCP_DIR`    | 本仓库（MCP server 安装目录）的绝对路径 | `c:\Users\<you>\VSCodeProjects\llm-wiki-mcp` |
+| `LLM_WIKI_VAULT_ROOT` | Obsidian wiki vault 的绝对路径          | `c:\Users\<you>\Documents\Obsidian Vault\codingwork`  |
 
 设好后再用各客户端对应的变量引用语法取值。三家客户端的变量替换语法不同：
 
@@ -87,17 +87,17 @@ server 按以下顺序解析 wiki 根目录（vault）：
 ```json
 {
   "servers": {
-    "netsuite-wiki": {
+    "llm-wiki": {
       "type": "stdio",
       "command": "uv",
       "args": [
         "--directory",
-        "${env:NETSUITE_LLM_WIKI_MCP_DIR}",
+        "${env:LLM_WIKI_MCP_DIR}",
         "run",
-        "netsuite-llm-wiki-mcp-server"
+        "llm-wiki-mcp-server"
       ],
       "env": {
-        "NETSUITE_LLM_WIKI_VAULT_ROOT": "${env:NETSUITE_LLM_WIKI_VAULT_ROOT}"
+        "LLM_WIKI_VAULT_ROOT": "${env:LLM_WIKI_VAULT_ROOT}"
       }
     }
   }
@@ -111,16 +111,16 @@ server 按以下顺序解析 wiki 根目录（vault）：
 ```json
 {
   "mcpServers": {
-    "netsuite-wiki": {
+    "llm-wiki": {
       "command": "uv",
       "args": [
         "--directory",
-        "${NETSUITE_LLM_WIKI_MCP_DIR}",
+        "${LLM_WIKI_MCP_DIR}",
         "run",
-        "netsuite-llm-wiki-mcp-server"
+        "llm-wiki-mcp-server"
       ],
       "env": {
-        "NETSUITE_LLM_WIKI_VAULT_ROOT": "${NETSUITE_LLM_WIKI_VAULT_ROOT}"
+        "LLM_WIKI_VAULT_ROOT": "${LLM_WIKI_VAULT_ROOT}"
       }
     }
   }
@@ -132,19 +132,19 @@ server 按以下顺序解析 wiki 根目录（vault）：
 在 `~/.codex/config.toml` 里用 `$VAR` 语法从环境变量取值：
 
 ```toml
-[mcp_servers.netsuite-wiki]
+[mcp_servers.llm-wiki]
 command = "uv"
-args = ["--directory", "$NETSUITE_LLM_WIKI_MCP_DIR", "run", "netsuite-llm-wiki-mcp-server"]
+args = ["--directory", "$LLM_WIKI_MCP_DIR", "run", "llm-wiki-mcp-server"]
 
-[mcp_servers.netsuite-wiki.env]
-NETSUITE_LLM_WIKI_VAULT_ROOT = "$NETSUITE_LLM_WIKI_VAULT_ROOT"
+[mcp_servers.llm-wiki.env]
+LLM_WIKI_VAULT_ROOT = "$LLM_WIKI_VAULT_ROOT"
 ```
 
 > 三种配置都只引用环境变量，不包含任何工作区相关路径或绝对路径，可以原样复制到任意工作区使用。
 
 ## 工具
 
-默认 core profile 只注册以下 8 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。`wiki_codegraph_import` 使用 `workspace_root` 指定 CodeGraph 工作区，未传时读取 `NETSUITE_LLM_WIKI_WORKSPACE_ROOT`。
+默认 core profile 只注册以下 8 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。`wiki_codegraph_import` 使用 `workspace_root` 指定 CodeGraph 工作区，未传时读取 `LLM_WIKI_WORKSPACE_ROOT`。
 
 | 工具                      | 说明                                                                                                                                                |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -181,7 +181,7 @@ Query V2 默认返回 compact response：`results` 只含 path、heading、snipp
 
 查询引擎固定为 V2；配置中的 `retrieval.query_version` 仅保留明确的 `v2` 值，旧 `v1` 配置会在启动解码时拒绝。若旧客户端只需要旧响应字段，可使用 `retrieval.context.response_mode=legacy`，它只适配已经完成的 V2 结果，不会切换检索引擎。
 
-使用 `netsuite-llm-wiki-mcp config validate|show|set-retrieval|set-privacy|set-telemetry|set-archive` 管理配置。配置修改在重启 MCP runtime 后生效；普通 MCP 调用不能修改脱敏、保留期、archive/purge 或索引路径。
+使用 `llm-wiki-mcp config validate|show|set-retrieval|set-privacy|set-telemetry|set-archive` 管理配置。配置修改在重启 MCP runtime 后生效；普通 MCP 调用不能修改脱敏、保留期、archive/purge 或索引路径。
 
 ## Wiki 结构
 
@@ -231,7 +231,7 @@ vault_root/
 
 推荐循环：
 
-1. 用 CLI 注册 vault：`netsuite-llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
+1. 用 CLI 注册 vault：`llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
 2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
 3. 对脚本项目在对应工作目录调用 `wiki_codegraph_import(sync="sync", workspace_root="<workspace-root>")`。它只接受外部 CodeGraph 已生成的数据库，不复制源码或数据库；生成页位于 `wiki/projects/<project-lowercase>/architecture/`。
 4. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。项目代码页默认隔离；Agent 需要先向用户确认项目，再原样保留自然语言问题并传入小写 `project`。
@@ -298,10 +298,10 @@ wiki_restore(apply)  → 恢复页面 + 更新 active/archive index
 uv run pytest
 
 # 运行单个测试文件
-uv run pytest tests/test_wiki_query.py
+uv run pytest tests/wiki/test_wiki_query.py
 
 # 运行单个测试函数
-uv run pytest tests/test_wiki_query.py::test_function_name -v
+uv run pytest tests/wiki/test_wiki_query.py::test_function_name -v
 ```
 
 ### 约定

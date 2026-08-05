@@ -4,9 +4,9 @@ date: 2026-07-01
 status: draft
 owners: user
 related_files:
-  - src/netsuite_llm_wiki_mcp/wiki_source_index.py
+  - src/llm_wiki_mcp/wiki_source_index.py
   - tests/test_wiki_source_index.py
-  - src/netsuite_llm_wiki_mcp/server.py
+  - src/llm_wiki_mcp/server.py
 ---
 
 # wiki_build_source_index 改为按 frontmatter tags 生成分级嵌套索引

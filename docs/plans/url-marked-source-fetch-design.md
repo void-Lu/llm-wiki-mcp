@@ -68,7 +68,7 @@ def wiki_fetch_marked_urls(
     max_urls: int = 20,
     timeout_seconds: int = 15,
     max_bytes: int = 2_000_000,
-    user_agent: str = "netsuite-llm-wiki-mcp/0.5",
+    user_agent: str = "llm-wiki-mcp/0.5",
   ) -> dict[str, Any]:
     """Fetch explicitly marked URLs and persist cleaned web snapshots."""
 ```

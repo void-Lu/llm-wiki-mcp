@@ -4,14 +4,14 @@ build-backend = "build_backend"
 backend-path = ["."]
 
 [project]
-name = "netsuite-llm-wiki-mcp"
+name = "llm-wiki-mcp"
 version = "0.9.0"
-description = "Local MCP server for NetSuite CodeGraph-powered Obsidian LLM Wiki maintenance"
+description = "Local MCP server for CodeGraph-powered Obsidian LLM Wiki maintenance"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
-    { name = "NetSuite LLM Wiki MCP Contributors" },
+    { name = "LLM Wiki MCP Contributors" },
 ]
 keywords = ["netsuite", "obsidian", "llm-wiki", "mcp", "codegraph"]
 classifiers = [
@@ -38,8 +38,8 @@ vector = [
 
 
 [project.scripts]
-netsuite-llm-wiki-mcp = "netsuite_llm_wiki_mcp.cli:main"
-netsuite-llm-wiki-mcp-server = "netsuite_llm_wiki_mcp.server:main"
+llm-wiki-mcp = "app.cli:main"
+llm-wiki-mcp-server = "app.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -49,7 +49,7 @@ build_py = "build_backend.BuildPy"
 sdist = "build_backend.Sdist"
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]

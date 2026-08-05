@@ -26,27 +26,27 @@
 
 | 文件 | 职责 | 改动类型 |
 |---|---|---|
-| `src/netsuite_llm_wiki_mcp/wiki_source_index.py` | 核心模块：tag 规范化、树构建、各 index 写出 | Modify（重写部分函数） |
+| `src/llm_wiki_mcp/wiki_source_index.py` | 核心模块：tag 规范化、树构建、各 index 写出 | Modify（重写部分函数） |
 | `tests/test_wiki_source_index.py` | 端到端回归测试 | Modify |
-| `src/netsuite_llm_wiki_mcp/server.py` | 工具注册（仅 docstring 提及 catalog 处更新） | Modify（仅 docstring） |
+| `src/llm_wiki_mcp/server.py` | 工具注册（仅 docstring 提及 catalog 处更新） | Modify（仅 docstring） |
 
 辅助不变模块（只读引用以确认兼容）：
-- `src/netsuite_llm_wiki_mcp/wiki_paths.py::slug` — 用做 tag 段安全处理。
-- `src/netsuite_llm_wiki_mcp/wiki_io.py::{split_frontmatter, write_wiki_page, WikiWriteError}`
-- `src/netsuite_llm_wiki_mcp/wiki_models.py::WikiPage`
-- `src/netsuite_llm_wiki_mcp/wiki_log.py::append_log_entry`
-- `src/netsuite_llm_wiki_mcp/wiki_index.py::refresh_indexes`、`wiki_overview.py::refresh_overview`
+- `src/llm_wiki_mcp/wiki_paths.py::slug` — 用做 tag 段安全处理。
+- `src/llm_wiki_mcp/wiki_io.py::{split_frontmatter, write_wiki_page, WikiWriteError}`
+- `src/llm_wiki_mcp/wiki_models.py::WikiPage`
+- `src/llm_wiki_mcp/wiki_log.py::append_log_entry`
+- `src/llm_wiki_mcp/wiki_index.py::refresh_indexes`、`wiki_overview.py::refresh_overview`
 
 ---
 
 ## Task 1: 新增 tag 路径解析与树构建函数
 
 **Files:**
-- Modify: `src/netsuite_llm_wiki_mcp/wiki_source_index.py`（在 `_group_entries` 之前插入新函数；末尾替换 `_group_entries`）
+- Modify: `src/llm_wiki_mcp/wiki_source_index.py`（在 `_group_entries` 之前插入新函数；末尾替换 `_group_entries`）
 - Test: `tests/test_wiki_source_index.py`（新增纯函数单元测试段）
 
 **Interfaces:**
-- Consumes: `from netsuite_llm_wiki_mcp.wiki_paths import slug`；`entry` 字典形状由现有 `_entry_for_file` 决定。
+- Consumes: `from llm_wiki_mcp.wiki_paths import slug`；`entry` 字典形状由现有 `_entry_for_file` 决定。
 - Produces:
   - `_resolve_tag_path(raw_tag: Any, source_name: str) -> tuple[str, ...] | None`
   - `_entry_tag_paths(entry: dict[str, Any], source_name: str) -> list[tuple[str, ...]]`
@@ -57,10 +57,10 @@
 
 - [ ] **Step 1: 在 `tests/test_wiki_source_index.py` 顶部新增纯函数导入与单元测试**
 
-在现有 `from netsuite_llm_wiki_mcp.wiki_source_index import build_source_index` 行之后追加：
+在现有 `from llm_wiki_mcp.wiki_source_index import build_source_index` 行之后追加：
 
 ```python
-from netsuite_llm_wiki_mcp.wiki_source_index import (
+from llm_wiki_mcp.wiki_source_index import (
     _resolve_tag_path,
     _entry_tag_paths,
     _build_tag_index_tree,
@@ -167,11 +167,11 @@ Expected: ImportError / AttributeError — 函数尚未定义。
 
 - [ ] **Step 3: 在 `wiki_source_index.py` 顶部 imports 末尾增加（如尚未导入 slug）**
 
-定位到文件首部 `from netsuite_llm_wiki_mcp.wiki_paths import slug`。若已存在跳过；若缺失，在 wiki_paths 相关导入附近补：
+定位到文件首部 `from llm_wiki_mcp.wiki_paths import slug`。若已存在跳过；若缺失，在 wiki_paths 相关导入附近补：
 
 ```python
 # 现有 imports
-from netsuite_llm_wiki_mcp.wiki_paths import slug
+from llm_wiki_mcp.wiki_paths import slug
 ```
 
 - [ ] **Step 4: 在 `_group_entries` 函数定义前面插入三个新函数**
@@ -282,8 +282,8 @@ Expected: PASS（6 个用例全过）。
 - [ ] **Step 6: Commit**
 
 ```bash
-cd C:\Users\26327\AppData\Local\netsuite-llm-wiki-mcp
-git add src/netsuite_llm_wiki_mcp/wiki_source_index.py tests/test_wiki_source_index.py
+cd C:\Users\26327\AppData\Local\llm-wiki-mcp
+git add src/llm_wiki_mcp/wiki_source_index.py tests/test_wiki_source_index.py
 git commit -m "feat(source_index): add tag-path resolver and index tree builder"
 ```
 
@@ -292,7 +292,7 @@ git commit -m "feat(source_index): add tag-path resolver and index tree builder"
 ## Task 2: 新增节点 index 写出函数（替换 `_write_group_pages` 与 `_write_catalog_page`）
 
 **Files:**
-- Modify: `src/netsuite_llm_wiki_mcp/wiki_source_index.py`
+- Modify: `src/llm_wiki_mcp/wiki_source_index.py`
 - Test: `tests/test_wiki_source_index.py`（继续在文件末尾追加单测）
 
 **Interfaces:**
@@ -306,7 +306,7 @@ git commit -m "feat(source_index): add tag-path resolver and index tree builder"
 
 ```python
 def test_write_node_index_creates_nested_directory_and_index_md(tmp_path: Path):
-    from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
+    from llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
 
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -347,7 +347,7 @@ def test_write_node_index_creates_nested_directory_and_index_md(tmp_path: Path):
 
 
 def test_write_node_index_paginates_with_index_suffix(tmp_path: Path):
-    from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
+    from llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
 
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -386,7 +386,7 @@ def test_write_node_index_paginates_with_index_suffix(tmp_path: Path):
 
 
 def test_write_node_index_includes_navigation_link_to_interior_child(tmp_path: Path):
-    from netsuite_llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
+    from llm_wiki_mcp.wiki_source_index import _write_node_index, _build_tag_index_tree
 
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -621,7 +621,7 @@ Expected: PASS（两个用例）。
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/netsuite_llm_wiki_mcp/wiki_source_index.py tests/test_wiki_source_index.py
+git add src/llm_wiki_mcp/wiki_source_index.py tests/test_wiki_source_index.py
 git commit -m "feat(source_index): add _write_node_index for nested tag index pages"
 ```
 
@@ -630,7 +630,7 @@ git commit -m "feat(source_index): add _write_node_index for nested tag index pa
 ## Task 3: 重写 `build_source_index` 主流程，删除旧分组与写页函数
 
 **Files:**
-- Modify: `src/netsuite_llm_wiki_mcp/wiki_source_index.py`（删除 `_group_entries`、`_write_group_pages`、`_write_catalog_page`、`_pages_by_group`；改写 `build_source_index`；调整 `_clear_existing_generated_pages` 不变；删除 `_group_body`）
+- Modify: `src/llm_wiki_mcp/wiki_source_index.py`（删除 `_group_entries`、`_write_group_pages`、`_write_catalog_page`、`_pages_by_group`；改写 `build_source_index`；调整 `_clear_existing_generated_pages` 不变；删除 `_group_body`）
 - Test: `tests/test_wiki_source_index.py`（修改现有两测；新增多 tag 镜像、root 文档、无 tag、纯叶子用例）
 
 **Interfaces:**
@@ -992,7 +992,7 @@ Expected: PASS（全部 8 个用例）。
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/netsuite_llm_wiki_mcp/wiki_source_index.py tests/test_wiki_source_index.py
+git add src/llm_wiki_mcp/wiki_source_index.py tests/test_wiki_source_index.py
 git commit -m "feat(source_index): rewrite build pipeline to nested tag index tree"
 ```
 
@@ -1001,7 +1001,7 @@ git commit -m "feat(source_index): rewrite build pipeline to nested tag index tr
 ## Task 4: 同步 `server.py` docstring 与回归整套测试
 
 **Files:**
-- Modify: `src/netsuite_llm_wiki_mcp/server.py`（仅工具 docstring 提及 catalog 名处）
+- Modify: `src/llm_wiki_mcp/server.py`（仅工具 docstring 提及 catalog 名处）
 - Test: 全套自动化回归 `pytest`
 
 **Interfaces:** 不变；确认 `server.py` 与 `wiki_source_index.py` 接口对称。
@@ -1029,7 +1029,7 @@ Expected: PASS（全部已有测试无回归；新加测试全过；`test_readme
 - [ ] **Step 3: Commit**
 
 ```bash
-git add src/netsuite_llm_wiki_mcp/server.py
+git add src/llm_wiki_mcp/server.py
 git commit -m "docs(server): update wiki_build_source_index description for nested tag index"
 ```
 

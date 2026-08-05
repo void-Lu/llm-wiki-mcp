@@ -1,98 +1,26 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
+__pycache__
 .pytest_cache/
+.venv/
+.vscode/
 *.egg-info/
-*.egg
-dist/
-build/
-.eggs/
-
-# Local/generated project-adjacent content
 rag/
 docs/plan/
 docs/superpowers/
-
-# Virtual environment
-.venv/
-venv/
-env/
-
-# RAG index data (regenerated from vault)
-.rag-index/
-
-# Local embedding model cache (preloaded/regenerated locally)
-.models/
-
-# Local environment and secrets
-.env
-.env/
-.env.*
-!.env.example
-.envrc
-config.local.json
-config.local.yml
-config.local.yaml
-settings.local.json
-settings.local.yml
-settings.local.yaml
-*.pem
-*.key
-*.p12
-*.pfx
-*.jks
-*.keystore
-credentials*.json
-*credentials*.json
-secrets*.json
-*secret*.json
-service-account*.json
-*-credentials.json
-*-secrets.json
-
-# IDE / local editor config
-.vscode/
-.idea/
-.cursor/
-*.swp
-*.swo
-*~
-.claude/
-.codegraph/
-.omc/
-.omx/
-archive/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Model cache (downloaded automatically)
-.cache/
 .agents
+.claude
+.codegraph
 .codex
 .github
+.netsuite-mcp/logs
+.pytest_cache
+.ruff_cache
 .trellis
-/.netsuite-mcp/logs/
-/.vscode/mcp.json
-/.mcp.json
-.pytest-tmp-capsule-batch-root
-.pytest-tmp-eval-longpath-root
-.pytest-tmp-knowledge-compiler-root
-.pytest-tmp-long-eval
-.pytest-tmp-knowledge-compiler
-.pytest-tmp-batch-capsules
+.venv
+.vscode
+dist
+docs
+scripts
+src/__pycache__
+src/llm_wiki_mcp.egg-info
+tests/__pycache__
 tests/fixtures
-!tests/fixtures/
-!tests/fixtures/retrieval/
-!tests/fixtures/retrieval/v2_40/
-!tests/fixtures/retrieval/v2_40/**
-.pytest-tmp
-scripts/*
-!scripts/archive_wiki_sources.py

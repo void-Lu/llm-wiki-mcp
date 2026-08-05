@@ -136,7 +136,7 @@ qmd 本身不负责：
 
 1. 本轮不实现 F/G。
 2. 将 qmd 作为首选本地 Markdown 检索/读取方案。
-3. 不把 qmd 作为 `netsuite-llm-wiki-mcp` 默认依赖，避免扩大安装面。
+3. 不把 qmd 作为 `llm-wiki-mcp` 默认依赖，避免扩大安装面。
 4. 后续可在 README 增加“推荐搭配 qmd skill 查询本地 Markdown”的使用说明，但这不是本轮范围。
 5. 若后续实现 F/G，应先明确目标是“补齐 qmd 无法覆盖的稳定 MCP API”，而不是重复 qmd 的检索能力。
 

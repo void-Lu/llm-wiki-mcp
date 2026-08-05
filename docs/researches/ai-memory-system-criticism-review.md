@@ -8,7 +8,7 @@
 
 ## 1. 背景
 
-本报告基于[《AI记忆系统批评》](C:\Users\26327\Documents\Obsidian Vault\codingwork\raw\sources\references\clippings\AI记忆系统批评\AI记忆系统批评.md)中对"类 LLM Wiki 项目"的 13 条批评，逐条对照分析当前 `netsuite-llm-wiki-mcp` 项目是否存在同类问题。
+本报告基于[《AI记忆系统批评》](C:\Users\26327\Documents\Obsidian Vault\codingwork\raw\sources\references\clippings\AI记忆系统批评\AI记忆系统批评.md)中对"类 LLM Wiki 项目"的 13 条批评，逐条对照分析当前 `llm-wiki-mcp` 项目是否存在同类问题。
 
 批评原文的核心论点：
 
@@ -26,7 +26,7 @@
 
 本项目的核心架构与批评所指的"多 Agent 记忆系统"有根本性差异：
 
-- **项目本质**: `netsuite-llm-wiki-mcp` 是一个 MCP (Model Context Protocol) 工具服务器，而非 AI Agent 记忆管理系统。它将代码事实、LLM 摄入结果、人工笔记写入外部 Obsidian Markdown Wiki，并通过关键词 + wikilink 图查询返回可引用的 context pack。
+- **项目本质**: `llm-wiki-mcp` 是一个 MCP (Model Context Protocol) 工具服务器，而非 AI Agent 记忆管理系统。它将代码事实、LLM 摄入结果、人工笔记写入外部 Obsidian Markdown Wiki，并通过关键词 + wikilink 图查询返回可引用的 context pack。
 - **LLM 的角色**: LLM 在此架构中是**工具调用者**（通过 MCP 协议调用 `wiki_query`、`wiki_ingest_llm` 等工具），而非记忆管理者。LLM 不负责"决定保留什么信息"——这个决策由用户（通过调用哪个工具、传入什么参数）和确定性代码逻辑共同完成。
 - **无子 Agent 蒸馏链**: 不存在"子 Agent 蒸馏 → 主 Agent 消费"的层级结构。查询直接从 wiki 文件系统读取完整页面内容。
 
@@ -68,7 +68,7 @@
 
 这是项目与批评所指系统**最关键的架构差异**：
 
-1. **基于内容哈希的缓存机制**（[wiki_ingest.py:267-273](src/netsuite_llm_wiki_mcp/wiki_ingest.py#L267-L273)）:
+1. **基于内容哈希的缓存机制**（[wiki_ingest.py:267-273](src/llm_wiki_mcp/wiki_ingest.py#L267-L273)）:
    ```python
    context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
    if cache.get("codegraph_context_hash") == context_hash:
@@ -80,7 +80,7 @@
 
 3. **CodeGraph 摄入同理**: `ingest_codegraph` 每次从 CodeGraph CLI 获取最新 graph snapshot，而非增量叠加。
 
-4. **人工页受保护**: `generated: false` 的页面不能被自动覆盖（[wiki_io.py:91-92](src/netsuite_llm_wiki_mcp/wiki_io.py#L91-L92)），防止人工知识被生成内容污染。
+4. **人工页受保护**: `generated: false` 的页面不能被自动覆盖（[wiki_io.py:91-92](src/llm_wiki_mcp/wiki_io.py#L91-L92)），防止人工知识被生成内容污染。
 
 **结论**: 不存在批评所指的"记忆漂移"问题，因为系统不进行迭代再摘要。
 
@@ -95,7 +95,7 @@
    - `wiki_research` 和 `wiki_synthesis` 工具专门用于保存研究过程和综合结果
    - `wiki/chatlog/` 保留完整会话记录
 
-2. **但摄入 prompt 偏向结构化输出**（[wiki_ingest.py:198-204](src/netsuite_llm_wiki_mcp/wiki_ingest.py#L198-L204)）:
+2. **但摄入 prompt 偏向结构化输出**（[wiki_ingest.py:198-204](src/llm_wiki_mcp/wiki_ingest.py#L198-L204)）:
    ```python
    "expected_response_schema": {
        "key_entities": ["string"],
@@ -116,10 +116,10 @@
 
 项目中**不存在自动置信度标签系统**：
 
-- `wiki_verify` 的 `score` 字段（[wiki_verify.py:100](src/netsuite_llm_wiki_mcp/wiki_verify.py#L100)）是 LLM 对 faithfulness 的判断，不是对"事实正确性"的置信度评分
-- `wiki_dedup` 的 `confidence` 字段（[wiki_dedup.py:145](src/netsuite_llm_wiki_mcp/wiki_dedup.py#L145)）是 LLM 对"两个页面是否重复"的判断信心，且仅在 detect 阶段使用，最终合并需人工确认
+- `wiki_verify` 的 `score` 字段（[wiki_verify.py:100](src/llm_wiki_mcp/wiki_verify.py#L100)）是 LLM 对 faithfulness 的判断，不是对"事实正确性"的置信度评分
+- `wiki_dedup` 的 `confidence` 字段（[wiki_dedup.py:145](src/llm_wiki_mcp/wiki_dedup.py#L145)）是 LLM 对"两个页面是否重复"的判断信心，且仅在 detect 阶段使用，最终合并需人工确认
 - 没有"此记忆置信度 0.95"这种自动标注机制
-- 核心数据模型（[wiki_models.py](src/netsuite_llm_wiki_mcp/wiki_models.py)）中没有置信度字段
+- 核心数据模型（[wiki_models.py](src/llm_wiki_mcp/wiki_models.py)）中没有置信度字段
 
 ### 2.7 Diversity Ranking 损害相关性
 
@@ -127,7 +127,7 @@
 
 **本项目评估: ✅ 不存在该问题**
 
-查询系统（[wiki_query.py:70-137](src/netsuite_llm_wiki_mcp/wiki_query.py#L70-L137)）的排序策略与 diversity ranking 完全不同：
+查询系统（[wiki_query.py:70-137](src/llm_wiki_mcp/wiki_query.py#L70-L137)）的排序策略与 diversity ranking 完全不同：
 
 1. **关键词评分** (`_keyword_score`): 基于 token 频率 + IDF 权重 + 标题/短语精确匹配加分，类似 TF-IDF
 2. **图扩展** (`_apply_graph_expansion`): 从 seed 页出发，沿 wikilink 图 BFS 扩展（1-2 跳），衰减系数 1/hop
@@ -142,7 +142,7 @@
 
 **本项目评估: 🔴 这是项目当前最实质性的局限**
 
-1. **确实无 Embedding**: `enable_vector` 参数始终返回 `"vector_backend_not_configured"`（[wiki_query.py:313-318](src/netsuite_llm_wiki_mcp/wiki_query.py#L313-L318)），`CLAUDE.md` 明确指示"不应重新引入 Chroma、embedding 或 `.rag-index` 主路径"。这是**有意的设计选择**，不是遗漏。
+1. **确实无 Embedding**: `enable_vector` 参数始终返回 `"vector_backend_not_configured"`（[wiki_query.py:313-318](src/llm_wiki_mcp/wiki_query.py#L313-L318)），`CLAUDE.md` 明确指示"不应重新引入 Chroma、embedding 或 `.rag-index` 主路径"。这是**有意的设计选择**，不是遗漏。
 
 2. **关键词检索固有局限**:
    - 中英文混合场景下，CJK bigram 分词粗糙
@@ -152,7 +152,7 @@
 3. **图扩展作为补偿**: wikilink 图扩展在一定程度上弥补了关键词的不足——即使术语不匹配，通过 wikilink 连接的相关页面也能被召回
 
 4. **规模问题的实际评估**:
-   - 当前查询是**全量扫描**所有 wiki/*.md 文件并对每个文件计算关键词分数（[wiki_query.py:191-206](src/netsuite_llm_wiki_mcp/wiki_query.py#L191-L206)）
+   - 当前查询是**全量扫描**所有 wiki/*.md 文件并对每个文件计算关键词分数（[wiki_query.py:191-206](src/llm_wiki_mcp/wiki_query.py#L191-L206)）
    - 无索引结构、无倒排索引、无预计算
    - 页面数量达到数千级别时性能会线性下降
    - 但对于当前项目规模（通常数百页面），这是可接受的
@@ -179,7 +179,7 @@
 多 Agent 协作 → 自动蒸馏 → 迭代再摘要 → 主 Agent 只读摘要
 ```
 
-而 `netsuite-llm-wiki-mcp` 的架构是：
+而 `llm-wiki-mcp` 的架构是：
 
 ```
 MCP 工具服务器 → 确定性文件 I/O → 原始来源永久保存 → 哈希缓存避免重复蒸馏
@@ -187,7 +187,7 @@ MCP 工具服务器 → 确定性文件 I/O → 原始来源永久保存 → 哈
 
 这两个架构在"记忆管理由谁负责"这个核心问题上有根本性分歧：
 
-| 维度 | 批评所指系统 | netsuite-llm-wiki-mcp |
+| 维度 | 批评所指系统 | llm-wiki-mcp |
 |------|------------|----------------------|
 | 记忆管理者 | AI Agent（子 Agent 蒸馏） | 确定性代码 + 文件系统 |
 | LLM 角色 | 记忆蒸馏者 + 记忆消费者 | 工具调用者（MCP client） |
@@ -231,7 +231,7 @@ MCP 工具服务器 → 确定性文件 I/O → 原始来源永久保存 → 哈
 
 ## 4. 结论
 
-**`netsuite-llm-wiki-mcp` 在架构层面规避了批评所指 AI 记忆系统的大部分核心缺陷。** 根本原因在于它是一个**知识库工具**（以确定性代码操作为主，LLM 作为工具调用者），而非一个**AI 记忆管理系统**（以 LLM 作为记忆蒸馏和消费的主体）。
+**`llm-wiki-mcp` 在架构层面规避了批评所指 AI 记忆系统的大部分核心缺陷。** 根本原因在于它是一个**知识库工具**（以确定性代码操作为主，LLM 作为工具调用者），而非一个**AI 记忆管理系统**（以 LLM 作为记忆蒸馏和消费的主体）。
 
 批评中最核心的"迭代蒸馏导致记忆漂移"问题在本项目中**不存在**，因为：
 - 原始来源永久保留且不可变
@@ -246,8 +246,8 @@ MCP 工具服务器 → 确定性文件 I/O → 原始来源永久保存 → 哈
 
 - [AI记忆系统批评](C:\Users\26327\Documents\Obsidian Vault\codingwork\raw\sources\references\clippings\AI记忆系统批评\AI记忆系统批评.md) — 原始批评文档
 - [CLAUDE.md](CLAUDE.md) — 项目架构约定
-- [wiki_ingest.py](src/netsuite_llm_wiki_mcp/wiki_ingest.py) — 摄入流水线（含哈希缓存逻辑）
-- [wiki_query.py](src/netsuite_llm_wiki_mcp/wiki_query.py) — 查询与检索
-- [wiki_verify.py](src/netsuite_llm_wiki_mcp/wiki_verify.py) — 两阶段 grounding check
-- [wiki_io.py](src/netsuite_llm_wiki_mcp/wiki_io.py) — 文件 I/O 与覆盖保护
-- [wiki_models.py](src/netsuite_llm_wiki_mcp/wiki_models.py) — 核心数据模型
+- [wiki_ingest.py](src/llm_wiki_mcp/wiki_ingest.py) — 摄入流水线（含哈希缓存逻辑）
+- [wiki_query.py](src/llm_wiki_mcp/wiki_query.py) — 查询与检索
+- [wiki_verify.py](src/llm_wiki_mcp/wiki_verify.py) — 两阶段 grounding check
+- [wiki_io.py](src/llm_wiki_mcp/wiki_io.py) — 文件 I/O 与覆盖保护
+- [wiki_models.py](src/llm_wiki_mcp/wiki_models.py) — 核心数据模型

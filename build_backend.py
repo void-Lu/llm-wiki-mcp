@@ -13,15 +13,13 @@ from setuptools import build_meta as _setuptools_build_meta
 from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.sdist import sdist as _sdist
 
-BUILD_REVISION_ENV = "NETSUITE_LLM_WIKI_BUILD_REVISION"
-BUILD_DIRTY_ENV = "NETSUITE_LLM_WIKI_BUILD_DIRTY"
-_EDITABLE_BUILD_ENV = "_NETSUITE_LLM_WIKI_EDITABLE_BUILD"
+BUILD_REVISION_ENV = "LLM_WIKI_BUILD_REVISION"
+BUILD_DIRTY_ENV = "LLM_WIKI_BUILD_DIRTY"
+_EDITABLE_BUILD_ENV = "_LLM_WIKI_EDITABLE_BUILD"
 _BUILD_INFO_SCHEMA_VERSION = 1
 _FULL_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40,64}$", re.IGNORECASE)
 _PROJECT_ROOT = Path(__file__).resolve().parent
-_BUILD_INFO_RELATIVE_PATH = (
-    Path("src") / "netsuite_llm_wiki_mcp" / "_build_info.py"
-)
+_BUILD_INFO_RELATIVE_PATH = Path("src") / "_build_info.py"
 
 
 @dataclass(frozen=True)
@@ -78,7 +76,7 @@ def _git_identity(project_root: Path) -> BuildIdentity | None:
     source_path = str(project_root / "src")
     sys.path.insert(0, source_path)
     try:
-        from netsuite_llm_wiki_mcp.git_utils import (
+        from common.git_utils import (
             get_git_dirty,
             get_git_revision,
         )
@@ -131,11 +129,7 @@ class BuildPy(_build_py):
         if os.environ.get(_EDITABLE_BUILD_ENV) == "1":
             return
         identity = resolve_build_identity()
-        target = (
-            Path(self.build_lib)
-            / "netsuite_llm_wiki_mcp"
-            / "_build_info.py"
-        )
+        target = Path(self.build_lib) / "_build_info.py"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_render_build_info(identity), encoding="utf-8")
 
