@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
 from pathlib import Path
 
 from netsuite_llm_wiki_mcp.codegraph_sync import (
     SUITESCRIPT_ENTRYPOINT_NAMES,
     CodeGraphSyncError,
+    _apply_replacements,
+    _rollback_replacements,
     _is_trusted_entrypoint,
     sync_codegraph,
 )
@@ -161,6 +165,12 @@ def test_sync_writes_latest_raw_pages_pipeline_and_active_index(tmp_path: Path) 
     assert list((vault / "wiki/projects/demoproject/architecture/code-facts").rglob("*.md"))
     assert list((vault / "wiki/projects/demoproject/architecture/pipelines").rglob("*.md"))
     assert (vault / "wiki/projects/demoproject/architecture/code-overview.md").is_file()
+    code_fact = next((vault / "wiki/projects/demoproject/architecture/code-facts").rglob("*.md")).read_text(encoding="utf-8")
+    pipeline_page = next((vault / "wiki/projects/demoproject/architecture/pipelines").rglob("*.md")).read_text(encoding="utf-8")
+    assert "render_version: '2'" in code_fact
+    assert "flowchart TD" in pipeline_page
+    assert "分阶段完整表格" in pipeline_page
+    assert "[[wiki/projects/demoproject/architecture/code-facts/src/helper.py|文件页]]" in pipeline_page
     graph = json.loads((vault / "raw/sources/projects/demoproject/codegraph/graph.json").read_text(encoding="utf-8"))
     assert "def main" not in json.dumps(graph, ensure_ascii=False)
 
@@ -203,6 +213,102 @@ def test_sync_hash_failure_does_not_create_partial_state(tmp_path: Path) -> None
         raise AssertionError("expected a hash mismatch")
     assert not (vault / "raw").exists()
     assert not (vault / "wiki").exists()
+
+
+def test_directory_replacement_falls_back_when_backup_replace_fails(tmp_path: Path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    stage = tmp_path / "stage"
+    project = "demo"
+    target = vault / "raw/sources/projects/demo/codegraph"
+    staged = stage / "raw/sources/projects/demo/codegraph"
+    target.mkdir(parents=True)
+    staged.mkdir(parents=True)
+    (target / "old.json").write_text("old", encoding="utf-8")
+    (staged / "new.json").write_text("new", encoding="utf-8")
+
+    real_replace = os.replace
+
+    def fail_backup(src, dst):
+        if Path(src) == target and Path(dst).name == "0":
+            raise OSError("injected directory backup failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_backup)
+    replacements = []
+
+    _apply_replacements(vault, stage, project, {}, {}, replacements)
+
+    assert (target / "new.json").read_text(encoding="utf-8") == "new"
+    assert (stage / "backups/0/old.json").read_text(encoding="utf-8") == "old"
+    assert len(replacements) == 1
+
+
+def test_directory_replacement_falls_back_when_staged_replace_fails(tmp_path: Path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    stage = tmp_path / "stage"
+    project = "demo"
+    target = vault / "raw/sources/projects/demo/codegraph"
+    staged = stage / "raw/sources/projects/demo/codegraph"
+    target.mkdir(parents=True)
+    staged.mkdir(parents=True)
+    (target / "old.json").write_text("old", encoding="utf-8")
+    (staged / "new.json").write_text("new", encoding="utf-8")
+
+    real_replace = os.replace
+
+    def fail_staged_replace(src, dst):
+        if Path(src) == staged and Path(dst) == target:
+            raise OSError("injected staged directory replacement failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_staged_replace)
+    replacements = []
+
+    _apply_replacements(vault, stage, project, {}, {}, replacements)
+
+    assert (target / "new.json").read_text(encoding="utf-8") == "new"
+    assert len(replacements) == 1
+
+
+def test_directory_replacement_rollback_restores_backup_after_copy_failure(tmp_path: Path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    stage = tmp_path / "stage"
+    project = "demo"
+    target = vault / "raw/sources/projects/demo/codegraph"
+    staged = stage / "raw/sources/projects/demo/codegraph"
+    target.mkdir(parents=True)
+    staged.mkdir(parents=True)
+    (target / "old.json").write_text("old", encoding="utf-8")
+    (staged / "new.json").write_text("new", encoding="utf-8")
+
+    real_replace = os.replace
+    real_copytree = shutil.copytree
+
+    def fail_staged_replace(src, dst):
+        if Path(src) == staged and Path(dst) == target:
+            raise OSError("injected staged directory replacement failure")
+        return real_replace(src, dst)
+
+    def fail_staged_copy(src, dst, *args, **kwargs):
+        if Path(src) == staged and Path(dst) == target:
+            raise OSError("injected directory copy failure")
+        return real_copytree(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_staged_replace)
+    monkeypatch.setattr(shutil, "copytree", fail_staged_copy)
+    replacements = []
+
+    try:
+        _apply_replacements(vault, stage, project, {}, {}, replacements)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected the directory replacement to fail")
+
+    _rollback_replacements(replacements)
+
+    assert (target / "old.json").read_text(encoding="utf-8") == "old"
+    assert not (target / "new.json").exists()
 
 
 def test_partial_pipeline_is_rendered_with_boundary_warning(tmp_path: Path) -> None:

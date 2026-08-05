@@ -23,16 +23,27 @@ from typing import Any, Iterable, Mapping
 
 import yaml
 
+from netsuite_llm_wiki_mcp.codegraph_architecture import (
+    ArchitectureIR,
+    PipelineSnapshot,
+    build_architecture,
+    render_code_fact,
+    render_overview,
+    render_pipeline_index,
+    render_pipeline,
+)
 from netsuite_llm_wiki_mcp.codegraph_policy import is_codegraph_frontmatter
 from netsuite_llm_wiki_mcp.git_utils import get_git_revision
 from netsuite_llm_wiki_mcp.retrieval_index import RetrievalIndexStore
 from netsuite_llm_wiki_mcp.wiki_io import split_frontmatter
 from netsuite_llm_wiki_mcp.wiki_paths import safe_segment
+from netsuite_llm_wiki_mcp.wiki_limits import TARGET_PAGE_BYTES, utf8_size
 
 
 CODEGRAPH_SOURCE_NAME = "codegraph"
 IMPORT_SCHEMA_VERSION = 1
 MAX_SUPPORTED_CODEGRAPH_SCHEMA_VERSION = 8
+RENDER_VERSION = "2"
 SUPPORTED_LANGUAGES = {"python", "javascript", "typescript", "js", "ts", "node", "suiteScript".casefold()}
 ENTRYPOINT_NAMES = {"main", "run", "handler", "execute", "entrypoint"}
 # Fixed SuiteScript 2.x/2.1 entry points. Custom Tool methods are defined by
@@ -133,19 +144,6 @@ class GraphSnapshot:
     revision: str
 
 
-@dataclass(frozen=True)
-class PipelineSnapshot:
-    pipeline_id: str
-    page_path: str
-    entrypoint: dict[str, Any]
-    node_ids: tuple[str, ...]
-    member_files: tuple[str, ...]
-    edge_keys: tuple[tuple[str, str, str], ...]
-    external_edge_keys: tuple[tuple[str, str, str], ...]
-    unresolved_count: int
-    pipeline_status: str
-
-
 WORKSPACE_ROOT_ENV = "NETSUITE_LLM_WIKI_WORKSPACE_ROOT"
 
 
@@ -171,8 +169,8 @@ def sync_codegraph(vault_root: str | Path, *, workspace_root: str | Path | None 
         raise CodeGraphSyncError("invalid_project", str(exc)) from exc
 
     snapshot_data = _read_snapshot(workspace, project)
-    pipelines = _extract_pipelines(snapshot_data)
-    desired = _desired_state(snapshot_data, pipelines)
+    architecture = build_architecture(snapshot_data, workspace)
+    desired = _desired_state(snapshot_data, architecture.pipelines, architecture=architecture)
     return _commit_desired_state(vault, project, desired)
 
 
@@ -493,7 +491,9 @@ def _pipeline_slug(value: str) -> str:
     return slug[:120] or "pipeline"
 
 
-def _desired_state(snapshot: GraphSnapshot, pipelines: list[PipelineSnapshot]) -> dict[str, Any]:
+def _desired_state(snapshot: GraphSnapshot, pipelines: Iterable[PipelineSnapshot], *, architecture: ArchitectureIR | None = None) -> dict[str, Any]:
+    pipeline_values = tuple(pipelines)
+    architecture = architecture or build_architecture(snapshot)
     raw_root = f"raw/sources/projects/{snapshot.project}/codegraph"
     graph = {
         "schema_version": IMPORT_SCHEMA_VERSION,
@@ -526,7 +526,7 @@ def _desired_state(snapshot: GraphSnapshot, pipelines: list[PipelineSnapshot]) -
             "member_files": list(item.member_files),
             "pipeline_status": item.pipeline_status,
         }
-        for item in pipelines
+        for item in pipeline_values
     ]
     manifest = {
         "schema_version": IMPORT_SCHEMA_VERSION,
@@ -547,48 +547,45 @@ def _desired_state(snapshot: GraphSnapshot, pipelines: list[PipelineSnapshot]) -
     source_hashes = [graph_hash, manifest_hash]
 
     pages: dict[str, str] = {}
-    pipeline_by_file: dict[str, list[PipelineSnapshot]] = defaultdict(list)
-    for pipeline in pipelines:
-        for path in pipeline.member_files:
-            pipeline_by_file[path].append(pipeline)
-    nodes_by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for node in snapshot.nodes:
-        file_path = str(node.get("file_path") or "")
-        if file_path:
-            nodes_by_file[file_path].append(node)
-    edges_by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    node_by_id = {str(node["id"]): node for node in snapshot.nodes}
-    for edge in snapshot.edges:
-        source_file = str(node_by_id.get(str(edge.get("source") or ""), {}).get("file_path") or "")
-        target_file = str(node_by_id.get(str(edge.get("target") or ""), {}).get("file_path") or "")
-        for file_path in {source_file, target_file} - {""}:
-            edges_by_file[file_path].append(edge)
-
     for file_item in snapshot.files:
         source_path = str(file_item["path"])
-        body = _render_file_body(source_path, file_item, nodes_by_file.get(source_path, ()), edges_by_file.get(source_path, ()), pipeline_by_file.get(source_path, ()), file_page_map)
+        body = render_code_fact(architecture, source_path, file_item, file_page_map)
         pages[file_page_map[source_path]] = _render_page(
             title=source_path,
             body=body,
             frontmatter=_base_frontmatter(snapshot, "file", source_path, raw_sources, source_hashes)
             | {"source_path": source_path, "source_hash": str(file_item["content_hash"]), "language": str(file_item.get("language") or "unknown")},
         )
-    for pipeline in pipelines:
-        body = _render_pipeline_body(pipeline, node_by_id, snapshot.edges, snapshot.unresolved_refs, file_page_map)
-        pages[pipeline.page_path] = _render_page(
-            title=pipeline.pipeline_id,
-            body=body,
-            frontmatter=_base_frontmatter(snapshot, "pipeline", pipeline.pipeline_id, raw_sources, source_hashes)
-            | {"pipeline_id": pipeline.pipeline_id, "pipeline_status": pipeline.pipeline_status, "member_files": list(pipeline.member_files)},
-        )
+    for pipeline in pipeline_values:
+        body = render_pipeline(architecture, pipeline, file_page_map)
+        pipeline_frontmatter = _base_frontmatter(snapshot, "pipeline", pipeline.pipeline_id, raw_sources, source_hashes) | {
+            "pipeline_id": pipeline.pipeline_id, "pipeline_status": pipeline.pipeline_status, "member_files": list(pipeline.member_files),
+        }
+        if utf8_size(body) <= TARGET_PAGE_BYTES:
+            pages[pipeline.page_path] = _render_page(title=pipeline.pipeline_id, body=body, frontmatter=pipeline_frontmatter)
+        else:
+            parts = _partition_pipeline_nodes(architecture, pipeline, file_page_map)
+            part_paths = [pipeline.page_path[:-3] + f"/part-{index:03}.md" for index in range(1, len(parts) + 1)]
+            pages[pipeline.page_path] = _render_page(
+                title=pipeline.pipeline_id,
+                body=render_pipeline_index(architecture, pipeline, part_paths),
+                frontmatter=pipeline_frontmatter | {"pipeline_part_count": len(parts)},
+            )
+            for index, node_ids in enumerate(parts, start=1):
+                part_path = part_paths[index - 1]
+                pages[part_path] = _render_page(
+                    title=f"{pipeline.pipeline_id} / part {index}",
+                    body=render_pipeline(architecture, pipeline, file_page_map, node_filter=set(node_ids)),
+                    frontmatter=pipeline_frontmatter | {"managed_key": f"{pipeline.pipeline_id}#part-{index:03}", "pipeline_part": index, "pipeline_part_count": len(parts)},
+                )
     overview_path = str(manifest["overview_page"])
     pages[overview_path] = _render_page(
         title=f"{snapshot.project} Code Overview",
-        body=_render_overview_body(snapshot, pipelines, file_page_map),
+        body=render_overview(architecture, snapshot, file_page_map),
         frontmatter=_base_frontmatter(snapshot, "overview", "overview", raw_sources, source_hashes),
     )
     raw = {f"{raw_root}/graph.json": graph_bytes, f"{raw_root}/manifest.json": manifest_bytes}
-    return {"raw": raw, "pages": pages, "snapshot": snapshot, "pipelines": pipelines}
+    return {"raw": raw, "pages": pages, "snapshot": snapshot, "pipelines": pipeline_values, "architecture": architecture}
 
 
 def _base_frontmatter(snapshot: GraphSnapshot, artifact_kind: str, managed_key: str, raw_sources: list[str], source_hashes: list[str]) -> dict[str, Any]:
@@ -606,6 +603,7 @@ def _base_frontmatter(snapshot: GraphSnapshot, artifact_kind: str, managed_key: 
         "revision": snapshot.revision,
         "sources": raw_sources,
         "source_hashes": source_hashes,
+        "render_version": RENDER_VERSION,
     }
 
 
@@ -765,6 +763,22 @@ def _warnings(desired: Mapping[str, Any]) -> list[str]:
     return [f"pipeline_partial:{partial}"] if partial else []
 
 
+def _partition_pipeline_nodes(architecture: ArchitectureIR, pipeline: PipelineSnapshot, file_page_map: Mapping[str, str]) -> list[tuple[str, ...]]:
+    parts: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for node_id in pipeline.node_order:
+        candidate = [*current, node_id]
+        candidate_body = render_pipeline(architecture, pipeline, file_page_map, node_filter=set(candidate))
+        if current and utf8_size(candidate_body) > TARGET_PAGE_BYTES:
+            parts.append(tuple(current))
+            current = [node_id]
+        else:
+            current = candidate
+    if current:
+        parts.append(tuple(current))
+    return parts or [tuple()]
+
+
 def _existing_managed_pages(vault: Path, project: str) -> set[str]:
     architecture = vault / "wiki" / "projects" / project / "architecture"
     paths: set[str] = set()
@@ -811,6 +825,52 @@ def _stage_wiki(vault: Path, stage: Path, project: str, pages: Mapping[str, str]
         staged.write_text(content, encoding="utf-8")
 
 
+def _replace_directory(
+    staged: Path,
+    target: Path,
+    old: Path,
+    replacements: list[tuple[Path, Path, bool]],
+) -> None:
+    """Replace a directory while preserving a recoverable rollback copy.
+
+    Windows can reject directory-to-directory ``os.replace`` even when both
+    paths are on the same volume.  If moving the old target fails, copy it
+    first and only remove the target after that backup is complete.  The
+    resulting commit is non-atomic, but a later copy failure can still restore
+    the known-good backup through ``_rollback_replacements``.
+    """
+
+    had_old = target.exists()
+    backup_is_copy = False
+    if had_old:
+        old.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(target, old)
+        except OSError as atomic_error:
+            try:
+                shutil.copytree(target, old)
+            except OSError as backup_error:
+                raise atomic_error from backup_error
+            backup_is_copy = True
+
+    # Register before removing a copied backup's source or attempting the new
+    # directory replacement so the outer transaction can restore this target.
+    replacements.append((target, old, had_old))
+    if backup_is_copy:
+        shutil.rmtree(target)
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, target)
+    except OSError as atomic_error:
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(staged, target)
+        except OSError as copy_error:
+            raise atomic_error from copy_error
+
+
 def _apply_replacements(vault: Path, stage: Path, project: str, pages: Mapping[str, str], raw: Mapping[str, bytes], replacements: list[tuple[Path, Path, bool]]) -> None:
     targets = [
         (vault / "raw" / "sources" / "projects" / project / "codegraph", stage / "raw" / "sources" / "projects" / project / "codegraph"),
@@ -825,17 +885,18 @@ def _apply_replacements(vault: Path, stage: Path, project: str, pages: Mapping[s
             continue
         old = backup_root / str(index)
         had_old = target.exists()
+        if staged.is_dir():
+            _replace_directory(staged, target, old, replacements)
+            continue
         if had_old:
             old.parent.mkdir(parents=True, exist_ok=True)
             os.replace(target, old)
+        replacements.append((target, old, had_old))
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged, target)
-        except Exception:
-            if had_old and old.exists():
-                os.replace(old, target)
+        except OSError:
             raise
-        replacements.append((target, old, had_old))
 
 
 def _stage_and_swap_index(vault: Path, stage: Path, replacements: list[tuple[Path, Path, bool]]) -> dict[str, Any]:
@@ -851,27 +912,38 @@ def _stage_and_swap_index(vault: Path, stage: Path, replacements: list[tuple[Pat
     if had_old:
         old.parent.mkdir(parents=True, exist_ok=True)
         os.replace(target, old)
+    replacements.append((target, old, had_old))
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(index_stage, target)
-    except Exception:
-        if had_old and old.exists():
-            os.replace(old, target)
+    except OSError:
         raise
-    replacements.append((target, old, had_old))
     return build
+
+
+def _restore_backup(old: Path, target: Path) -> None:
+    try:
+        os.replace(old, target)
+    except OSError as atomic_error:
+        try:
+            if old.is_dir():
+                shutil.copytree(old, target)
+            else:
+                shutil.copy2(old, target)
+        except OSError as copy_error:
+            raise atomic_error from copy_error
 
 
 def _rollback_replacements(replacements: list[tuple[Path, Path, bool]]) -> None:
     for target, old, had_old in reversed(replacements):
         try:
-            if target.is_dir():
+            if target.is_dir() and not target.is_symlink():
                 shutil.rmtree(target)
             else:
                 target.unlink(missing_ok=True)
             if had_old and old.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(old, target)
+                _restore_backup(old, target)
         except OSError:
             # Preserve the original sync error.  The caller still receives a
             # deterministic failure code; the rollback issue is visible in
