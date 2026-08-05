@@ -51,7 +51,7 @@ def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None
     assert "content" not in result["results"][0]
     assert result["context_pack"]["passages"][0]["content"]
     assert result["pipeline"]["corpus"] == "active"
-    assert result["pipeline"]["authority"] == "active:formal>project>raw_chat;fallback:active_relaxed>raw_identifier>raw"
+    assert result["pipeline"]["authority"] == "active:formal>project>raw_chat;fallback:wiki_relaxed>raw"
 
 
 def test_legacy_adapter_reuses_v2_selected_context_passages(tmp_path: Path) -> None:
@@ -212,6 +212,70 @@ def test_v2_raw_fallback_uses_raw_documents_after_formal_miss(tmp_path: Path) ->
     assert result["results"][0]["source_kind"] == "raw"
 
 
+def test_v2_wiki_relaxed_recall_does_not_open_raw_store(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/curated.md", "Curated Alpha", "alpha is the curated answer", type="concept")
+    raw = root / "raw/sources/file/default/raw.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("missing raw evidence", encoding="utf-8")
+    refresh_indexes(root)
+
+    original_status = RetrievalIndexStore.status
+
+    def reject_raw_status(self: RetrievalIndexStore) -> dict[str, object]:
+        if self.scope == "raw":
+            raise AssertionError("Wiki relaxed recall must finish before raw store access")
+        return original_status(self)
+
+    monkeypatch.setattr(RetrievalIndexStore, "status", reject_raw_status)
+    result = run_query_v2(root, "alpha missing", retrieval_mode="lexical")
+
+    assert [item["path"] for item in result["results"]] == ["wiki/concepts/curated.md"]
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
+    assert result["pipeline"]["fallback"]["level"] == "none"
+
+
+def test_v2_history_scope_never_opens_raw_fallback_store(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/known.md", "Known", "curated material", type="concept")
+    raw = root / "raw/sources/file/default/history-boundary.txt"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("history boundary raw marker", encoding="utf-8")
+    refresh_indexes(root)
+
+    original_status = RetrievalIndexStore.status
+
+    def reject_raw_status(self: RetrievalIndexStore) -> dict[str, object]:
+        if self.scope == "raw":
+            raise AssertionError("history scope must not access raw store")
+        return original_status(self)
+
+    monkeypatch.setattr(RetrievalIndexStore, "status", reject_raw_status)
+    result = run_query_v2(root, "history boundary raw marker", scope="history", retrieval_mode="lexical")
+
+    assert result["results"] == []
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
+    assert result["pipeline"]["fallback"]["level"] == "none"
+
+
+def test_v2_raw_fallback_uses_bounded_prefix_recovery(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/file/default/ingestion.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("# Ingestion\n\nThe ingestion pipeline is the raw answer.", encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "ingest", retrieval_mode="lexical")
+
+    assert [item["path"] for item in result["results"]] == ["raw/sources/file/default/ingestion.md"]
+    assert result["pipeline"]["lexical"]["mode"] == "raw_prefix"
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 1
+
+
 def test_v2_archive_scope_is_physically_isolated(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -223,6 +287,33 @@ def test_v2_archive_scope_is_physically_isolated(tmp_path: Path) -> None:
     result = run_query_v2(root, "legacy retention", scope="archive", filters=QueryFilters())
     assert result["pipeline"]["corpus"] == "archive"
     assert all("current.md" not in item["path"] for item in result["results"])
+
+
+def test_v2_archive_scope_never_opens_raw_fallback_store(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    archive_page = root / "archives/bundles/2026/08/wiki/concepts/old.md"
+    archive_page.parent.mkdir(parents=True, exist_ok=True)
+    archive_page.write_text("---\ntype: concept\n---\n\narchived-only marker", encoding="utf-8")
+    raw = root / "raw/sources/file/default/archive-boundary.txt"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("archive boundary raw marker", encoding="utf-8")
+    archive_store = RetrievalIndexStore(root, scope="archive")
+    archive_store.build(archive_store.iter_vault_pages())
+
+    original_status = RetrievalIndexStore.status
+
+    def reject_raw_status(self: RetrievalIndexStore) -> dict[str, object]:
+        if self.scope == "raw":
+            raise AssertionError("archive scope must not access raw store")
+        return original_status(self)
+
+    monkeypatch.setattr(RetrievalIndexStore, "status", reject_raw_status)
+    result = run_query_v2(root, "archive boundary raw marker", scope="archive", retrieval_mode="lexical")
+
+    assert result["results"] == []
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
+    assert result["pipeline"]["fallback"]["level"] == "none"
 
 
 def test_v2_reuses_bounded_graph_expansion_without_filter_escape(tmp_path: Path) -> None:
@@ -270,6 +361,49 @@ def test_v2_raw_fallback_uses_the_dedicated_fts_store_without_scanning_sources(t
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 1
 
 
+def test_v2_raw_fallback_reports_missing_corrupt_and_stale_raw_indexes(tmp_path: Path) -> None:
+    for state in ("missing", "corrupt", "stale"):
+        root = tmp_path / state
+        create_wiki_root(root)
+        raw = root / "raw/sources/file/default/marker.txt"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_text("raw lifecycle marker", encoding="utf-8")
+        refresh_indexes(root)
+        raw_store = RetrievalIndexStore(root, scope="raw")
+        if state == "missing":
+            raw_store.path.unlink()
+        elif state == "corrupt":
+            raw_store.path.write_bytes(b"not a sqlite database")
+        else:
+            raw_store._mark_stale()
+
+        result = run_query_v2(root, "raw lifecycle marker", retrieval_mode="lexical")
+
+        assert result["ok"] is True
+        assert result["results"] == []
+        assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
+        assert f"raw_index_{state}" in result["pipeline"]["warnings"]
+
+
+def test_v2_raw_fallback_reranks_page_titles_and_deduplicates_pages(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    titled = root / "raw/sources/file/default/target.md"
+    other = root / "raw/sources/file/default/other.md"
+    titled.parent.mkdir(parents=True, exist_ok=True)
+    titled.write_text("# Target Feature\n\nshared raw evidence", encoding="utf-8")
+    other.write_text("# Other Feature\n\nTarget appears in the body with shared raw evidence", encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "target", retrieval_mode="lexical", top_k=2)
+
+    assert [item["path"] for item in result["results"]] == [
+        "raw/sources/file/default/target.md",
+        "raw/sources/file/default/other.md",
+    ]
+    assert len({item["path"] for item in result["context_pack"]["passages"]}) == 2
+
+
 def test_v2_raw_fallback_recovers_qualified_module_names_from_chinese_questions(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -292,7 +426,7 @@ def test_v2_raw_fallback_recovers_qualified_module_names_from_chinese_questions(
         assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
 
 
-def test_v2_raw_fallback_ranks_strong_raw_answer_above_noisy_wiki_relaxed_match(tmp_path: Path) -> None:
+def test_v2_wiki_relaxed_answer_blocks_raw_fallback(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
     reference = root / "raw" / "sources" / "references" / "location.md"
@@ -313,11 +447,10 @@ def test_v2_raw_fallback_ranks_strong_raw_answer_above_noisy_wiki_relaxed_match(
     result = run_query_v2(root, "NetSuite 的 Location List/Record 字段 selectrecordtype 数字 ID 是多少？", retrieval_mode="lexical")
 
     paths = [item["path"] for item in result["results"]]
-    assert paths[0] == "raw/sources/references/location.md"
-    assert "wiki/concepts/noisy-location.md" in paths
-    assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert paths == ["wiki/concepts/noisy-location.md"]
+    assert result["pipeline"]["fallback"]["level"] == "none"
     assert result["pipeline"]["lexical"]["mode"] == "relaxed"
-    assert result["pipeline"]["counters"]["raw_fts_hits"] == 1
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
     assert result["pipeline"]["counters"]["relaxed_fts_hits"] > 0
 
 
@@ -355,7 +488,7 @@ def test_v2_context_pack_carries_multiple_answer_passages_from_the_leading_page(
     assert result["pipeline"]["fallback"]["level"] == "none"
 
 
-def test_v2_list_record_field_label_does_not_trigger_qualified_code_priority(tmp_path: Path) -> None:
+def test_v2_wiki_result_does_not_mix_raw_list_record_evidence(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
     note = "wiki/concepts/netsuite-object-playbooks/typeid-cheatsheet.md"
@@ -384,9 +517,10 @@ def test_v2_list_record_field_label_does_not_trigger_qualified_code_priority(tmp
     result = run_query_v2(root, "自定义 List/Record 字段关联 Subsidiary 标准记录 typeId 是多少", retrieval_mode="lexical")
 
     assert result["results"][0]["path"] == note
-    assert any(item["path"] == "raw/sources/references/list-record-fields.md" for item in result["results"])
+    assert all(not item["path"].startswith("raw/") for item in result["results"])
     assert result["pipeline"]["lexical"]["mode"] == "relaxed"
     assert result["pipeline"]["fallback"]["level"] == "none"
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
 
 
 def test_v2_raw_fallback_combines_identifier_phrase_docs_above_bigram_noise(tmp_path: Path) -> None:

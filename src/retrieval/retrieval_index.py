@@ -27,6 +27,7 @@ from retrieval.lexical_analyzer import (
     identifier_phrase_fts_query,
     normalize,
     qualified_code_fts_query,
+    raw_prefix_fts_query,
     relaxed_fts_query,
 )
 from retrieval.passage_chunker import CHUNK_SCHEMA_VERSION, PassageChunk, chunk_markdown
@@ -194,7 +195,7 @@ class RetrievalIndexStore:
         page_type: str | None = None,
         tags: list[str] | None = None,
         include_navigation: bool = False,
-        mode: Literal["strict", "relaxed", "qualified_code", "identifier_phrase"] = "strict",
+        mode: Literal["strict", "relaxed", "qualified_code", "identifier_phrase", "raw_prefix"] = "strict",
         extra_terms: list[str] | None = None,
         term_variants: dict[str, list[str]] | None = None,
     ) -> list[PassageHit]:
@@ -203,9 +204,10 @@ class RetrievalIndexStore:
             "relaxed": relaxed_fts_query,
             "qualified_code": qualified_code_fts_query,
             "identifier_phrase": identifier_phrase_fts_query,
+            "raw_prefix": raw_prefix_fts_query,
         }.get(mode)
         if phrase_builder is None:
-            raise RetrievalIndexError("invalid_fts_mode", "FTS mode must be strict, relaxed, qualified_code, or identifier_phrase")
+            raise RetrievalIndexError("invalid_fts_mode", "FTS mode must be strict, relaxed, qualified_code, identifier_phrase, or raw_prefix")
         if mode == "relaxed" and extra_terms:
             phrase = expanded_relaxed_fts_query(query, extra_terms)
         elif mode == "identifier_phrase" and term_variants:

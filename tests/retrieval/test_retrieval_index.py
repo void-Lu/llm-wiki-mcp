@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from retrieval.lexical_analyzer import raw_prefix_fts_query
 from retrieval.retrieval_index import RetrievalIndexStore
 
 
@@ -123,3 +124,25 @@ def test_raw_store_is_physically_isolated_and_queryable_without_source_reads(tmp
     assert not active.search_fts("custbody_approval_state")
     monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source scan")))
     assert [hit.page_path for hit in raw.search_fts("custbody_approval_state")] == ["raw/sources/file/finance/manual/invoice.txt"]
+
+
+def test_raw_prefix_query_keeps_prefixes_anchored_and_short_tokens_exact() -> None:
+    query = raw_prefix_fts_query("ingest id 数据")
+
+    assert '"ingest"*' in query
+    assert '"id"' in query
+    assert '"id"*' not in query
+    assert '"数据"' in query
+    assert "*ingest*" not in query
+
+
+def test_raw_prefix_search_recovers_morphology_but_excludes_codegraph(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(root, "raw/sources/file/default/ingestion.md", "# Ingestion\n\nThe ingestion pipeline is documented here.")
+    _write(root, "raw/sources/projects/demo/codegraph/graph.json", '{"ingest": "internal provenance"}')
+    raw = RetrievalIndexStore(root, scope="raw")
+    raw.build(raw.iter_vault_pages())
+
+    hits = raw.search_fts("ingest", mode="raw_prefix")
+
+    assert [hit.page_path for hit in hits] == ["raw/sources/file/default/ingestion.md"]

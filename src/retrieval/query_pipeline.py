@@ -26,9 +26,10 @@ from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError
 from wiki.wiki_query import QueryCandidate, _apply_graph_expansion, _build_graph
 
 
-RANKING_POLICY_VERSION = "query-v2-passage-rrf-8"
+RANKING_POLICY_VERSION = "query-v2-passage-rrf-9"
 RRF_K = 60
 RAW_FALLBACK_LIMIT = 20
+RAW_FALLBACK_CANDIDATE_LIMIT = 160
 IDENTIFIER_PHRASE_BONUS = 20.0
 IDENTIFIER_PHRASE_CANDIDATES = 200
 PAGE_FILL_LIMIT = 500
@@ -453,6 +454,95 @@ def _title_candidates(
     return store.passages_for_pages(paths, limit_per_page=1)
 
 
+def _relaxed_recovery_items(
+    store: RetrievalIndexStore,
+    metadata: dict[str, dict[str, Any]],
+    question: str,
+    *,
+    scope: str,
+    project: str | None,
+    filters: QueryFilters,
+    extra_terms: list[str],
+) -> tuple[list[dict[str, Any]], int, str]:
+    """Read a bounded relaxed candidate set from one existing projection."""
+
+    try:
+        hits = store.search_fts(
+            question,
+            limit=IDENTIFIER_PHRASE_CANDIDATES,
+            project=project,
+            page_type=filters.type,
+            tags=list(filters.tags),
+            mode="relaxed",
+            extra_terms=extra_terms,
+        )
+    except RetrievalIndexError as exc:
+        return [], 0, exc.code
+    items: list[dict[str, Any]] = []
+    for rank, hit in enumerate(hits, 1):
+        if not _eligible(hit, metadata, scope=scope) or not _matches_request(hit, metadata, project=project, filters=filters):
+            continue
+        items.append(
+            {
+                "hit": hit,
+                "fts_rank": rank,
+                "title_rank": None,
+                "vector_rank": None,
+                "vector_score": 0.0,
+                "rrf": 0.0,
+                "exact": False,
+                "graph_score": 0.0,
+                "graph_reasons": [],
+                "score": round(hit.score, 12),
+            }
+        )
+    return items, len(hits), ""
+
+
+def _raw_recovery_bonus(hit: PassageHit, question: str, identifier_terms: list[str]) -> float:
+    """Rank raw pages with bounded title, heading, phrase, and anchor signals."""
+
+    query_terms = set(tokens(question))
+    title_terms = set(tokens(hit.title))
+    heading_text = " ".join(hit.heading_path)
+    heading_terms = set(tokens(heading_text))
+    title_overlap = len(query_terms & title_terms)
+    heading_overlap = len(query_terms & heading_terms)
+    title_heading = f"{hit.title} {heading_text}".casefold()
+    body = hit.text.casefold()
+    phrase_matches = [term.casefold() for term in identifier_terms if term]
+    phrase_bonus = 5.0 if any(term in title_heading for term in phrase_matches) else 0.0
+    anchor_bonus = 2.0 if any(term in heading_text.casefold() for term in phrase_matches) else 0.0
+    exact_phrase_bonus = 1.5 if question.strip().casefold() in body and len(question.strip()) >= 4 else 0.0
+    return min(title_overlap, 3) * 4.0 + min(heading_overlap, 3) * 2.0 + phrase_bonus + anchor_bonus + exact_phrase_bonus
+
+
+def _best_passage_per_page(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bound raw ranking to one deterministic representative per page."""
+
+    best: dict[str, dict[str, Any]] = {}
+    for item in items:
+        path = item["hit"].page_path
+        current = best.get(path)
+        if current is None or item["score"] > current["score"] or (
+            item["score"] == current["score"] and item["hit"].passage_id < current["hit"].passage_id
+        ):
+            best[path] = item
+    return list(best.values())
+
+
+def _raw_index_warning(status: Mapping[str, object]) -> str:
+    """Expose raw-store failures without conflating them with the Wiki index."""
+
+    state = str(status.get("state") or "")
+    if state == "stale":
+        return "raw_index_stale"
+    code = str(status.get("code") or "unavailable")
+    if code.startswith("index_"):
+        code = code.removeprefix("index_")
+    return f"raw_index_{code}"
+
+
 def _vector_hits(
     root: Path,
     question: str,
@@ -722,88 +812,116 @@ def run_query_v2(
         stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": "active"})
         stats["max"] = max(stats["max"], item["hit"].score)
     context_items = _build_page_ordered_context(selected, store, hit_stats=hit_stats, pool_by_page=pool_by_page)
-    # A true Wiki zero-result query recovers evidence from two places: the
-    # active store under relaxed multilingual lexical recovery, and the
-    # dedicated raw-source store.  Both stores share the same tokenizer and
-    # schema, so their bm25 scores are directly comparable and the candidates
-    # are ranked together.  Wiki pages are curated and carry an authority
-    # bonus when only wiki candidates exist; against raw evidence the raw
-    # bm25 score is the comparable lexical signal.  The fallback still reads
-    # SQLite projections only, never walks raw files or loads an embedding
-    # model.
+    # A true Wiki zero-result query has two sequential recovery stages: active
+    # Wiki relaxed recovery, followed only when that stage is empty by the
+    # dedicated raw-source store.  They share the tokenizer and schema, but
+    # are intentionally never ranked together: raw evidence is an isolated
+    # fallback corpus.  Both stages read SQLite projections only, never walk
+    # raw files or load an embedding model.
     raw_fts_hits = 0
     relaxed_fts_hits = 0
     raw_index_warning = ""
     raw_fallback = False
     lexical_mode = "strict"
+    raw_store: RetrievalIndexStore | None = None
+    query_extra_terms: list[str] = []
+    query_term_variants: dict[str, list[str]] = {}
+    wiki_relaxed_answered = False
     if not has_primary_recall and effective_scope in {"knowledge", "all"}:
-        raw_store = RetrievalIndexStore(root, scope="raw")
-        # Stage one: bounded multilingual recovery over the curated wiki.
-        relaxed_items: list[dict[str, Any]] = []
+        # Wiki is the primary corpus.  Try its bounded relaxed projection
+        # before opening the independent raw store; a successful Wiki answer
+        # must not be mixed with raw evidence or even query the raw DB.
         query_extra_terms, query_term_variants, expansion_suggestions = _query_expansion(
             question,
             store,
-            raw_store,
+            None,
             expansion_terms,
             project,
         )
-        try:
-            relaxed_hits = store.search_fts(
-                question,
-                limit=IDENTIFIER_PHRASE_CANDIDATES,
-                project=project,
-                page_type=filters.type,
-                tags=list(filters.tags),
-                mode="relaxed",
-                extra_terms=query_extra_terms,
+        wiki_relaxed_items, relaxed_fts_hits, relaxed_warning = _relaxed_recovery_items(
+            store,
+            metadata,
+            question,
+            scope=effective_scope,
+            project=project,
+            filters=filters,
+            extra_terms=query_extra_terms,
+        )
+        if relaxed_warning:
+            status = {**status, "code": relaxed_warning}
+        if wiki_relaxed_items:
+            for item in wiki_relaxed_items:
+                item["score"] = round(
+                    item["hit"].score
+                    + _authority_bonus(item["hit"], intent, effective_scope, metadata)
+                    + _title_overlap_bonus(item["hit"], question)
+                    + _freshness_bonus(item["hit"], metadata),
+                    12,
+                )
+            step_counts = _step_counts_for_pages(
+                sorted({item["hit"].page_path for item in wiki_relaxed_items}),
+                store,
+                None,
             )
-        except RetrievalIndexError as exc:
-            relaxed_hits = []
-            status = {**status, "code": exc.code}
-        relaxed_fts_hits = len(relaxed_hits)
-        for rank, hit in enumerate(relaxed_hits, 1):
-            if (
-                not _eligible(hit, metadata, scope=effective_scope)
-                or not _matches_request(hit, metadata, project=project, filters=filters)
-            ):
-                continue
-            relaxed_items.append(
-                {
-                    "hit": hit,
-                    "fts_rank": rank,
-                    "title_rank": None,
-                    "vector_rank": None,
-                    "vector_score": 0.0,
-                    "rrf": 0.0,
-                    "exact": False,
-                    "graph_score": 0.0,
-                    "graph_reasons": [],
-                    "score": round(hit.score, 12),
-                }
+            for item in wiki_relaxed_items:
+                count = step_counts.get(item["hit"].page_path, 0)
+                item["score"] = round(
+                    item["score"] + STEP_BONUS_MAX * min(count, STEP_COUNT_FULL) / STEP_COUNT_FULL,
+                    12,
+                )
+            wiki_relaxed_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
+            selected = []
+            selected_paths = set()
+            for item in wiki_relaxed_items:
+                page_path = item["hit"].page_path
+                if page_path not in selected_paths:
+                    selected.append(item)
+                    selected_paths.add(page_path)
+            selected = _adaptive_expand(selected, top_k)
+            selected_paths = {item["hit"].page_path for item in selected}
+            hit_stats = {}
+            pool_by_page = {}
+            for item in wiki_relaxed_items:
+                page_path = item["hit"].page_path
+                pool_by_page.setdefault(page_path, []).append(item)
+                stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": "active"})
+                stats["max"] = max(stats["max"], item["hit"].score)
+            context_items = _build_page_ordered_context(
+                selected,
+                store,
+                hit_stats=hit_stats,
+                pool_by_page=pool_by_page,
             )
+            lexical_mode = "relaxed"
+            wiki_relaxed_answered = True
+
+    if not has_primary_recall and not wiki_relaxed_answered and effective_scope in {"knowledge", "all"}:
+        raw_store = RetrievalIndexStore(root, scope="raw")
         # Stage two: dedicated raw-store fallback (strict, then slash-qualified
-        # identifiers, then multi-word English identifiers, then relaxed).
+        # identifiers, then multi-word English identifiers, then bounded
+        # prefix recovery, then relaxed).  The store is opened only after the
+        # active Wiki corpus has no acceptable result.
         # A slash-qualified identifier wins outright only for a genuine module
         # namespace such as ``N/record``; a generic slash term such as
-        # ``List/Record`` stays in the merged pool so curated wiki evidence is
-        # not starved by it.
+        # ``List/Record`` stays on the ordinary raw path.
         raw_items: list[dict[str, Any]] = []
         raw_lexical_mode = "strict"
         raw_status = raw_store.status()
-        if raw_status.get("ok") and raw_status.get("state") == "stale":
-            raw_index_warning = "index_stale"
-        if raw_status.get("ok"):
+        candidate_limit = min(max(top_k * 8, RAW_FALLBACK_LIMIT), RAW_FALLBACK_CANDIDATE_LIMIT)
+        if raw_status.get("ok") and raw_status.get("state") != "fresh":
+            raw_index_warning = _raw_index_warning(raw_status)
+        elif raw_status.get("ok"):
             try:
                 raw_hits = raw_store.search_fts(
                     question,
-                    limit=min(top_k, RAW_FALLBACK_LIMIT),
+                    limit=candidate_limit,
                     project=project,
                     page_type=filters.type,
                     tags=list(filters.tags),
                 )
                 qualified_code_hits = raw_store.search_fts(
                     question,
-                    limit=min(top_k, RAW_FALLBACK_LIMIT),
+                    limit=candidate_limit,
                     project=project,
                     page_type=filters.type,
                     tags=list(filters.tags),
@@ -814,7 +932,7 @@ def run_query_v2(
                     try:
                         identifier_phrase_hits = raw_store.search_fts(
                             question,
-                            limit=IDENTIFIER_PHRASE_CANDIDATES,
+                            limit=candidate_limit,
                             project=project,
                             page_type=filters.type,
                             tags=list(filters.tags),
@@ -839,20 +957,32 @@ def run_query_v2(
                     raw_hits = identifier_phrase_hits
                     raw_lexical_mode = "identifier_phrase"
                 elif not raw_hits:
-                    raw_hits = raw_store.search_fts(
+                    prefix_hits = raw_store.search_fts(
                         question,
-                        limit=min(top_k, RAW_FALLBACK_LIMIT),
+                        limit=candidate_limit,
                         project=project,
                         page_type=filters.type,
                         tags=list(filters.tags),
-                        mode="relaxed",
-                        extra_terms=query_extra_terms,
+                        mode="raw_prefix",
                     )
-                    if raw_hits:
+                    if prefix_hits:
+                        raw_hits = prefix_hits
+                        raw_lexical_mode = "raw_prefix"
+                    else:
+                        raw_hits = raw_store.search_fts(
+                            question,
+                            limit=candidate_limit,
+                            project=project,
+                            page_type=filters.type,
+                            tags=list(filters.tags),
+                            mode="relaxed",
+                            extra_terms=query_extra_terms,
+                        )
+                    if raw_hits and raw_lexical_mode == "strict":
                         raw_lexical_mode = "relaxed"
             except RetrievalIndexError as exc:
                 raw_hits = []
-                raw_index_warning = exc.code
+                raw_index_warning = _raw_index_warning({"code": exc.code})
             raw_fts_hits = len(raw_hits)
             query_identifier_phrases = identifier_phrases(question) if raw_lexical_mode == "identifier_phrase" else []
             for rank, hit in enumerate(raw_hits, 1):
@@ -862,7 +992,7 @@ def run_query_v2(
                 # navigation metadata) is re-checked here.
                 if not _eligible(hit, metadata, scope=effective_scope):
                     continue
-                score = hit.score
+                score = hit.score + _raw_recovery_bonus(hit, question, query_identifier_phrases)
                 if query_identifier_phrases:
                     compact = f"{hit.title}\n{hit.text}".casefold()
                     if any(phrase in compact for phrase in query_identifier_phrases):
@@ -894,57 +1024,9 @@ def run_query_v2(
                     }
                 )
         else:
-            raw_index_warning = str(raw_status.get("code") or "raw_index_unavailable")
-        if raw_lexical_mode == "qualified_code" and module_qualified(question):
-            # A slash-qualified module identifier is a precise, strong signal.
-            # The dedicated raw lookup wins outright over incidental wiki term
-            # overlap (for example "record" or "methods").
-            merged_items = raw_items
-        elif raw_lexical_mode == "identifier_phrase":
-            # A multi-word English identifier is the strongest recovery
-            # signal.  It leads the merged pool; curated wiki evidence from
-            # relaxed recovery is still merged afterwards so it is never
-            # starved, while incidental relaxed raw noise is dropped.
-            # Freshness is deliberately not applied here: an exact identifier
-            # query targets official feature documentation, and a recently
-            # edited wiki note on a different topic must not outrank it merely
-            # because it is newer.
-            for item in relaxed_items:
-                item["score"] = round(
-                    item["hit"].score
-                    + _authority_bonus(item["hit"], intent, effective_scope, metadata)
-                    + _title_overlap_bonus(item["hit"], question),
-                    12,
-                )
-            merged_items = raw_items + relaxed_items
-        else:
-            merged_items = relaxed_items + raw_items
-            if relaxed_items and not raw_items:
-                # Wiki-only recovery keeps the full curation bonus so an
-                # overlapping knowledge page still outranks weaker lexical
-                # neighbours.
-                for item in merged_items:
-                    item["score"] = round(
-                        item["hit"].score
-                        + _authority_bonus(item["hit"], intent, effective_scope, metadata)
-                        + _title_overlap_bonus(item["hit"], question)
-                        + _freshness_bonus(item["hit"], metadata),
-                        12,
-                    )
-            else:
-                # When raw evidence is also present, curated wiki pages compete
-                # on lexical score plus their freshness signal, while raw hits
-                # keep a bare score: a raw answer with a strong exact match
-                # must still beat a generic wiki overview, and a broad raw
-                # OR-match (clipping, quiz note) cannot silently outrank a
-                # recent wiki fix note.
-                for item in relaxed_items:
-                    item["score"] = round(
-                        item["hit"].score
-                        + _freshness_bonus(item["hit"], metadata),
-                        12,
-                    )
-        if merged_items:
+            raw_index_warning = _raw_index_warning(raw_status)
+        raw_candidate_items = _best_passage_per_page(raw_items)
+        if raw_candidate_items:
             if raw_lexical_mode != "qualified_code":
                 # Procedural-page preference: in fuzzy recovery, pages written
                 # as numbered steps receive a small structural bonus so a
@@ -952,29 +1034,29 @@ def run_query_v2(
                 # page.  The bonus is capped and derived purely from document
                 # structure, so it applies to any topic and language.
                 step_counts = _step_counts_for_pages(
-                    sorted({item["hit"].page_path for item in merged_items}),
+                    sorted({item["hit"].page_path for item in raw_candidate_items}),
                     store,
                     raw_store,
                 )
-                for item in merged_items:
+                for item in raw_candidate_items:
                     count = step_counts.get(item["hit"].page_path, 0)
                     item["score"] = round(
                         item["score"] + STEP_BONUS_MAX * min(count, STEP_COUNT_FULL) / STEP_COUNT_FULL,
                         12,
                     )
-            merged_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
+            raw_candidate_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
             selected = []
             selected_paths = set()
-            for item in merged_items:
+            for item in raw_candidate_items:
                 page_path = item["hit"].page_path
                 if page_path not in selected_paths:
                     selected.append(item)
                     selected_paths.add(page_path)
-            selected = _adaptive_expand(selected, top_k)
+            selected = _adaptive_expand(selected, top_k)[:top_k]
             selected_paths = {item["hit"].page_path for item in selected}
             hit_stats = {}
             pool_by_page = {}
-            for item in merged_items:
+            for item in raw_items:
                 page_path = item["hit"].page_path
                 pool_by_page.setdefault(page_path, []).append(item)
                 store_key = "raw" if page_path.startswith("raw/") else "active"
@@ -987,12 +1069,11 @@ def run_query_v2(
                 lexical_mode = "qualified_code"
             elif raw_lexical_mode == "identifier_phrase":
                 lexical_mode = "identifier_phrase"
-            elif raw_lexical_mode == "relaxed" or relaxed_items:
+            elif raw_lexical_mode == "raw_prefix":
+                lexical_mode = "raw_prefix"
+            elif raw_lexical_mode == "relaxed":
                 lexical_mode = "relaxed"
-            # A merged result set is a raw fallback only when the best-ranked
-            # evidence is a raw source; a curated wiki page on top means the
-            # wiki answered the question and raw evidence is supplementary.
-            raw_fallback = bool(selected) and selected[0]["hit"].source_kind == "raw"
+            raw_fallback = bool(selected) and all(item["hit"].source_kind == "raw" for item in selected)
     passages = [
         ContextPassage(
             item["hit"].passage_id,
@@ -1036,7 +1117,7 @@ def run_query_v2(
     warnings = list(dict.fromkeys([*filter(None, scope_rules), *vector_warnings, *index_warnings]))
     if raw_index_warning:
         warnings = list(dict.fromkeys([*warnings, raw_index_warning]))
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>raw_chat;fallback:active_relaxed>raw_identifier>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical_enabled": lexical_enabled, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
+    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if raw_fallback else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>raw_chat;fallback:wiki_relaxed>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical_enabled": lexical_enabled, "lexical": {"mode": lexical_mode}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
         pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"]} for item in selected]
     elapsed = (time.perf_counter() - started) * 1_000

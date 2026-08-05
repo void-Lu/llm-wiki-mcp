@@ -10,6 +10,7 @@ _CJK_RUN = re.compile(r"[一-鿿]+")
 _QUALIFIED_CODE = re.compile(r"(?<![a-z0-9_])([a-z][a-z0-9_]*)/([a-z][a-z0-9_]*)(?![a-z0-9_])", re.I)
 _MULTIWORD_RUN = re.compile(r"[a-z0-9_]+(?:\s+[a-z0-9_]+)+", re.I)
 _STOPWORDS = frozenset({"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "of", "on", "or", "the", "to", "with"})
+_RAW_PREFIX_MIN_LENGTH = 3
 
 
 def edit_distance(left: str, right: str) -> int:
@@ -64,6 +65,30 @@ def relaxed_fts_query(text: str) -> str:
     """Produce a bounded OR recovery query after a natural-language miss."""
 
     return _fts_expression(tokens(text), "OR")
+
+
+def raw_prefix_fts_query(text: str) -> str:
+    """Produce a bounded prefix query for raw-source recovery.
+
+    Raw fallback is allowed one extra lexical recovery pass for English and
+    code tokens.  Prefix matching is intentionally anchored at the beginning
+    of a token; arbitrary-substring wildcards (for example ``*term*``) would
+    make common fragments recall unrelated source passages.  CJK tokens keep
+    their exact pre-tokenised form and short Latin tokens are exact-only.
+    """
+
+    values = tokens(text)
+    clauses: list[str] = []
+    for value in values:
+        escaped = value.replace(chr(34), chr(34) * 2)
+        if re.fullmatch(r"[a-z0-9_]+", value) and len(value) >= _RAW_PREFIX_MIN_LENGTH:
+            clauses.append(f'"{escaped}"*')
+        else:
+            # Short Latin tokens and CJK tokens remain exact.  Dropping a
+            # short token would silently turn the bounded AND recovery pass
+            # into a much broader query than the caller asked for.
+            clauses.append(f'"{escaped}"')
+    return " AND ".join(clauses)
 
 
 def expanded_relaxed_fts_query(text: str, extra_terms: Iterable[str]) -> str:

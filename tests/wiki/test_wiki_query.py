@@ -161,6 +161,25 @@ def test_wiki_query_includes_project_scoped_raw_sources_when_enabled(tmp_path: P
     assert "raw/sources/manual.txt" not in [item["path"] for item in default_result["results"]]
 
 
+def test_wiki_query_reads_raw_projection_for_explicit_inclusion_and_scope(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/wiki-only.md", "Wiki Only", "curated material", type="concept")
+    raw = root / "raw/sources/file/default/projection.txt"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("raw projection sentinel", encoding="utf-8")
+    refresh_indexes(root)
+
+    default_result = wiki_query(root, "raw projection sentinel", top_k=5)
+    included_result = wiki_query(root, "raw projection sentinel", include_raw_sources=True, top_k=5)
+    raw_result = wiki_query(root, "raw projection sentinel", scope="raw", top_k=5)
+
+    assert default_result["results"] == []
+    assert [item["path"] for item in included_result["results"]] == ["raw/sources/file/default/projection.txt"]
+    assert [item["path"] for item in raw_result["results"]] == ["raw/sources/file/default/projection.txt"]
+    assert raw_result["results"][0]["source_kind"] == "raw"
+
+
 def test_wiki_query_graph_expands_by_sources_and_wikilinks(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

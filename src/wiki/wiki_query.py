@@ -263,34 +263,53 @@ def _relationship_reasons(left: str, right: str, graph: Graph) -> list[dict[str,
 
 
 def _candidate_pages(root: Path, include_raw_sources: bool = False, *, scope: str = "active") -> list[QueryCandidate]:
-    store = RetrievalIndexStore(root, scope="archive" if scope == "archive" else "active")
+    store_scope = "raw" if scope == "raw" else "archive" if scope == "archive" else "active"
+    store = RetrievalIndexStore(root, scope=store_scope)
     if store.status().get("ok"):
-        candidates = [
-            QueryCandidate(
-                path=root / str(item["path"]),
-                rel=str(item["path"]),
-                title=str(item["title"]),
-                body=str(item["body"]),
-                frontmatter={
-                    str(key): value
-                    for key, value in (item["frontmatter"] if isinstance(item["frontmatter"], dict) else {}).items()
-                },
-                source_kind="raw" if str(item["source_kind"]) == "raw_chat" else "wiki",
+        projected = list(store.page_candidates())
+        if scope == "active" and include_raw_sources:
+            raw_store = RetrievalIndexStore(root, scope="raw")
+            raw_status = raw_store.status()
+            if raw_status.get("ok") and raw_status.get("state") == "fresh":
+                projected.extend(raw_store.page_candidates())
+        candidates: list[QueryCandidate] = []
+        seen_paths: set[str] = set()
+        for item in projected:
+            relative = str(item["path"])
+            if relative in seen_paths:
+                continue
+            if scope == "archive":
+                allowed = True
+            elif scope == "raw":
+                allowed = relative.startswith("raw/sources/") and not is_codegraph_raw_path(relative)
+            else:
+                allowed = not relative.startswith("wiki/sources/") and (
+                    include_raw_sources or not relative.startswith("raw/")
+                )
+            if not allowed:
+                continue
+            seen_paths.add(relative)
+            candidates.append(
+                QueryCandidate(
+                    path=root / relative,
+                    rel=relative,
+                    title=str(item["title"]),
+                    body=str(item["body"]),
+                    frontmatter={
+                        str(key): value
+                        for key, value in (item["frontmatter"] if isinstance(item["frontmatter"], dict) else {}).items()
+                    },
+                    source_kind="raw" if str(item["source_kind"]) in {"raw", "raw_chat"} else "wiki",
+                )
             )
-            for item in store.page_candidates()
-            if scope == "archive"
-            or (
-                not str(item["path"]).startswith("wiki/sources/")
-                and (include_raw_sources or not str(item["path"]).startswith("raw/"))
-            )
-        ]
         return candidates
     # Compatibility fallback for a vault that has not received its first
     # explicit maintenance build. It is deliberately not used once a store is
     # present, so normal query traffic never walks the corpus.
-    if scope == "archive":
-        # Archive queries never scan bundles on demand.  Only a committed,
-        # explicit archive-index projection can make cold content searchable.
+    if scope in {"archive", "raw"}:
+        # Archive and raw queries never scan their source trees on demand.
+        # Only a committed projection can make those isolated corpora
+        # searchable.
         return []
     candidates: list[QueryCandidate] = []
     wiki = root / "wiki"
