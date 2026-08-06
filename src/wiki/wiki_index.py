@@ -6,13 +6,13 @@ from typing import Any
 import yaml
 
 from wiki.wiki_io import split_frontmatter
-from wiki.wiki_paths import filesystem_path
+from wiki.wiki_paths import ARCHIVES_DIR, ARCHIVES_LOG_PATH, filesystem_path
 
 _TOP_LEVEL_GROUPS = (
     ("Projects", Path("wiki/projects")),
     ("Concepts", Path("wiki/concepts")),
     ("Entities", Path("wiki/entities")),
-    ("Archives", Path("wiki/archives")),
+    ("Archives", ARCHIVES_DIR),
 )
 
 _PROJECT_GROUPS = (
@@ -95,8 +95,8 @@ def _top_level_entries(root: Path, title: str, relative_dir: Path) -> list[str]:
             entries.append(f"- [[{rel.as_posix()}|{project_dir.name}]]")
         return entries
     if title == "Archives":
-        log_path = root / "wiki" / "archives" / "log.md"
-        return ["- [[archives/log.md|Archives Log]]"] if log_path.exists() else []
+        log_path = root / ARCHIVES_LOG_PATH
+        return [f"- [[{ARCHIVES_LOG_PATH.as_posix()}|Archives Log]]"] if log_path.exists() else []
     index_path = relative_dir / "index.md"
     return [f"- [[{index_path.relative_to('wiki').as_posix()}|{title}]]"] if (root / index_path).exists() else []
 

@@ -161,6 +161,24 @@ def test_legacy_migration_preserves_date_frontmatter(tmp_path: Path) -> None:
     assert "date: 2026-07-28" in migrated_text
 
 
+def test_legacy_migration_moves_old_wiki_archives_and_removes_legacy_directory(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    legacy = root / "wiki" / "archives" / "log" / "2026" / "05" / "log-001.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("legacy archive log", encoding="utf-8")
+
+    migrated = apply_legacy_migration(root)
+
+    assert migrated["ok"] is True
+    assert not (root / "wiki" / "archives").exists()
+    archived = next(
+        (root / "archives" / "bundles").glob(
+            f"*/*/{migrated['archive_id']}/wiki/archives/log/2026/05/log-001.md"
+        )
+    )
+    assert archived.read_text(encoding="utf-8") == "legacy archive log"
+
+
 def test_legacy_migration_archives_previously_migrated_chat_sources(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     legacy = root / "raw" / "sources" / "chat" / "legacy" / "2026" / "session.md"

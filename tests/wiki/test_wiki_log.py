@@ -104,7 +104,7 @@ def test_append_log_entry_archives_oldest_half_when_exceeding_limit(tmp_path: Pa
 
     headings = read_recent_log_entries(root, limit=250)
     text = (root / "wiki/log.md").read_text(encoding="utf-8")
-    archived = sorted((root / "wiki/archives/log/2026/05").glob("log-*.md"))
+    archived = sorted((root / "archives/log/2026/05").glob("log-*.md"))
 
     # After 201 entries: 101 oldest archived (0-100), 100 kept in log (101-200)
     assert len(headings) == 100
@@ -113,9 +113,10 @@ def test_append_log_entry_archives_oldest_half_when_exceeding_limit(tmp_path: Pa
     assert archived
     assert "Question 000" in archived[0].read_text(encoding="utf-8")
     assert "Question 100" in archived[0].read_text(encoding="utf-8")
-    archive_index = root / "wiki/archives/log/index.md"
+    archive_index = root / "archives/log/index.md"
     assert archive_index.exists()
     assert utf8_size(archive_index.read_text(encoding="utf-8")) <= HARD_PAGE_BYTES
+    assert not (root / "wiki/archives").exists()
 
 
 def test_partition_rendered_units_counts_utf8_bytes_without_splitting_chinese_units():
@@ -152,6 +153,8 @@ def test_append_log_entry_archives_large_single_entry_and_keeps_summary_link(tmp
     active = (root / "wiki/log.md").read_text(encoding="utf-8")
     detail = root / result["archived"][0]
     assert "details archived" in active
+    assert f"[[{result['archived'][0]}|Full record]]" in active
+    assert "wiki/archives" not in active
     assert detail.exists()
     assert utf8_size(active) <= TARGET_PAGE_BYTES
     assert utf8_size(detail.read_text(encoding="utf-8")) <= HARD_PAGE_BYTES
@@ -174,7 +177,7 @@ def test_append_log_entry_rotates_few_long_records_on_utf8_bytes(tmp_path: Path)
         )
 
     active = (root / "wiki/log.md").read_text(encoding="utf-8")
-    archives = list((root / "wiki/archives/log").rglob("log-*.md"))
+    archives = list((root / "archives/log").rglob("log-*.md"))
     assert "First" not in active
     assert "Second" in active
     assert len(archives) == 1
@@ -205,7 +208,7 @@ def test_append_log_entry_rejects_record_that_cannot_fit_in_an_archive_page(tmp_
 def test_archive_index_never_overwrites_a_manual_paged_index(tmp_path: Path, monkeypatch):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    archive_dir = root / "wiki/archives/log"
+    archive_dir = root / "archives/log"
     archive_dir.mkdir(parents=True)
     (archive_dir / "2026-05-log-001.md").write_text("# First\n", encoding="utf-8")
     (archive_dir / "2026-05-log-002.md").write_text("# Second\n", encoding="utf-8")

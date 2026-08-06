@@ -108,6 +108,7 @@ def test_write_wiki_page_rejects_retired_source_capsule_field(tmp_path: Path):
         Path("wiki/maintenance/old.md"),
         Path("wiki/projects/alpha/sources/source.md"),
         Path("wiki/projects/alpha/objects/object.md"),
+        Path("wiki/archives/legacy.md"),
         Path("projects/alpha/wiki/objects/object.md"),
     ],
 )

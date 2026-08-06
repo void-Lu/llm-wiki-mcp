@@ -47,6 +47,7 @@ def test_create_wiki_root_creates_confirmed_directory_structure(tmp_path: Path):
         assert (root / relative).is_dir(), relative
     for relative in EXPECTED_FILES:
         assert (root / relative).is_file(), relative
+    assert not (root / "wiki/archives").exists()
 
 
 def test_create_wiki_root_preserves_existing_core_files(tmp_path: Path):
@@ -73,6 +74,8 @@ def test_create_wiki_root_writes_actionable_schema_template(tmp_path: Path):
     assert "wiki/projects/<project>/specs/" in schema
     assert "wiki/projects/<project>/plans/" in schema
     assert "wiki/index.md" in schema
+    assert "archives/bundles/<yyyy>/<mm>/<archive-id>/" in schema
+    assert "wiki/archives/" not in schema
     assert "generated: false" in schema
 
 

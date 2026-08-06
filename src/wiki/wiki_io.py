@@ -21,7 +21,6 @@ _ALLOWED_PREFIXES = (
     Path("wiki/projects"),
     Path("wiki/concepts"),
     Path("wiki/entities"),
-    Path("wiki/archives"),
 )
 
 _FORBIDDEN_PARTS = {"objects"}

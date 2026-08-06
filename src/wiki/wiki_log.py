@@ -18,6 +18,7 @@ from wiki.wiki_limits import (
     utf8_size,
 )
 from wiki.wiki_models import WikiLogEntry
+from wiki.wiki_paths import ARCHIVES_LOG_DIR, ARCHIVES_LOG_PATH
 
 _LOG_HEADING_RE = re.compile(r"^## \[([^\]]+)\] (\S+) \| (.+)$")
 _INDEX_PAGE_RE = re.compile(r"^index(?:-\d{2,})?\.md$")
@@ -95,7 +96,7 @@ def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: st
         f"## [{timestamp}] {operation} | {title}",
         f"- project: {project}",
         f"- status: {status} (details archived)",
-        f"- detail: [[{archive_rel.removeprefix('wiki/')}|Full record]]",
+        f"- detail: [[{archive_rel}|Full record]]",
         "- paths:",
         f"  - {len(entry.paths)} paths archived",
         "- sources:",
@@ -188,7 +189,7 @@ def _archive_prefix(source_log_name: str) -> str:
 
 def _write_archive_text(root: Path, timestamp: str, text: str, prefix: str) -> Path:
     year, month = _archive_month_parts_from_timestamp(timestamp)
-    archive_dir = root / "wiki" / "archives" / "log" / year / month
+    archive_dir = root / ARCHIVES_LOG_DIR / year / month
     sequence = _next_archive_sequence(archive_dir, prefix)
     archive_path = archive_dir / f"{prefix}-{sequence:03d}.md"
     _atomic_write(archive_path, text)
@@ -218,7 +219,7 @@ def _archive_month_parts_from_timestamp(timestamp: str) -> tuple[str, str]:
 
 
 def _append_archive_log(root: Path, archive_path: Path) -> None:
-    archive_log = root / "wiki" / "archives" / "log.md"
+    archive_log = root / ARCHIVES_LOG_PATH
     timestamp = _now()
     rel = archive_path.relative_to(root).as_posix()
     block = "\n".join([
@@ -238,7 +239,7 @@ def _append_archive_log(root: Path, archive_path: Path) -> None:
 
 
 def _write_archive_index(root: Path) -> None:
-    directory = root / "wiki" / "archives" / "log"
+    directory = root / ARCHIVES_LOG_DIR
     target = directory / "index.md"
     if target.exists() and not _is_generated_page(target):
         return

@@ -36,6 +36,8 @@ def test_refresh_indexes_groups_only_active_wiki_categories(tmp_path: Path):
     assert "[[projects/alpha/index.md|alpha]]" in index
     assert "[[concepts/index.md|Concepts]]" in index
     assert "[[entities/index.md|Entities]]" in index
+    assert "[[archives/log.md|Archives Log]]" in index
+    assert not (root / "wiki/archives").exists()
 
     concepts_index = (root / "wiki/concepts/index.md").read_text(encoding="utf-8")
     assert "[[suitescript/index.md|suitescript]]" in concepts_index

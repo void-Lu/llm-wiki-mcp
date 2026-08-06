@@ -28,6 +28,12 @@ def filesystem_path(path: str | Path) -> Path:
         return Path("\\\\?\\UNC\\" + value[2:])
     return Path("\\\\?\\" + value)
 
+
+ARCHIVES_DIR = Path("archives")
+ARCHIVES_LOG_DIR = ARCHIVES_DIR / "log"
+ARCHIVES_LOG_PATH = ARCHIVES_DIR / "log.md"
+
+
 TOP_LEVEL_DIRS = (
     Path("raw/sources"),
     Path("raw/sources/projects"),
@@ -71,7 +77,7 @@ DEFAULT_SCHEMA_TEXT = """# Schema
 | `researches` | `wiki/projects/<project>/researches/` | 项目调查结果、代码阅读结论、专题研究沉淀 | `true` 或 `false` |
 | `concept` / `knowledge` | `wiki/concepts/<domain>/` | 领域知识、API 参考、场景实践 | `true` 或 `false` |
 | `entity` | `wiki/entities/<entity>/` | 构建完毕的实体页面 | `true` 或 `false` |
-| `archive` | `wiki/archives/<yyyy>/<mm>/<dd>/` | 过时、废弃或超限归档的 wiki 文档；不参与索引 | `true` 或 `false` |
+| `archive` | `archives/bundles/<yyyy>/<mm>/<archive-id>/` | 过时、废弃或超限归档的 wiki 文档；不参与活动索引 | `true` 或 `false` |
 | `index` | `wiki/index.md` | 内容目录，按类别列出页面和摘要 | `true` |
 | `project_index` | `wiki/projects/<project>/index.md` | 项目内目录 | `true` |
 | `overview` | `wiki/overview.md` | 自动统计和最近日志摘要 | `true` |
@@ -108,7 +114,7 @@ tags:
 
 ## 写入与覆盖规则
 
-1. 只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/entities/<entity>/`、`wiki/archives/<yyyy>/<mm>/<dd>/`。
+1. Wiki 页面只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/entities/<entity>/`。不可变归档内容只能由归档生命周期写入 `archives/bundles/<yyyy>/<mm>/<archive-id>/`。
 2. 工具生成页只能覆盖已有 `generated: true` 页面；遇到 `generated: false` 必须停止并报告。
 3. 受控更新时保留锁定字段：`type`、`title`、`created`、来源和人工维护字段；数组字段采用去重合并。
 4. 文件名和路径段必须是 Windows 安全的单段名称：不得包含 `<>:"|?*`、控制字符、ADS 冒号、保留设备名、尾随点或空格。
@@ -185,7 +191,7 @@ DEFAULT_FILES = {
     Path("wiki/overview.md"): "---\ntype: overview\ngenerated: true\n---\n\n# Overview\n\n",
     Path("wiki/concepts/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Concepts\n\n",
     Path("wiki/entities/index.md"): "---\ntype: index\ngenerated: true\n---\n\n# Entities\n\n",
-    Path("archives/log.md"): "# Archives Log\n\n",
+    ARCHIVES_LOG_PATH: "# Archives Log\n\n",
 }
 
 
