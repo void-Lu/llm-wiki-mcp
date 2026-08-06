@@ -544,3 +544,37 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: 完成 raw scope 与 relaxed coverage 验收
+
+**Date**: 2026-08-06
+**Task**: 完成 raw scope 与 relaxed coverage 验收
+**Branch**: `v0.9.19`
+
+### Summary
+
+完成 wiki_query raw-only scope、scope=all Wiki relaxed Latin coverage 补充、跨语料融合与 fallback 契约；154 项相关测试和 ruff 通过，真实 Vault raw/all MCP 验收通过。全仓 407 passed、6 项为系统权限/其他窗口改动/既有标签契约冲突。任务已归档。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7e7d8d3` | (see git log) |
+| `ba88738` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

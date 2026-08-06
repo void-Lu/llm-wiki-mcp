@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 15
-- **Last Active**: 2026-08-05
+- **Total Sessions**: 16
+- **Last Active**: 2026-08-06
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~546 | Active |
+| `journal-1.md` | ~580 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 16 | 2026-08-06 | 完成 raw scope 与 relaxed coverage 验收 | `7e7d8d3`, `ba88738` | `v0.9.19` |
 | 15 | 2026-08-05 | 修复 wiki_query raw fallback | `87bea9f` | `v0.9.18` |
 | 14 | 2026-08-04 | 明确 CodeGraph 页面查询结论 | `ca2ce46`, `efbdcaf` | `v0.9.17` |
 | 13 | 2026-08-04 | 完成 CodeGraph 同步与任务归档 | `ca2ce46` | `v0.9.17` |
