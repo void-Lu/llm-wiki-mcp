@@ -308,6 +308,31 @@ def test_v2_coverage_keeps_primary_results_when_raw_does_not_cover_gap(tmp_path:
     assert result["pipeline"]["coverage"]["triggered"] is False
 
 
+def test_v2_all_scope_coverage_extends_wiki_relaxed_results(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/rag.md", "RAG Notes", "RAG is the curated primary answer.", type="concept")
+    raw = root / "raw/sources/references/llm.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("---\ntitle: LLM Reference\n---\n\nLLM evidence fills the missing term.", encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "RAG LLM", scope="all", retrieval_mode="lexical", top_k=2)
+
+    assert {item["path"] for item in result["results"]} == {
+        "wiki/concepts/rag.md",
+        "raw/sources/references/llm.md",
+    }
+    assert result["pipeline"]["counters"]["relaxed_fts_hits"] > 0
+    assert result["pipeline"]["coverage"] == {"uncovered_latin_terms": ["llm"], "triggered": True}
+    assert result["pipeline"]["fallback"] == {
+        "level": "raw",
+        "reasons": ["wiki_primary_missing_latin_coverage"],
+        "allowed_source_paths": ["raw/sources/references/llm.md"],
+        "added_token_usage": 0,
+    }
+
+
 def test_v2_coverage_does_not_open_raw_store_when_primary_covers_terms(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

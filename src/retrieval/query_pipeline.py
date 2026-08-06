@@ -1165,6 +1165,48 @@ def run_query_v2(
             lexical_mode = "relaxed"
             wiki_relaxed_answered = True
 
+            # ``scope=all`` may use the relaxed Wiki result as the primary
+            # answer, but it can still leave an explicit Latin term uncovered.
+            # Extend the same bounded coverage path used after strict recall;
+            # the default knowledge scope keeps its Wiki-first isolation.
+            if effective_scope == "all":
+                uncovered_latin_terms = _uncovered_latin_terms(question, selected)
+                if uncovered_latin_terms:
+                    raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, _raw_lexical_mode = _raw_recovery_candidates(
+                        root,
+                        question,
+                        project=project,
+                        filters=filters,
+                        scope="raw",
+                        extra_terms=query_extra_terms,
+                        term_variants=query_term_variants,
+                        top_k=top_k,
+                    )
+                    raw_candidate_items = [
+                        item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
+                    ]
+                    if raw_candidate_items:
+                        merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms)
+                        selected = _adaptive_expand(merged, top_k)[:top_k]
+                        selected_paths = {item["hit"].page_path for item in selected}
+                        combined_items = [*wiki_relaxed_items, *raw_candidate_items]
+                        hit_stats = {}
+                        pool_by_page = {}
+                        for item in combined_items:
+                            page_path = item["hit"].page_path
+                            pool_by_page.setdefault(page_path, []).append(item)
+                            store_key = "raw" if page_path.startswith("raw/") else "active"
+                            stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": store_key})
+                            stats["max"] = max(stats["max"], item["score"])
+                        context_items = _build_page_ordered_context(
+                            selected,
+                            store,
+                            raw_store=raw_store,
+                            hit_stats=hit_stats,
+                            pool_by_page=pool_by_page,
+                        )
+                        coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
+
     if not has_primary_recall and not wiki_relaxed_answered and effective_scope in {"knowledge", "all"}:
         raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, raw_lexical_mode = _raw_recovery_candidates(
             root,
