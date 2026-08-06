@@ -37,3 +37,46 @@ def test_apply_update_uses_redacted_writer_and_refreshes_existing_retrieval_inde
     assert "token=abc1234567890" not in text
     assert store.search_fts("central update sentinel")
     assert all("token=abc1234567890" not in str(candidate) for candidate in store.page_candidates())
+
+
+def test_preview_and_apply_append_related_page_section(tmp_path) -> None:
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\ntitle: A\ngenerated: true\n---\n\n# A\n\nold\n", encoding="utf-8")
+    related = tmp_path / "wiki/concepts/general/related.md"
+    related.write_text("---\ntype: concept\n---\n\n# Related\n", encoding="utf-8")
+    related_pages = [{"path": "wiki/concepts/general/related.md", "title": "Related"}]
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "new", related_pages=related_pages)
+
+    assert preview["ok"] is True
+    assert "## 参考来源" in preview["diff"]
+    result = apply_update(tmp_path, "wiki/concepts/general/a.md", "new", plan_id=preview["plan_id"], related_pages=related_pages)
+
+    assert result["ok"] is True
+    assert result["related_pages_skipped"] == []
+    assert "[[wiki/concepts/general/related|Related]]" in page.read_text(encoding="utf-8")
+
+
+def test_update_skips_invalid_related_pages_and_keeps_writing(tmp_path) -> None:
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\ntitle: A\n---\n\n# A\n\nold\n", encoding="utf-8")
+
+    result = apply_update(
+        tmp_path,
+        "wiki/concepts/general/a.md",
+        "new",
+        related_pages=[
+            {"path": "raw/sources/reference.txt", "title": "Raw"},
+            {"path": "wiki/concepts/general/missing.md", "title": "Missing"},
+        ],
+    )
+
+    assert result["ok"] is True
+    assert [item["reason"] for item in result["related_pages_skipped"]] == [
+        "raw_source_use_sources",
+        "not_found",
+    ]
+    assert result["warnings"]
+    assert "## 参考来源" not in page.read_text(encoding="utf-8")

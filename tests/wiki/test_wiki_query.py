@@ -204,6 +204,22 @@ def test_wiki_query_graph_expands_by_sources_and_wikilinks(tmp_path: Path):
     assert neighbor["scores"]["graph"] > 0
 
 
+def test_wiki_query_graph_expands_by_full_wiki_reference_target(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/seed.md", "Seed Page", "unique full target needle", type="concept")
+    _write(root, "wiki/concepts/neighbor.md", "Neighbor Page", "related content", type="concept")
+    seed = root / "wiki/concepts/seed.md"
+    seed.write_text(seed.read_text(encoding="utf-8").replace("unique full target needle", "unique full target needle [[wiki/concepts/neighbor]]"), encoding="utf-8")
+    refresh_indexes(root)
+
+    result = wiki_query(root, "unique full target needle", top_k=3)
+
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/neighbor.md" in paths
+    assert result["results"][paths.index("wiki/concepts/neighbor.md")]["scores"]["graph"] > 0
+
+
 def test_wiki_query_graph_uses_markdown_code_context_semantics(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

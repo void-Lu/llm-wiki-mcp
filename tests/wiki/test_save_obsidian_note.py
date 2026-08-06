@@ -124,6 +124,31 @@ def test_chat_derived_entity_requires_and_locks_chat_source(vault: Path):
     assert frontmatter["chat_sources"] == [{"source_id": "writer-session", "revision": 1, "redacted_hash": source["redacted_hash"]}]
 
 
+def test_chat_note_does_not_consume_wiki_or_raw_reference_arguments(vault: Path):
+    result = save_obsidian_note(
+        note_type="chat",
+        title="Chat note",
+        content="## User\n\n问题\n\n## Assistant\n\n回答",
+        vault_root=str(vault),
+        auto_index=False,
+        chat_metadata={
+            "session_id": "chat-writer",
+            "summary": "记录结论",
+            "decisions": ["记录"],
+            "open_questions": [],
+            "tags": [],
+        },
+        related_pages=[{"path": "wiki/concepts/related.md", "title": "Related"}],
+        sources=["raw/sources/reference.txt"],
+    )
+
+    assert result["ok"] is True
+    path = vault / str(result["path"])
+    frontmatter, body = _frontmatter_and_body(path)
+    assert "sources" not in frontmatter
+    assert "## 参考来源" not in body
+
+
 def test_unknown_knowledge_domain_returns_code(vault: Path):
     result = _save(vault, note_type="knowledge", domain="unknown-domain")
 
@@ -245,7 +270,7 @@ def test_frontmatter_fixed_fields_and_old_fields_absent(vault: Path):
     assert frontmatter["project"] == "project-a"
     assert frontmatter["author"] == "copilot"
     assert date.fromisoformat(str(frontmatter["updated_at"])) <= date.today()
-    assert "netsuite" in frontmatter["tags"]
+    assert "netsuite" not in frontmatter["tags"]
     assert "spec" in frontmatter["tags"]
     assert "custom" in frontmatter["tags"]
     assert frontmatter["related_objects"] == ["salesorder"]
@@ -285,7 +310,7 @@ def test_yaml_injection_values_stay_parseable(vault: Path):
     path = _written_path(vault, result)
     frontmatter, body = _frontmatter_and_body(path)
     assert frontmatter["topic"] == injected_title
-    assert frontmatter["tags"][2:] == injected_values
+    assert frontmatter["tags"][1:] == injected_values
     assert frontmatter["related_objects"] == injected_values
     assert frontmatter["related_script_types"] == injected_values
     assert "Body" in body
@@ -317,6 +342,38 @@ def test_no_sensitive_body_returns_zero_redactions(vault: Path):
     assert frontmatter["type"] == "researches"
     assert result["redacted_count"] == 0
     assert "普通需求说明" in body
+
+
+def test_related_pages_and_raw_sources_are_written_with_invalid_entries_skipped(vault: Path):
+    related = vault / "wiki" / "concepts" / "related.md"
+    related.parent.mkdir(parents=True)
+    related.write_text("Related", encoding="utf-8")
+    source = vault / "raw" / "sources" / "reference.txt"
+    source.parent.mkdir(parents=True)
+    source.write_text("raw", encoding="utf-8")
+
+    result = save_obsidian_note(
+        note_type="knowledge",
+        title="Reference note",
+        content="Body",
+        domain="common-errors",
+        related_pages=[
+            {"path": "wiki/concepts/related.md", "title": "Related Page"},
+            {"path": "raw/sources/reference.txt", "title": "Raw"},
+        ],
+        sources=["raw/sources/reference.txt", "wiki/concepts/related.md"],
+        vault_root=str(vault),
+        auto_index=False,
+    )
+
+    path = _written_path(vault, result)
+    frontmatter, body = _frontmatter_and_body(path)
+    assert frontmatter["sources"] == ["raw/sources/reference.txt"]
+    assert "## 参考来源" in body
+    assert "[[wiki/concepts/related|Related Page]]" in body
+    assert result["related_pages_skipped"][0]["reason"] == "raw_source_use_sources"
+    assert result["sources_skipped"][0]["reason"] == "path_not_allowed"
+    assert result["warnings"]
 
 
 def test_save_note_requires_explicit_vault_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

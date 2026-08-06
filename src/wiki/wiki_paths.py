@@ -112,6 +112,15 @@ tags:
 - `sources` 中引用 `raw/...` 时，路径必须真实存在；删除或归档 source 时应通过 `wiki_archive`/CLI admin 生命周期处理。
 - 新页面标题和摘要应能让 `wiki/index.md` 成为有效导航入口。
 
+## 参考来源
+
+Wiki 页面正文可以在末尾追加固定的 `## 参考来源` 段落，用
+`related_pages=[{"path": "wiki/...md", "title": "..."}]` 记录本次采纳的其他
+Wiki 页面；工具会校验目标存在于 `wiki/` 下并写成去掉 `.md` 扩展名的
+`[[wikilink|标题]]`。raw 文档不写入该段落，而应通过 frontmatter 的
+`sources`（仅允许存在的 `raw/sources/**` 文件）追踪；chat 历史继续使用
+`chat_derived` + `chat_sources`，不混入 Wiki 链接或 raw `sources`。
+
 ## 写入与覆盖规则
 
 1. Wiki 页面只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/entities/<entity>/`。不可变归档内容只能由归档生命周期写入 `archives/bundles/<yyyy>/<mm>/<archive-id>/`。

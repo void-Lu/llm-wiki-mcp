@@ -22,6 +22,7 @@ from app.server import (
     wiki_archive,
     wiki_restore,
     wiki_query,
+    wiki_update,
     wiki_status,
     wiki_write_note,
 )
@@ -353,3 +354,69 @@ def test_query_enforces_wall_clock_timeout(monkeypatch: pytest.MonkeyPatch, tmp_
 
 def test_write_note_requires_note_type() -> None:
     assert wiki_write_note(title="Title", content="Body")["code"] == "missing_note_type"
+
+
+def test_write_and_update_schemas_expose_related_page_arguments() -> None:
+    async def assert_schema() -> None:
+        async with Client(mcp) as client:
+            tools = {item.name: item for item in (await client.list_tools()).tools}
+            write_properties = tools["wiki_write_note"].input_schema["properties"]
+            update_properties = tools["wiki_update"].input_schema["properties"]
+            assert {"related_pages", "sources"} <= set(write_properties)
+            assert "related_pages" in update_properties
+
+    anyio.run(assert_schema)
+
+
+def test_write_note_forwards_related_pages_and_sources(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    calls: dict[str, object] = {}
+
+    def fake_writer(**kwargs: object) -> dict[str, object]:
+        calls.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr("app.server.wiki_write_note_tool", fake_writer)
+    related_pages = [{"path": "wiki/concepts/related.md", "title": "Related"}]
+    sources = ["raw/sources/reference.txt"]
+
+    result = wiki_write_note(
+        title="Title",
+        content="Body",
+        note_type="knowledge",
+        domain="common-errors",
+        related_pages=related_pages,
+        sources=sources,
+        vault="primary",
+    )
+
+    assert result == {"ok": True}
+    assert calls["related_pages"] == related_pages
+    assert calls["sources"] == sources
+    assert calls["vault_root"] == str(root)
+
+
+def test_update_forwards_related_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    calls: dict[str, object] = {}
+
+    def fake_preview(*args: object, **kwargs: object) -> dict[str, object]:
+        calls["args"] = args
+        calls.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr("app.server.run_preview_update", fake_preview)
+    related_pages = [{"path": "wiki/concepts/related.md", "title": "Related"}]
+
+    result = wiki_update(
+        page_path="wiki/concepts/page.md",
+        incoming_body="Body",
+        related_pages=related_pages,
+        vault="primary",
+    )
+
+    assert result == {"ok": True}
+    assert calls["related_pages"] == related_pages
+    assert calls["args"] == (root, "wiki/concepts/page.md", "Body", None)

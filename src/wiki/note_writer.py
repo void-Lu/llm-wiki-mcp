@@ -14,6 +14,7 @@ from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
 from wiki.wiki_paths import create_wiki_root
+from wiki.reference_section import build_reference_section, skipped_warnings, validate_raw_sources
 
 NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge", "entity", "chat"}
 PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
@@ -157,6 +158,8 @@ def save_obsidian_note(
     chat_metadata: dict[str, Any] | None = None,
     chat_derived: bool = False,
     chat_sources: list[dict[str, str]] | None = None,
+    related_pages: list[dict[str, Any]] | None = None,
+    sources: list[str] | None = None,
 ) -> dict[str, Any]:
     if vault_root is None or not str(vault_root).strip():
         return _error("missing_vault_root", "vault_root is required")
@@ -229,6 +232,13 @@ def save_obsidian_note(
 
     redacted_content = redact_sensitive_text(content)
     redacted_count = count_redactions(content, redacted_content)
+    related_pages_skipped: list[dict[str, str]] = []
+    if related_pages is not None:
+        redacted_content, related_pages_skipped = build_reference_section(root, redacted_content, related_pages)
+    valid_sources: list[str] = []
+    sources_skipped: list[dict[str, str]] = []
+    if sources is not None and not chat_derived:
+        valid_sources, sources_skipped = validate_raw_sources(root, sources)
     frontmatter = _frontmatter(note_type, title, project, domain, related_script_types, related_objects, related_scripts, tags, zentao_urls, decision_status, status)
     if chat_derived:
         frontmatter["chat_derived"] = True
@@ -237,6 +247,8 @@ def save_obsidian_note(
             for item in provenance
         ]
         frontmatter["sources"] = [item["path"] for item in provenance]
+    elif sources is not None:
+        frontmatter["sources"] = valid_sources
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
     note_text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{redacted_content}"
 
@@ -249,7 +261,7 @@ def save_obsidian_note(
     except OSError as exc:
         return _error("write_failed", str(exc))
 
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "path": relative_path.as_posix(),
         "absolute_path": str(target),
@@ -257,3 +269,14 @@ def save_obsidian_note(
         "redacted_count": redacted_count,
         "indexed": None,
     }
+    if related_pages is not None:
+        result["related_pages_skipped"] = related_pages_skipped
+    if sources is not None and not chat_derived:
+        result["sources_skipped"] = sources_skipped
+    skipped = [*related_pages_skipped, *sources_skipped]
+    if skipped:
+        result["warnings"] = [
+            *skipped_warnings("related_pages", related_pages_skipped),
+            *skipped_warnings("sources", sources_skipped),
+        ]
+    return result

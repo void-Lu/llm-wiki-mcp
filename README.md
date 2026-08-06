@@ -51,6 +51,10 @@ server 按以下顺序解析 wiki 根目录（vault）：
 2. 环境变量 `LLM_WIKI_VAULT_ROOT`
 3. 全局配置 `config.yaml` → `default_vault`
 
+旧版 NetSuite 客户端配置中可能仍出现 `netsuite-llm-wiki-mcp-server` 或
+`NETSUITE_LLM_WIKI_*` 命名；当前项目统一使用 `llm-wiki-mcp-server` 和
+`LLM_WIKI_*` 环境变量。
+
 **推荐方式**：将 vault 绝对路径存入系统环境变量 `LLM_WIKI_VAULT_ROOT`，配置文件中只使用变量引用，避免硬编码绝对路径。
 
 `config.yaml` 位于 `llm-wiki-mcp` 的平台用户配置目录（可选，环境变量优先）：
@@ -238,6 +242,18 @@ vault_root/
 5. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
 6. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑；CodeGraph 管理页只能由 `wiki_codegraph_import` 同步更新。
 7. 用 `wiki_archive`/`wiki_restore` 管理归档生命周期；purge 只保留在 CLI/admin 边界。
+
+当 `wiki_query` 返回的 citations 中有被当前结论采纳的 Wiki 页面时，将其显式
+映射为 `related_pages=[{"path": "wiki/...md", "title": "..."}]` 传给
+`wiki_write_note` 或 `wiki_update`；工具会在正文末尾生成 `## 参考来源` 和
+`[[wiki/...|标题]]`，供 Obsidian 导航和后续图扩展使用。raw citation 应单独
+放入 `wiki_write_note` 的 `sources=["raw/sources/..."]`，不要放进
+`related_pages`；chat 历史仍使用 `chat_derived` 与 `chat_sources`。
+
+`related_pages` 中的路径必须是 vault 内实际存在的 `wiki/**/*.md` 文件，title
+省略时回退到文件名；无效条目会在 `related_pages_skipped` 中报告并附 warning，
+不会阻断主写入。`wiki_write_note` 的 `sources` 同样只接受存在的
+`raw/sources/**` 文件，并在 `sources_skipped` 中报告无效条目。
 
 对于大范围本地 Markdown 搜索，可以把这个 MCP server 与 qmd 等外部工具搭配使用，但 qmd/vector search 有意不作为默认依赖或主检索路径。
 
