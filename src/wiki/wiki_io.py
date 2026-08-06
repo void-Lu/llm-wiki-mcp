@@ -99,7 +99,7 @@ def write_wiki_page(
         raise WikiWriteError("source_capsules_removed", "source capsule provenance fields are retired; use raw sources instead")
     frontmatter.setdefault("title", title)
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
-    text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{body.strip()}\n"
+    text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{strip_leading_h1(body).strip()}\n"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     original_text = f"{page.title}\n{page.frontmatter}\n{page.body}"
@@ -136,6 +136,23 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, "\n".join(lines[1:]).strip()
     frontmatter = loaded if isinstance(loaded, dict) else {}
     return frontmatter, "\n".join(lines[end + 1 :]).strip()
+
+
+def strip_leading_h1(body: str) -> str:
+    # Drop a leading markdown H1 so the writer can inject the canonical title
+    # heading from frontmatter without producing a duplicate. Only the first
+    # non-blank line is considered (must start with "# "); content headings are
+    # preserved. Returns the body unchanged when no leading H1 is present.
+    lines = body.splitlines()
+    index = 0
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index >= len(lines) or not lines[index].startswith("# "):
+        return body
+    rest = lines[index + 1 :]
+    while rest and not rest[0].strip():
+        rest.pop(0)
+    return "\n".join(rest)
 
 
 def _validate_relative_path(path: Path) -> Path:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from wiki.wiki_io import WikiWriteError, read_markdown_page, write_wiki_page
+from wiki.wiki_io import WikiWriteError, read_markdown_page, strip_leading_h1, write_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
 
@@ -187,3 +187,41 @@ def test_read_markdown_page_treats_malformed_frontmatter_as_empty(tmp_path: Path
     assert parsed.relative_path == Path("wiki/concepts/general/bad.md")
     assert parsed.frontmatter == {}
     assert parsed.title == "Bad"
+
+
+def test_strip_leading_h1_removes_leading_title_heading():
+    assert strip_leading_h1("# 标题\n\n正文") == "正文"
+    assert strip_leading_h1("# 标题\n正文") == "正文"
+    # blank lines before and after the H1 are dropped
+    assert strip_leading_h1("\n\n# 标题\n\n\n正文") == "正文"
+
+
+def test_strip_leading_h1_preserves_content_without_leading_h1():
+    assert strip_leading_h1("正文") == "正文"
+    # H2 is not an H1 and is preserved
+    assert strip_leading_h1("## 子标题\n\n正文") == "## 子标题\n\n正文"
+    # an H1 inside the content (not at the start) is preserved
+    assert strip_leading_h1("引言\n\n# 中间标题\n\n正文") == "引言\n\n# 中间标题\n\n正文"
+
+
+def test_write_wiki_page_strips_duplicate_leading_h1(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    write_wiki_page(
+        root,
+        WikiPage(
+            relative_path=Path("wiki/concepts/general/dup.md"),
+            frontmatter={"generated": True, "type": "concept"},
+            title="页面标题",
+            body="# 页面标题\n\n正文内容",
+        ),
+    )
+
+    text = (root / "wiki/concepts/general/dup.md").read_text(encoding="utf-8")
+    h1_lines = [line for line in text.splitlines() if line == "# 页面标题"]
+    assert h1_lines == ["# 页面标题"]
+    assert "正文内容" in text
+    parsed = read_markdown_page(root / "wiki/concepts/general/dup.md", root)
+    assert parsed.title == "页面标题"
+    assert "正文内容" in parsed.body

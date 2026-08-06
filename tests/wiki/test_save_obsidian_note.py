@@ -387,3 +387,19 @@ def test_save_note_requires_explicit_vault_root(monkeypatch: pytest.MonkeyPatch,
     assert result["ok"] is False
     assert result["code"] == "missing_vault_root"
     assert not (cwd_vault / "wiki").exists()
+
+
+def test_save_note_strips_duplicate_leading_h1(vault: Path):
+    result = save_obsidian_note(
+        note_type="knowledge",
+        title="去重标题",
+        content="# 去重标题\n\n正文内容",
+        domain="common-errors",
+        vault_root=str(vault),
+        auto_index=False,
+    )
+
+    path = _written_path(vault, result)
+    text = path.read_text(encoding="utf-8")
+    assert text.count("# 去重标题") == 1
+    assert "正文内容" in text

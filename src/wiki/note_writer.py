@@ -10,6 +10,7 @@ import yaml
 
 from common.redaction import count_redactions, redact_sensitive_text
 from wiki.wiki_index import refresh_indexes
+from wiki.wiki_io import strip_leading_h1
 from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
@@ -250,7 +251,7 @@ def save_obsidian_note(
     elif sources is not None:
         frontmatter["sources"] = valid_sources
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
-    note_text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{redacted_content}"
+    note_text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{strip_leading_h1(redacted_content)}"
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
