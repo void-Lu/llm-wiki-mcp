@@ -24,3 +24,4 @@ src/__pycache__
 src/llm_wiki_mcp.egg-info
 tests/__pycache__
 tests/fixtures
+build

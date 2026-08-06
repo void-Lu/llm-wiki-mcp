@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -25,6 +26,12 @@ def test_repository_mcp_config_has_no_absolute_paths():
         return
 
     text = mcp_json.read_text(encoding="utf-8")
+    config = json.loads(text)
+    servers = config.get("servers")
+    # .vscode/ is ignored and some local workspaces keep an empty placeholder;
+    # README.md is the tracked source of truth for the copyable example.
+    if not isinstance(servers, dict) or not servers:
+        return
     assert "C:\\" not in text and "D:\\" not in text and "F:\\" not in text
     # vault root 与 server 安装目录都通过环境变量引用传入，不硬编码绝对路径
     assert "${env:LLM_WIKI_VAULT_ROOT}" in text
@@ -71,6 +78,10 @@ def test_installation_docs_prefer_uv_commands():
     assert "uv run pytest" in readme
     assert '"command": "uv"' in readme
     assert '"command": "llm-wiki-mcp-server"' not in readme
+    assert '"llm-wiki-mcp-server"' in readme
+    assert "netsuite-llm-wiki-mcp-server" in readme
+    assert "NETSUITE_LLM_WIKI_*" in readme
+    assert "LLM_WIKI_VAULT_ROOT" in readme
 
     assert "uv sync --extra dev" in claude
     assert "命令为 `uv run pytest tests/<package>/test_<module>.py`" in claude

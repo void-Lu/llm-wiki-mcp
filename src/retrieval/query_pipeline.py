@@ -8,7 +8,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, cast
 
 from retrieval.context_packer import ContextPassage, estimate_tokens, pack_context
 from codegraph.codegraph_policy import is_codegraph_raw_path, is_project_code_page
@@ -149,13 +149,15 @@ def _query_expansion(
 
     title_words: set[str] = set()
     for page in store.page_candidates():
-        frontmatter = page.get("frontmatter") if isinstance(page.get("frontmatter"), dict) else {}
+        raw_frontmatter = page.get("frontmatter")
+        frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, dict) else {}
         if not _project_page_allowed(frontmatter, project):
             continue
         title_words.update(tokens(str(page.get("title") or "")))
     if raw_store is not None:
         for page in raw_store.page_candidates():
-            frontmatter = page.get("frontmatter") if isinstance(page.get("frontmatter"), dict) else {}
+            raw_frontmatter = page.get("frontmatter")
+            frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, dict) else {}
             if not _project_page_allowed(frontmatter, project):
                 continue
             title_words.update(tokens(str(page.get("title") or "")))
@@ -934,21 +936,26 @@ def run_query_v2(
     except RetrievalIndexError as exc:
         fts = []
         status = {**status, "code": exc.code}
-    allowed_vector_paths = {
-        str(item["path"])
-        for item in store.page_candidates()
-        if _project_page_allowed(item.get("frontmatter") if isinstance(item.get("frontmatter"), dict) else {}, project)
-        and _filters_allow_page(
-            item.get("frontmatter") if isinstance(item.get("frontmatter"), dict) else {},
+    allowed_vector_paths: set[str] = set()
+    for item in store.page_candidates():
+        frontmatter = item.get("frontmatter")
+        if not isinstance(frontmatter, dict):
+            frontmatter = {}
+        if not _project_page_allowed(frontmatter, project):
+            continue
+        if not _filters_allow_page(
+            frontmatter,
             str(item.get("source_kind") or ""),
             filters,
-        )
-        and _eligible(
+        ):
+            continue
+        if not _eligible(
             PassageHit("", str(item["path"]), str(item["title"]), (), "", 0.0, str(item.get("corpus") or "active"), str(item.get("authority") or ""), str(item.get("source_kind") or "")),
             metadata,
             scope=effective_scope,
-        )
-    }
+        ):
+            continue
+        allowed_vector_paths.add(str(item["path"]))
     vector, vector_warnings = (
         _vector_hits(root, question, embedding, scope=effective_scope, allowed_paths=allowed_vector_paths)
         if retrieval_mode != "lexical" and effective_scope != "raw"
@@ -1294,7 +1301,27 @@ def run_query_v2(
         warnings = list(dict.fromkeys([*warnings, raw_index_warning]))
     pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if contains_raw else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>raw_chat;fallback:wiki_relaxed>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical_enabled": lexical_enabled, "lexical": {"mode": lexical_mode}, "coverage": {"uncovered_latin_terms": uncovered_latin_terms, "triggered": coverage_fallback}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
     if debug:
-        pipeline["debug"] = [{"passage_id": item["hit"].passage_id, "path": item["hit"].page_path, "fts_rank": item["fts_rank"], "vector_rank": item["vector_rank"], "rrf": item["rrf"], "graph": item["graph_score"], "graph_reasons": item["graph_reasons"], "exact_match": item["exact"], "final_score": item["score"], "coverage_terms": item.get("coverage_terms", []), "coverage_ratio": item.get("coverage_ratio"), "source_local_rank": item.get("source_local_rank"), "source_local_rrf": item.get("source_local_rrf"), "fusion_score": item.get("fusion_score"), "fusion_source": item.get("fusion_source"), "fusion_local_position": item.get("fusion_local_position")}]
+        pipeline["debug"] = [
+            {
+                "passage_id": (hit := cast(PassageHit, item["hit"])).passage_id,
+                "path": hit.page_path,
+                "fts_rank": item["fts_rank"],
+                "vector_rank": item["vector_rank"],
+                "rrf": item["rrf"],
+                "graph": item["graph_score"],
+                "graph_reasons": item["graph_reasons"],
+                "exact_match": item["exact"],
+                "final_score": item["score"],
+                "coverage_terms": item.get("coverage_terms", []),
+                "coverage_ratio": item.get("coverage_ratio"),
+                "source_local_rank": item.get("source_local_rank"),
+                "source_local_rrf": item.get("source_local_rrf"),
+                "fusion_score": item.get("fusion_score"),
+                "fusion_source": item.get("fusion_source"),
+                "fusion_local_position": item.get("fusion_local_position"),
+            }
+            for item in selected
+        ]
     elapsed = (time.perf_counter() - started) * 1_000
     if telemetry is None or telemetry.enabled:
         QueryTelemetry(root).record(question=question, scope=scope, project=project, passage_ids=[item["hit"].passage_id for item in selected], fallback_level=str(fallback_payload["level"]), token_count=int(packed["budget"]["used"]), latency_ms=elapsed, retention_days=(telemetry.retention_days if telemetry else 90))

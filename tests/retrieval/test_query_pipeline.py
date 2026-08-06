@@ -1310,7 +1310,7 @@ def test_v2_raw_content_never_enters_vector_records(tmp_path: Path) -> None:
 
     records = wiki_query_module.vector_index_records(root)
 
-    assert all("vector-leak" not in record["text"] for record in records)
+    assert all("vector-leak" not in record.text for record in records)
 
 
 def test_v2_adds_vector_only_passages_without_scanning_markdown(tmp_path: Path, monkeypatch) -> None:

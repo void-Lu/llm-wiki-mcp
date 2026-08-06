@@ -82,7 +82,7 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 #### VS Code / GitHub Copilot（推荐）
 
-在项目根目录创建 `.vscode/mcp.json`（[本仓库已提供](.vscode/mcp.json)）：
+在项目根目录创建 `.vscode/mcp.json`（`.vscode/` 为本地客户端配置目录，不随发行包提交）：
 
 ```json
 {

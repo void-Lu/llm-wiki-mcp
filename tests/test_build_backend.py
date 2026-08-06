@@ -97,8 +97,15 @@ def test_wheel_embeds_revision_and_imports_without_git_metadata(
     wheel = next(output_dir.glob("*.whl"))
     with zipfile.ZipFile(wheel) as archive:
         build_info = archive.read("_build_info.py").decode("utf-8")
+        entry_points_name = next(
+            name for name in archive.namelist() if name.endswith(".dist-info/entry_points.txt")
+        )
+        entry_points = archive.read(entry_points_name).decode("utf-8")
     assert f'REVISION = "{FULL_REVISION}"' in build_info
     assert "DIRTY = False" in build_info
+    assert "llm-wiki-mcp = app.cli:main" in entry_points
+    assert "llm-wiki-mcp-server = app.server:main" in entry_points
+    assert "netsuite-llm-wiki-mcp" not in entry_points
 
     code = (
         "import json,sys;"
