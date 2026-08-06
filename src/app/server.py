@@ -171,7 +171,7 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
     return attach_warnings(status, resolution.warnings)
 
 
-QueryScope = Literal["auto", "knowledge", "history", "all", "archive"]
+QueryScope = Literal["auto", "knowledge", "history", "all", "archive", "raw"]
 _SAFE_EXPANSION = re.compile(r"^[a-z0-9_\-/\.\s]+$")
 
 
@@ -267,8 +267,8 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     with ``expansion_terms`` set to the mapping so the relaxed recovery can
     reach documents that use different vocabulary.
     """
-    if scope not in {"auto", "knowledge", "history", "all", "archive"}:
-        return {"ok": False, "code": "invalid_scope", "error": "scope must be auto, knowledge, history, all, or archive"}
+    if scope not in {"auto", "knowledge", "history", "all", "archive", "raw"}:
+        return {"ok": False, "code": "invalid_scope", "error": "scope must be auto, knowledge, history, all, archive, or raw"}
     if not question:
         return {"ok": False, "code": "missing_question", "error": "question is required"}
     if top_k < 1 or top_k > 40:

@@ -175,6 +175,45 @@ def test_mcp_client_protocol_calls_status_and_query(monkeypatch: pytest.MonkeyPa
     anyio.run(assert_protocol_calls)
 
 
+def test_mcp_query_schema_accepts_raw_scope_and_forwards_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, _ = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    calls: dict[str, object] = {}
+
+    def fake_run_query(root: Path, question: str, **kwargs: object) -> dict[str, object]:
+        calls.update(kwargs)
+        return {
+            "ok": True,
+            "question": question,
+            "scope": kwargs["scope"],
+            "results": [{"path": "raw/sources/references/raw.md", "source_kind": "raw"}],
+        }
+
+    monkeypatch.setattr("app.server.run_query_v2", fake_run_query)
+
+    async def assert_protocol_contract() -> None:
+        async with Client(mcp) as client:
+            tool = next(item for item in (await client.list_tools()).tools if item.name == "wiki_query")
+            scope_schema = tool.input_schema["properties"]["scope"]
+            assert "raw" in scope_schema["enum"]
+            query_result = await client.call_tool("wiki_query", {"vault": "primary", "question": "raw", "scope": "raw"})
+            assert query_result.is_error is False
+            assert _tool_result_payload(query_result)["scope"] == "raw"
+
+    anyio.run(assert_protocol_contract)
+    assert calls["scope"] == "raw"
+
+
+def test_wiki_query_rejects_invalid_scope() -> None:
+    payload = wiki_query(question="raw", scope="unsupported")  # type: ignore[arg-type]
+
+    assert payload == {
+        "ok": False,
+        "code": "invalid_scope",
+        "error": "scope must be auto, knowledge, history, all, archive, or raw",
+    }
+
+
 def test_public_query_schema_has_logical_vault_and_no_runtime_overrides() -> None:
     parameters = inspect.signature(wiki_query).parameters
     assert {"vault", "vault_root", "vaultRoot", "scope", "project", "filters", "top_k"} <= set(parameters)

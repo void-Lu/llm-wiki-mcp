@@ -35,8 +35,12 @@ def decide_fallback(
 ) -> FallbackDecision:
     """Choose the minimum additional evidence needed for a query.
 
-    Raw evidence is opt-in by this policy only.  History passages are a
-    separate corpus choice and never pass through this function.
+    Raw evidence is opt-in by this policy only.  Query V2 also has one narrow,
+    observable exception for primary Wiki passages missing Latin-term
+    coverage; that path uses its own ``wiki_primary_missing_latin_coverage``
+    reason and never compares raw BM25 values with active ranking scores.
+    History passages are a separate corpus choice and never pass through this
+    function.
     """
     reasons: list[str] = []
     if intent == "exact_evidence":

@@ -1,7 +1,9 @@
 from pathlib import Path
 
-from retrieval.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
-from retrieval.retrieval_index import RetrievalIndexStore
+from retrieval.query_pipeline import QueryFilters, _merge_coverage_items, _uncovered_latin_terms, legacy_response_from_v2, run_query_v2
+from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
+import retrieval.query_pipeline as query_pipeline_module
+from runtime.runtime_config import EmbeddingSettings
 import wiki.wiki_query as wiki_query_module
 from wiki.wiki_io import write_wiki_page
 from wiki.wiki_models import WikiPage
@@ -52,6 +54,54 @@ def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None
     assert result["context_pack"]["passages"][0]["content"]
     assert result["pipeline"]["corpus"] == "active"
     assert result["pipeline"]["authority"] == "active:formal>project>raw_chat;fallback:wiki_relaxed>raw"
+
+
+def test_v2_raw_scope_is_raw_only_and_excludes_codegraph_raw(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/active.md", "Active", "raw scope sentinel", type="concept")
+    raw = root / "raw/sources/references/raw-scope.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("---\ntitle: Raw Scope\n---\n\nraw scope sentinel", encoding="utf-8")
+    codegraph = root / "raw/sources/projects/demo/codegraph/raw-scope.md"
+    codegraph.parent.mkdir(parents=True)
+    codegraph.write_text("---\ntitle: CodeGraph Raw\n---\n\nraw scope sentinel", encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "raw scope sentinel", scope="raw", retrieval_mode="lexical", top_k=5)
+
+    assert [item["path"] for item in result["results"]] == ["raw/sources/references/raw-scope.md"]
+    assert all(item["source_kind"] == "raw" for item in result["results"])
+    assert result["pipeline"]["fallback"] == {
+        "level": "none",
+        "reasons": [],
+        "allowed_source_paths": [],
+        "added_token_usage": 0,
+    }
+
+
+def test_v2_raw_scope_skips_vector_and_graph_stages(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/references/raw-only.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("---\ntitle: Raw Only\n---\n\nraw-only stage sentinel", encoding="utf-8")
+    refresh_indexes(root)
+
+    def fail_vector(*_args, **_kwargs):
+        raise AssertionError("raw scope must not load vector provider or index")
+
+    def fail_graph(*_args, **_kwargs):
+        raise AssertionError("raw scope must not expand Wiki graph")
+
+    monkeypatch.setattr(query_pipeline_module, "_vector_hits", fail_vector)
+    monkeypatch.setattr(query_pipeline_module, "_graph_expand", fail_graph)
+
+    result = run_query_v2(root, "raw-only stage sentinel", scope="raw", retrieval_mode="hybrid")
+
+    assert result["results"][0]["path"] == "raw/sources/references/raw-only.md"
+    assert result["pipeline"]["counters"]["vector_hits"] == 0
+    assert result["pipeline"]["counters"]["graph_hits"] == 0
 
 
 def test_legacy_adapter_reuses_v2_selected_context_passages(tmp_path: Path) -> None:
@@ -182,6 +232,158 @@ def test_v2_expansion_suggestions_stay_empty_when_primary_recall_exists(tmp_path
     assert result["ok"] is True
     assert result["results"]
     assert result["expansion_suggestions"] == []
+
+
+def test_uncovered_latin_terms_only_reports_missing_selected_passage_tokens() -> None:
+    selected = [
+        {
+            "hit": PassageHit("p1", "wiki/concepts/invoice.md", "Invoice", (), "invoice approval", 1.0, "knowledge", "high", "concept")
+        }
+    ]
+
+    assert _uncovered_latin_terms("invoice RAG 和 LLM", selected) == ["rag", "llm"]
+    assert _uncovered_latin_terms("知识检索", selected) == []
+
+
+def test_v2_coverage_recovery_merges_raw_evidence_when_primary_misses_latin_term(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice.md", "Invoice", "invoice approval is documented here", type="concept")
+    raw = root / "raw/sources/references/rag.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("---\ntitle: RAG Reference\n---\n\nRAG evidence complements invoice retrieval.", encoding="utf-8")
+    refresh_indexes(root)
+    active_hit = RetrievalIndexStore(root).search_fts("invoice")[0]
+
+    monkeypatch.setattr(
+        query_pipeline_module,
+        "_vector_hits",
+        lambda *_args, **_kwargs: ({active_hit.passage_id: (1, 0.99)}, []),
+    )
+    result = run_query_v2(
+        root,
+        "invoice RAG",
+        top_k=2,
+        embedding=EmbeddingSettings(enabled=True),
+        retrieval_mode="hybrid",
+    )
+
+    assert {item["path"] for item in result["results"]} == {
+        "wiki/concepts/invoice.md",
+        "raw/sources/references/rag.md",
+    }
+    assert result["pipeline"]["fallback"] == {
+        "level": "raw",
+        "reasons": ["wiki_primary_missing_latin_coverage"],
+        "allowed_source_paths": ["raw/sources/references/rag.md"],
+        "added_token_usage": 0,
+    }
+    assert result["pipeline"]["coverage"]["uncovered_latin_terms"] == ["rag"]
+
+
+def test_v2_coverage_keeps_primary_results_when_raw_does_not_cover_gap(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice.md", "Invoice", "invoice approval is documented here", type="concept")
+    raw = root / "raw/sources/references/unrelated.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("---\ntitle: Unrelated\n---\n\nOnly unrelated evidence.", encoding="utf-8")
+    refresh_indexes(root)
+    active_hit = RetrievalIndexStore(root).search_fts("invoice")[0]
+    monkeypatch.setattr(
+        query_pipeline_module,
+        "_vector_hits",
+        lambda *_args, **_kwargs: ({active_hit.passage_id: (1, 0.99)}, []),
+    )
+
+    result = run_query_v2(
+        root,
+        "invoice RAG",
+        embedding=EmbeddingSettings(enabled=True),
+        retrieval_mode="hybrid",
+    )
+
+    assert [item["path"] for item in result["results"]] == ["wiki/concepts/invoice.md"]
+    assert result["pipeline"]["fallback"]["level"] == "none"
+    assert result["pipeline"]["coverage"]["triggered"] is False
+
+
+def test_v2_coverage_does_not_open_raw_store_when_primary_covers_terms(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice.md", "Invoice", "invoice approval is documented here", type="concept")
+    refresh_indexes(root)
+
+    original_status = RetrievalIndexStore.status
+
+    def reject_raw_status(self: RetrievalIndexStore) -> dict[str, object]:
+        if self.scope == "raw":
+            raise AssertionError("covered primary terms must not open the raw store")
+        return original_status(self)
+
+    monkeypatch.setattr(RetrievalIndexStore, "status", reject_raw_status)
+    result = run_query_v2(root, "invoice approval", retrieval_mode="lexical")
+
+    assert [item["path"] for item in result["results"]] == ["wiki/concepts/invoice.md"]
+    assert result["pipeline"]["coverage"] == {"uncovered_latin_terms": [], "triggered": False}
+
+
+def test_v2_cjk_only_query_does_not_open_raw_store(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/knowledge.md", "知识检索", "知识检索结果来自已索引的知识库。", type="concept")
+    refresh_indexes(root)
+
+    original_status = RetrievalIndexStore.status
+
+    def reject_raw_status(self: RetrievalIndexStore) -> dict[str, object]:
+        if self.scope == "raw":
+            raise AssertionError("CJK-only queries must not open the raw store")
+        return original_status(self)
+
+    monkeypatch.setattr(RetrievalIndexStore, "status", reject_raw_status)
+    result = run_query_v2(root, "知识检索", retrieval_mode="lexical")
+
+    assert result["pipeline"]["coverage"] == {"uncovered_latin_terms": [], "triggered": False}
+
+
+def test_v2_raw_scope_index_unavailable_uses_structured_index_response(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/references/raw-only.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("# Raw Only\n\nraw scope index marker", encoding="utf-8")
+    refresh_indexes(root)
+    RetrievalIndexStore(root, scope="raw").path.unlink()
+
+    result = run_query_v2(root, "raw scope index marker", scope="raw", retrieval_mode="lexical")
+
+    assert result["ok"] is True
+    assert result["code"] == "index_missing"
+    assert result["results"] == []
+    assert result["pipeline"]["fallback"]["level"] == "none"
+
+
+def test_coverage_fusion_uses_raw_source_rank_not_bm25_absolute_value() -> None:
+    active = {
+        "hit": PassageHit("a", "wiki/concepts/active.md", "Active", (), "active evidence", 1.0, "knowledge", "high", "concept"),
+        "score": 4.0,
+    }
+    raw_first = {
+        "hit": PassageHit("r1", "raw/sources/references/first.md", "RAG first", (), "rag evidence", 100.0, "raw", "low", "raw"),
+        "score": 100.0,
+    }
+    raw_second = {
+        "hit": PassageHit("r2", "raw/sources/references/second.md", "RAG second", (), "rag evidence", 1.0, "raw", "low", "raw"),
+        "score": 1.0,
+    }
+    baseline = _merge_coverage_items([active], [raw_first, raw_second], ["rag"])
+
+    raw_first["score"] = 10_000.0
+    raw_second["score"] = 2.0
+    changed_magnitude = _merge_coverage_items([active], [raw_first, raw_second], ["rag"])
+
+    assert [item["hit"].page_path for item in changed_magnitude] == [item["hit"].page_path for item in baseline]
 
 
 def test_v2_excludes_retired_source_namespace_even_when_legacy_files_remain(tmp_path: Path) -> None:
