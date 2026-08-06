@@ -15,6 +15,7 @@ from wiki.wiki_limits import (
     TARGET_PAGE_BYTES,
     partition_rendered_units,
     render_units,
+    split_text_by_utf8,
     utf8_size,
 )
 from wiki.wiki_models import WikiLogEntry
@@ -22,6 +23,8 @@ from wiki.wiki_paths import ARCHIVES_LOG_DIR, ARCHIVES_LOG_PATH
 
 _LOG_HEADING_RE = re.compile(r"^## \[([^\]]+)\] (\S+) \| (.+)$")
 _INDEX_PAGE_RE = re.compile(r"^index(?:-\d{2,})?\.md$")
+_ARCHIVE_HEADER = "---\ntype: log_archive\ngenerated: true\narchived: true\n---\n\n# Log archive"
+_ARCHIVE_NAVIGATION_INDEX = "archives/log/index.md"
 
 
 def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, object]:
@@ -34,18 +37,18 @@ def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, o
     preamble, blocks = _read_log_blocks(log_path, "# Log")
     archived_paths: list[Path] = []
 
-    if utf8_size(_join_log_blocks(preamble, [block])) > TARGET_PAGE_BYTES:
-        detail = _render_archive_detail(block)
-        if utf8_size(detail) > HARD_PAGE_BYTES:
+    if utf8_size(_join_log_blocks(preamble, [block])) > _archive_target_bytes():
+        try:
+            detail_paths = _write_archive_document(root, timestamp, [block], prefix="log")
+        except ValueError:
             return {
                 "ok": False,
                 "code": "log_entry_too_large",
                 "error": "log entry cannot fit into a bounded archive page",
                 "path": "wiki/log.md",
             }
-        detail_path = _write_archive_text(root, timestamp, detail, prefix="log")
-        archived_paths.append(detail_path)
-        block = _render_archive_summary(entry, timestamp, detail_path.relative_to(root).as_posix())
+        archived_paths.extend(detail_paths)
+        block = _render_archive_summary(entry, timestamp, detail_paths[0].relative_to(root).as_posix())
 
     next_blocks = [*blocks, block]
     keep, overflow = _rotate_blocks(preamble, next_blocks)
@@ -106,7 +109,7 @@ def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: st
 
 def _render_archive_detail(block: str) -> str:
     return render_units(
-        "---\ntype: log_archive\ngenerated: true\narchived: true\n---\n\n# Log archive",
+        _ARCHIVE_HEADER,
         [block],
     )
 
@@ -127,7 +130,7 @@ def _read_log_blocks(log_path: Path, default_preamble: str) -> tuple[str, list[s
 def _rotate_blocks(preamble: str, blocks: list[str]) -> tuple[list[str], list[str]]:
     """Move only oldest whole blocks until both active limits are satisfied."""
 
-    if len(blocks) <= MAX_LOG_ENTRIES and utf8_size(_join_log_blocks(preamble, blocks)) <= TARGET_PAGE_BYTES:
+    if len(blocks) <= MAX_LOG_ENTRIES and utf8_size(_join_log_blocks(preamble, blocks)) <= _archive_target_bytes():
         return blocks, []
 
     if len(blocks) > MAX_LOG_ENTRIES:
@@ -136,7 +139,7 @@ def _rotate_blocks(preamble: str, blocks: list[str]) -> tuple[list[str], list[st
     else:
         keep = list(blocks)
         overflow = []
-    while keep and utf8_size(_join_log_blocks(preamble, keep)) > TARGET_PAGE_BYTES:
+    while keep and utf8_size(_join_log_blocks(preamble, keep)) > _archive_target_bytes():
         overflow.append(keep.pop(0))
     return keep, overflow
 
@@ -171,15 +174,14 @@ def _write_archived_log_blocks(root: Path, source_log_name: str, blocks: list[st
         grouped[_archive_month_parts(block)].append(block)
     written: list[Path] = []
     for (year, month), group in sorted(grouped.items()):
-        header = "---\ntype: log_archive\ngenerated: true\narchived: true\n---\n\n# Log archive"
-        pages, oversized = partition_rendered_units(group, header, target_bytes=TARGET_PAGE_BYTES)
-        for page_blocks in pages:
-            written.append(_write_archive_text(root, f"{year}-{month}-01T00:00:00Z", render_units(header, page_blocks), prefix=_archive_prefix(source_log_name)))
-        for block in oversized:
-            detail = render_units(header, [block])
-            if utf8_size(detail) > HARD_PAGE_BYTES:
-                raise ValueError("archived log entry cannot fit into a bounded page")
-            written.append(_write_archive_text(root, f"{year}-{month}-01T00:00:00Z", detail, prefix=_archive_prefix(source_log_name)))
+        written.extend(
+            _write_archive_document(
+                root,
+                f"{year}-{month}-01T00:00:00Z",
+                group,
+                prefix=_archive_prefix(source_log_name),
+            )
+        )
     return written
 
 
@@ -187,13 +189,96 @@ def _archive_prefix(source_log_name: str) -> str:
     return "log" if source_log_name == "wiki-log" else source_log_name
 
 
-def _write_archive_text(root: Path, timestamp: str, text: str, prefix: str) -> Path:
+def _write_archive_document(
+    root: Path,
+    timestamp: str,
+    units: list[str],
+    *,
+    prefix: str,
+    header: str = _ARCHIVE_HEADER,
+) -> list[Path]:
     year, month = _archive_month_parts_from_timestamp(timestamp)
     archive_dir = root / ARCHIVES_LOG_DIR / year / month
+    target_bytes = _archive_target_bytes()
+    placeholder = _archive_navigation_placeholder(prefix, year, month)
+    page_units = _partition_archive_units(units, header, placeholder, target_bytes)
     sequence = _next_archive_sequence(archive_dir, prefix)
-    archive_path = archive_dir / f"{prefix}-{sequence:03d}.md"
-    _atomic_write(archive_path, text)
-    return archive_path
+    paths = [archive_dir / f"{prefix}-{sequence + index:03d}.md" for index in range(len(page_units))]
+    total = len(paths)
+    contents: dict[Path, str] = {}
+    for index, (path, page) in enumerate(zip(paths, page_units, strict=True), start=1):
+        footer = _archive_navigation_footer(prefix, year, month, sequence, index, total)
+        rendered = render_units(header, page, footer)
+        if utf8_size(rendered) > target_bytes or utf8_size(rendered) > HARD_PAGE_BYTES:
+            raise ValueError("archived Markdown page cannot fit into a bounded page")
+        contents[path] = rendered
+    _atomic_write_many(contents)
+    return paths
+
+
+def _write_archive_text(root: Path, timestamp: str, text: str, prefix: str) -> Path:
+    """Write a legacy pre-rendered archive text, preserving its old API."""
+
+    year, month = _archive_month_parts_from_timestamp(timestamp)
+    placeholder = _archive_navigation_placeholder(prefix, year, month)
+    if utf8_size(render_units("", [text], placeholder)) > _archive_target_bytes():
+        raise ValueError("archive text was split into multiple pages")
+    paths = _write_archive_document(root, timestamp, [text], prefix=prefix, header="")
+    return paths[0]
+
+
+def _partition_archive_units(units: list[str], header: str, footer: str, target_bytes: int) -> list[list[str]]:
+    pages: list[list[str]] = []
+    current: list[str] = []
+    for unit in units:
+        if utf8_size(render_units(header, [unit], footer)) > target_bytes:
+            if current:
+                pages.append(current)
+                current = []
+            pages.extend([[chunk] for chunk in split_text_by_utf8(unit, header, footer, target_bytes)])
+            continue
+        candidate = [*current, unit]
+        if current and utf8_size(render_units(header, candidate, footer)) > target_bytes:
+            pages.append(current)
+            current = []
+        current.append(unit)
+    if current:
+        pages.append(current)
+    return pages
+
+
+def _archive_target_bytes() -> int:
+    return min(TARGET_PAGE_BYTES, HARD_PAGE_BYTES)
+
+
+def _archive_navigation_placeholder(prefix: str, year: str, month: str) -> str:
+    return " · ".join([
+        f"← [[archives/log/{year}/{month}/{prefix}-999999.md|Previous volume]]",
+        f"[[{_ARCHIVE_NAVIGATION_INDEX}|Archive index]]",
+        f"[[archives/log/{year}/{month}/{prefix}-999999.md|Next volume]] →",
+    ])
+
+
+def _archive_navigation_footer(
+    prefix: str,
+    year: str,
+    month: str,
+    first_sequence: int,
+    number: int,
+    total: int,
+) -> str:
+    links = [f"[[{_ARCHIVE_NAVIGATION_INDEX}|Archive index]]"]
+    current_sequence = first_sequence + number - 1
+    if number > 1:
+        links.insert(
+            0,
+            f"← [[archives/log/{year}/{month}/{prefix}-{current_sequence - 1:03d}.md|Previous volume]]",
+        )
+    if number < total:
+        links.append(
+            f"[[archives/log/{year}/{month}/{prefix}-{current_sequence + 1:03d}.md|Next volume]] →"
+        )
+    return " · ".join(links)
 
 
 def _next_archive_sequence(archive_dir: Path, prefix: str) -> int:
@@ -243,15 +328,20 @@ def _write_archive_index(root: Path) -> None:
     target = directory / "index.md"
     if target.exists() and not _is_generated_page(target):
         return
+    if any(
+        path != target and _INDEX_PAGE_RE.match(path.name) and not _is_generated_page(path)
+        for path in directory.glob("index-*.md")
+    ):
+        return
     entries = []
     if directory.exists():
         for path in sorted(directory.rglob("*.md")):
             if _INDEX_PAGE_RE.match(path.name):
                 continue
-            rel = path.relative_to(directory).as_posix()
+            rel = path.relative_to(root).as_posix()
             entries.append(f"- [[{rel}|{path.stem}]]")
     base_header = "---\ntype: index\ngenerated: true\nnavigation: true\n---\n\n# Log archives"
-    pages, oversized = partition_rendered_units(entries or ["- 无"], base_header, _index_footer_placeholder(), TARGET_PAGE_BYTES)
+    pages, oversized = partition_rendered_units(entries or ["- 无"], base_header, _index_footer_placeholder(), _archive_target_bytes())
     if oversized:
         raise ValueError("archive index entry cannot fit into a bounded page")
     pages = pages or [["- 无"]]
@@ -259,7 +349,10 @@ def _write_archive_index(root: Path) -> None:
     for number, units in enumerate(pages, 1):
         filename = "index.md" if number == 1 else f"index-{number:02d}.md"
         header = base_header if len(pages) == 1 else f"{base_header}\n\nPage {number}/{len(pages)}"
-        contents[directory / filename] = render_units(header, units, _index_footer(number, len(pages)))
+        rendered = render_units(header, units, _index_footer(number, len(pages)))
+        if utf8_size(rendered) > _archive_target_bytes() or utf8_size(rendered) > HARD_PAGE_BYTES:
+            raise ValueError("archive index cannot fit into a bounded page")
+        contents[directory / filename] = rendered
     if any(path.exists() and not _is_generated_page(path) for path in contents):
         return
     _atomic_write_many(contents)
@@ -269,16 +362,18 @@ def _write_archive_index(root: Path) -> None:
 
 
 def _index_footer_placeholder() -> str:
-    return "← [[index-9999.md|Previous]] · [[index-9999.md|Next]]"
+    index_pages = f"{_ARCHIVE_NAVIGATION_INDEX[:-3]}-9999.md"
+    return f"← [[{index_pages}|Previous]] · [[{_ARCHIVE_NAVIGATION_INDEX}|Archive index]] · [[{index_pages}|Next]]"
 
 
 def _index_footer(number: int, total: int) -> str:
     links = []
     if number > 1:
-        previous = "index.md" if number == 2 else f"index-{number - 1:02d}.md"
+        previous = _ARCHIVE_NAVIGATION_INDEX if number == 2 else f"archives/log/index-{number - 1:02d}.md"
         links.append(f"← [[{previous}|Previous]]")
     if number < total:
-        links.append(f"[[index-{number + 1:02d}.md|Next]] →")
+        next_page = f"archives/log/index-{number + 1:02d}.md"
+        links.append(f"[[{next_page}|Next]] →")
     return " · ".join(links)
 
 

@@ -68,3 +68,48 @@ def partition_rendered_units(
     if current:
         pages.append(current)
     return pages, oversized
+
+
+def split_text_by_utf8(
+    text: str,
+    header: str,
+    footer: str = "",
+    target_bytes: int = TARGET_PAGE_BYTES,
+) -> list[str]:
+    """Split one rendered unit into Unicode-safe text chunks.
+
+    The caller supplies the page header and footer because both contribute to
+    the on-disk byte budget.  The split never cuts a Python character, so a
+    UTF-8 sequence cannot be corrupted.  When possible, it prefers the last
+    line boundary that still leaves a reasonably sized chunk.
+    """
+
+    if target_bytes <= 0:
+        raise ValueError("target_bytes must be positive")
+    if utf8_size(render_units(header, [text], footer)) <= target_bytes:
+        return [text]
+    if not text:
+        raise ValueError("page header and footer exceed target_bytes")
+
+    chunks: list[str] = []
+    offset = 0
+    while offset < len(text):
+        remaining = text[offset:]
+        low, high, best = 1, len(remaining), 0
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = remaining[:middle]
+            if utf8_size(render_units(header, [candidate], footer)) <= target_bytes:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best == 0:
+            raise ValueError("page header and footer exceed target_bytes")
+
+        boundary = remaining.rfind("\n", 0, best + 1)
+        if boundary >= max(1, best // 2):
+            best = boundary + 1
+        chunks.append(remaining[:best])
+        offset += best
+    return chunks

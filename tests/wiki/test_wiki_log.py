@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import wiki.wiki_log as wiki_log
 
 from wiki.wiki_limits import HARD_PAGE_BYTES, TARGET_PAGE_BYTES, partition_rendered_units, utf8_size
+from wiki.wiki_limits import split_text_by_utf8
+from wiki.wiki_io import split_frontmatter
 from wiki.wiki_log import append_log_entry, read_recent_log_entries
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_paths import create_wiki_root
+
+
+def _assert_obsidian_links_resolve(root: Path, text: str) -> None:
+    for target in re.findall(r"\[\[([^|\]#]+)(?:#[^|\]]+)?(?:\|[^\]]+)?\]\]", text):
+        path = root / target
+        if path.suffix != ".md":
+            path = path.with_suffix(".md")
+        assert path.is_file(), f"unresolved Obsidian link: {target}"
 
 
 def test_append_log_entry_uses_parseable_heading_and_fields(tmp_path: Path):
@@ -130,6 +141,18 @@ def test_partition_rendered_units_counts_utf8_bytes_without_splitting_chinese_un
     assert all(utf8_size(header + "\n\n" + "\n\n".join(page) + "\n") <= 150 for page in pages)
 
 
+def test_split_text_by_utf8_preserves_unicode_text_and_rendered_page_limit():
+    source = "开头\n" + "路径" * 500 + "\n结尾"
+    header = "# 归档分卷"
+    footer = "[[archives/log/index.md|总索引]]"
+
+    chunks = split_text_by_utf8(source, header, footer, target_bytes=300)
+
+    assert len(chunks) > 1
+    assert "".join(chunks) == source
+    assert all(utf8_size(f"{header}\n\n{chunk.rstrip()}\n\n{footer}\n") <= 300 for chunk in chunks)
+
+
 def test_append_log_entry_archives_large_single_entry_and_keeps_summary_link(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -185,7 +208,7 @@ def test_append_log_entry_rotates_few_long_records_on_utf8_bytes(tmp_path: Path)
     assert utf8_size(active) <= TARGET_PAGE_BYTES
 
 
-def test_append_log_entry_rejects_record_that_cannot_fit_in_an_archive_page(tmp_path: Path):
+def test_append_log_entry_splits_oversized_record_into_navigable_volumes(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
@@ -193,8 +216,51 @@ def test_append_log_entry_rejects_record_that_cannot_fit_in_an_archive_page(tmp_
         root,
         WikiLogEntry(
             operation="ingest",
+            title="超大归档",
+            paths=["wiki/" + "路径" * 70_000],
+            sources=[],
+            timestamp="2026-05-26T10:20:30Z",
+        ),
+    )
+
+    assert result["ok"] is True
+    archived = [root / path for path in result["archived"]]
+    assert len(archived) >= 2
+    assert all(path.is_file() for path in archived)
+    assert all(utf8_size(path.read_text(encoding="utf-8")) <= min(TARGET_PAGE_BYTES, HARD_PAGE_BYTES) for path in archived)
+
+    active = (root / "wiki/log.md").read_text(encoding="utf-8")
+    assert f"[[{result['archived'][0]}|Full record]]" in active
+    archive_index = root / "archives/log/index.md"
+    index_text = archive_index.read_text(encoding="utf-8")
+    for number, path in enumerate(archived):
+        relative = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        frontmatter, _ = split_frontmatter(text)
+        assert frontmatter["generated"] is True
+        assert f"[[{relative}|" in index_text
+        assert "[[archives/log/index.md|Archive index]]" in text
+        if number:
+            previous = archived[number - 1].relative_to(root).as_posix()
+            assert f"[[{previous}|Previous volume]]" in text
+        if number + 1 < len(archived):
+            following = archived[number + 1].relative_to(root).as_posix()
+            assert f"[[{following}|Next volume]]" in text
+        _assert_obsidian_links_resolve(root, text)
+    _assert_obsidian_links_resolve(root, index_text)
+
+
+def test_append_log_entry_rejects_when_archive_wrapper_cannot_fit(tmp_path: Path, monkeypatch):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    monkeypatch.setattr(wiki_log, "TARGET_PAGE_BYTES", 64)
+
+    result = append_log_entry(
+        root,
+        WikiLogEntry(
+            operation="ingest",
             title="无法归档",
-            paths=["wiki/" + "路径" * 65_000],
+            paths=["wiki/small.md"],
             sources=[],
             timestamp="2026-05-26T10:20:30Z",
         ),
@@ -203,6 +269,23 @@ def test_append_log_entry_rejects_record_that_cannot_fit_in_an_archive_page(tmp_
     assert result["ok"] is False
     assert result["code"] == "log_entry_too_large"
     assert read_recent_log_entries(root) == []
+
+
+def test_archive_index_includes_existing_top_level_archives(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    existing = root / "archives/log/2026/04/log-007.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("# Existing archive\n", encoding="utf-8")
+
+    append_log_entry(
+        root,
+        WikiLogEntry(operation="query", title="Current", timestamp="2026-05-26T10:20:30Z"),
+    )
+
+    index = (root / "archives/log/index.md").read_text(encoding="utf-8")
+    assert "[[archives/log/2026/04/log-007.md|log-007]]" in index
+    _assert_obsidian_links_resolve(root, index)
 
 
 def test_archive_index_never_overwrites_a_manual_paged_index(tmp_path: Path, monkeypatch):
