@@ -578,3 +578,36 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: 完成 related_pages wikilink section
+
+**Date**: 2026-08-06
+**Task**: 完成 related_pages wikilink section
+**Branch**: `v0.9.20`
+
+### Summary
+
+已按 PRD 与 implement 验证清单完成 related_pages Wikilink 区块、raw sources 归属、校验告警、去重与回归测试；全量 pytest 430 passed，ruff 与 diff check 通过，任务已归档。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ab9231d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
