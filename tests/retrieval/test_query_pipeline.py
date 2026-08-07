@@ -1879,6 +1879,34 @@ def test_v2_script_type_listing_reads_flattened_table_and_ignores_sample_noise(t
     ]
 
 
+def test_v2_discovery_keeps_title_case_record_names_as_generic_entities(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/SuiteScript 2.1 Record Types.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript 2.1 Record Types\n\n"
+        "| Record Type | Description |\n"
+        "| --- | --- |\n"
+        "| Customer | Customer record |\n"
+        "| Vendor | Vendor record |\n"
+        "| Object | Object record |\n"
+        "| Method | Method record |\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "record type list", scope="raw", retrieval_mode="lexical")
+
+    discovery = result["pipeline"]["discovery"]
+    assert [item["canonical_id"] for item in discovery["candidate_entities"]] == [
+        "customer",
+        "vendor",
+        "object",
+        "method",
+    ]
+
+
 def test_v2_english_listing_query_finds_module_catalog_and_batches_entities(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

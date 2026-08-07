@@ -551,11 +551,14 @@ def _discovery_candidate_for_fragment(fragment: str) -> list[tuple[str, tuple[st
         for identifier in identifiers:
             # A space-separated phrase such as ``Client Script`` is a generic
             # enumeration label, not a qualified identifier.  Keep explicit
-            # boundary forms and compact/camel forms deterministic.
+            # boundary forms deterministic.  A bare title-case word such as
+            # ``Object`` or ``Customer`` is also a generic entity label, even
+            # though the query-time parser accepts the compact ``Nauth``
+            # alias form: discovery reads source cells, where qualified IDs
+            # appear with an explicit boundary.
             explicit_boundary = "/" in candidate_text or re.search(r"[A-Za-z0-9][-_]\s*[A-Za-z0-9]", candidate_text) is not None
-            compact_entity = re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9_]*\s*", candidate_text) is not None
             spaced_entity = re.fullmatch(r"\s*[A-Za-z]\s+[A-Za-z][A-Za-z0-9_-]*\s*", candidate_text) is not None
-            single_segment_prefix = len(identifier.prefix_segments) == 1 and len(identifier.prefix_segments[0]) == 1 and (compact_entity or spaced_entity)
+            single_segment_prefix = len(identifier.prefix_segments) == 1 and len(identifier.prefix_segments[0]) == 1 and spaced_entity
             if not explicit_boundary and candidate_text.casefold() in _DISCOVERY_STOPWORDS:
                 continue
             match = re.search(
