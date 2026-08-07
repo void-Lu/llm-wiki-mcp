@@ -62,6 +62,18 @@ def attach_no_results_outcome(payload: dict[str, Any]) -> dict[str, Any]:
     """Make an empty successful query explicit without broadening its source boundary."""
     if payload.get("ok") is not True or payload.get("results") != [] or "code" in payload:
         return payload
+    pipeline = payload.get("pipeline")
+    if isinstance(pipeline, dict):
+        discovery = pipeline.get("discovery")
+        batch = pipeline.get("batch")
+        if (
+            isinstance(discovery, dict)
+            and bool(discovery.get("candidate_entities"))
+        ) or (
+            isinstance(batch, dict)
+            and batch.get("status") not in {None, "not_triggered"}
+        ):
+            return payload
     result = dict(payload)
     result["code"] = "no_results"
     result["message"] = "No indexed documentation matched the query."

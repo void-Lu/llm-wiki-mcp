@@ -1634,3 +1634,359 @@ def test_v2_raw_scope_uses_qualified_aliases_on_the_primary_path(tmp_path: Path)
         result = run_query_v2(root, form, scope="raw", retrieval_mode="lexical")
         assert [item["path"] for item in result["results"]] == ["raw/sources/references/n-auth.md"]
         assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
+
+
+def test_v2_namespace_wildcard_discovers_raw_catalog_before_entity_batch(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/module-catalog.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript Module Catalog\n\n"
+        "- N/auth Authentication module\n"
+        "- N/search Search module\n"
+        "- N/record Record module\n",
+        encoding="utf-8",
+    )
+    for name in ("auth", "search", "record"):
+        page = root / f"raw/sources/references/n-{name}.md"
+        page.write_text(f"# N/{name}\n\nN/{name} API reference", encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "列出 N/* modules", scope="raw", retrieval_mode="lexical")
+
+    discovery = result["pipeline"]["discovery"]
+    assert discovery["requested"] is True
+    assert discovery["source_pages"] == ["raw/sources/references/module-catalog.md"]
+    assert [item["canonical_id"] for item in discovery["candidate_entities"]] == [
+        "n/auth",
+        "n/search",
+        "n/record",
+    ]
+    batch = result["pipeline"]["batch"]
+    assert batch["status"] == "success"
+    assert [item["entity"] for item in batch["entities"]] == ["n/auth", "n/search", "n/record"]
+    assert [item["primary"]["path"] for item in batch["entities"]] == [
+        "raw/sources/references/n-auth.md",
+        "raw/sources/references/n-search.md",
+        "raw/sources/references/n-record.md",
+    ]
+
+
+def test_v2_namespace_wildcard_discovers_nested_raw_module_paths(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/module-catalog.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript Module Catalog\n\n"
+        "| Module | Description |\n"
+        "| --- | --- |\n"
+        "| N/crypto/certificate | Certificate module |\n"
+        "| N/crypto/random | Random module |\n"
+        "| N/ui/serverWidget | Server widget module |\n",
+        encoding="utf-8",
+    )
+    for module_id, filename in (
+        ("N/crypto/certificate", "n-crypto-certificate.md"),
+        ("N/crypto/random", "n-crypto-random.md"),
+        ("N/ui/serverWidget", "n-ui-serverwidget.md"),
+    ):
+        (catalog.parent / filename).write_text(
+            f"# {module_id}\n\n{module_id} API reference", encoding="utf-8"
+        )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "列出 N/* modules", scope="raw", retrieval_mode="lexical")
+
+    discovery = result["pipeline"]["discovery"]
+    assert [item["canonical_id"] for item in discovery["candidate_entities"]] == [
+        "n/crypto/certificate",
+        "n/crypto/random",
+        "n/ui/serverwidget",
+    ]
+    assert [item["entity"] for item in result["pipeline"]["batch"]["entities"]] == [
+        "n/crypto/certificate",
+        "n/crypto/random",
+        "n/ui/serverwidget",
+    ]
+    assert [item["primary"]["path"] for item in result["pipeline"]["batch"]["entities"]] == [
+        "raw/sources/references/n-crypto-certificate.md",
+        "raw/sources/references/n-crypto-random.md",
+        "raw/sources/references/n-ui-serverwidget.md",
+    ]
+
+
+def test_v2_discovery_only_is_distinct_from_no_results(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/module-catalog.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript Module Catalog\n\n"
+        "- N/auth Authentication module\n"
+        "- N/search Search module\n",
+        encoding="utf-8",
+    )
+    for name in ("auth", "search"):
+        (catalog.parent / f"n-{name}.md").write_text(
+            f"# N/{name}\n\nN/{name} API reference", encoding="utf-8"
+        )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "列出 N/*", scope="raw", retrieval_mode="lexical")
+
+    assert result["results"] == []
+    assert result["code"] == "discovery_only"
+    assert "pipeline.discovery" in result["message"]
+
+
+def test_v2_namespace_wildcard_filters_structured_noise_and_reads_flattened_tables(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/module-catalog.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript Module Catalog\n\n"
+        "| Module | Description |\n"
+        "| --- | --- |\n"
+        "| N/auth | Authentication module |\n"
+        "| N/search | Search module |\n",
+        encoding="utf-8",
+    )
+    noise = root / "raw/sources/references/record-catalog.md"
+    noise.write_text(
+        "# Record Catalog\n\n"
+        "| Record | Description |\n"
+        "| --- | --- |\n"
+        "| Customer | Customer record |\n"
+        "| Vendor | Vendor record |\n",
+        encoding="utf-8",
+    )
+    for name in ("auth", "search"):
+        (catalog.parent / f"N{name}.md").write_text(
+            f"# N/{name}\n\nN/{name} API reference", encoding="utf-8"
+        )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "列出 N/* modules", scope="raw", retrieval_mode="lexical")
+
+    discovery = result["pipeline"]["discovery"]
+    assert discovery["source_pages"] == ["raw/sources/references/module-catalog.md"]
+    assert [item["canonical_id"] for item in discovery["candidate_entities"]] == [
+        "n/auth",
+        "n/search",
+    ]
+    assert [item["entity"] for item in result["pipeline"]["batch"]["entities"]] == [
+        "n/auth",
+        "n/search",
+    ]
+
+
+def test_v2_script_type_listing_reads_flattened_table_and_ignores_sample_noise(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/SuiteScript 2.1 Script Types.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript 2.1 Script Types\n\n"
+        "| Script Type | Description |\n"
+        "| --- | --- |\n"
+        "| Client Script | Runs in the browser |\n"
+        "| User Event Script | Runs on record events |\n"
+        "| Scheduled Script | Runs on a schedule |\n\n"
+        "- Do not hard-code passwords in scripts.\n"
+        "- Use built in functions for reading/writing Date/Currency fields.\n",
+        encoding="utf-8",
+    )
+    noise = root / "raw/sources/references/SuiteScript Samples Catalog.md"
+    noise.write_text(
+        "# SuiteScript Samples Catalog\n\n"
+        "- Example One\n"
+        "- Example Two\n",
+        encoding="utf-8",
+    )
+    for name, body in (
+        (
+            "Client Script Type",
+            "# Client Script Type\n\n- pageInit\n- saveRecord\n- validateField\n",
+        ),
+        (
+            "Scheduled Script Type",
+            "# Scheduled Script Type\n\n- execute\n- governance\n- deployment\n",
+        ),
+    ):
+        (catalog.parent / f"{name}.md").write_text(body, encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "查询SuiteScript脚本类型相关内容", scope="raw", retrieval_mode="lexical")
+
+    discovery = result["pipeline"]["discovery"]
+    assert discovery["source_pages"] == ["raw/sources/references/SuiteScript 2.1 Script Types.md"]
+    assert [item["canonical_id"] for item in discovery["candidate_entities"]] == [
+        "client script",
+        "user event script",
+        "scheduled script",
+    ]
+    assert [item["entity"] for item in result["pipeline"]["batch"]["entities"]] == [
+        "client script",
+        "user event script",
+        "scheduled script",
+    ]
+
+
+def test_v2_english_listing_query_finds_module_catalog_and_batches_entities(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/SuiteScript 2.1 Modules.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript 2.1 Modules\n\n"
+        "SuiteScript 2.1 APIs are organized into various modules based on behavior.\n\n"
+        "- N/auth Authentication module\n"
+        "- N/search Search module\n"
+        "- N/record Record module\n",
+        encoding="utf-8",
+    )
+    for name in ("auth", "search", "record"):
+        (catalog.parent / f"N{name}.md").write_text(
+            f"# N/{name}\n\nN/{name} API reference", encoding="utf-8"
+        )
+    (catalog.parent / "suitelet-faq.md").write_text(
+        "# Scriptable Cart FAQ\n\nSuiteScript 2.1 scriptable cart FAQ", encoding="utf-8"
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "NetSuite SuiteScript 2.1 standard N modules overview list API reference",
+        scope="raw",
+        retrieval_mode="lexical",
+        top_k=20,
+    )
+
+    discovery = result["pipeline"]["discovery"]
+    assert discovery["source_pages"] == ["raw/sources/references/SuiteScript 2.1 Modules.md"]
+    assert [item["canonical_id"] for item in discovery["candidate_entities"]] == [
+        "n/auth",
+        "n/search",
+        "n/record",
+    ]
+    assert [item["entity"] for item in result["pipeline"]["batch"]["entities"]] == [
+        "n/auth",
+        "n/search",
+        "n/record",
+    ]
+
+
+def test_v2_discovery_prioritizes_catalog_metadata_after_fts_pool_fills_with_noise(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/SuiteScript 2.1 Modules.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript 2.1 Modules\n\n"
+        "- N/auth Authentication module\n"
+        "- N/search Search module\n",
+        encoding="utf-8",
+    )
+    for name in ("auth", "search"):
+        (catalog.parent / f"N{name}.md").write_text(
+            f"# N/{name}\n\nN/{name} API reference", encoding="utf-8"
+        )
+    for index in range(48):
+        noise = root / f"raw/sources/noise/generic-{index:03d}.md"
+        noise.parent.mkdir(parents=True, exist_ok=True)
+        noise.write_text(
+            "# NetSuite Product Notes\n\n"
+            "NetSuite SuiteScript 2.1 standard API reference and overview "
+            "list for generic product notes. " * 8,
+            encoding="utf-8",
+        )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "NetSuite SuiteScript 2.1 standard N modules overview list API reference",
+        scope="raw",
+        retrieval_mode="lexical",
+        top_k=20,
+    )
+
+    assert result["pipeline"]["discovery"]["source_pages"] == [
+        "raw/sources/references/SuiteScript 2.1 Modules.md"
+    ]
+    assert [item["entity"] for item in result["pipeline"]["batch"]["entities"]] == [
+        "n/auth",
+        "n/search",
+    ]
+
+
+def test_v2_original_chinese_raw_listing_query_finds_catalog_and_batches_entities(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog_dir = root / "raw/sources/references/05_SS 2.x API Reference/03_SS 2.1 Modules"
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    (catalog_dir / "SuiteScript 2.1 Modules.md").write_text(
+        "# SuiteScript 2.1 Modules\n\n"
+        "- N/auth Authentication module\n"
+        "- N/search Search module\n",
+        encoding="utf-8",
+    )
+    (catalog_dir / "NetSuite overview.md").write_text(
+        "# NetSuite Overview\n\nNetSuite standard SuiteScript examples", encoding="utf-8"
+    )
+    for name in ("auth", "search"):
+        (catalog_dir / f"N{name}.md").write_text(
+            f"# N/{name}\n\nN/{name} API reference", encoding="utf-8"
+        )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "查询raw文档，整理NetSuite标准 N/* 平台模块内容",
+        scope="raw",
+        retrieval_mode="lexical",
+        top_k=20,
+    )
+
+    assert result["pipeline"]["discovery"]["source_pages"] == [
+        "raw/sources/references/05_SS 2.x API Reference/03_SS 2.1 Modules/SuiteScript 2.1 Modules.md"
+    ]
+    assert [item["entity"] for item in result["pipeline"]["batch"]["entities"]] == [
+        "n/auth",
+        "n/search",
+    ]
+
+
+def test_v2_mixed_language_wildcard_ignores_generic_netsuite_passage_for_discovery(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/netsuite-generic.md",
+        "NetSuite Standard Reference",
+        "NetSuite standard modules and examples without an entity enumeration.",
+        type="concept",
+    )
+    _write(
+        root,
+        "wiki/concepts/suitescript-module-catalog.md",
+        "SuiteScript Module Catalog",
+        "# SuiteScript Module Catalog\n\n"
+        "- N/auth Authentication API\n"
+        "- N/search Search API",
+        type="concept",
+    )
+    _write(root, "wiki/entities/n-auth.md", "N/auth", "N/auth API reference", type="entity")
+    _write(root, "wiki/entities/n-search.md", "N/search", "N/search API reference", type="entity")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "NetSuite 中有哪些 N/* modules？", retrieval_mode="lexical")
+
+    assert [item["canonical_id"] for item in result["pipeline"]["discovery"]["candidate_entities"]] == [
+        "n/auth",
+        "n/search",
+    ]
+    assert result["pipeline"]["batch"]["status"] == "success"
+    assert result["expansion_suggestions"] == []

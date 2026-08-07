@@ -8,15 +8,35 @@ from dataclasses import dataclass
 
 _LATIN_OR_CODE = re.compile(r"[a-z0-9_]+")
 _CJK_RUN = re.compile(r"[一-鿿]+")
-_QUALIFIED_CODE = re.compile(r"(?<![a-z0-9_])([a-z][a-z0-9_]*)/([a-z][a-z0-9_]*)(?![a-z0-9_])", re.I)
+_QUALIFIED_CODE = re.compile(
+    r"(?<![a-z0-9_])([a-z][a-z0-9_]*)/"
+    r"([a-z][a-z0-9_-]*(?:/[a-z][a-z0-9_-]*)*)"
+    r"(?![a-z0-9_/])",
+    re.I,
+)
 _QUALIFIED_IDENTIFIER = re.compile(
     r"(?<![a-z0-9_])(?P<prefix>[a-z][a-z0-9.]*)"
-    r"(?P<separator>/|[-_]|[ \t]+)"
+    r"(?P<separator>/)"
+    r"(?P<name>[a-z][a-z0-9_-]*(?:/[a-z][a-z0-9_-]*)*)(?![a-z0-9_/])",
+    re.I,
+)
+_QUALIFIED_BOUNDARY_IDENTIFIER = re.compile(
+    r"(?<![a-z0-9_])(?P<prefix>[a-z][a-z0-9.]*)"
+    r"(?P<separator>[-_]|[ \t]+)"
     r"(?P<name>[a-z][a-z0-9_-]*)(?![a-z0-9_/])",
     re.I,
 )
+_QUALIFIED_IDENTIFIER_PATTERNS = (_QUALIFIED_IDENTIFIER, _QUALIFIED_BOUNDARY_IDENTIFIER)
 _COMPACT_QUALIFIED_IDENTIFIER = re.compile(
-    r"(?<![a-z0-9_])(?P<value>[A-Z][a-z0-9_]*[A-Z][a-z0-9_]*|[A-Z][a-z][a-z0-9_]*)(?![a-z0-9_])"
+    # Automatic compact extraction is intentionally narrower than the public
+    # parser.  A one-letter namespace followed by a lower-case entity is the
+    # only unambiguous compact form; otherwise ordinary CamelCase (notably
+    # ``NetSuite``) would become a false qualified-code query.
+    r"(?<![A-Za-z0-9_])(?P<value>[A-Z][a-z][a-z0-9_]*)(?![A-Za-z0-9_])"
+)
+_NAMESPACE_WILDCARD = re.compile(
+    r"(?<![a-z0-9_])(?P<prefix>[a-z][a-z0-9.]*)\s*/\s*\*(?![a-z0-9_])",
+    re.I,
 )
 _MULTIWORD_RUN = re.compile(r"[a-z0-9_]+(?:\s+[a-z0-9_]+)+", re.I)
 _STOPWORDS = frozenset({"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "of", "on", "or", "the", "to", "with"})
@@ -39,16 +59,105 @@ class QualifiedIdentifier:
     raw_forms: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class NamespaceWildcard:
+    """Query-time discovery intent for every entity in one namespace."""
+
+    prefix_segments: tuple[str, ...]
+    canonical_prefix: str
+    aliases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LexicalQueryPlan:
+    """Language-separated lexical signals used by recovery/discovery."""
+
+    latin_terms: tuple[str, ...]
+    cjk_terms: tuple[str, ...]
+    qualified_identifiers: tuple[QualifiedIdentifier, ...]
+    namespace_wildcards: tuple[NamespaceWildcard, ...]
+
+    @property
+    def discovery_intent(self) -> bool:
+        return bool(self.namespace_wildcards)
+
+
+def _namespace_wildcard_from_parts(prefix: str, raw: str) -> NamespaceWildcard:
+    segments = tuple(part.casefold() for part in prefix.split(".") if part)
+    if not segments:
+        raise ValueError("namespace wildcard requires a prefix")
+    canonical = ".".join(segments)
+    forms = (
+        f"{prefix}/*",
+        f"{prefix} / *",
+        f"{prefix.casefold()}/*",
+        canonical,
+    )
+    return NamespaceWildcard(segments, canonical, tuple(dict.fromkeys((raw.strip(), *forms))))
+
+
+def parse_namespace_wildcard(value: str) -> NamespaceWildcard:
+    """Parse ``prefix/*`` without turning the prefix into an FTS token."""
+
+    raw = value.strip().strip("`[](){}<>").rstrip(".,:;!?\u3002\uff1f\uff01")
+    match = _NAMESPACE_WILDCARD.fullmatch(raw)
+    if not match:
+        raise ValueError(f"invalid namespace wildcard: {value!r}")
+    return _namespace_wildcard_from_parts(match.group("prefix"), raw)
+
+
+def extract_namespace_wildcards(text: str) -> list[NamespaceWildcard]:
+    """Extract wildcard discovery intents while preserving query order."""
+
+    values: list[NamespaceWildcard] = []
+    seen: set[str] = set()
+    for match in _NAMESPACE_WILDCARD.finditer(text):
+        wildcard = _namespace_wildcard_from_parts(match.group("prefix"), match.group(0))
+        if wildcard.canonical_prefix not in seen:
+            seen.add(wildcard.canonical_prefix)
+            values.append(wildcard)
+    return values
+
+
+def is_safe_compact_qualified_identifier(value: str) -> bool:
+    """Return whether a complete token can use the compact alias form.
+
+    The first letter is deliberately namespace-agnostic.  Restricting this
+    helper to ``N`` would turn a generic identifier contract into a
+    SuiteScript-specific branch.  Internal CamelCase is excluded, so
+    ``NetSuite`` cannot become ``net/suite``.
+    """
+
+    candidate = value.strip()
+    return re.fullmatch(r"[A-Za-z][a-z][a-z0-9_]*", candidate) is not None
+
+
+def plan_query(text: str) -> LexicalQueryPlan:
+    """Build separated Latin/CJK and qualified/discovery query signals."""
+
+    lowered = text.casefold()
+    latin_terms = tuple(value for value in _LATIN_OR_CODE.findall(lowered) if value not in _STOPWORDS)
+    cjk_terms: list[str] = []
+    for run in _CJK_RUN.findall(lowered):
+        cjk_terms.extend(run if len(run) == 1 else (run[index : index + 2] for index in range(len(run) - 1)))
+    return LexicalQueryPlan(
+        latin_terms=latin_terms,
+        cjk_terms=tuple(cjk_terms),
+        qualified_identifiers=tuple(extract_qualified_identifiers(text)),
+        namespace_wildcards=tuple(extract_namespace_wildcards(text)),
+    )
+
+
 def _qualified_identifier_from_parts(prefix: str, name: str, raw: str) -> QualifiedIdentifier:
     prefix_segments = tuple(part.casefold() for part in prefix.split(".") if part)
-    name_segments = tuple(part.casefold() for part in name.split(".") if part)
+    name_segments = tuple(part.casefold() for part in name.split("/") if part)
     if not prefix_segments or not name_segments:
         raise ValueError("qualified identifier requires a prefix and a name")
     normalized_prefix = ".".join(prefix_segments)
-    normalized_name = ".".join(name_segments)
+    normalized_name = "/".join(name_segments)
     canonical_id = f"{normalized_prefix}/{normalized_name}"
     display_prefix = ".".join(part for part in prefix.split(".") if part)
-    display_name = ".".join(part for part in name.split(".") if part)
+    display_name = "/".join(part for part in name.split("/") if part)
     boundary_forms = (
         f"{display_prefix}/{display_name}",
         f"{display_prefix} {display_name}",
@@ -72,7 +181,14 @@ def parse_qualified_identifier(value: str) -> QualifiedIdentifier:
     """
 
     raw = value.strip().strip("`*_[](){}<>").rstrip(".,:;!?\u3002\uff1f\uff01")
-    match = _QUALIFIED_IDENTIFIER.fullmatch(raw)
+    match = next(
+        (
+            matched
+            for pattern in _QUALIFIED_IDENTIFIER_PATTERNS
+            if (matched := pattern.fullmatch(raw)) is not None
+        ),
+        None,
+    )
     if match:
         return _qualified_identifier_from_parts(match.group("prefix"), match.group("name"), raw)
     if not raw or any(character.isspace() for character in raw) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", raw):
@@ -90,7 +206,15 @@ def extract_qualified_identifiers(text: str) -> list[QualifiedIdentifier]:
 
     values: list[QualifiedIdentifier] = []
     seen: set[str] = set()
-    for match in _QUALIFIED_IDENTIFIER.finditer(text):
+    matches = sorted(
+        (
+            match
+            for pattern in _QUALIFIED_IDENTIFIER_PATTERNS
+            for match in pattern.finditer(text)
+        ),
+        key=lambda match: (match.start(), match.end()),
+    )
+    for match in matches:
         if match.group("separator").isspace() and len(match.group("prefix")) != 1:
             continue
         try:
@@ -102,16 +226,19 @@ def extract_qualified_identifiers(text: str) -> list[QualifiedIdentifier]:
             values.append(identifier)
     # Once an explicit boundary form exists in a passage, ordinary title-case
     # words such as ``Authentication`` must not be split as ``a/uthentication``.
-    # Compact aliases are still parsed when they are the only spelling present.
-    if not re.search(r"[A-Za-z0-9]/[A-Za-z0-9]|[A-Za-z0-9][-_][A-Za-z0-9]", text):
-        for match in _COMPACT_QUALIFIED_IDENTIFIER.finditer(text):
-            try:
-                identifier = parse_qualified_identifier(match.group("value"))
-            except ValueError:
-                continue
-            if identifier.canonical_id not in seen:
-                seen.add(identifier.canonical_id)
-                values.append(identifier)
+    # A compact alias is accepted only when it is the complete query/fragment;
+    # doing this for every CamelCase or title-case word inside prose would make
+    # ``Suitelet script`` and similar natural-language questions look like
+    # qualified-code queries.
+    stripped = text.strip()
+    if not re.search(r"[A-Za-z0-9]/[A-Za-z0-9]|[A-Za-z0-9][-_][A-Za-z0-9]", text) and _COMPACT_QUALIFIED_IDENTIFIER.fullmatch(stripped):
+        try:
+            identifier = parse_qualified_identifier(stripped)
+        except ValueError:
+            identifier = None
+        if identifier is not None and identifier.canonical_id not in seen:
+            seen.add(identifier.canonical_id)
+            values.append(identifier)
     return values
 
 
@@ -157,7 +284,10 @@ def tokens(text: str) -> list[str]:
     Pre-tokenising keeps FTS behaviour stable across all supported platforms.
     """
 
-    lowered = text.casefold()
+    # Namespace wildcards are a discovery directive, not a namespace FTS
+    # term.  Removing the whole expression prevents ``N/*`` from becoming a
+    # broad query for the ordinary token ``n``.
+    lowered = _NAMESPACE_WILDCARD.sub(" ", text.casefold())
     latin = [value for value in _LATIN_OR_CODE.findall(lowered) if value not in _STOPWORDS]
     cjk: list[str] = []
     for run in _CJK_RUN.findall(lowered):
@@ -249,7 +379,7 @@ def qualified_code_fts_query(text: str) -> str:
     """Extract qualified identifiers and union one precise query per entity."""
 
     identifiers = extract_qualified_identifiers(text)
-    if not identifiers and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", text.strip()):
+    if not identifiers and is_safe_compact_qualified_identifier(text):
         try:
             identifiers = [parse_qualified_identifier(text)]
         except ValueError:
@@ -262,8 +392,7 @@ def has_qualified_identifier(text: str) -> bool:
 
     if extract_qualified_identifiers(text):
         return True
-    stripped = text.strip()
-    return re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", stripped) is not None and len(stripped) >= 3
+    return is_safe_compact_qualified_identifier(text)
 
 
 def module_qualified(text: str) -> bool:

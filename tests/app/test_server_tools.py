@@ -15,6 +15,7 @@ from runtime.runtime_config import ConfigRegistry, RuntimeConfigError, write_glo
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 import app.server as server_module
 from app.server import (
+    attach_no_results_outcome,
     attach_warnings,
     mcp,
     resolve_tool_vault,
@@ -174,6 +175,20 @@ def test_mcp_client_protocol_calls_status_and_query(monkeypatch: pytest.MonkeyPa
             }
 
     anyio.run(assert_protocol_calls)
+
+
+def test_no_results_adapter_does_not_override_discovery_outcome() -> None:
+    payload = {
+        "ok": True,
+        "question": "列出 N/*",
+        "results": [],
+        "pipeline": {
+            "discovery": {"candidate_entities": [{"canonical_id": "n/auth"}]},
+            "batch": {"status": "success"},
+        },
+    }
+
+    assert attach_no_results_outcome(payload) == payload
 
 
 def test_mcp_query_schema_accepts_raw_scope_and_forwards_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

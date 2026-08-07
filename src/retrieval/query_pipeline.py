@@ -19,8 +19,10 @@ from retrieval.lexical_analyzer import (
     QualifiedIdentifier,
     edit_distance,
     extract_qualified_identifiers,
+    extract_namespace_wildcards,
     has_qualified_identifier,
     identifier_phrases,
+    plan_query,
     tokens,
 )
 from retrieval.query_telemetry import QueryTelemetry
@@ -54,6 +56,36 @@ BATCH_MIN_RELEVANCE_SCORE = 0.05
 BATCH_HIGH_SCORE_RATIO = 0.82
 BATCH_AMBIGUITY_RATIO = 0.93
 BATCH_MAX_SELECTED_CANDIDATES = 12
+DISCOVERY_CANDIDATE_LIMIT = 240
+DISCOVERY_PAGE_LIMIT = 32
+DISCOVERY_SOURCE_PAGE_LIMIT = 8
+_DISCOVERY_INTENT_RE = re.compile(
+    r"(?:\blist\b|\ball\b|\beach\b|\bevery\b|\bvarious\b|\bdifferent\b|\btypes?\b|\bavailable\b|\bmodules?\b|\bcatalog\b|\bdirectory\b|\boverview\b|列出|有哪些|各|每|分别|类型|目录|模块|清单|列表)",
+    re.I,
+)
+_DISCOVERY_ANCHOR_STOPWORDS = frozenset(
+    {
+        "all",
+        "available",
+        "catalog",
+        "directory",
+        "list",
+        "module",
+        "modules",
+        "overview",
+        "reference",
+        "show",
+        "which",
+    }
+)
+_DISCOVERY_CJK_ALIASES = {
+    "模块": ("module", "modules"),
+    "脚本": ("script", "scripts"),
+    "类型": ("type", "types"),
+    "目录": ("catalog", "directory", "overview", "list"),
+    "清单": ("catalog", "directory", "list"),
+    "列表": ("list", "listing"),
+}
 _STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
 def _freshness_bonus(hit: PassageHit, metadata: dict[str, dict[str, Any]]) -> float:
     """Reward recently updated wiki pages so a newer fix patch outranks an
@@ -402,6 +434,7 @@ class AdaptiveCandidateScorePolicy:
 
 _DISCOVERY_HEADING_RE = re.compile(r"^\s*(?P<marks>#{2,6})\s+(?P<label>.+?)\s*$")
 _DISCOVERY_LIST_RE = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}\s*[.)、]\s+|[一二三四五六七八九十百\d]+\s*[、.)]\s+)(?P<label>.+?)\s*$")
+_DISCOVERY_LINK_RE = re.compile(r"\[([^\]]+)\]\s*\([^)]*\)")
 _DISCOVERY_STOPWORDS = frozenset(
     {
         "available",
@@ -424,28 +457,61 @@ _DISCOVERY_STOPWORDS = frozenset(
 )
 
 
-def _discovery_line(line: str) -> tuple[str, str, str] | None:
-    """Return (group, label, kind) for a structured enumeration line."""
+def _discovery_fragments(line: str) -> list[tuple[str, str, str]]:
+    """Return structured labels, including rows flattened into one passage."""
 
     heading = _DISCOVERY_HEADING_RE.match(line)
     if heading:
         label = re.sub(r"^\s*\d{1,3}\s*[.)、]\s*", "", heading.group("label"))
-        return f"heading:{len(heading.group('marks'))}", label, "heading"
-    if line.lstrip().startswith("|") and line.rstrip().endswith("|"):
+        return [(f"heading:{len(heading.group('marks'))}", label, "heading")]
+    # The retrieval index may split a long Markdown table passage in the
+    # middle of a row, so a chunk need not retain both outer table pipes.
+    if line.count("|") >= 3 and (line.lstrip().startswith("|") or " | " in line):
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if cells and not all(re.fullmatch(r":?-{2,}:?", cell) for cell in cells):
-            return "table", " | ".join(cells), "table"
+        rows: list[list[str]] = []
+        current: list[str] = []
+        for cell in cells:
+            if cell:
+                current.append(cell)
+            elif current:
+                rows.append(current)
+                current = []
+        if current:
+            rows.append(current)
+        fragments: list[tuple[str, str, str]] = []
+        starts_at_table_boundary = line.lstrip().startswith("|")
+        for row_index, row in enumerate(rows):
+            # Passage chunking can begin in the middle of a long table row.
+            # Such a leading cell contains the tail of a description or a
+            # linked URL, not the entity in the first column.  Later rows in
+            # the same chunk still begin at an explicit ``| |`` boundary and
+            # remain eligible.  A normal Markdown table line starts with ``|``
+            # and is unaffected.
+            if row_index == 0 and not starts_at_table_boundary:
+                continue
+            if not row or all(re.fullmatch(r":?(?:-+\s*){2,}:?", cell) for cell in row):
+                continue
+            fragments.append(("table", row[0], "table"))
+        return fragments
     item = _DISCOVERY_LIST_RE.match(line)
     if item:
-        return "list", item.group("label"), "list"
-    return None
+        return [("list", item.group("label"), "list")]
+    return []
+
+
+def _discovery_line(line: str) -> tuple[str, str, str] | None:
+    """Return the first structured label for compatibility with callers."""
+
+    fragments = _discovery_fragments(line)
+    return fragments[0] if fragments else None
 
 
 def _clean_discovery_label(value: str) -> str:
     if "|" in value:
         value = value.split("|", 1)[0]
-    value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"\[([^\]]+)\]\s*\([^)]*\)", r"\1", value)
     value = re.sub(r"[`*_]", "", value).strip()
+    value = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", value)
     value = re.split(r"\s+(?:[-–—]|:|：)\s+|[:：]", value, maxsplit=1)[0].strip()
     return value.strip("-–—,，;；。.")
 
@@ -453,7 +519,7 @@ def _clean_discovery_label(value: str) -> str:
 def _generic_discovery_entity(label: str) -> tuple[str, tuple[str, ...]] | None:
     cleaned = _clean_discovery_label(label)
     words = re.findall(r"[A-Za-z0-9_\u3400-\u9fff][A-Za-z0-9_\u3400-\u9fff -]*", cleaned)
-    if not words or len(cleaned) > 80 or len(cleaned.split()) > 5:
+    if not words or len(cleaned) > 80 or len(cleaned.split()) > 8:
         return None
     canonical = re.sub(r"\s+", " ", cleaned.casefold()).strip()
     if not canonical or canonical in _DISCOVERY_STOPWORDS or canonical.split()[0] in _DISCOVERY_STOPWORDS:
@@ -466,25 +532,316 @@ def _generic_discovery_entity(label: str) -> tuple[str, tuple[str, ...]] | None:
 def _discovery_candidate_for_fragment(fragment: str) -> list[tuple[str, tuple[str, ...], QualifiedIdentifier | None]]:
     """Extract qualified IDs first, then a structured generic entity label."""
 
-    identifiers = extract_qualified_identifiers(fragment)
+    visible_fragment = re.sub(r"\[([^\]]+)\]\s*\([^)]*\)", r"\1", fragment)
+    visible_fragment = re.sub(r"\s*/\s*", "/", visible_fragment).strip()
+    link_labels = _DISCOVERY_LINK_RE.findall(fragment)
+    candidate_fragments = link_labels or [visible_fragment]
     qualified: list[tuple[str, tuple[str, ...], QualifiedIdentifier | None]] = []
-    for identifier in identifiers:
-        # A space-separated phrase such as ``Client Script`` is a generic
-        # enumeration label, not a qualified identifier.  Keep explicit
-        # boundary forms and compact/camel forms deterministic.
-        explicit_boundary = "/" in fragment or re.search(r"[A-Za-z0-9][-_]\s*[A-Za-z0-9]", fragment) is not None
-        compact_entity = re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9_]*\s*", fragment) is not None
-        spaced_entity = re.fullmatch(r"\s*[A-Za-z]\s+[A-Za-z][A-Za-z0-9_-]*\s*", fragment) is not None
-        single_segment_prefix = len(identifier.prefix_segments) == 1 and len(identifier.prefix_segments[0]) == 1 and (compact_entity or spaced_entity)
-        if explicit_boundary or single_segment_prefix:
-            qualified.append((identifier.canonical_id, identifier.aliases, identifier))
-    if qualified:
-        return qualified
-    generic = _generic_discovery_entity(fragment)
-    if generic is None:
-        return []
-    canonical, aliases = generic
-    return [(canonical, aliases, None)]
+    for candidate_fragment in candidate_fragments:
+        candidate_text = re.sub(r"\s*/\s*", "/", candidate_fragment).strip()
+        identifiers = extract_qualified_identifiers(candidate_text)
+        for identifier in identifiers:
+            # A space-separated phrase such as ``Client Script`` is a generic
+            # enumeration label, not a qualified identifier.  Keep explicit
+            # boundary forms and compact/camel forms deterministic.
+            explicit_boundary = "/" in candidate_text or re.search(r"[A-Za-z0-9][-_]\s*[A-Za-z0-9]", candidate_text) is not None
+            compact_entity = re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9_]*\s*", candidate_text) is not None
+            spaced_entity = re.fullmatch(r"\s*[A-Za-z]\s+[A-Za-z][A-Za-z0-9_-]*\s*", candidate_text) is not None
+            single_segment_prefix = len(identifier.prefix_segments) == 1 and len(identifier.prefix_segments[0]) == 1 and (compact_entity or spaced_entity)
+            if not explicit_boundary and candidate_text.casefold() in _DISCOVERY_STOPWORDS:
+                continue
+            match = re.search(
+                rf"(?<![a-z0-9_]){re.escape(identifier.prefix_segments[0])}"
+                rf"(?P<separator>/|[-_]|[ \\t]+)"
+                rf"[a-z][a-z0-9_-]*",
+                candidate_text,
+                re.I,
+            )
+            if match:
+                prefix_is_single_letter = len(identifier.prefix_segments) == 1 and len(identifier.prefix_segments[0]) == 1
+                starts_with_identifier = not candidate_text[: match.start()].strip(" -*+`[]()")
+                separator = match.group("separator")
+                # Natural prose frequently contains slash or hyphen phrases
+                # such as ``reading/writing`` and ``hard-code``.  Boundary
+                # aliases remain supported for one-letter namespaces (for
+                # example N/auth, N auth, N-auth, and N_auth), while a
+                # multi-letter qualified name must start the structured cell.
+                if separator in {"-", "_"} and not prefix_is_single_letter:
+                    continue
+                if not starts_with_identifier and not prefix_is_single_letter:
+                    continue
+                if not starts_with_identifier and identifier.prefix_segments == ("a",):
+                    continue
+            if explicit_boundary or single_segment_prefix:
+                qualified.append((identifier.canonical_id, identifier.aliases, identifier))
+        if qualified:
+            continue
+        generic = _generic_discovery_entity(candidate_text)
+        if generic is None:
+            continue
+        canonical, aliases = generic
+        qualified.append((canonical, aliases, None))
+    return qualified
+
+
+def _discovery_requested(question: str) -> bool:
+    """Recognize listing/wildcard intent without widening ordinary queries."""
+
+    return bool(extract_namespace_wildcards(question) or _DISCOVERY_INTENT_RE.search(question))
+
+
+def _discovery_anchor_query(question: str) -> str:
+    """Keep Latin anchors independent from CJK bigrams and wildcard prefixes."""
+
+    plan = plan_query(question)
+    wildcard_prefixes = {segment for item in plan.namespace_wildcards for segment in item.prefix_segments}
+    anchors = [
+        term
+        for term in plan.latin_terms
+        if len(term) > 1 and term not in wildcard_prefixes and term not in _DISCOVERY_ANCHOR_STOPWORDS
+    ]
+    return " ".join(dict.fromkeys(anchors))
+
+
+def _discovery_focus_terms(question: str) -> set[str]:
+    """Return topic words for title/path scoring, including CJK synonyms."""
+
+    plan = plan_query(question)
+    terms = {
+        term
+        for term in plan.latin_terms
+        if len(term) > 1 and term not in _DISCOVERY_ANCHOR_STOPWORDS
+    }
+    for phrase, aliases in _DISCOVERY_CJK_ALIASES.items():
+        if phrase in question:
+            terms.update(aliases)
+    return terms
+
+
+def _wildcard_evidence_names(question: str, text: str) -> set[str]:
+    """Find distinct qualified names for a wildcard from indexed passage text."""
+
+    names: set[str] = set()
+    for wildcard in extract_namespace_wildcards(question):
+        prefix = r"\s*\.\s*".join(re.escape(segment) for segment in wildcard.prefix_segments)
+        pattern = re.compile(
+            rf"(?<![a-z0-9]){prefix}\s*/\s*"
+            rf"(?P<name>[a-z][a-z0-9_-]*(?:\s*/\s*[a-z][a-z0-9_-]*)*)"
+            rf"(?![a-z0-9_/])",
+            re.I,
+        )
+        for match in pattern.finditer(text):
+            name = re.sub(r"\s*/\s*", "/", match.group("name")).casefold()
+            if name not in {"a", "na", "none", "null"}:
+                names.add(f"{wildcard.canonical_prefix}/{name}")
+    return names
+
+
+def _discovery_source_items(
+    store: RetrievalIndexStore,
+    metadata: dict[str, dict[str, Any]],
+    question: str,
+    *,
+    scope: str,
+    project: str | None,
+    filters: QueryFilters,
+) -> list[dict[str, Any]]:
+    """Find bounded discovery pages from an existing SQLite projection.
+
+    Relaxed FTS is only a recall source here.  The caller still requires
+    same-page structured enumeration before any entity can reach the batch.
+    No source files or index lifecycle methods are touched.
+    """
+
+    anchor_query = _discovery_anchor_query(question)
+    hits: list[PassageHit] = []
+    if anchor_query:
+        try:
+            hits = store.search_fts(
+                anchor_query,
+                limit=DISCOVERY_CANDIDATE_LIMIT,
+                project=project,
+                page_type=filters.type,
+                tags=list(filters.tags),
+                mode="strict",
+            )
+            if not hits:
+                hits = store.search_fts(
+                    anchor_query,
+                    limit=DISCOVERY_CANDIDATE_LIMIT,
+                    project=project,
+                    page_type=filters.type,
+                    tags=list(filters.tags),
+                    mode="relaxed",
+                )
+        except RetrievalIndexError:
+            hits = []
+
+    page_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for hit in hits:
+        if hit.page_path in seen_paths:
+            continue
+        if _eligible(hit, metadata, scope=scope) and _matches_request(hit, metadata, project=project, filters=filters):
+            seen_paths.add(hit.page_path)
+            page_paths.append(hit.page_path)
+
+    # Use bounded title/path metadata on every discovery pass.  A pure
+    # wildcard has no useful FTS term after its prefix is removed, while a
+    # multilingual or broad listing query can fill the FTS page pool with
+    # generic product pages.  Prefer catalog signals in the title over mere
+    # path overlap, then let same-page structured evidence validate the page.
+    raw_anchor_terms = set(tokens(anchor_query))
+    wildcard = bool(extract_namespace_wildcards(question))
+    eligible_pages: list[tuple[str, str, str]] = []
+    for page in store.page_candidates():
+        path = str(page["path"])
+        title = str(page.get("title") or "")
+        probe = PassageHit(
+            "",
+            path,
+            title,
+            (),
+            "",
+            0.0,
+            str(page.get("corpus") or "active"),
+            str(page.get("authority") or ""),
+            str(page.get("source_kind") or ""),
+        )
+        if not _eligible(probe, metadata, scope=scope) or not _matches_request(probe, metadata, project=project, filters=filters):
+            continue
+        eligible_pages.append((path, title, f"{title} {path}".casefold()))
+
+    term_frequency = {
+        term: sum(term in title_path for _path, _title, title_path in eligible_pages)
+        for term in raw_anchor_terms
+    }
+    common_term_limit = max(1, len(eligible_pages) // 2)
+    anchor_terms = {
+        term for term in raw_anchor_terms if term_frequency.get(term, 0) <= common_term_limit
+    }
+    focus_terms = {
+        term
+        for term in _discovery_focus_terms(question)
+        if term not in raw_anchor_terms or term_frequency.get(term, 0) <= common_term_limit
+    }
+
+    def contains_term(value: str, term: str) -> bool:
+        return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", value, re.I) is not None
+
+    metadata_candidates: list[tuple[int, str]] = []
+    clean_catalog_paths: set[str] = set()
+    catalog_paths: set[str] = set()
+    for path, title, title_path in eligible_pages:
+        overlap = sum(contains_term(title_path, term) for term in anchor_terms)
+        title_focus = sum(contains_term(title, term) for term in focus_terms)
+        path_focus = sum(contains_term(path, term) for term in focus_terms)
+        title_catalog = bool(re.search(r"catalog|directory|overview|modules?|types?|reference|list|目录|模块|类型|清单|列表", title, re.I))
+        path_catalog = bool(re.search(r"catalog|directory|overview|modules?|types?|reference|list|目录|模块|类型|清单|列表", path, re.I))
+        plural_catalog = bool(re.search(r"\b(?:modules|types|catalogs|directories|lists|listings)\b", title, re.I))
+        noisy_title = bool(re.search(r"sample|reference|difference|tutorial|code|entry points?|api|file", title, re.I))
+        explicit_catalog_title = bool(re.search(r"catalog|directory|overview|index|contents|list(?:ing)?|目录|模块|类型|清单|列表", title, re.I))
+        strong_catalog = plural_catalog or explicit_catalog_title
+        if strong_catalog:
+            catalog_paths.add(path)
+            if not noisy_title:
+                clean_catalog_paths.add(path)
+        likely_catalog = title_catalog or path_catalog
+        if overlap or title_focus or (wildcard and likely_catalog):
+            score = (
+                overlap
+                + title_focus * 2
+                + path_focus
+                + (3 if title_catalog else 0)
+                + (1 if path_catalog else 0)
+                + (2 if plural_catalog else 0)
+                - (5 if noisy_title else 0)
+            )
+            metadata_candidates.append((score, path))
+
+    qualified_names_by_path: dict[str, set[str]] = {}
+    if wildcard and metadata_candidates:
+        probe_paths = [
+            path
+            for _score, path in sorted(metadata_candidates, key=lambda item: (-item[0], item[1]))[
+                :DISCOVERY_CANDIDATE_LIMIT
+            ]
+        ]
+        for hit in store.passages_for_pages(probe_paths, limit_per_page=20):
+            qualified_names_by_path.setdefault(hit.page_path, set()).update(
+                _wildcard_evidence_names(question, hit.text)
+            )
+        max_qualified_names = max(
+            (len(names) for names in qualified_names_by_path.values()), default=0
+        )
+        minimum_qualified_names = max(2, max_qualified_names // 10)
+        qualified_paths = {
+            path
+            for path, names in qualified_names_by_path.items()
+            if len(names) >= minimum_qualified_names
+        }
+        if qualified_paths:
+            metadata_candidates = [
+                item for item in metadata_candidates if item[1] in qualified_paths
+            ]
+
+    sorted_metadata_candidates = sorted(
+        metadata_candidates, key=lambda item: (-item[0], item[1])
+    )
+    if wildcard and qualified_names_by_path:
+        metadata_paths = [
+            path
+            for _score, path in sorted(
+                sorted_metadata_candidates,
+                key=lambda item: (-len(qualified_names_by_path.get(item[1], ())), -item[0], item[1]),
+            )
+        ][:DISCOVERY_SOURCE_PAGE_LIMIT]
+    elif focus_terms and sorted_metadata_candidates:
+        # A listing question should prefer an explicit catalog/overview page
+        # when one is available.  Detail/reference pages often inherit the
+        # same topic words through their parent directory, but their
+        # structured rows enumerate entry points, methods, or examples rather
+        # than the requested top-level entities.  This is a generic title
+        # signal; it does not name a product or document path.
+        catalog_candidates = [
+            item for item in sorted_metadata_candidates if item[1] in clean_catalog_paths
+        ] or [item for item in sorted_metadata_candidates if item[1] in catalog_paths]
+        ranking_candidates = catalog_candidates or sorted_metadata_candidates
+        best_score = ranking_candidates[0][0]
+        metadata_paths = [
+            path
+            for score, path in ranking_candidates
+            if score >= best_score - 1
+        ][:DISCOVERY_SOURCE_PAGE_LIMIT]
+    else:
+        metadata_paths = [path for _score, path in sorted_metadata_candidates]
+    # Once the metadata pass has found candidate catalog pages, treat that
+    # bounded set as authoritative.  Merging the original relaxed-FTS page
+    # pool back in here defeats the title/path and same-page-evidence filters:
+    # generic product pages can re-enter the discovery context even though
+    # they contributed no structured enumeration evidence.  Keep FTS paths as
+    # a fallback only when metadata did not produce any candidate page.
+    if metadata_paths:
+        page_paths = list(dict.fromkeys(metadata_paths))[:DISCOVERY_PAGE_LIMIT]
+    else:
+        page_paths = page_paths[:DISCOVERY_PAGE_LIMIT]
+
+    passages = store.passages_for_pages(page_paths, limit_per_page=PAGE_FILL_LIMIT)
+    return [
+        {
+            "hit": hit,
+            "fts_rank": None,
+            "title_rank": None,
+            "vector_rank": None,
+            "vector_score": 0.0,
+            "rrf": 0.0,
+            "exact": False,
+            "graph_score": 0.0,
+            "graph_reasons": [],
+            "score": hit.score,
+        }
+        for hit in passages
+    ]
 
 
 def _discover_enumerated_entities(
@@ -517,42 +874,50 @@ def _discover_enumerated_entities(
                 and re.fullmatch(r"\s*\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?\s*", lines[line_index + 1])
             ):
                 continue
-            structured = _discovery_line(line)
-            if structured is None:
-                continue
-            group, label, kind = structured
-            for canonical, aliases, identifier in _discovery_candidate_for_fragment(label):
-                entities = page["entities"]
-                entity = entities.get(canonical)
-                if entity is None:
-                    entity = {
-                        "canonical_id": canonical,
-                        "aliases": list(dict.fromkeys(aliases)),
-                        "evidence": {
+            for group, label, kind in _discovery_fragments(line):
+                for canonical, aliases, identifier in _discovery_candidate_for_fragment(label):
+                    entities = page["entities"]
+                    entity = entities.get(canonical)
+                    if entity is None:
+                        entity = {
+                            "canonical_id": canonical,
+                            "aliases": list(dict.fromkeys(aliases)),
+                            "evidence": {
+                                "path": hit.page_path,
+                                "passage_id": hit.passage_id,
+                                "heading": _heading(hit),
+                                "excerpt": line.strip()[:360],
+                            },
+                            "evidence_fragments": [],
+                            "_identifier": identifier,
+                            "_order": page["next_order"],
+                        }
+                        entities[canonical] = entity
+                        page["next_order"] += 1
+                    entity["evidence_fragments"].append(
+                        {
                             "path": hit.page_path,
                             "passage_id": hit.passage_id,
                             "heading": _heading(hit),
                             "excerpt": line.strip()[:360],
-                        },
-                        "evidence_fragments": [],
-                        "_identifier": identifier,
-                        "_order": page["next_order"],
-                    }
-                    entities[canonical] = entity
-                    page["next_order"] += 1
-                entity["evidence_fragments"].append(
-                    {
-                        "path": hit.page_path,
-                        "passage_id": hit.passage_id,
-                        "heading": _heading(hit),
-                        "excerpt": line.strip()[:360],
-                    }
-                )
-                page["groups"].setdefault((group, kind), set()).add(canonical)
+                        }
+                    )
+                    page["groups"].setdefault((group, kind), set()).add(canonical)
 
     valid_pages: list[tuple[str, dict[str, Any], set[str]]] = []
     for path, page in by_page.items():
-        valid_groups = [members for members in page["groups"].values() if len(members) >= 2]
+        table_groups = [
+            members
+            for (group, kind), members in page["groups"].items()
+            if kind == "table" and len(members) >= 2
+        ]
+        # A catalog table is stronger evidence than unrelated bullet lists on
+        # the same page (for example, implementation guidelines or samples).
+        # Keep list/heading enumeration as a fallback for pages that have no
+        # multi-row table at all.
+        valid_groups = table_groups or [
+            members for members in page["groups"].values() if len(members) >= 2
+        ]
         valid_entities = set().union(*valid_groups) if valid_groups else set()
         if len(valid_entities) >= 2:
             valid_pages.append((path, page, valid_entities))
@@ -595,6 +960,46 @@ def _public_discovery_entity(entity: dict[str, Any]) -> dict[str, Any]:
         for key, value in entity.items()
         if not key.startswith("_")
     }
+
+
+def _constrain_discovery_entities(
+    question: str,
+    discovery: dict[str, Any],
+    entities: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Apply query-level entity constraints before discovery can batch.
+
+    A wildcard is a namespace request, not permission to batch every generic
+    label found on a candidate page.  Keep only qualified evidence whose
+    prefix matches the requested wildcard and drop source pages that no
+    longer have an eligible entity after that constraint.
+    """
+
+    wildcards = extract_namespace_wildcards(question)
+    if not wildcards:
+        return discovery, list(entities)
+    prefixes = [item.prefix_segments for item in wildcards]
+    constrained: list[dict[str, Any]] = []
+    for entity in entities:
+        identifier = entity.get("_identifier")
+        if not isinstance(identifier, QualifiedIdentifier):
+            continue
+        name = "/".join(identifier.name_segments).casefold()
+        if name in {"a", "na", "none", "null"}:
+            continue
+        if any(identifier.prefix_segments[: len(prefix)] == prefix for prefix in prefixes):
+            constrained.append(entity)
+    source_paths = {str(entity["evidence"]["path"]) for entity in constrained}
+    constrained_discovery = {
+        **discovery,
+        "triggered": len(constrained) >= 2,
+        "enumeration_evidence": len(constrained) >= 2,
+        "candidate_entities": [_public_discovery_entity(entity) for entity in constrained],
+        "source_pages": [
+            path for path in discovery.get("source_pages", ()) if path in source_paths
+        ],
+    }
+    return constrained_discovery, constrained if len(constrained) >= 2 else []
 
 
 def _authority_bonus(hit: PassageHit, intent: str, scope: str, metadata: dict[str, dict[str, Any]]) -> float:
@@ -2006,7 +2411,59 @@ def run_query_v2(
             elif raw_lexical_mode == "relaxed":
                 lexical_mode = "relaxed"
             raw_fallback = bool(selected)
+    discovery_requested = _discovery_requested(question)
+    discovery_source_items: list[dict[str, Any]] = []
     discovery, discovery_entities = _discover_enumerated_entities(selected, context_items)
+    discovery, discovery_entities = _constrain_discovery_entities(
+        question, discovery, discovery_entities
+    )
+    if not discovery_entities and discovery_requested:
+        # Stage one may be dominated by a generic product passage (for
+        # example ``NetSuite``) or may have no FTS term at all for ``N/*``.
+        # Locate a bounded catalog candidate from the active projection, then
+        # validate same-page structure before exposing any entity.
+        discovery_source_items = _discovery_source_items(
+            store,
+            metadata,
+            question,
+            scope=effective_scope,
+            project=project,
+            filters=filters,
+        )
+        discovery, discovery_entities = _discover_enumerated_entities(
+            selected,
+            [*context_items, *discovery_source_items],
+        )
+        discovery, discovery_entities = _constrain_discovery_entities(
+            question, discovery, discovery_entities
+        )
+    if not discovery_entities and discovery_requested and effective_scope in {"knowledge", "all"}:
+        # Raw reference projections are a second discovery source, subject to
+        # the same active→raw boundary and request filters as entity queries.
+        candidate_raw_store = raw_store or RetrievalIndexStore(root, scope="raw")
+        raw_status = candidate_raw_store.status()
+        if raw_status.get("ok") and raw_status.get("state") == "fresh":
+            raw_metadata = _store_metadata(candidate_raw_store)
+            raw_discovery_items = _discovery_source_items(
+                candidate_raw_store,
+                raw_metadata,
+                question,
+                scope="raw",
+                project=project,
+                filters=filters,
+            )
+            discovery, discovery_entities = _discover_enumerated_entities(
+                selected,
+                [*context_items, *discovery_source_items, *raw_discovery_items],
+            )
+            discovery, discovery_entities = _constrain_discovery_entities(
+                question, discovery, discovery_entities
+            )
+            if discovery_entities:
+                raw_store = candidate_raw_store
+    discovery["requested"] = discovery_requested
+    if not discovery_entities:
+        discovery["reason"] = "structured_enumeration_evidence_insufficient"
     batch_payload: dict[str, Any] = {
         "status": "not_triggered",
         "reason": "structured_enumeration_evidence_insufficient",
@@ -2130,10 +2587,29 @@ def run_query_v2(
         "pipeline": pipeline,
     }
     if not results:
-        response.update(
-            code="no_results",
-            message="No indexed documentation matched the query.",
+        discovery = pipeline.get("discovery")
+        batch = pipeline.get("batch")
+        has_discovery_entities = (
+            isinstance(discovery, dict)
+            and bool(discovery.get("candidate_entities"))
         )
+        has_batch_outcome = (
+            isinstance(batch, dict)
+            and batch.get("status") not in {None, "not_triggered"}
+        )
+        if has_discovery_entities or has_batch_outcome:
+            response.update(
+                code="discovery_only",
+                message=(
+                    "Structured discovery found entities; inspect "
+                    "pipeline.discovery and pipeline.batch."
+                ),
+            )
+        else:
+            response.update(
+                code="no_results",
+                message="No indexed documentation matched the query.",
+            )
     return response
 
 
