@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from retrieval.query_pipeline import QueryFilters, _merge_coverage_items, _uncovered_latin_terms, legacy_response_from_v2, run_query_v2
+from retrieval.query_pipeline import (
+    AdaptiveCandidateScorePolicy,
+    QueryFilters,
+    _adaptive_select_candidates,
+    _merge_coverage_items,
+    _uncovered_latin_terms,
+    legacy_response_from_v2,
+    run_query_v2,
+)
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
 import retrieval.query_pipeline as query_pipeline_module
 from runtime.runtime_config import EmbeddingSettings
@@ -1391,3 +1399,238 @@ def test_v2_vector_only_recall_does_not_bypass_filters(tmp_path: Path, monkeypat
 
     result = run_query_v2(root, "unrelated query", project="beta", filters=QueryFilters(type="concept", tags=("finance",)))
     assert result["results"] == []
+
+
+def test_v2_discovers_structured_qualified_entities_and_batches_in_discovery_order(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/module-catalog.md",
+        "Module catalog",
+        "# Module catalog\n\n- N/auth Authentication API\n- N/search Search API\n- N/record Record API",
+        type="concept",
+    )
+    for name, title in (("auth", "N/auth"), ("search", "N/search"), ("record", "N/record")):
+        _write(root, f"wiki/entities/n-{name}.md", title, f"{title} module API reference", type="entity")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "N/auth N/search N/record", retrieval_mode="lexical", top_k=5)
+
+    discovery = result["pipeline"]["discovery"]
+    assert discovery["triggered"] is True
+    assert [item["canonical_id"] for item in discovery["candidate_entities"]] == ["n/auth", "n/search", "n/record"]
+    assert all(item["evidence"]["path"] == "wiki/concepts/module-catalog.md" for item in discovery["candidate_entities"])
+    batch = result["pipeline"]["batch"]
+    assert batch["status"] == "success"
+    assert [item["entity"] for item in batch["entities"]] == ["n/auth", "n/search", "n/record"]
+    assert [item["primary"]["path"] for item in batch["entities"]] == [
+        "wiki/entities/n-auth.md",
+        "wiki/entities/n-search.md",
+        "wiki/entities/n-record.md",
+    ]
+    assert all(item["primary"]["context"] for item in batch["entities"])
+    assert all(item["primary"]["path"] != "wiki/concepts/module-catalog.md" for item in batch["entities"])
+
+
+def test_v2_batch_does_not_recurse_into_a_third_query_stage(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/catalog.md", "Catalog", "# Catalog\n\n- N/auth\n- N/search", type="concept")
+    _write(root, "wiki/entities/n-auth.md", "N/auth", "N/auth API reference", type="entity")
+    _write(root, "wiki/entities/n-search.md", "N/search", "N/search API reference", type="entity")
+    refresh_indexes(root)
+
+    original_batch = query_pipeline_module._run_entity_batch
+    batch_calls = 0
+    active = False
+
+    def guarded_batch(*args, **kwargs):
+        nonlocal active, batch_calls
+        assert active is False, "entity batch must not recursively start another batch"
+        active = True
+        batch_calls += 1
+        try:
+            return original_batch(*args, **kwargs)
+        finally:
+            active = False
+
+    monkeypatch.setattr(query_pipeline_module, "_run_entity_batch", guarded_batch)
+    result = run_query_v2(root, "Catalog", retrieval_mode="lexical")
+
+    assert batch_calls == 1
+    assert result["pipeline"]["batch"]["status"] == "success"
+
+
+def test_v2_does_not_batch_sample_names_without_structured_enumeration(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/sample.md",
+        "Sample",
+        "Examples mention N/auth and N/search in one paragraph, but this is not a catalog.",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "N/auth N/search", retrieval_mode="lexical")
+
+    assert result["pipeline"]["discovery"]["triggered"] is False
+    assert result["pipeline"]["batch"]["status"] == "not_triggered"
+
+
+def test_v2_treats_same_level_headings_and_table_rows_as_generic_enumeration(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/script-catalog.md",
+        "Script catalog",
+        "# Script catalog\n\n| Script Type | Entry Point |\n| --- | --- |\n| Client Script | client |\n| User Event Script | user event |",
+        type="concept",
+    )
+    _write(root, "wiki/entities/client-script.md", "Client Script", "Client Script entry points", type="entity")
+    _write(root, "wiki/entities/user-event-script.md", "User Event Script", "User Event Script entry points", type="entity")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "Script catalog", retrieval_mode="lexical")
+
+    discovery = result["pipeline"]["discovery"]
+    assert discovery["triggered"] is True
+    assert [item["canonical_id"] for item in discovery["candidate_entities"]] == ["client script", "user event script"]
+    assert result["pipeline"]["batch"]["status"] == "success"
+
+
+def test_adaptive_entity_selection_keeps_high_score_platform_and_drops_score_cliff() -> None:
+    items = [{"score": 10.0}, {"score": 9.0}, {"score": 4.0}]
+    selected, error = _adaptive_select_candidates(items, AdaptiveCandidateScorePolicy())
+
+    assert error == ""
+    assert len(selected) == 2
+    assert selected[1]["selection_reason"] == "same_high_score_platform"
+
+    unresolved, error = _adaptive_select_candidates([{"score": 0.01}], AdaptiveCandidateScorePolicy())
+    assert unresolved == []
+    assert error == "unresolved:below_minimum_relevance"
+
+
+def test_v2_isolates_partial_and_ambiguous_entities_and_marks_shared_sources(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/catalog.md",
+        "Catalog",
+        "# Catalog\n\n- N/auth\n- N/search\n- N/error",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    shared = PassageHit(
+        "shared",
+        "wiki/entities/shared.md",
+        "N/auth N/search shared",
+        (),
+        "N/auth N/search shared API",
+        1.5,
+        "active",
+        "high",
+        "entity",
+    )
+
+    def fake_qualified_search(self, identifier, **_kwargs):
+        del self
+        if identifier.canonical_id == "n/error":
+            raise RuntimeError("synthetic entity failure")
+        if identifier.canonical_id == "n/search":
+            return [shared]
+        return [
+            PassageHit("auth-a", "wiki/entities/n-auth-a.md", "N/auth guide A", (), "N/auth API", 1.0, "active", "high", "entity"),
+            PassageHit("auth-b", "wiki/entities/n-auth-b.md", "N/auth guide B", (), "N/auth API", 1.0, "active", "high", "entity"),
+            shared,
+        ]
+
+    monkeypatch.setattr(RetrievalIndexStore, "search_qualified_identifier", fake_qualified_search)
+    result = run_query_v2(root, "Catalog", retrieval_mode="lexical")
+
+    batch = result["pipeline"]["batch"]
+    by_entity = {item["entity"]: item for item in batch["entities"]}
+    assert batch["status"] == "partial_success"
+    assert by_entity["n/auth"]["status"] == "ambiguous"
+    assert by_entity["n/auth"]["needs_review"] is True
+    assert by_entity["n/auth"]["shared_source"] is True
+    assert by_entity["n/search"]["shared_source"] is True
+    assert by_entity["n/error"]["status"] == "error"
+    assert batch["failed_entities"] == ["n/error"]
+
+
+def test_v2_requires_confirmation_before_querying_more_than_40_entities(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    lines = [f"- N/mod{index} module" for index in range(41)]
+    _write(root, "wiki/concepts/catalog.md", "Catalog", "# Catalog\n\n" + "\n".join(lines), type="concept")
+    refresh_indexes(root)
+
+    called = False
+
+    def fail_batch_search(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("batch search must wait for confirmation")
+
+    monkeypatch.setattr(RetrievalIndexStore, "search_qualified_identifier", fail_batch_search)
+    result = run_query_v2(root, "Catalog", retrieval_mode="lexical")
+
+    batch = result["pipeline"]["batch"]
+    assert batch["status"] == "confirmation_required"
+    assert batch["entity_count"] == 41
+    assert batch["max_batch_items"] == 40
+    assert batch["confirmation_token"]
+    assert called is False
+
+
+def test_v2_raw_batch_keeps_24_short_entity_pages_out_of_a_160_plus_sample_pool(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    entity_names = [f"N/mod{index}" for index in range(24)]
+    catalog = root / "raw/sources/references/catalog.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# Catalog\n\n" + "\n".join(f"- {name} module reference" for name in entity_names),
+        encoding="utf-8",
+    )
+    for index, name in enumerate(entity_names):
+        page = root / f"raw/sources/references/short-{index}.md"
+        page.write_text(f"# {name}\n\n{name} API reference", encoding="utf-8")
+    sample_body = " ".join(entity_names) + " sample implementation details"
+    for index in range(170):
+        page = root / f"raw/sources/samples/sample-{index:03d}.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(f"# Sample {index}\n\n{sample_body}", encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "Catalog", scope="raw", retrieval_mode="lexical", top_k=5)
+
+    batch = result["pipeline"]["batch"]
+    assert batch["status"] == "success"
+    assert len(batch["entities"]) == 24
+    assert all(
+        item["primary"]["path"] == f"raw/sources/references/short-{index}.md"
+        for index, item in enumerate(batch["entities"])
+    )
+    assert batch["counters"]["raw_hits"] > 160
+
+
+def test_v2_raw_scope_uses_qualified_aliases_on_the_primary_path(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    source = root / "raw/sources/references/n-auth.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("# N/auth\n\nN/auth API reference", encoding="utf-8")
+    refresh_indexes(root)
+
+    for form in ("N/auth", "N auth", "Nauth", "N-auth", "N_auth", "nauth"):
+        result = run_query_v2(root, form, scope="raw", retrieval_mode="lexical")
+        assert [item["path"] for item in result["results"]] == ["raw/sources/references/n-auth.md"]
+        assert result["pipeline"]["lexical"]["mode"] == "qualified_code"

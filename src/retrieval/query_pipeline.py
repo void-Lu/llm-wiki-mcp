@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +16,11 @@ from typing import Any, Literal, Mapping, cast
 from retrieval.context_packer import ContextPassage, estimate_tokens, pack_context
 from codegraph.codegraph_policy import is_codegraph_raw_path, is_project_code_page
 from retrieval.lexical_analyzer import (
+    QualifiedIdentifier,
     edit_distance,
+    extract_qualified_identifiers,
+    has_qualified_identifier,
     identifier_phrases,
-    module_qualified,
     tokens,
 )
 from retrieval.query_telemetry import QueryTelemetry
@@ -42,6 +47,13 @@ STEP_BONUS_MAX = 4.0
 STEP_COUNT_FULL = 5
 ADAPTIVE_EXPAND_MAX = 40
 ADAPTIVE_SCORE_RATIO = 0.9
+BATCH_MAX_ITEMS = 40
+BATCH_WORKERS = 4
+BATCH_CANDIDATE_POOL_LIMIT = 80
+BATCH_MIN_RELEVANCE_SCORE = 0.05
+BATCH_HIGH_SCORE_RATIO = 0.82
+BATCH_AMBIGUITY_RATIO = 0.93
+BATCH_MAX_SELECTED_CANDIDATES = 12
 _STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
 def _freshness_bonus(hit: PassageHit, metadata: dict[str, dict[str, Any]]) -> float:
     """Reward recently updated wiki pages so a newer fix patch outranks an
@@ -377,6 +389,214 @@ def _filters_allow_page(frontmatter: Mapping[str, Any], source_kind: str, filter
     return True
 
 
+@dataclass(frozen=True)
+class AdaptiveCandidateScorePolicy:
+    """Local score policy used only by the entity batch fan-out."""
+
+    candidate_pool_limit: int = BATCH_CANDIDATE_POOL_LIMIT
+    minimum_relevance_score: float = BATCH_MIN_RELEVANCE_SCORE
+    high_score_ratio: float = BATCH_HIGH_SCORE_RATIO
+    ambiguity_ratio: float = BATCH_AMBIGUITY_RATIO
+    max_selected_candidates: int = BATCH_MAX_SELECTED_CANDIDATES
+
+
+_DISCOVERY_HEADING_RE = re.compile(r"^\s*(?P<marks>#{2,6})\s+(?P<label>.+?)\s*$")
+_DISCOVERY_LIST_RE = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}\s*[.)、]\s+|[一二三四五六七八九十百\d]+\s*[、.)]\s+)(?P<label>.+?)\s*$")
+_DISCOVERY_STOPWORDS = frozenset(
+    {
+        "available",
+        "example",
+        "examples",
+        "list",
+        "module",
+        "modules",
+        "name",
+        "names",
+        "note",
+        "notes",
+        "overview",
+        "script",
+        "scripts",
+        "type",
+        "types",
+        "usage",
+    }
+)
+
+
+def _discovery_line(line: str) -> tuple[str, str, str] | None:
+    """Return (group, label, kind) for a structured enumeration line."""
+
+    heading = _DISCOVERY_HEADING_RE.match(line)
+    if heading:
+        label = re.sub(r"^\s*\d{1,3}\s*[.)、]\s*", "", heading.group("label"))
+        return f"heading:{len(heading.group('marks'))}", label, "heading"
+    if line.lstrip().startswith("|") and line.rstrip().endswith("|"):
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells and not all(re.fullmatch(r":?-{2,}:?", cell) for cell in cells):
+            return "table", " | ".join(cells), "table"
+    item = _DISCOVERY_LIST_RE.match(line)
+    if item:
+        return "list", item.group("label"), "list"
+    return None
+
+
+def _clean_discovery_label(value: str) -> str:
+    if "|" in value:
+        value = value.split("|", 1)[0]
+    value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"[`*_]", "", value).strip()
+    value = re.split(r"\s+(?:[-–—]|:|：)\s+|[:：]", value, maxsplit=1)[0].strip()
+    return value.strip("-–—,，;；。.")
+
+
+def _generic_discovery_entity(label: str) -> tuple[str, tuple[str, ...]] | None:
+    cleaned = _clean_discovery_label(label)
+    words = re.findall(r"[A-Za-z0-9_\u3400-\u9fff][A-Za-z0-9_\u3400-\u9fff -]*", cleaned)
+    if not words or len(cleaned) > 80 or len(cleaned.split()) > 5:
+        return None
+    canonical = re.sub(r"\s+", " ", cleaned.casefold()).strip()
+    if not canonical or canonical in _DISCOVERY_STOPWORDS or canonical.split()[0] in _DISCOVERY_STOPWORDS:
+        return None
+    if not re.search(r"[A-Za-z\u3400-\u9fff]", canonical):
+        return None
+    return canonical, (cleaned, canonical)
+
+
+def _discovery_candidate_for_fragment(fragment: str) -> list[tuple[str, tuple[str, ...], QualifiedIdentifier | None]]:
+    """Extract qualified IDs first, then a structured generic entity label."""
+
+    identifiers = extract_qualified_identifiers(fragment)
+    qualified: list[tuple[str, tuple[str, ...], QualifiedIdentifier | None]] = []
+    for identifier in identifiers:
+        # A space-separated phrase such as ``Client Script`` is a generic
+        # enumeration label, not a qualified identifier.  Keep explicit
+        # boundary forms and compact/camel forms deterministic.
+        explicit_boundary = "/" in fragment or re.search(r"[A-Za-z0-9][-_]\s*[A-Za-z0-9]", fragment) is not None
+        compact_entity = re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9_]*\s*", fragment) is not None
+        spaced_entity = re.fullmatch(r"\s*[A-Za-z]\s+[A-Za-z][A-Za-z0-9_-]*\s*", fragment) is not None
+        single_segment_prefix = len(identifier.prefix_segments) == 1 and len(identifier.prefix_segments[0]) == 1 and (compact_entity or spaced_entity)
+        if explicit_boundary or single_segment_prefix:
+            qualified.append((identifier.canonical_id, identifier.aliases, identifier))
+    if qualified:
+        return qualified
+    generic = _generic_discovery_entity(fragment)
+    if generic is None:
+        return []
+    canonical, aliases = generic
+    return [(canonical, aliases, None)]
+
+
+def _discover_enumerated_entities(
+    selected: Sequence[dict[str, Any]],
+    context_items: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Discover entities only from same-page structured evidence."""
+
+    ordered_items: list[dict[str, Any]] = []
+    seen_passages: set[tuple[str, str]] = set()
+    for item in [*selected, *context_items]:
+        hit = item.get("hit")
+        if not isinstance(hit, PassageHit):
+            continue
+        key = (hit.page_path, hit.passage_id)
+        if key in seen_passages:
+            continue
+        seen_passages.add(key)
+        ordered_items.append(item)
+
+    by_page: dict[str, dict[str, Any]] = {}
+    for item in ordered_items:
+        hit = item["hit"]
+        page = by_page.setdefault(hit.page_path, {"groups": {}, "entities": {}, "order": len(by_page), "next_order": 0})
+        lines = hit.text.splitlines()
+        for line_index, line in enumerate(lines):
+            if (
+                line.lstrip().startswith("|")
+                and line_index + 1 < len(lines)
+                and re.fullmatch(r"\s*\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?\s*", lines[line_index + 1])
+            ):
+                continue
+            structured = _discovery_line(line)
+            if structured is None:
+                continue
+            group, label, kind = structured
+            for canonical, aliases, identifier in _discovery_candidate_for_fragment(label):
+                entities = page["entities"]
+                entity = entities.get(canonical)
+                if entity is None:
+                    entity = {
+                        "canonical_id": canonical,
+                        "aliases": list(dict.fromkeys(aliases)),
+                        "evidence": {
+                            "path": hit.page_path,
+                            "passage_id": hit.passage_id,
+                            "heading": _heading(hit),
+                            "excerpt": line.strip()[:360],
+                        },
+                        "evidence_fragments": [],
+                        "_identifier": identifier,
+                        "_order": page["next_order"],
+                    }
+                    entities[canonical] = entity
+                    page["next_order"] += 1
+                entity["evidence_fragments"].append(
+                    {
+                        "path": hit.page_path,
+                        "passage_id": hit.passage_id,
+                        "heading": _heading(hit),
+                        "excerpt": line.strip()[:360],
+                    }
+                )
+                page["groups"].setdefault((group, kind), set()).add(canonical)
+
+    valid_pages: list[tuple[str, dict[str, Any], set[str]]] = []
+    for path, page in by_page.items():
+        valid_groups = [members for members in page["groups"].values() if len(members) >= 2]
+        valid_entities = set().union(*valid_groups) if valid_groups else set()
+        if len(valid_entities) >= 2:
+            valid_pages.append((path, page, valid_entities))
+
+    candidates: list[dict[str, Any]] = []
+    for path, page, valid_entities in valid_pages:
+        for canonical, entity in page["entities"].items():
+            if canonical not in valid_entities:
+                continue
+            candidates.append(entity)
+    candidates.sort(
+        key=lambda item: (
+            next(index for index, entry in enumerate(ordered_items) if entry["hit"].page_path == item["evidence"]["path"]),
+            item.get("_order", 0),
+        )
+    )
+    unique_candidates: list[dict[str, Any]] = []
+    by_canonical: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        existing = by_canonical.get(candidate["canonical_id"])
+        if existing is None:
+            by_canonical[candidate["canonical_id"]] = candidate
+            unique_candidates.append(candidate)
+            continue
+        existing["aliases"] = list(dict.fromkeys([*existing["aliases"], *candidate["aliases"]]))
+        existing["evidence_fragments"].extend(candidate["evidence_fragments"])
+    candidates = unique_candidates
+    discovery = {
+        "triggered": bool(candidates),
+        "enumeration_evidence": bool(candidates),
+        "candidate_entities": [_public_discovery_entity(entity) for entity in candidates],
+        "source_pages": [path for path, _page, _entities in valid_pages],
+    }
+    return discovery, candidates if len(candidates) >= 2 else []
+
+
+def _public_discovery_entity(entity: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in entity.items()
+        if not key.startswith("_")
+    }
+
+
 def _authority_bonus(hit: PassageHit, intent: str, scope: str, metadata: dict[str, dict[str, Any]]) -> float:
     values = {"formal_knowledge": 0.35, "concept": 0.35, "entity": 0.35, "project": 0.23, "raw": 0.0, "raw_chat": -0.15}
     if hit.corpus == "history" or hit.source_kind == "raw_chat":
@@ -597,16 +817,20 @@ def _raw_recovery_candidates(
             page_type=filters.type,
             tags=list(filters.tags),
         )
-        qualified_code_hits = raw_store.search_fts(
-            question,
-            limit=candidate_limit,
-            project=project,
-            page_type=filters.type,
-            tags=list(filters.tags),
-            mode="qualified_code",
+        qualified_code_hits = (
+            raw_store.search_fts(
+                question,
+                limit=candidate_limit,
+                project=project,
+                page_type=filters.type,
+                tags=list(filters.tags),
+                mode="qualified_code",
+            )
+            if has_qualified_identifier(question)
+            else []
         )
         identifier_phrase_hits: list[PassageHit] = []
-        if not raw_hits and not (qualified_code_hits and module_qualified(question)):
+        if not raw_hits and not qualified_code_hits:
             try:
                 identifier_phrase_hits = raw_store.search_fts(
                     question,
@@ -619,7 +843,7 @@ def _raw_recovery_candidates(
                 )
             except RetrievalIndexError:
                 identifier_phrase_hits = []
-        if qualified_code_hits and module_qualified(question):
+        if qualified_code_hits:
             raw_hits = qualified_code_hits
             raw_lexical_mode = "qualified_code"
         elif identifier_phrase_hits:
@@ -861,6 +1085,525 @@ def _graph_expand(
     return scored, store.passages_for_pages(added, limit_per_page=1)
 
 
+def _store_metadata(store: RetrievalIndexStore) -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for page in store.page_candidates():
+        frontmatter = page.get("frontmatter")
+        metadata[str(page["path"])] = dict(frontmatter) if isinstance(frontmatter, dict) else {}
+    return metadata
+
+
+def _entity_query_text(entity: dict[str, Any], base_question: str, all_entities: Sequence[dict[str, Any]]) -> str:
+    identifier = entity.get("_identifier")
+    canonical = identifier.canonical_id if isinstance(identifier, QualifiedIdentifier) else str(entity["canonical_id"])
+    excluded: set[str] = set()
+    for item in all_entities:
+        excluded.update(tokens(" ".join(str(alias) for alias in item.get("aliases", []))))
+    remaining = [term for term in tokens(base_question) if term not in excluded]
+    return " ".join([canonical, *remaining])
+
+
+def _alias_pattern(alias: str) -> str:
+    pieces = [piece for piece in re.split(r"[/\s_-]+", alias.casefold()) if piece]
+    if not pieces:
+        return ""
+    return r"(?<![a-z0-9_])" + r"[/\s_-]+".join(re.escape(piece) for piece in pieces) + r"(?![a-z0-9_])"
+
+
+def _entity_match_signals(entity: dict[str, Any], hit: PassageHit) -> tuple[float, bool, dict[str, bool]]:
+    aliases = [str(alias) for alias in entity.get("aliases", ())]
+    identifier = entity.get("_identifier")
+    if isinstance(identifier, QualifiedIdentifier):
+        aliases = [*aliases, identifier.canonical_id, "".join((*identifier.prefix_segments, *identifier.name_segments))]
+    title = hit.title.casefold()
+    heading = " ".join(hit.heading_path).casefold()
+    path = hit.page_path.casefold()
+    body = hit.text.casefold()
+    fields = {"title": title, "heading": heading, "path": path, "body": body}
+    title_match = any(alias.casefold() in title or re.search(_alias_pattern(alias), title) for alias in aliases if alias)
+    heading_match = any(alias.casefold() in heading or re.search(_alias_pattern(alias), heading) for alias in aliases if alias)
+    path_match = any(alias.casefold() in path or re.search(_alias_pattern(alias), path) for alias in aliases if alias)
+    body_match = any(alias.casefold() in body or re.search(_alias_pattern(alias), body) for alias in aliases if alias)
+    exact_match = title_match or heading_match or path_match or body_match
+    score = max(float(hit.score), 0.0)
+    score += 3.0 if title_match else 0.0
+    score += 2.0 if heading_match else 0.0
+    score += 1.5 if path_match else 0.0
+    score += 1.0 if body_match else 0.0
+    del fields
+    return round(score, 12), exact_match, {"title": title_match, "heading": heading_match, "path": path_match, "body": body_match}
+
+
+def _batch_candidate_items(entity: dict[str, Any], hits: Sequence[PassageHit]) -> list[dict[str, Any]]:
+    by_page: dict[str, dict[str, Any]] = {}
+    for hit in hits:
+        score, exact_match, signals = _entity_match_signals(entity, hit)
+        item = {
+            "hit": hit,
+            "score": score,
+            "raw_score": round(float(hit.score), 12),
+            "exact_match": exact_match,
+            "signals": signals,
+        }
+        current = by_page.get(hit.page_path)
+        if current is None or (item["score"], hit.passage_id) > (current["score"], current["hit"].passage_id):
+            by_page[hit.page_path] = item
+    return sorted(by_page.values(), key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
+
+
+def _adaptive_select_candidates(
+    items: Sequence[dict[str, Any]],
+    policy: AdaptiveCandidateScorePolicy,
+) -> tuple[list[dict[str, Any]], str]:
+    """Keep a score platform and stop at the first meaningful drop."""
+
+    ranked = list(items)
+    if not ranked:
+        return [], "unresolved:no_candidates"
+    best_score = float(ranked[0]["score"])
+    if best_score < policy.minimum_relevance_score:
+        return [], "unresolved:below_minimum_relevance"
+    threshold = max(policy.minimum_relevance_score, best_score * policy.high_score_ratio)
+    selected: list[dict[str, Any]] = []
+    for index, item in enumerate(ranked):
+        score = float(item["score"])
+        if index == 0:
+            item["selection_reason"] = "best_local_candidate"
+        elif score >= threshold and len(selected) < policy.max_selected_candidates:
+            item["selection_reason"] = "same_high_score_platform"
+        else:
+            break
+        item["local_rank"] = index + 1
+        item["normalized_score"] = round(score / best_score if best_score else 0.0, 12)
+        selected.append(item)
+    return selected, ""
+
+
+def _entity_store_specs(
+    root: Path,
+    primary_store: RetrievalIndexStore,
+    effective_scope: str,
+) -> list[tuple[RetrievalIndexStore, str, dict[str, dict[str, Any]]]]:
+    specs = [(primary_store, effective_scope, _store_metadata(primary_store))]
+    if effective_scope in {"knowledge", "all"}:
+        raw_store = RetrievalIndexStore(root, scope="raw")
+        raw_status = raw_store.status()
+        if raw_status.get("ok") and raw_status.get("state") == "fresh":
+            specs.append((raw_store, "raw", _store_metadata(raw_store)))
+    return specs
+
+
+def _search_entity_store(
+    store: RetrievalIndexStore,
+    entity: dict[str, Any],
+    query_text: str,
+    *,
+    project: str | None,
+    filters: QueryFilters,
+    limit: int,
+) -> tuple[list[PassageHit], dict[str, int]]:
+    counters = {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0}
+    identifier = entity.get("_identifier")
+    if isinstance(identifier, QualifiedIdentifier):
+        hits = store.search_qualified_identifier(
+            identifier,
+            limit=limit,
+            project=project,
+            page_type=filters.type,
+            tags=list(filters.tags),
+        )
+        counters["qualified_hits"] += len(hits)
+    else:
+        hits = store.search_fts(
+            str(entity["canonical_id"]),
+            limit=limit,
+            project=project,
+            page_type=filters.type,
+            tags=list(filters.tags),
+        )
+        counters["fts_hits"] += len(hits)
+    if not hits:
+        hits = store.search_fts(
+            query_text,
+            limit=limit,
+            project=project,
+            page_type=filters.type,
+            tags=list(filters.tags),
+        )
+        counters["fts_hits"] += len(hits)
+    if not hits:
+        hits = store.search_fts(
+            query_text,
+            limit=limit,
+            project=project,
+            page_type=filters.type,
+            tags=list(filters.tags),
+            mode="relaxed",
+        )
+        counters["relaxed_hits"] += len(hits)
+    return hits, counters
+
+
+def _run_one_entity_batch_query(
+    root: Path,
+    entity: dict[str, Any],
+    all_entities: Sequence[dict[str, Any]],
+    base_question: str,
+    *,
+    store_specs: Sequence[tuple[RetrievalIndexStore, str, dict[str, dict[str, Any]]]],
+    project: str | None,
+    filters: QueryFilters,
+    policy: AdaptiveCandidateScorePolicy,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    del root
+    query_text = _entity_query_text(entity, base_question, all_entities)
+    counters = {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0}
+    try:
+        for store, store_scope, metadata in store_specs:
+            hits, local_counters = _search_entity_store(
+                store,
+                entity,
+                query_text,
+                project=project,
+                filters=filters,
+                limit=policy.candidate_pool_limit,
+            )
+            for key, value in local_counters.items():
+                counters[key] += value
+            if store_scope == "raw":
+                counters["raw_hits"] += len(hits)
+            eligible_hits = [
+                hit
+                for hit in hits
+                if _eligible(hit, metadata, scope=store_scope)
+                and _matches_request(hit, metadata, project=project, filters=filters)
+            ]
+            if not eligible_hits:
+                continue
+            candidates = _batch_candidate_items(entity, eligible_hits)
+            selected, selection_error = _adaptive_select_candidates(candidates, policy)
+            if selection_error:
+                return (
+                    {
+                        "entity": entity["canonical_id"],
+                        "aliases": list(entity.get("aliases", ())),
+                        "status": "unresolved",
+                        "primary": None,
+                        "alternatives": [],
+                        "needs_review": False,
+                        "shared_source": False,
+                        "selection_confidence": 0.0,
+                        "evidence": entity["evidence"],
+                        "reason": selection_error,
+                    },
+                    counters,
+                )
+            source_conflict = len({str(item["hit"].source_kind) for item in selected}) > 1
+            needs_review = len(selected) > 1 and (
+                float(selected[1]["score"]) >= float(selected[0]["score"]) * policy.ambiguity_ratio or source_conflict
+            )
+            confidence = 1.0 if len(selected) == 1 else float(selected[0]["score"]) / max(float(selected[0]["score"]) + float(selected[1]["score"]), 1e-9)
+            result = {
+                "entity": entity["canonical_id"],
+                "aliases": list(entity.get("aliases", ())),
+                "status": "ambiguous" if needs_review else "ok",
+                "primary": _batch_public_candidate(selected[0], include_context=True),
+                "alternatives": [_batch_public_candidate(item, include_context=False) for item in selected[1:]],
+                "needs_review": needs_review,
+                "shared_source": False,
+                "selection_confidence": round(confidence if not needs_review else min(confidence, 0.55), 4),
+                "evidence": entity["evidence"],
+            }
+            return result, counters
+        return (
+            {
+                "entity": entity["canonical_id"],
+                "aliases": list(entity.get("aliases", ())),
+                "status": "unresolved",
+                "primary": None,
+                "alternatives": [],
+                "needs_review": False,
+                "shared_source": False,
+                "selection_confidence": 0.0,
+                "evidence": entity["evidence"],
+                "reason": "unresolved:no_eligible_candidates",
+            },
+            counters,
+        )
+    except RetrievalIndexError as exc:
+        return (
+            {
+                "entity": entity["canonical_id"],
+                "aliases": list(entity.get("aliases", ())),
+                "status": "error",
+                "primary": None,
+                "alternatives": [],
+                "needs_review": False,
+                "shared_source": False,
+                "selection_confidence": 0.0,
+                "evidence": entity["evidence"],
+                "error": {"code": exc.code, "message": str(exc)},
+            },
+            counters,
+        )
+    except Exception as exc:  # noqa: BLE001 - isolate one entity failure from the batch
+        return (
+            {
+                "entity": entity["canonical_id"],
+                "aliases": list(entity.get("aliases", ())),
+                "status": "error",
+                "primary": None,
+                "alternatives": [],
+                "needs_review": False,
+                "shared_source": False,
+                "selection_confidence": 0.0,
+                "evidence": entity["evidence"],
+                "error": {"code": "batch_query_failed", "message": str(exc)},
+            },
+            counters,
+        )
+
+
+def _batch_public_candidate(item: dict[str, Any], *, include_context: bool) -> dict[str, Any]:
+    hit = item["hit"]
+    evidence = {
+        "path": hit.page_path,
+        "passage_id": hit.passage_id,
+        "heading": _heading(hit),
+        "excerpt": hit.text[:360],
+    }
+    candidate = {
+        "path": hit.page_path,
+        "heading": _heading(hit),
+        "passage_id": hit.passage_id,
+        "snippet": hit.text[:240],
+        "score": item["score"],
+        "normalized_score": item.get("normalized_score", 0.0),
+        "local_rank": item.get("local_rank"),
+        "selection_reason": item.get("selection_reason", ""),
+        "source_kind": hit.source_kind,
+        "evidence": evidence,
+    }
+    if include_context:
+        candidate["context"] = hit.text
+    return candidate
+
+
+def _batch_token(fingerprint: str, offset: int) -> str:
+    return f"qualified-batch:v1:{fingerprint}:{offset}"
+
+
+def _batch_fingerprint(
+    question: str,
+    *,
+    scope: str,
+    project: str | None,
+    filters: QueryFilters,
+    retrieval_mode: str,
+    hard_budget_tokens: int,
+    entities: Sequence[dict[str, Any]],
+) -> str:
+    payload = {
+        "question": question,
+        "scope": scope,
+        "project": project or "",
+        "filters": {"type": filters.type or "", "tags": list(filters.tags)},
+        "retrieval_mode": retrieval_mode,
+        "hard_budget_tokens": hard_budget_tokens,
+        "entities": [str(entity["canonical_id"]) for entity in entities],
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _parse_batch_token(token: str | None, fingerprint: str) -> int | None:
+    if not token:
+        return None
+    prefix = f"qualified-batch:v1:{fingerprint}:"
+    if not token.startswith(prefix):
+        return None
+    try:
+        offset = int(token.removeprefix(prefix))
+    except ValueError:
+        return None
+    return offset if offset >= 0 else None
+
+
+def _run_entity_batch(
+    root: Path,
+    entities: Sequence[dict[str, Any]],
+    base_question: str,
+    *,
+    primary_store: RetrievalIndexStore,
+    effective_scope: str,
+    project: str | None,
+    filters: QueryFilters,
+    retrieval_mode: str,
+    hard_budget_tokens: int,
+    confirmation_token: str | None,
+) -> dict[str, Any]:
+    policy = AdaptiveCandidateScorePolicy()
+    fingerprint = _batch_fingerprint(
+        base_question,
+        scope=effective_scope,
+        project=project,
+        filters=filters,
+        retrieval_mode=retrieval_mode,
+        hard_budget_tokens=hard_budget_tokens,
+        entities=entities,
+    )
+    offset = _parse_batch_token(confirmation_token, fingerprint)
+    if confirmation_token and offset is None:
+        return {
+            "status": "confirmation_required",
+            "entity_count": len(entities),
+            "max_batch_items": BATCH_MAX_ITEMS,
+            "pending_entities": [entity["canonical_id"] for entity in entities],
+            "confirmation_token": _batch_token(fingerprint, 0),
+            "entities": [],
+            "failed_entities": [],
+            "unresolved": [],
+            "ambiguous": [],
+            "error": {"code": "invalid_confirmation_token", "message": "confirmation token does not match the discovered entity list"},
+            "counters": {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0, "queries": 0},
+        }
+    if len(entities) > BATCH_MAX_ITEMS and offset is None:
+        token = _batch_token(fingerprint, 0)
+        return {
+            "status": "confirmation_required",
+            "entity_count": len(entities),
+            "max_batch_items": BATCH_MAX_ITEMS,
+            "pending_entities": [entity["canonical_id"] for entity in entities],
+            "confirmation_token": token,
+            "entities": [],
+            "failed_entities": [],
+            "unresolved": [],
+            "ambiguous": [],
+            "counters": {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0, "queries": 0},
+        }
+    if offset is None:
+        offset = 0
+    if offset >= len(entities) or offset % BATCH_MAX_ITEMS != 0:
+        return {
+            "status": "confirmation_required",
+            "entity_count": len(entities),
+            "max_batch_items": BATCH_MAX_ITEMS,
+            "pending_entities": [entity["canonical_id"] for entity in entities[offset:] if offset < len(entities)],
+            "confirmation_token": _batch_token(fingerprint, 0),
+            "entities": [],
+            "failed_entities": [],
+            "unresolved": [],
+            "ambiguous": [],
+            "error": {"code": "invalid_confirmation_token", "message": "confirmation token does not match the discovered entity list"},
+            "counters": {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0, "queries": 0},
+        }
+    current_entities = list(entities[offset : offset + BATCH_MAX_ITEMS])
+    specs = _entity_store_specs(root, primary_store, effective_scope)
+    results: list[dict[str, Any]] = []
+    counter_totals = {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0, "queries": len(current_entities)}
+    with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, max(len(current_entities), 1))) as executor:
+        futures = [
+            executor.submit(
+                _run_one_entity_batch_query,
+                root,
+                entity,
+                entities,
+                base_question,
+                store_specs=specs,
+                project=project,
+                filters=filters,
+                policy=policy,
+            )
+            for entity in current_entities
+        ]
+        for future in futures:
+            result, counters = future.result()
+            results.append(result)
+            for key, value in counters.items():
+                counter_totals[key] += value
+    path_counts: dict[str, int] = {}
+    for result in results:
+        for candidate in [result.get("primary"), *result.get("alternatives", [])]:
+            if isinstance(candidate, dict) and candidate.get("path"):
+                path_counts[str(candidate["path"])] = path_counts.get(str(candidate["path"]), 0) + 1
+    for result in results:
+        paths = [result.get("primary"), *result.get("alternatives", [])]
+        result["shared_source"] = any(
+            isinstance(candidate, dict) and path_counts.get(str(candidate.get("path")), 0) > 1
+            for candidate in paths
+        )
+        for candidate in paths:
+            if isinstance(candidate, dict):
+                candidate["shared_source"] = path_counts.get(str(candidate.get("path")), 0) > 1
+    pending = list(entities[offset + len(current_entities) :])
+    continuation_token = _batch_token(fingerprint, offset + len(current_entities)) if pending else None
+    statuses = [str(result.get("status")) for result in results]
+    if pending or any(status in {"error", "unresolved", "ambiguous"} for status in statuses):
+        if any(status in {"ok", "ambiguous"} for status in statuses):
+            status = "partial_success"
+        elif any(status == "error" for status in statuses):
+            status = "error"
+        else:
+            status = "unresolved"
+    else:
+        status = "success"
+    return {
+        "status": status,
+        "entity_count": len(entities),
+        "max_batch_items": BATCH_MAX_ITEMS,
+        "batch_index": offset // BATCH_MAX_ITEMS,
+        "pending_entities": [entity["canonical_id"] for entity in pending],
+        "confirmation_token": confirmation_token if len(entities) > BATCH_MAX_ITEMS else None,
+        "continuation_token": continuation_token,
+        "entities": results,
+        "failed_entities": [result["entity"] for result in results if result.get("status") == "error"],
+        "unresolved": [result["entity"] for result in results if result.get("status") == "unresolved"],
+        "ambiguous": [result["entity"] for result in results if result.get("status") == "ambiguous"],
+        "counters": counter_totals,
+        "candidate_pool_limit": policy.candidate_pool_limit,
+        "score_policy": {
+            "minimum_relevance_score": policy.minimum_relevance_score,
+            "high_score_ratio": policy.high_score_ratio,
+            "ambiguity_ratio": policy.ambiguity_ratio,
+        },
+    }
+
+
+def _stage_one_fts_hits(
+    store: RetrievalIndexStore,
+    question: str,
+    *,
+    effective_scope: str,
+    project: str | None,
+    filters: QueryFilters,
+) -> tuple[list[PassageHit], str, int]:
+    """Run stage-one lexical recall, including raw qualified aliases directly."""
+
+    strict_hits = store.search_fts(
+        question,
+        limit=50,
+        project=project,
+        page_type=filters.type,
+        tags=list(filters.tags),
+    )
+    if effective_scope != "raw" or not has_qualified_identifier(question):
+        return strict_hits, "strict", 0
+    qualified_hits = store.search_fts(
+        question,
+        limit=50,
+        project=project,
+        page_type=filters.type,
+        tags=list(filters.tags),
+        mode="qualified_code",
+    )
+    by_passage = {hit.passage_id: hit for hit in strict_hits}
+    for hit in qualified_hits:
+        current = by_passage.get(hit.passage_id)
+        if current is None or hit.score > current.score:
+            by_passage[hit.passage_id] = hit
+    hits = sorted(by_passage.values(), key=lambda hit: (-hit.score, hit.page_path, hit.passage_id))
+    return hits, "qualified_code" if qualified_hits else "strict", len(qualified_hits)
+
+
 def run_query_v2(
     vault_root: str | Path,
     question: str,
@@ -877,6 +1620,7 @@ def run_query_v2(
     lexical_enabled: bool = True,
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid",
     expansion_terms: dict[str, list[str]] | None = None,
+    confirmation_token: str | None = None,
 ) -> dict[str, Any]:
     """Read only existing passage/vector projections and return compact context."""
     started = time.perf_counter()
@@ -927,11 +1671,19 @@ def run_query_v2(
             key: str(item.get(key) or "")
             for key in ("session_id", "occurred_at", "project", "content_hash")
         }
+    stage_lexical_mode = "strict"
+    qualified_fts_hits = 0
     try:
-        fts = (
-            store.search_fts(question, limit=50, project=project, page_type=filters.type, tags=list(filters.tags))
+        fts, stage_lexical_mode, qualified_fts_hits = (
+            _stage_one_fts_hits(
+                store,
+                question,
+                effective_scope=effective_scope,
+                project=project,
+                filters=filters,
+            )
             if retrieval_mode != "vector"
-            else []
+            else ([], "strict", 0)
         )
     except RetrievalIndexError as exc:
         fts = []
@@ -1058,7 +1810,7 @@ def run_query_v2(
     raw_index_warning = ""
     raw_fallback = False
     coverage_fallback = False
-    lexical_mode = "strict"
+    lexical_mode = stage_lexical_mode
     raw_store: RetrievalIndexStore | None = None
     query_extra_terms: list[str] = []
     query_term_variants: dict[str, list[str]] = {}
@@ -1245,7 +1997,7 @@ def run_query_v2(
             context_items = _build_page_ordered_context(
                 selected, store, raw_store=raw_store, hit_stats=hit_stats, pool_by_page=pool_by_page
             )
-            if raw_lexical_mode == "qualified_code" and module_qualified(question):
+            if raw_lexical_mode == "qualified_code" and has_qualified_identifier(question):
                 lexical_mode = "qualified_code"
             elif raw_lexical_mode == "identifier_phrase":
                 lexical_mode = "identifier_phrase"
@@ -1254,6 +2006,25 @@ def run_query_v2(
             elif raw_lexical_mode == "relaxed":
                 lexical_mode = "relaxed"
             raw_fallback = bool(selected)
+    discovery, discovery_entities = _discover_enumerated_entities(selected, context_items)
+    batch_payload: dict[str, Any] = {
+        "status": "not_triggered",
+        "reason": "structured_enumeration_evidence_insufficient",
+        "entities": [],
+    }
+    if discovery_entities:
+        batch_payload = _run_entity_batch(
+            root,
+            discovery_entities,
+            question,
+            primary_store=store,
+            effective_scope=effective_scope,
+            project=project,
+            filters=filters,
+            retrieval_mode=retrieval_mode,
+            hard_budget_tokens=hard_budget_tokens,
+            confirmation_token=confirmation_token,
+        )
     passages = [
         ContextPassage(
             item["hit"].passage_id,
@@ -1299,7 +2070,30 @@ def run_query_v2(
     warnings = list(dict.fromkeys([*filter(None, scope_rules), *vector_warnings, *index_warnings]))
     if raw_index_warning:
         warnings = list(dict.fromkeys([*warnings, raw_index_warning]))
-    pipeline: dict[str, Any] = {"ranking_version": RANKING_POLICY_VERSION, "scope": scope, "corpus": "raw" if contains_raw else "archive" if effective_scope == "archive" else "active", "authority": "active:formal>project>raw_chat;fallback:wiki_relaxed>raw", "intent": intent, "retrieval_mode": retrieval_mode, "lexical_enabled": lexical_enabled, "lexical": {"mode": lexical_mode}, "coverage": {"uncovered_latin_terms": uncovered_latin_terms, "triggered": coverage_fallback}, "counters": {"fts_hits": len(fts), "relaxed_fts_hits": relaxed_fts_hits, "raw_fts_hits": raw_fts_hits, "vector_hits": len(vector), "graph_hits": sum(1 for item in selected if item["graph_score"] > 0), "selected": len(selected)}, "warnings": warnings, "fallback": fallback_payload}
+    pipeline: dict[str, Any] = {
+        "ranking_version": RANKING_POLICY_VERSION,
+        "scope": scope,
+        "corpus": "raw" if contains_raw else "archive" if effective_scope == "archive" else "active",
+        "authority": "active:formal>project>raw_chat;fallback:wiki_relaxed>raw",
+        "intent": intent,
+        "retrieval_mode": retrieval_mode,
+        "lexical_enabled": lexical_enabled,
+        "lexical": {"mode": lexical_mode},
+        "coverage": {"uncovered_latin_terms": uncovered_latin_terms, "triggered": coverage_fallback},
+        "counters": {
+            "fts_hits": len(fts),
+            "qualified_fts_hits": qualified_fts_hits,
+            "relaxed_fts_hits": relaxed_fts_hits,
+            "raw_fts_hits": raw_fts_hits,
+            "vector_hits": len(vector),
+            "graph_hits": sum(1 for item in selected if item["graph_score"] > 0),
+            "selected": len(selected),
+        },
+        "discovery": discovery,
+        "batch": batch_payload,
+        "warnings": warnings,
+        "fallback": fallback_payload,
+    }
     if debug:
         pipeline["debug"] = [
             {

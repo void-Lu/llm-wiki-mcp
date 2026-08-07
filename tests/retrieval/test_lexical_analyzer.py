@@ -1,4 +1,11 @@
-from retrieval.lexical_analyzer import identifier_phrase_fts_query, identifier_phrase_tokens, identifier_phrases, module_qualified, qualified_code_fts_query
+from retrieval.lexical_analyzer import (
+    identifier_phrase_fts_query,
+    identifier_phrase_tokens,
+    identifier_phrases,
+    module_qualified,
+    parse_qualified_identifier,
+    qualified_code_fts_query,
+)
 
 
 def test_qualified_code_fts_query_keeps_parsed_segments_and_verbatim_phrase() -> None:
@@ -46,3 +53,19 @@ def test_identifier_phrase_tokens_drop_single_letter_namespace_segments() -> Non
 def test_identifier_phrases_extract_only_space_separated_runs() -> None:
     assert identifier_phrases("配置netsuite系统内ai connector的mcp工具的完整步骤") == ["ai connector"]
     assert identifier_phrases("自定义 List/Record 字段关联 Subsidiary 标准记录 typeId 是多少") == []
+
+
+def test_qualified_identifier_aliases_share_one_canonical_id() -> None:
+    forms = ("N/auth", "N auth", "Nauth", "N-auth", "N_auth", "n/AUTH")
+    parsed = [parse_qualified_identifier(form) for form in forms]
+
+    assert {item.canonical_id for item in parsed} == {"n/auth"}
+    assert {"N/auth", "N auth", "Nauth", "N-auth", "N_auth"} <= set(parsed[0].aliases)
+
+
+def test_qualified_identifier_parser_is_not_net_suite_specific() -> None:
+    assert parse_qualified_identifier("Foo/Bar").canonical_id == "foo/bar"
+    assert parse_qualified_identifier("FooBar").canonical_id == "foo/bar"
+    query = qualified_code_fts_query("Foo/Bar and Baz/qux")
+    assert '"foo" AND "bar"' in query
+    assert '"baz" AND "qux"' in query

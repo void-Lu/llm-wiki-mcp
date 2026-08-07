@@ -26,6 +26,7 @@ from retrieval.lexical_analyzer import (
     fts_query,
     identifier_phrase_fts_query,
     normalize,
+    QualifiedIdentifier,
     qualified_code_fts_query,
     raw_prefix_fts_query,
     relaxed_fts_query,
@@ -263,6 +264,32 @@ class RetrievalIndexStore:
         except sqlite3.Error as exc:
             raise RetrievalIndexError("index_corrupt", "retrieval store could not be searched") from exc
         return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8]) for row in rows]
+
+    def search_qualified_identifier(
+        self,
+        identifier: QualifiedIdentifier | str,
+        *,
+        limit: int = 80,
+        project: str | None = None,
+        page_type: str | None = None,
+        tags: list[str] | None = None,
+    ) -> list[PassageHit]:
+        """Search one qualified entity with its own bounded candidate quota.
+
+        The query is deliberately scoped to one canonical identifier.  Batch
+        orchestration calls this method once per discovered entity, so the
+        global raw fallback limit cannot starve a short page for another entity.
+        """
+
+        query = identifier.canonical_id if isinstance(identifier, QualifiedIdentifier) else identifier
+        return self.search_fts(
+            query,
+            limit=limit,
+            project=project,
+            page_type=page_type,
+            tags=tags,
+            mode="qualified_code",
+        )
 
     def load_passages(self, ids: Iterable[str]) -> list[PassageHit]:
         values = sorted(set(ids))

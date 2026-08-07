@@ -221,6 +221,7 @@ def _run_wiki_query(
     vault: str | None,
     vault_root: str | None,
     vaultRoot: str | None,
+    confirmation_token: str | None,
 ) -> dict[str, Any]:
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
@@ -250,6 +251,7 @@ def _run_wiki_query(
         lexical_enabled=settings.lexical_enabled,
         retrieval_mode=retrieval_mode,
         expansion_terms=expansion_terms,
+        confirmation_token=confirmation_token,
     )
     if settings.context.response_mode == "legacy":
         result = legacy_response_from_v2(result)
@@ -257,7 +259,7 @@ def _run_wiki_query(
 
 
 @_register
-def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, expansion_terms: dict[str, list[str]] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, expansion_terms: dict[str, list[str]] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, confirmation_token: str | None = None) -> dict[str, Any]:
     """Query a vault using its immutable retrieval and context profile.
 
     When the vault has no indexed answer, the response includes
@@ -277,7 +279,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     if expansion_error:
         return {"ok": False, "code": "invalid_expansion_terms", "error": expansion_error}
     return _with_timeout(
-        lambda: _run_wiki_query(question, scope, project, filters, top_k, normalized_expansion, vault, vault_root, vaultRoot),
+        lambda: _run_wiki_query(question, scope, project, filters, top_k, normalized_expansion, vault, vault_root, vaultRoot, confirmation_token),
         QUERY_TIMEOUT_SECONDS,
     )
 

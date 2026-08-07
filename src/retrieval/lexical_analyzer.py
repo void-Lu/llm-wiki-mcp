@@ -4,13 +4,132 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 _LATIN_OR_CODE = re.compile(r"[a-z0-9_]+")
 _CJK_RUN = re.compile(r"[一-鿿]+")
 _QUALIFIED_CODE = re.compile(r"(?<![a-z0-9_])([a-z][a-z0-9_]*)/([a-z][a-z0-9_]*)(?![a-z0-9_])", re.I)
+_QUALIFIED_IDENTIFIER = re.compile(
+    r"(?<![a-z0-9_])(?P<prefix>[a-z][a-z0-9.]*)"
+    r"(?P<separator>/|[-_]|[ \t]+)"
+    r"(?P<name>[a-z][a-z0-9_-]*)(?![a-z0-9_/])",
+    re.I,
+)
+_COMPACT_QUALIFIED_IDENTIFIER = re.compile(
+    r"(?<![a-z0-9_])(?P<value>[A-Z][a-z0-9_]*[A-Z][a-z0-9_]*|[A-Z][a-z][a-z0-9_]*)(?![a-z0-9_])"
+)
 _MULTIWORD_RUN = re.compile(r"[a-z0-9_]+(?:\s+[a-z0-9_]+)+", re.I)
 _STOPWORDS = frozenset({"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "of", "on", "or", "the", "to", "with"})
 _RAW_PREFIX_MIN_LENGTH = 3
+
+
+@dataclass(frozen=True)
+class QualifiedIdentifier:
+    """Query-time representation of a namespace-qualified entity.
+
+    The raw document and its index remain untouched.  All boundary spellings
+    are derived here so callers can search ``N/auth`` and ``Nauth`` as the same
+    entity while preserving separators inside the entity name itself.
+    """
+
+    prefix_segments: tuple[str, ...]
+    name_segments: tuple[str, ...]
+    canonical_id: str
+    aliases: tuple[str, ...]
+    raw_forms: tuple[str, ...]
+
+
+def _qualified_identifier_from_parts(prefix: str, name: str, raw: str) -> QualifiedIdentifier:
+    prefix_segments = tuple(part.casefold() for part in prefix.split(".") if part)
+    name_segments = tuple(part.casefold() for part in name.split(".") if part)
+    if not prefix_segments or not name_segments:
+        raise ValueError("qualified identifier requires a prefix and a name")
+    normalized_prefix = ".".join(prefix_segments)
+    normalized_name = ".".join(name_segments)
+    canonical_id = f"{normalized_prefix}/{normalized_name}"
+    display_prefix = ".".join(part for part in prefix.split(".") if part)
+    display_name = ".".join(part for part in name.split(".") if part)
+    boundary_forms = (
+        f"{display_prefix}/{display_name}",
+        f"{display_prefix} {display_name}",
+        f"{display_prefix}{display_name}",
+        f"{display_prefix}-{display_name}",
+        f"{display_prefix}_{display_name}",
+    )
+    aliases: list[str] = []
+    for value in (raw.strip(), *boundary_forms, *(item.casefold() for item in boundary_forms), canonical_id):
+        if value and value not in aliases:
+            aliases.append(value)
+    return QualifiedIdentifier(prefix_segments, name_segments, canonical_id, tuple(aliases), tuple(aliases))
+
+
+def parse_qualified_identifier(value: str) -> QualifiedIdentifier:
+    """Parse one qualified identifier and normalize only its boundary.
+
+    Explicit slash, whitespace, hyphen, and underscore forms are losslessly
+    parsed.  A compact form uses a camel-case boundary when present, otherwise
+    the first character is the namespace boundary (the ``Nauth`` form).
+    """
+
+    raw = value.strip().strip("`*_[](){}<>").rstrip(".,:;!?\u3002\uff1f\uff01")
+    match = _QUALIFIED_IDENTIFIER.fullmatch(raw)
+    if match:
+        return _qualified_identifier_from_parts(match.group("prefix"), match.group("name"), raw)
+    if not raw or any(character.isspace() for character in raw) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", raw):
+        raise ValueError(f"invalid qualified identifier: {value!r}")
+    boundary = next((match.start() for match in re.finditer(r"(?<=[a-z0-9])(?=[A-Z])", raw)), None)
+    if boundary is None:
+        if len(raw) < 3:
+            raise ValueError(f"invalid compact qualified identifier: {value!r}")
+        boundary = 1
+    return _qualified_identifier_from_parts(raw[:boundary], raw[boundary:], raw)
+
+
+def extract_qualified_identifiers(text: str) -> list[QualifiedIdentifier]:
+    """Extract deterministic qualified identifiers from a query or passage."""
+
+    values: list[QualifiedIdentifier] = []
+    seen: set[str] = set()
+    for match in _QUALIFIED_IDENTIFIER.finditer(text):
+        if match.group("separator").isspace() and len(match.group("prefix")) != 1:
+            continue
+        try:
+            identifier = _qualified_identifier_from_parts(match.group("prefix"), match.group("name"), match.group(0))
+        except ValueError:
+            continue
+        if identifier.canonical_id not in seen:
+            seen.add(identifier.canonical_id)
+            values.append(identifier)
+    # Once an explicit boundary form exists in a passage, ordinary title-case
+    # words such as ``Authentication`` must not be split as ``a/uthentication``.
+    # Compact aliases are still parsed when they are the only spelling present.
+    if not re.search(r"[A-Za-z0-9]/[A-Za-z0-9]|[A-Za-z0-9][-_][A-Za-z0-9]", text):
+        for match in _COMPACT_QUALIFIED_IDENTIFIER.finditer(text):
+            try:
+                identifier = parse_qualified_identifier(match.group("value"))
+            except ValueError:
+                continue
+            if identifier.canonical_id not in seen:
+                seen.add(identifier.canonical_id)
+                values.append(identifier)
+    return values
+
+
+def qualified_identifier_aliases(value: str | QualifiedIdentifier) -> tuple[str, ...]:
+    """Return query-time aliases for one qualified identifier."""
+
+    return value.aliases if isinstance(value, QualifiedIdentifier) else parse_qualified_identifier(value).aliases
+
+
+def qualified_identifier_fts_query(value: str | QualifiedIdentifier) -> str:
+    """Build an OR query for one identifier's boundary and compact aliases."""
+
+    identifier = value if isinstance(value, QualifiedIdentifier) else parse_qualified_identifier(value)
+    segments = [*identifier.prefix_segments, *identifier.name_segments]
+    segment_query = _fts_expression(segments, "AND")
+    phrase_query = f'"{" ".join(segments)}"'
+    compact = "".join(segments).replace(chr(34), chr(34) * 2)
+    return f'({segment_query} OR {phrase_query} OR "{compact}")'
 
 
 def edit_distance(left: str, right: str) -> int:
@@ -127,23 +246,24 @@ def expanded_identifier_phrase_fts_query(
 
 
 def qualified_code_fts_query(text: str) -> str:
-    """Extract slash-qualified identifiers and keep their verbatim slash term.
+    """Extract qualified identifiers and union one precise query per entity."""
 
-    Slash-qualified identifiers (for example ``N/record``) are recovered with
-    their parsed segments, and the verbatim slash term (for example
-    ``List/Record``) is preserved as an adjacent phrase.  Both forms are part
-    of the query so a generic English slash term keeps its original meaning
-    instead of being reduced to two disconnected tokens.
-    """
+    identifiers = extract_qualified_identifiers(text)
+    if not identifiers and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", text.strip()):
+        try:
+            identifiers = [parse_qualified_identifier(text)]
+        except ValueError:
+            identifiers = []
+    return " OR ".join(qualified_identifier_fts_query(identifier) for identifier in identifiers)
 
-    matches = _QUALIFIED_CODE.findall(text)
-    if not matches:
-        return ""
-    parsed = [segment.casefold() for match in matches for segment in match]
-    clauses = [_fts_expression(parsed, "AND")]
-    phrases = [" ".join(segment.casefold() for segment in match) for match in matches]
-    clauses.append(" OR ".join(f'"{phrase}"' for phrase in phrases))
-    return " OR ".join(clauses)
+
+def has_qualified_identifier(text: str) -> bool:
+    """Return whether a query contains a supported qualified-id spelling."""
+
+    if extract_qualified_identifiers(text):
+        return True
+    stripped = text.strip()
+    return re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", stripped) is not None and len(stripped) >= 3
 
 
 def module_qualified(text: str) -> bool:
