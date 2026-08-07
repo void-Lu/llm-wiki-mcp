@@ -19,3 +19,17 @@ If you're using Codex or another agent-capable tool, additional project-scoped h
 Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
 
 <!-- TRELLIS:END -->
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues in `void-Lu/netsuite-llm-wiki-mcp`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five canonical triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
