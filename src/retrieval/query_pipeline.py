@@ -49,6 +49,7 @@ STEP_BONUS_MAX = 4.0
 STEP_COUNT_FULL = 5
 ADAPTIVE_EXPAND_MAX = 40
 ADAPTIVE_SCORE_RATIO = 0.9
+MAX_ADAPTIVE_SCORE_RATIO = 0.7
 BATCH_MAX_ITEMS = 40
 BATCH_WORKERS = 4
 BATCH_CANDIDATE_POOL_LIMIT = 80
@@ -151,8 +152,11 @@ def _adaptive_expand(
     The requested ``top_k`` is a floor, not a hard cap: pages ranked just
     behind the boundary that still score within ``score_ratio`` of it are
     plausibly part of the same answer set, so they are kept — up to
-    ``max_top_k`` (40).  The decision is purely score-driven, so it applies to
-    any topic and language without domain vocabulary.
+    ``max_top_k`` (40).  Expansion also has a global score floor relative to
+    the highest-ranked page, preventing a low-scoring plateau from expanding
+    the response when the boundary score itself is already weak.  The decision
+    is purely score-driven, so it applies to any topic and language without
+    domain vocabulary.
     """
 
     selected = ranked[:base_top_k]
@@ -161,7 +165,11 @@ def _adaptive_expand(
     boundary = ranked[base_top_k - 1]["score"]
     if boundary <= 0:
         return selected
-    threshold = boundary * score_ratio
+    top_score = ranked[0]["score"]
+    threshold = max(
+        boundary * score_ratio,
+        top_score * MAX_ADAPTIVE_SCORE_RATIO,
+    )
     index = base_top_k
     while index < min(len(ranked), max_top_k):
         if ranked[index]["score"] >= threshold:

@@ -3,6 +3,7 @@ from pathlib import Path
 from retrieval.query_pipeline import (
     AdaptiveCandidateScorePolicy,
     QueryFilters,
+    _adaptive_expand,
     _adaptive_select_candidates,
     _merge_coverage_items,
     _uncovered_latin_terms,
@@ -1166,6 +1167,33 @@ def test_v2_adaptive_expand_keeps_close_scoring_pages_above_boundary(tmp_path: P
     assert len(returned) > 10  # the score-driven expansion kept close-scoring pages
     assert all(path in returned for path in pages[:12])
     assert not any("unrelated" in path for path in returned)
+
+
+def test_adaptive_expand_applies_global_score_floor() -> None:
+    ranked = [
+        {"score": score, "path": f"page-{index}"}
+        for index, score in enumerate(
+            [48.2, 46.1, 44.0, 42.0, 40.0, 39.0, 38.0, 37.0, 36.5, 36.0, 35.0, 33.8, 33.0, 24.0, 15.0]
+        )
+    ]
+
+    selected = _adaptive_expand(ranked, base_top_k=10)
+
+    assert [item["score"] for item in selected] == [
+        48.2,
+        46.1,
+        44.0,
+        42.0,
+        40.0,
+        39.0,
+        38.0,
+        37.0,
+        36.5,
+        36.0,
+        35.0,
+        33.8,
+    ]
+    assert query_pipeline_module.MAX_ADAPTIVE_SCORE_RATIO == 0.7
 
 
 def test_v2_adaptive_expand_budget_scales_with_returned_count(tmp_path: Path) -> None:
