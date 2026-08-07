@@ -15,6 +15,7 @@ from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
 from wiki.wiki_paths import create_wiki_root
+from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 from wiki.reference_section import build_reference_section, skipped_warnings, validate_raw_sources
 
 NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge", "entity", "chat"}
@@ -233,6 +234,7 @@ def save_obsidian_note(
 
     redacted_content = redact_sensitive_text(content)
     redacted_count = count_redactions(content, redacted_content)
+    redacted_content, normalized_wikilink_count = auto_normalize_wikilinks(redacted_content, root)
     related_pages_skipped: list[dict[str, str]] = []
     if related_pages is not None:
         redacted_content, related_pages_skipped = build_reference_section(root, redacted_content, related_pages)
@@ -262,6 +264,7 @@ def save_obsidian_note(
     except OSError as exc:
         return _error("write_failed", str(exc))
 
+    broken_wikilinks = validate_wikilinks(redacted_content, root)
     result: dict[str, Any] = {
         "ok": True,
         "path": relative_path.as_posix(),
@@ -269,6 +272,9 @@ def save_obsidian_note(
         "created": True,
         "redacted_count": redacted_count,
         "indexed": None,
+        "wikilink_target": name[:-3] if name.endswith(".md") else name,
+        "normalized_wikilinks": normalized_wikilink_count,
+        "broken_wikilinks": broken_wikilinks,
     }
     if related_pages is not None:
         result["related_pages_skipped"] = related_pages_skipped
