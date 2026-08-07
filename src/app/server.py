@@ -280,6 +280,11 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     terms with your own model (for example ``sl`` -> ``suitelet``) and retry
     with ``expansion_terms`` set to the mapping so the relaxed recovery can
     reach documents that use different vocabulary.
+
+    When the response includes ``pipeline.discovery`` with a
+    ``confirmation_token``, pass the same ``question`` and ``confirmation_token``
+    back to batch-resolve all discovered entities' API content in one follow-up
+    call instead of querying each entity individually.
     """
     if scope not in {"auto", "knowledge", "history", "all", "archive", "raw"}:
         return {"ok": False, "code": "invalid_scope", "error": "scope must be auto, knowledge, history, all, archive, or raw"}
