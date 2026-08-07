@@ -1,4 +1,4 @@
-"""Query V2: typed, passage-first retrieval behind the compact MCP response."""
+"""Query V2: typed, page-first retrieval behind the canonical MCP response."""
 
 from __future__ import annotations
 
@@ -852,6 +852,27 @@ def _discovery_source_items(
     ]
 
 
+def _compact_discovery_aliases(aliases: Sequence[str]) -> list[str]:
+    """Deduplicate boundary variants by normalizing separators and case.
+
+    ``QualifiedIdentifier`` emits slash, space, compact, hyphen and underscore
+    forms, which explode the discovery payload for long multi-segment names.
+    Matching uses ``_alias_pattern``, which already collapses all those
+    separators to one, so each normalized spelling only needs one alias.
+    """
+
+    seen: set[str] = set()
+    compact: list[str] = []
+    for alias in aliases:
+        if not alias:
+            continue
+        key = re.sub(r"[/\s_-]+", "/", alias).casefold().strip("/")
+        if key not in seen:
+            seen.add(key)
+            compact.append(alias)
+    return compact
+
+
 def _discover_enumerated_entities(
     selected: Sequence[dict[str, Any]],
     context_items: Sequence[dict[str, Any]],
@@ -889,7 +910,7 @@ def _discover_enumerated_entities(
                     if entity is None:
                         entity = {
                             "canonical_id": canonical,
-                            "aliases": list(dict.fromkeys(aliases)),
+                            "aliases": _compact_discovery_aliases(aliases),
                             "evidence": {
                                 "path": hit.page_path,
                                 "passage_id": hit.passage_id,
@@ -902,14 +923,15 @@ def _discover_enumerated_entities(
                         }
                         entities[canonical] = entity
                         page["next_order"] += 1
-                    entity["evidence_fragments"].append(
-                        {
-                            "path": hit.page_path,
-                            "passage_id": hit.passage_id,
-                            "heading": _heading(hit),
-                            "excerpt": line.strip()[:360],
-                        }
-                    )
+                    else:
+                        entity["evidence_fragments"].append(
+                            {
+                                "path": hit.page_path,
+                                "passage_id": hit.passage_id,
+                                "heading": _heading(hit),
+                                "excerpt": line.strip()[:360],
+                            }
+                        )
                     page["groups"].setdefault((group, kind), set()).add(canonical)
 
     valid_pages: list[tuple[str, dict[str, Any], set[str]]] = []
@@ -2035,7 +2057,12 @@ def run_query_v2(
     expansion_terms: dict[str, list[str]] | None = None,
     confirmation_token: str | None = None,
 ) -> dict[str, Any]:
-    """Read only existing passage/vector projections and return compact context."""
+    """Read existing projections and return one canonical result payload.
+
+    The internal packer still assembles page-ordered evidence, but its body is
+    emitted once on each public ``results`` item; the old ``context_pack`` and
+    legacy adapter are intentionally not part of the response contract.
+    """
     started = time.perf_counter()
     if not question.strip():
         return {"ok": False, "code": "missing_question", "error": "question is required"}
@@ -2070,7 +2097,8 @@ def run_query_v2(
             "question": question,
             "scope": scope,
             "results": [],
-            "context_pack": {"passages": [], "citations": [], "budget": {"total": k_budget, "used": 0}},
+            "additional_results": [],
+            "budget": {"total": k_budget, "used": 0},
             "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [*index_warnings, str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}},
         }
 
@@ -2186,12 +2214,8 @@ def run_query_v2(
         candidate = graph_candidates[hit.page_path]
         scored.append({"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0, "rrf": 0.0, "exact": False, "graph_score": candidate.graph_score, "graph_reasons": list(candidate.rank_breakdown.graph_reasons), "score": candidate.total_score})
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
-    # Retrieval is passage-first.  The public result list keeps the single
-    # best passage per page, while the context pack may carry several passages
-    # from the same page so an answer table or code block is not lost behind a
-    # higher-scoring intro passage.  Both lists consume the same
     # Retrieval is page-first: the public result list keeps one best passage
-    # per page, while the context pack is assembled page-by-page in reading
+    # per page, while the internal pack is assembled page-by-page in reading
     # order so multi-section answers (fix steps, install checklists) survive
     # regardless of which sections carried the highest BM25 scores.
     selected: list[dict[str, Any]] = []
@@ -2490,6 +2514,12 @@ def run_query_v2(
             hard_budget_tokens=hard_budget_tokens,
             confirmation_token=confirmation_token,
         )
+    public_selected = selected[:top_k]
+    additional_selected = selected[top_k:]
+    public_paths = {item["hit"].page_path for item in public_selected}
+    public_context_items = [
+        item for item in context_items if item["hit"].page_path in public_paths
+    ]
     passages = [
         ContextPassage(
             item["hit"].passage_id,
@@ -2500,14 +2530,27 @@ def run_query_v2(
             "raw_evidence" if item["hit"].source_kind == "raw" else "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge",
             _citation_metadata(item["hit"], provenance),
         )
-        for item in context_items
+        for item in public_context_items
     ]
-    k_budget = min(hard_budget_tokens, 400 * max(top_k, len(selected)))
+    k_budget = min(hard_budget_tokens, 400 * top_k)
     packed: dict[str, Any] = (
         pack_context(passages, hard_limit=hard_budget_tokens, intent=intent, budget_scale=k_budget)
         if include_context_pack
         else {"passages": [], "citations": [], "budget": {"total": k_budget, "used": 0, "omitted": 0}}
     )
+    packed_by_path: dict[str, dict[str, Any]] = {}
+    for item in packed.get("passages", []):
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        if not path:
+            continue
+        previous = packed_by_path.get(path)
+        if previous is None:
+            packed_by_path[path] = dict(item)
+            continue
+        previous["content"] = f"{previous.get('content', '')}\n\n{item.get('content', '')}".strip()
+        previous["tokens"] = int(previous.get("tokens") or 0) + int(item.get("tokens") or 0)
     contains_raw = any(item["hit"].source_kind == "raw" for item in selected)
     raw_fallback_response = effective_scope != "raw" and contains_raw
     fallback_payload = {
@@ -2516,21 +2559,40 @@ def run_query_v2(
         "allowed_source_paths": [item["hit"].page_path for item in selected if item["hit"].source_kind == "raw"] if raw_fallback_response else [],
         "added_token_usage": 0,
     }
-    results = [
-        {
-            "path": item["hit"].page_path,
-            "heading": _heading(item["hit"]),
-            "snippet": item["hit"].text[:240],
+    def _result_item(item: dict[str, Any], *, citation: str, include_content: bool) -> dict[str, Any]:
+        hit = item["hit"]
+        result_metadata = (
+            {"type": hit.source_kind, "tags": []}
+            if hit.source_kind == "raw"
+            else {"type": metadata.get(hit.page_path, {}).get("type"), "tags": metadata.get(hit.page_path, {}).get("tags", [])}
+        )
+        citation_metadata = _citation_metadata(hit, provenance)
+        if citation_metadata:
+            result_metadata["provenance"] = citation_metadata
+        result: dict[str, Any] = {
+            "citation": citation,
+            "path": hit.page_path,
+            "heading": _heading(hit),
             "score": item["score"],
-            "scores": {"fts": item["hit"].score, "vector": item["vector_score"], "rrf": item["rrf"], "graph": item["graph_score"]},
-            "source_kind": item["hit"].source_kind,
-            "metadata": (
-                {"type": item["hit"].source_kind, "tags": []}
-                if item["hit"].source_kind == "raw"
-                else {"type": metadata.get(item["hit"].page_path, {}).get("type"), "tags": metadata.get(item["hit"].page_path, {}).get("tags", [])}
-            ),
+            "scores": {"fts": hit.score, "vector": item["vector_score"], "rrf": item["rrf"], "graph": item["graph_score"]},
+            "source_kind": hit.source_kind,
+            "metadata": result_metadata,
         }
-        for item in selected
+        if include_content:
+            context = packed_by_path.get(hit.page_path)
+            if context:
+                result["content"] = context.get("content", "")
+                result["tokens"] = context.get("tokens", 0)
+                result["evidence_kind"] = context.get("evidence_kind", "")
+        return result
+
+    results = [
+        _result_item(item, citation=f"[{index}]", include_content=include_context_pack)
+        for index, item in enumerate(public_selected, 1)
+    ]
+    additional_results = [
+        _result_item(item, citation=f"[{len(public_selected) + index}]", include_content=False)
+        for index, item in enumerate(additional_selected, 1)
     ]
     warnings = list(dict.fromkeys([*filter(None, scope_rules), *vector_warnings, *index_warnings]))
     if raw_index_warning:
@@ -2553,12 +2615,16 @@ def run_query_v2(
             "vector_hits": len(vector),
             "graph_hits": sum(1 for item in selected if item["graph_score"] > 0),
             "selected": len(selected),
+            "returned": len(results),
+            "additional": len(additional_results),
         },
-        "discovery": discovery,
-        "batch": batch_payload,
         "warnings": warnings,
         "fallback": fallback_payload,
     }
+    if discovery_requested or discovery_entities or discovery_source_items:
+        pipeline["discovery"] = discovery
+    if batch_payload.get("status") != "not_triggered":
+        pipeline["batch"] = batch_payload
     if debug:
         pipeline["debug"] = [
             {
@@ -2590,20 +2656,18 @@ def run_query_v2(
         "scope": scope,
         "project": project or "",
         "results": results,
+        "additional_results": additional_results,
         "expansion_suggestions": expansion_suggestions,
-        "context_pack": packed,
+        "budget": packed["budget"],
         "pipeline": pipeline,
     }
     if not results:
-        discovery = pipeline.get("discovery")
-        batch = pipeline.get("batch")
         has_discovery_entities = (
-            isinstance(discovery, dict)
-            and bool(discovery.get("candidate_entities"))
+            bool(discovery_entities)
+            or (isinstance(discovery, dict) and bool(discovery.get("candidate_entities")))
         )
         has_batch_outcome = (
-            isinstance(batch, dict)
-            and batch.get("status") not in {None, "not_triggered"}
+            batch_payload.get("status") not in {None, "not_triggered"}
         )
         if has_discovery_entities or has_batch_outcome:
             response.update(
@@ -2619,26 +2683,3 @@ def run_query_v2(
                 message="No indexed documentation matched the query.",
             )
     return response
-
-
-def legacy_response_from_v2(payload: dict[str, Any]) -> dict[str, Any]:
-    """Render a deprecated legacy context from the already-selected V2 pack.
-
-    This adapter intentionally performs no retrieval or reranking: legacy and
-    compact callers therefore cite the identical selected-results set.
-    """
-    result = dict(payload)
-    context_pack = payload.get("context_pack")
-    passages = context_pack.get("passages", []) if isinstance(context_pack, dict) else []
-    result["context"] = [
-        {
-            "citation": item.get("citation", ""),
-            "path": item.get("path", ""),
-            "title": item.get("heading", ""),
-            "content": item.get("content", ""),
-        }
-        for item in passages
-        if isinstance(item, dict)
-    ]
-    result.setdefault("warnings", []).append("legacy_response_adapter_v2_selected_results")
-    return result

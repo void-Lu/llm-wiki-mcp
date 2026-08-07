@@ -7,7 +7,6 @@ from retrieval.query_pipeline import (
     _adaptive_select_candidates,
     _merge_coverage_items,
     _uncovered_latin_terms,
-    legacy_response_from_v2,
     run_query_v2,
 )
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
@@ -52,17 +51,45 @@ def test_query_filters_rejects_non_sequence_or_non_string_tags() -> None:
         raise AssertionError(f"expected ValueError for tags={bad_tags!r}")
 
 
-def test_v2_returns_compact_passages_without_result_body(tmp_path: Path) -> None:
+def test_v2_returns_result_body_without_context_pack(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
     _write(root, "wiki/concepts/invoice.md", "Invoice", "Invoice approval requires a role.", type="concept")
     refresh_indexes(root)
     result = run_query_v2(root, "invoice approval")
     assert result["ok"] is True
-    assert "content" not in result["results"][0]
-    assert result["context_pack"]["passages"][0]["content"]
+    assert result["results"][0]["content"]
+    assert "context_pack" not in result
     assert result["pipeline"]["corpus"] == "active"
     assert result["pipeline"]["authority"] == "active:formal>project>raw_chat;fallback:wiki_relaxed>raw"
+
+
+def test_v2_uses_results_as_the_single_public_context_source(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    for index in range(12):
+        _write(
+            root,
+            f"wiki/concepts/invoice-{index:02d}.md",
+            f"Invoice {index}",
+            "invoice approval requires a role and a matching workflow step.",
+            type="concept",
+        )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "invoice approval", top_k=2, retrieval_mode="lexical")
+
+    assert "context_pack" not in result
+    assert len(result["results"]) == 2
+    assert [item["citation"] for item in result["results"]] == ["[1]", "[2]"]
+    assert all(item["content"] for item in result["results"])
+    assert all("snippet" not in item for item in result["results"])
+    assert result["budget"]["used"] > 0
+    assert len(result["additional_results"]) > 0
+    assert result["additional_results"][0]["citation"] == "[3]"
+    assert all("content" not in item for item in result["additional_results"])
+    assert "discovery" not in result["pipeline"]
+    assert "batch" not in result["pipeline"]
 
 
 def test_v2_raw_scope_is_raw_only_and_excludes_codegraph_raw(tmp_path: Path) -> None:
@@ -113,19 +140,6 @@ def test_v2_raw_scope_skips_vector_and_graph_stages(tmp_path: Path, monkeypatch)
     assert result["pipeline"]["counters"]["graph_hits"] == 0
 
 
-def test_legacy_adapter_reuses_v2_selected_context_passages(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
-    create_wiki_root(root)
-    _write(root, "wiki/concepts/invoice.md", "Invoice", "Invoice approval requires a role.", type="concept")
-    refresh_indexes(root)
-
-    compact = run_query_v2(root, "invoice approval")
-    legacy = legacy_response_from_v2(compact)
-
-    assert [item["path"] for item in legacy["context"]] == [item["path"] for item in compact["context_pack"]["passages"]]
-    assert legacy["warnings"] == ["legacy_response_adapter_v2_selected_results"]
-
-
 def test_v2_returns_at_most_one_best_passage_per_page(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -135,7 +149,7 @@ def test_v2_returns_at_most_one_best_passage_per_page(tmp_path: Path) -> None:
     result = run_query_v2(root, "invoice approval", top_k=5)
 
     assert [item["path"] for item in result["results"]] == ["wiki/concepts/invoice.md"]
-    assert len(result["context_pack"]["passages"]) == 1
+    assert result["results"][0]["content"]
 
 
 def test_v2_uses_a_stable_path_tie_break_for_equal_scores(tmp_path: Path) -> None:
@@ -169,14 +183,14 @@ def test_v2_history_scope_is_traceable_and_cannot_outrank_formal_knowledge(tmp_p
 
     assert all_scope["results"][0]["path"] == "wiki/concepts/approval.md"
     assert [item["path"] for item in history_scope["results"]] == ["raw/sources/chat/2026/07/31/review-123/transcript.md"]
-    citation = history_scope["context_pack"]["citations"][0]
-    assert citation["metadata"] == {
+    provenance = history_scope["results"][0]["metadata"]["provenance"]
+    assert provenance == {
         "session_id": "2026/07/31/review-123",
         "occurred_at": "2026-07-31 08:30:00+00:00",
         "project": "billing",
-        "content_hash": citation["metadata"]["content_hash"],
+        "content_hash": provenance["content_hash"],
     }
-    assert len(citation["metadata"]["content_hash"]) == 64
+    assert len(provenance["content_hash"]) == 64
 
 
 def test_v2_reports_unresolved_fuzzy_terms_when_primary_recall_is_empty(tmp_path: Path) -> None:
@@ -589,7 +603,7 @@ def test_v2_raw_fallback_uses_the_dedicated_fts_store_without_scanning_sources(t
     monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("raw source scan")))
     result = run_query_v2(root, "custbody_approval_state", retrieval_mode="lexical")
 
-    raw_passages = [item for item in result["context_pack"]["passages"] if item["evidence_kind"] == "raw_evidence"]
+    raw_passages = [item for item in result["results"] if item["source_kind"] == "raw"]
     assert raw_passages and "custbody_approval_state" in raw_passages[0]["content"]
     assert "super-secret" not in raw_passages[0]["content"]
     assert result["pipeline"]["fallback"]["level"] == "raw"
@@ -637,7 +651,7 @@ def test_v2_raw_fallback_reranks_page_titles_and_deduplicates_pages(tmp_path: Pa
         "raw/sources/file/default/target.md",
         "raw/sources/file/default/other.md",
     ]
-    assert len({item["path"] for item in result["context_pack"]["passages"]}) == 2
+    assert len({item["path"] for item in result["results"]}) == 2
 
 
 def test_v2_raw_fallback_recovers_qualified_module_names_from_chinese_questions(tmp_path: Path) -> None:
@@ -690,7 +704,7 @@ def test_v2_wiki_relaxed_answer_blocks_raw_fallback(tmp_path: Path) -> None:
     assert result["pipeline"]["counters"]["relaxed_fts_hits"] > 0
 
 
-def test_v2_context_pack_carries_multiple_answer_passages_from_the_leading_page(tmp_path: Path) -> None:
+def test_v2_result_body_combines_multiple_answer_passages_from_the_leading_page(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
     note = "wiki/concepts/netsuite-object-playbooks/typeid-cheatsheet.md"
@@ -717,9 +731,10 @@ def test_v2_context_pack_carries_multiple_answer_passages_from_the_leading_page(
     result = run_query_v2(root, "subsidiary在自定义list类型字段上的内部id是什么", retrieval_mode="lexical")
 
     assert result["results"][0]["path"] == note
-    assert len(result["context_pack"]["passages"]) == 3
-    assert all(item["path"] == note for item in result["context_pack"]["passages"])
-    assert any("-117" in item["content"] for item in result["context_pack"]["passages"])
+    body = result["results"][0]["content"]
+    assert "-117" in body
+    assert "-103" in body
+    assert "<selectrecordtype>" in body
     assert result["pipeline"]["lexical"]["mode"] == "relaxed"
     assert result["pipeline"]["fallback"]["level"] == "none"
 
@@ -812,7 +827,7 @@ def test_v2_raw_fallback_combines_identifier_phrase_docs_above_bigram_noise(tmp_
     assert set(paths[:3]) == expected
     assert result["pipeline"]["lexical"]["mode"] == "identifier_phrase"
     assert result["pipeline"]["fallback"]["level"] == "raw"
-    combined = "\n".join(item["content"] for item in result["context_pack"]["passages"])
+    combined = "\n".join(item["content"] for item in result["results"] if "content" in item)
     assert "Server SuiteScript" in combined
     assert "suitetalk.api.netsuite.com" in combined
     assert "MCP Server Connection" in combined
@@ -862,10 +877,9 @@ def test_v2_identifier_phrase_fills_procedural_sections_of_selected_guide_pages(
     )
 
     assert result["pipeline"]["lexical"]["mode"] == "identifier_phrase"
-    passages = result["context_pack"]["passages"]
-    combined = "\n".join(item["content"] for item in passages)
+    passages = result["results"]
+    combined = "\n".join(item["content"] for item in passages if "content" in item)
     assert "claude.ai" in combined
-    assert any("Enable the required features" in (item["heading"] or "") for item in passages)
     assert "Server SuiteScript" in combined
     assert "REST Web Services" in combined
 
@@ -910,12 +924,10 @@ def test_v2_page_ordered_context_keeps_fix_steps_in_later_sections(tmp_path: Pat
     )
 
     assert result["results"][0]["path"] == note
-    passages = result["context_pack"]["passages"]
-    combined = "\n".join(item["content"] for item in passages)
-    assert any("最终处理方式" in (item["heading"] or "") for item in passages)
-    assert "npm i -g" in combined
-    assert "codegraph index" in combined
-    assert "codegraph explore" in combined
+    body = result["results"][0]["content"]
+    assert "npm i -g" in body
+    assert "codegraph index" in body
+    assert "codegraph explore" in body
 
 
 def test_v2_weak_pages_contribute_only_their_top_hits(tmp_path: Path) -> None:
@@ -969,10 +981,12 @@ def test_v2_weak_pages_contribute_only_their_top_hits(tmp_path: Path) -> None:
         retrieval_mode="lexical",
     )
 
-    strong_segs = [p for p in result["context_pack"]["passages"] if "codegraph-fix.md" in p["path"]]
-    weak_segs = [p for p in result["context_pack"]["passages"] if "gstack-notes.md" in p["path"]]
-    assert len(strong_segs) == 2  # the strongly matched page is filled wholesale
-    assert 1 <= len(weak_segs) <= 3  # the weak page keeps only its top hits
+    strong_results = [p for p in result["results"] if "codegraph-fix.md" in p["path"]]
+    weak_results = [p for p in result["results"] if "gstack-notes.md" in p["path"]]
+    assert len(strong_results) == 1
+    assert len(weak_results) == 1
+    assert strong_results[0]["content"]
+    assert weak_results[0]["content"]
 
 
 def test_v2_freshness_ranks_newer_fix_note_above_older_one(tmp_path: Path) -> None:
@@ -1047,7 +1061,7 @@ def test_v2_two_phase_pack_keeps_every_selected_page_represented(tmp_path: Path)
         top_k=5,
     )
 
-    pack_paths = [item["path"] for item in result["context_pack"]["passages"]]
+    pack_paths = [item["path"] for item in result["results"] if item.get("content")]
     assert long_page in pack_paths
     assert second in pack_paths
 
@@ -1073,8 +1087,8 @@ def test_v2_top_k_scales_context_budget(tmp_path: Path) -> None:
     ten = run_query_v2(root, question, retrieval_mode="lexical", top_k=10)
     twenty = run_query_v2(root, question, retrieval_mode="lexical", top_k=20)
 
-    assert ten["context_pack"]["budget"]["total"] == 4_000
-    assert twenty["context_pack"]["budget"]["total"] == 8_000
+    assert ten["budget"]["total"] == 4_000
+    assert twenty["budget"]["total"] == 8_000
 
 
 def test_v2_step_guide_bonus_prefers_numbered_procedural_page(tmp_path: Path) -> None:
@@ -1164,9 +1178,11 @@ def test_v2_adaptive_expand_keeps_close_scoring_pages_above_boundary(tmp_path: P
     )
 
     returned = [item["path"] for item in result["results"]]
-    assert len(returned) > 10  # the score-driven expansion kept close-scoring pages
-    assert all(path in returned for path in pages[:12])
-    assert not any("unrelated" in path for path in returned)
+    all_selected = returned + [item["path"] for item in result["additional_results"]]
+    assert len(returned) == 10
+    assert all(path in all_selected for path in pages[:12])
+    assert not any("unrelated" in path for path in all_selected)
+    assert result["additional_results"]
 
 
 def test_adaptive_expand_applies_global_score_floor() -> None:
@@ -1222,8 +1238,8 @@ def test_v2_adaptive_expand_budget_scales_with_returned_count(tmp_path: Path) ->
 
     # A single-page vault keeps the intent floor (concept=4000): the budget
     # never shrinks below the requested top_k base, and grows with returns.
-    assert result["context_pack"]["budget"]["total"] == 4_000
-    assert result["context_pack"]["budget"]["total"] >= 400 * len(result["results"])
+    assert result["budget"]["total"] == 4_000
+    assert result["budget"]["total"] >= 400 * len(result["results"])
 
 
 def test_v2_relaxes_multilingual_questions_after_strict_fts_returns_no_results(tmp_path: Path) -> None:
@@ -1504,8 +1520,8 @@ def test_v2_does_not_batch_sample_names_without_structured_enumeration(tmp_path:
 
     result = run_query_v2(root, "N/auth N/search", retrieval_mode="lexical")
 
-    assert result["pipeline"]["discovery"]["triggered"] is False
-    assert result["pipeline"]["batch"]["status"] == "not_triggered"
+    assert "discovery" not in result["pipeline"]
+    assert "batch" not in result["pipeline"]
 
 
 def test_v2_treats_same_level_headings_and_table_rows_as_generic_enumeration(tmp_path: Path) -> None:

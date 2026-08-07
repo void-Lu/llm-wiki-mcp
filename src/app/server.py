@@ -22,7 +22,7 @@ from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from wiki.wiki_files import wiki_status as run_wiki_status
 from wiki.ingest_service import ingest_file as run_ingest_file
 from wiki.wiki_query import DEFAULT_TOP_K
-from retrieval.query_pipeline import QueryFilters, legacy_response_from_v2, run_query_v2
+from retrieval.query_pipeline import QueryFilters, run_query_v2
 from archive.archive_models import ARCHIVE_REASONS, is_archive_reason
 from archive.archive_service import ArchiveService
 from codegraph.codegraph_sync import CodeGraphSyncError, sync_codegraph as run_codegraph_sync
@@ -265,8 +265,6 @@ def _run_wiki_query(
         expansion_terms=expansion_terms,
         confirmation_token=confirmation_token,
     )
-    if settings.context.response_mode == "legacy":
-        result = legacy_response_from_v2(result)
     return attach_warnings(attach_no_results_outcome(result), resolution.warnings)
 
 

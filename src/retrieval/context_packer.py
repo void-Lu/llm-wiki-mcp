@@ -45,7 +45,7 @@ def pack_context(
     intent: str,
     budget_scale: int | None = None,
 ) -> dict[str, object]:
-    """Keep bodies only in ``context_pack.passages`` and obey a hard limit.
+    """Pack page-ordered bodies for the canonical query response.
 
     ``budget_scale`` lets callers grow the budget with the number of requested
     results (for example 400 tokens per result).  The intent target remains a
