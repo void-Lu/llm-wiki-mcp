@@ -611,3 +611,37 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: 完成限定标识符批量检索任务
+
+**Date**: 2026-08-07
+**Task**: 完成限定标识符批量检索任务
+**Branch**: `v0.9.20`
+
+### Summary
+
+实现通用 qualified identifier 解析、结构化 discovery 到 per-entity batch 编排、局部自适应候选选择、scope/raw 继承与 40 实体确认协议；已勾选 PRD/implement 并归档任务。
+
+### Main Changes
+
+- 新增 canonical/alias 解析及按实体 FTS 适配层
+- 新增 discovery、batch、partial/ambiguous/error、confirmation 与 continuation 响应契约
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `efec5d3` | (see git log) |
+
+### Testing
+
+- [OK] 442 个业务测试通过；Ruff 与编译检查通过
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 修复 uv 缓存/网络环境后再运行 3 个构建测试；真实数据集召回与性能仍标记为 unproven
