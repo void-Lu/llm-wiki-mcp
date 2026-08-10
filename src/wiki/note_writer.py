@@ -20,7 +20,7 @@ from wiki.reference_section import build_reference_section, skipped_warnings, va
 
 NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge", "entity", "chat"}
 PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
-DOMAINS = {"common-errors", "integration-patterns", "netsuite-object-playbooks", "suitescript-patterns"}
+DOMAINS = {"common-errors", "integration-patterns"}
 WINDOWS_RESERVED_CHARS = set('<>:"|?*')
 WINDOWS_RESERVED_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL"}
 WINDOWS_RESERVED_DEVICE_PREFIXES = ("COM", "LPT")

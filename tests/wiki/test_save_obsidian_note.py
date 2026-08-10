@@ -69,8 +69,8 @@ def test_script_and_object_note_types_are_removed(vault: Path, note_type: str):
         ("plan", {"project": "project-a"}, "wiki/projects/project-a/plans/plan-note.md"),
         ("troubleshooting", {"project": "project-a"}, "wiki/projects/project-a/troubleshooting/troubleshooting-note.md"),
         ("researches", {"project": "project-a"}, "wiki/projects/project-a/researches/researches-note.md"),
-        ("knowledge", {"domain": "suitescript-patterns"}, "wiki/concepts/suitescript-patterns/knowledge-note.md"),
-        ("entity", {"domain": "suitescript-patterns"}, "wiki/entities/suitescript-patterns/entity-note.md"),
+        ("knowledge", {"domain": "integration-patterns"}, "wiki/concepts/integration-patterns/knowledge-note.md"),
+        ("entity", {"domain": "integration-patterns"}, "wiki/entities/integration-patterns/entity-note.md"),
     ],
 )
 def test_note_type_path_mappings_create_expected_files(vault: Path, note_type: str, kwargs: dict[str, str], expected_path: str):
@@ -108,12 +108,12 @@ def test_chat_derived_entity_requires_and_locks_chat_source(vault: Path):
         "## User\n\n记录结论。\n\n## Assistant\n\n已记录。",
         {"session_id": "writer-session", "summary": "结论", "decisions": ["记录"], "open_questions": [], "tags": []},
     )
-    missing = _save(vault, note_type="entity", domain="suitescript-patterns", filename="missing", chat_derived=True)
+    missing = _save(vault, note_type="entity", domain="integration-patterns", filename="missing", chat_derived=True)
     assert missing["code"] == "chat_sources_required"
     result = _save(
         vault,
         note_type="entity",
-        domain="suitescript-patterns",
+        domain="integration-patterns",
         filename="derived",
         chat_derived=True,
         chat_sources=[{"source_id": source["source_id"], "revision": source["revision"], "redacted_hash": source["redacted_hash"]}],
