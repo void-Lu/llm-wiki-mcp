@@ -272,6 +272,10 @@ def _run_wiki_query(
 def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, expansion_terms: dict[str, list[str]] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, confirmation_token: str | None = None) -> dict[str, Any]:
     """Query a vault using its immutable retrieval and context profile.
 
+    ``filters`` accepts ``type`` (string), ``tags`` (list of strings), and
+    ``path_prefix`` (string, e.g. ``"wiki/concepts/netsuite-script-types/"``)
+    to restrict results to a specific directory.
+
     When the vault has no indexed answer, the response includes
     ``expansion_suggestions``: the Latin terms in the question that do not
     appear in any page title and have no spelling variant yet.  Resolve those

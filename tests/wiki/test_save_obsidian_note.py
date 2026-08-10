@@ -403,3 +403,33 @@ def test_save_note_strips_duplicate_leading_h1(vault: Path):
     text = path.read_text(encoding="utf-8")
     assert text.count("# 去重标题") == 1
     assert "正文内容" in text
+
+
+def test_write_note_returns_wikilink_target_and_normalizes_wikilinks(vault: Path) -> None:
+    """write_note should return wikilink_target, normalize body wikilinks, and report broken ones."""
+    # Create a target page so the stem index can match it.
+    target_dir = vault / "wiki" / "concepts" / "common-errors"
+    target_dir.mkdir(parents=True)
+    (target_dir / "Target-Page.md").write_text("# Target", encoding="utf-8")
+
+    result = save_obsidian_note(
+        note_type="knowledge",
+        title="Source Page",
+        content="See [[Target Page]] and [[Nonexistent]] for details.",
+        domain="common-errors",
+        vault_root=str(vault),
+        auto_index=False,
+    )
+
+    assert result["ok"] is True
+    assert result["wikilink_target"] == "Source-Page"
+    assert result["normalized_wikilinks"] == 1  # "Target Page" -> "Target-Page"
+    broken = result["broken_wikilinks"]
+    assert len(broken) == 1
+    assert broken[0]["target"] == "Nonexistent"
+
+    # Verify the written content has the normalized wikilink.
+    path = _written_path(vault, result)
+    text = path.read_text(encoding="utf-8")
+    assert "[[Target-Page]]" in text
+    assert "[[Target Page]]" not in text

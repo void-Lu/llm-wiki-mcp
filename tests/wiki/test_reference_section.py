@@ -101,3 +101,31 @@ def test_validate_raw_sources_only_returns_existing_raw_files(tmp_path: Path) ->
         {"path": "raw/sources/missing.txt", "reason": "not_found"},
         {"path": "wiki/concepts/not-raw.md", "reason": "path_not_allowed"},
     ]
+
+
+def test_build_reference_section_uses_custom_heading(tmp_path: Path) -> None:
+    _touch(tmp_path, "wiki/concepts/related.md")
+
+    body, skipped = build_reference_section(
+        tmp_path,
+        "正文",
+        [{"path": "wiki/concepts/related.md", "title": "Related"}],
+        heading="## 相关深度文档",
+    )
+
+    assert skipped == []
+    assert "## 相关深度文档" in body
+    assert "## 参考来源" not in body
+
+
+def test_build_reference_section_falls_back_to_default_heading_when_empty(tmp_path: Path) -> None:
+    _touch(tmp_path, "wiki/concepts/related.md")
+
+    body, _ = build_reference_section(
+        tmp_path,
+        "正文",
+        [{"path": "wiki/concepts/related.md", "title": "Related"}],
+        heading="   ",
+    )
+
+    assert "## 参考来源" in body
