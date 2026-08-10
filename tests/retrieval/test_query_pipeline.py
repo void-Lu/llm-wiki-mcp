@@ -51,6 +51,24 @@ def test_query_filters_rejects_non_sequence_or_non_string_tags() -> None:
         raise AssertionError(f"expected ValueError for tags={bad_tags!r}")
 
 
+def test_query_filters_accepts_path_prefix() -> None:
+    filters = QueryFilters.from_mapping({"path_prefix": "wiki/concepts/netsuite-script-types/"})
+    assert filters.path_prefix == "wiki/concepts/netsuite-script-types/"
+
+
+def test_query_filters_normalizes_path_prefix_backslashes() -> None:
+    filters = QueryFilters.from_mapping({"path_prefix": "wiki\\concepts\\general"})
+    assert filters.path_prefix == "wiki/concepts/general"
+
+
+def test_query_filters_rejects_non_string_path_prefix() -> None:
+    try:
+        QueryFilters.from_mapping({"path_prefix": 42})
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for non-string path_prefix")
+
+
 def test_v2_returns_result_body_without_context_pack(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -2062,3 +2080,19 @@ def test_v2_mixed_language_wildcard_ignores_generic_netsuite_passage_for_discove
     ]
     assert result["pipeline"]["batch"]["status"] == "success"
     assert result["expansion_suggestions"] == []
+
+
+def test_v2_path_prefix_filter_restricts_results(tmp_path: Path) -> None:
+    """path_prefix filter should restrict results to the specified directory."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/domain-a/page.md", "Page A", "invoice approval workflow", type="concept")
+    _write(root, "wiki/concepts/domain-b/page.md", "Page B", "invoice approval process", type="concept")
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root, "invoice approval", scope="knowledge",
+        filters=QueryFilters(path_prefix="wiki/concepts/domain-a/"),
+    )
+    paths = {item["path"] for item in result["results"]}
+    assert paths == {"wiki/concepts/domain-a/page.md"}

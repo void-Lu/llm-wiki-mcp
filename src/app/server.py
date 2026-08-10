@@ -300,12 +300,13 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
 
 
 @_register
-def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, sources: list[str] | None = None) -> dict[str, Any]:
+def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None, sources: list[str] | None = None) -> dict[str, Any]:
     """Create a manual page, optionally linking adopted Wiki pages and raw sources.
 
     ``related_pages`` accepts existing ``wiki/**`` paths and creates a
-    ``## 参考来源`` wikilink section.  Raw provenance belongs in ``sources``;
-    chat-derived pages continue to use ``chat_sources``.
+    ``## 参考来源`` wikilink section (override with ``related_pages_heading``).
+    Raw provenance belongs in ``sources``; chat-derived pages continue to use
+    ``chat_sources``.
     """
     selected_type = note_type or noteType
     if not selected_type:
@@ -314,7 +315,7 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
-    result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, chat_metadata=chat_metadata, chat_derived=chat_derived, chat_sources=chat_sources, related_pages=related_pages, sources=sources, overwrite=False, auto_index=True, vault_root=str(resolution.root))
+    result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, chat_metadata=chat_metadata, chat_derived=chat_derived, chat_sources=chat_sources, related_pages=related_pages, related_pages_heading=related_pages_heading, sources=sources, overwrite=False, auto_index=True, vault_root=str(resolution.root))
     return attach_warnings(result, resolution.warnings)
 
 
@@ -354,7 +355,7 @@ def wiki_codegraph_import(sync: Literal["sync"] = "sync", vault: str | None = No
 
 
 @_register
-def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, incoming_frontmatter: dict[str, Any] | None = None, plan_id: str | None = None, expected_hash: str | None = None, related_pages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, incoming_frontmatter: dict[str, Any] | None = None, plan_id: str | None = None, expected_hash: str | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None) -> dict[str, Any]:
     """Preview or apply a controlled update, optionally appending Wiki links."""
     if action not in {"preview", "apply"}:
         return {"ok": False, "code": "invalid_action", "error": "action must be preview or apply"}
@@ -363,9 +364,9 @@ def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vau
     except RuntimeConfigError as exc:
         return _tool_error(exc)
     if action == "preview":
-        result = run_preview_update(resolution.root, page_path, incoming_body, incoming_frontmatter, related_pages=related_pages)
+        result = run_preview_update(resolution.root, page_path, incoming_body, incoming_frontmatter, related_pages=related_pages, related_pages_heading=related_pages_heading)
     else:
-        result = run_apply_update(resolution.root, page_path, incoming_body, incoming_frontmatter=incoming_frontmatter, plan_id=plan_id, expected_hash=expected_hash, related_pages=related_pages)
+        result = run_apply_update(resolution.root, page_path, incoming_body, incoming_frontmatter=incoming_frontmatter, plan_id=plan_id, expected_hash=expected_hash, related_pages=related_pages, related_pages_heading=related_pages_heading)
     return attach_warnings(result, resolution.warnings)
 
 

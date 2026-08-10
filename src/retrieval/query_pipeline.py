@@ -332,6 +332,7 @@ _HOWTO_RE = re.compile(r"(?:步骤|怎么|如何|怎样|流程|做法|配置|安
 class QueryFilters:
     type: str | None = None
     tags: tuple[str, ...] = ()
+    path_prefix: str | None = None
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "QueryFilters":
@@ -342,7 +343,11 @@ class QueryFilters:
         page_type = value.get("type")
         if page_type is not None and not isinstance(page_type, str):
             raise ValueError("filters.type must be a string")
-        return cls(page_type, tuple(tags))
+        path_prefix = value.get("path_prefix")
+        if path_prefix is not None and not isinstance(path_prefix, str):
+            raise ValueError("filters.path_prefix must be a string")
+        path_prefix = path_prefix.replace("\\", "/").strip() if path_prefix else None
+        return cls(page_type, tuple(tags), path_prefix)
 
 
 def classify_intent(question: str) -> str:
@@ -405,7 +410,7 @@ def _matches_request(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, pr
     frontmatter = metadata.get(hit.page_path, {})
     if not _project_page_allowed(frontmatter, project):
         return False
-    return _filters_allow_page(frontmatter, hit.source_kind, filters)
+    return _filters_allow_page(frontmatter, hit.source_kind, filters, page_path=hit.page_path)
 
 
 def _project_page_allowed(frontmatter: Mapping[str, Any], project: str | None) -> bool:
@@ -419,7 +424,9 @@ def _project_page_allowed(frontmatter: Mapping[str, Any], project: str | None) -
     return True
 
 
-def _filters_allow_page(frontmatter: Mapping[str, Any], source_kind: str, filters: QueryFilters) -> bool:
+def _filters_allow_page(frontmatter: Mapping[str, Any], source_kind: str, filters: QueryFilters, page_path: str = "") -> bool:
+    if filters.path_prefix and not page_path.replace("\\", "/").startswith(filters.path_prefix):
+        return False
     if filters.type and str(frontmatter.get("type") or source_kind) != filters.type:
         return False
     if filters.tags:
@@ -2143,6 +2150,7 @@ def run_query_v2(
             frontmatter,
             str(item.get("source_kind") or ""),
             filters,
+            page_path=str(item.get("path") or ""),
         ):
             continue
         if not _eligible(

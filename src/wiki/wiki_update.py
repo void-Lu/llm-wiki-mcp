@@ -11,11 +11,12 @@ import yaml
 
 from codegraph.codegraph_policy import is_codegraph_managed_path
 from wiki.knowledge_dependencies import KnowledgeDependencies
-from wiki.reference_section import build_reference_section, skipped_warnings
+from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
 from wiki.wiki_index import refresh_indexes
 from wiki.wiki_io import WikiWriteError, split_frontmatter, write_wiki_page
 from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry, WikiPage
+from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 
 LOCKED_FIELDS = {"type", "concept_id", "entity_id", "entity_type", "created", "source_path", "source_hash"}
 REMOVED_FIELDS = {"source_capsules", "source_capsule"}
@@ -36,6 +37,7 @@ def preview_update(
     incoming_body: str,
     incoming_frontmatter: Mapping[str, Any] | None = None,
     related_pages: list[dict[str, Any]] | None = None,
+    related_pages_heading: str | None = None,
 ) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
     target = _target(root, page_path)
@@ -53,10 +55,12 @@ def preview_update(
     removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
     if removed_fields:
         return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
-    incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages)
+    incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages, heading=related_pages_heading)
+    incoming_body, normalized_count = auto_normalize_wikilinks(incoming_body, root)
+    broken_wikilinks = validate_wikilinks(incoming_body, root)
     violations = _locked_violations(fm, incoming)
     removed_sources = set(_sources(fm)) - set(_sources(incoming)) if "sources" in incoming else set()
-    result = {"ok": True, "action": "preview", "page_path": page_path, "current_hash": _digest(text), "plan_id": _plan_id(page_path, _digest(text), incoming_body, incoming), "locked_fields": sorted(LOCKED_FIELDS), "locked_field_violations": violations, "removed_sources": sorted(removed_sources), "diff": "".join(difflib.unified_diff(old_body.splitlines(True), incoming_body.splitlines(True), fromfile="current", tofile="incoming"))}
+    result = {"ok": True, "action": "preview", "page_path": page_path, "current_hash": _digest(text), "plan_id": _plan_id(page_path, _digest(text), incoming_body, incoming), "locked_fields": sorted(LOCKED_FIELDS), "locked_field_violations": violations, "removed_sources": sorted(removed_sources), "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "diff": "".join(difflib.unified_diff(old_body.splitlines(True), incoming_body.splitlines(True), fromfile="current", tofile="incoming"))}
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 
@@ -69,6 +73,7 @@ def apply_update(
     expected_hash: str | None = None,
     plan_id: str | None = None,
     related_pages: list[dict[str, Any]] | None = None,
+    related_pages_heading: str | None = None,
 ) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
     target = _target(root, page_path)
@@ -85,7 +90,9 @@ def apply_update(
     removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
     if removed_fields:
         return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
-    incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages)
+    incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages, heading=related_pages_heading)
+    incoming_body, normalized_count = auto_normalize_wikilinks(incoming_body, root)
+    broken_wikilinks = validate_wikilinks(incoming_body, root)
     expected_plan = _plan_id(page_path, current_hash, incoming_body, incoming)
     if expected_hash and expected_hash != current_hash:
         return {"ok": False, "code": "expected_hash_mismatch"}
@@ -119,7 +126,7 @@ def apply_update(
     KnowledgeDependencies(root).update_page(page_path, updated_hash, sources, generated=bool(final.get("generated")), maintenance=str(final.get("maintenance") or "manual"))
     navigation = refresh_indexes(root)
     append_log_entry(root, WikiLogEntry(operation="update", title=title, paths=[page_path], sources=list(sources), project=str(final.get("project") or ""), status="ok"))
-    result = {"ok": True, "action": "apply", "page_path": page_path, "hash": updated_hash, "navigation": navigation, "retrieval_index": write_result.get("retrieval_index")}
+    result = {"ok": True, "action": "apply", "page_path": page_path, "hash": updated_hash, "navigation": navigation, "retrieval_index": write_result.get("retrieval_index"), "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks}
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 
@@ -149,8 +156,9 @@ def _with_reference_section(
     root: Path,
     body: str,
     related_pages: list[dict[str, Any]] | None,
+    heading: str | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
-    return build_reference_section(root, body, related_pages)
+    return build_reference_section(root, body, related_pages, heading=heading)
 
 
 def _attach_related_page_skips(

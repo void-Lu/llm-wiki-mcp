@@ -18,12 +18,15 @@ def build_reference_section(
     root: str | Path,
     body: str,
     related_pages: Sequence[Mapping[str, Any]] | None,
+    heading: str | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
-    """Append a deduplicated ``参考来源`` section to *body*.
+    """Append a deduplicated reference section to *body*.
 
     Only existing Markdown files below ``wiki/`` are eligible.  Invalid input
     is reported in the returned skip list so callers can keep the main write
     operation successful.
+
+    *heading* overrides the default ``## 参考来源`` section title.
     """
 
     if related_pages is None:
@@ -66,7 +69,8 @@ def build_reference_section(
     if not links:
         return body, skipped
 
-    section = f"{_REFERENCE_HEADING}\n\n" + "\n".join(f"- {link}" for link in links)
+    section_heading = heading.strip() if heading and heading.strip() else _REFERENCE_HEADING
+    section = f"{section_heading}\n\n" + "\n".join(f"- {link}" for link in links)
     if not body:
         return section, skipped
     separator = "" if body.endswith("\n\n") else "\n" if body.endswith("\n") else "\n\n"

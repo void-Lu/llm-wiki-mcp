@@ -80,3 +80,63 @@ def test_update_skips_invalid_related_pages_and_keeps_writing(tmp_path) -> None:
     ]
     assert result["warnings"]
     assert "## 参考来源" not in page.read_text(encoding="utf-8")
+
+
+def test_preview_reports_broken_wikilinks(tmp_path) -> None:
+    """Preview should include broken_wikilinks for targets that don't match any file."""
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    (tmp_path / "wiki/concepts/general/Target-Page.md").write_text("# Target", encoding="utf-8")
+    page.write_text("---\ntype: concept\ntitle: A\n---\n\n# A\n\nold\n", encoding="utf-8")
+
+    body = "See [[Target Page]] and [[Nonexistent]] for details."
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", body)
+
+    assert preview["ok"] is True
+    assert preview["normalized_wikilinks"] == 1  # "Target Page" -> "Target-Page"
+    broken = preview["broken_wikilinks"]
+    assert len(broken) == 1
+    assert broken[0]["target"] == "Nonexistent"
+
+
+def test_apply_auto_normalizes_wikilinks(tmp_path) -> None:
+    """Apply should auto-normalize space-based wikilink targets to filename stems."""
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    (tmp_path / "wiki/concepts/general/Target-Page.md").write_text("# Target", encoding="utf-8")
+    page.write_text("---\ntype: concept\ntitle: A\n---\n\n# A\n\nold\n", encoding="utf-8")
+
+    body = "See [[Target Page]] for details."
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", body)
+    assert preview["normalized_wikilinks"] == 1
+
+    result = apply_update(tmp_path, "wiki/concepts/general/a.md", body, plan_id=preview["plan_id"])
+    assert result["ok"] is True
+    assert result["normalized_wikilinks"] == 1
+    assert "[[Target-Page]]" in page.read_text(encoding="utf-8")
+
+
+def test_preview_and_apply_with_custom_heading(tmp_path) -> None:
+    """related_pages_heading should override the default section title."""
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\ntitle: A\n---\n\n# A\n\nold\n", encoding="utf-8")
+    related = tmp_path / "wiki/concepts/general/related.md"
+    related.write_text("---\ntype: concept\n---\n\n# Related\n", encoding="utf-8")
+    related_pages = [{"path": "wiki/concepts/general/related.md", "title": "Related"}]
+
+    preview = preview_update(
+        tmp_path, "wiki/concepts/general/a.md", "new",
+        related_pages=related_pages, related_pages_heading="## 相关深度文档",
+    )
+    assert preview["ok"] is True
+    assert "## 相关深度文档" in preview["diff"]
+    assert "## 参考来源" not in preview["diff"]
+
+    result = apply_update(
+        tmp_path, "wiki/concepts/general/a.md", "new",
+        plan_id=preview["plan_id"],
+        related_pages=related_pages, related_pages_heading="## 相关深度文档",
+    )
+    assert result["ok"] is True
+    assert "## 相关深度文档" in page.read_text(encoding="utf-8")

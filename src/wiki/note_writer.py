@@ -161,6 +161,7 @@ def save_obsidian_note(
     chat_derived: bool = False,
     chat_sources: list[dict[str, str]] | None = None,
     related_pages: list[dict[str, Any]] | None = None,
+    related_pages_heading: str | None = None,
     sources: list[str] | None = None,
 ) -> dict[str, Any]:
     if vault_root is None or not str(vault_root).strip():
@@ -237,7 +238,7 @@ def save_obsidian_note(
     redacted_content, normalized_wikilink_count = auto_normalize_wikilinks(redacted_content, root)
     related_pages_skipped: list[dict[str, str]] = []
     if related_pages is not None:
-        redacted_content, related_pages_skipped = build_reference_section(root, redacted_content, related_pages)
+        redacted_content, related_pages_skipped = build_reference_section(root, redacted_content, related_pages, heading=related_pages_heading)
     valid_sources: list[str] = []
     sources_skipped: list[dict[str, str]] = []
     if sources is not None and not chat_derived:
