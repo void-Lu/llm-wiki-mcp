@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/index.md","reason":"核对报告是否遵循本地已记录合同与事实层级。"}
+{"file":".trellis/spec/backend/runtime-configuration.md","reason":"复核公开工具、vault 与脱敏结论。"}
+{"file":".trellis/spec/backend/knowledge-compilation.md","reason":"复核笔记、来源、更新和生命周期结论。"}
+{"file":".trellis/spec/backend/local-vector-retrieval.md","reason":"复核查询、向量和索引生命周期结论。"}
+{"file":".trellis/spec/backend/archive-lifecycle.md","reason":"复核归档/恢复与不可逆操作边界。"}
+{"file":".trellis/spec/backend/codegraph-sync.md","reason":"复核 CodeGraph 导入与所有权边界。"}
+{"file":".trellis/tasks/08-10-weknora-note-tools-comparison/research/weknora-knowledge-note-scripts.md","reason":"逐项核验 WeKnora 事实、SHA 固定链接和 Caveats。"}
+{"file":".trellis/tasks/08-10-weknora-note-tools-comparison/research/local-mcp-knowledge-note-tools.md","reason":"逐项核验本地事实、路径行号与候选优化项，并排除已被工作树修复的 path_prefix 问题。"}
