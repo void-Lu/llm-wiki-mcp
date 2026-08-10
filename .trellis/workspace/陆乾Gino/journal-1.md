@@ -645,3 +645,37 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - 修复 uv 缓存/网络环境后再运行 3 个构建测试；真实数据集召回与性能仍标记为 unproven
+
+
+## Session 19: WeKnora 知识库笔记工具比对分析
+
+**Date**: 2026-08-10
+**Task**: WeKnora 知识库笔记工具比对分析
+**Branch**: `v0.9.21`
+
+### Summary
+
+完成 WeKnora 与本地 llm-wiki-mcp 的知识库笔记创建、查询、维护能力比对；生成并复核完整中文报告，用户选择自行提交最终报告，Trellis 任务已归档。
+
+### Main Changes
+
+- 锁定 WeKnora main@355d161d 与本地 v0.9.21@0e048483 比较基线
+- 生成 docs/researches/weknora-knowledge-note-tools-comparison.md，并形成 P0/P1/P2 优化路线图
+- 归档任务研究证据、PRD、设计和执行计划
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] tests/app/test_server_tools.py: 29 passed
+- [OK] 35 个本地链接全部存在，WeKnora blob/tree 链接未发现未固定 SHA
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 用户自行使用 git add -f 提交被 docs ignore 规则忽略的最终报告
