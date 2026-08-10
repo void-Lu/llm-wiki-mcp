@@ -342,7 +342,35 @@ def test_query_rejects_runtime_override_filters_before_domain_call() -> None:
         filters={"index_path": "bad"},
         vault_root=str(Path.cwd()),
     )
-    assert result == {"ok": False, "code": "invalid_filters", "error": "filters may only contain type and tags"}
+    assert result == {"ok": False, "code": "invalid_filters", "error": "filters may only contain type, tags, and path_prefix"}
+
+
+def test_query_passes_path_prefix_filter_to_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """path_prefix should pass the server whitelist and reach run_query_v2 as a QueryFilters."""
+    from retrieval.query_pipeline import QueryFilters
+
+    registry, vault_root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+
+    captured: dict[str, object] = {}
+
+    def fake_run_query(root: Path, question: str, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"ok": True, "question": question, "results": []}
+
+    monkeypatch.setattr("app.server.run_query_v2", fake_run_query)
+
+    result = wiki_query(
+        question="UserEventType enum values",
+        scope="raw",
+        filters={"path_prefix": "raw/sources/file/NetSuite Help Docs/"},
+        vault_root=str(vault_root),
+    )
+
+    assert result["ok"] is True
+    passed_filters = captured["filters"]
+    assert isinstance(passed_filters, QueryFilters)
+    assert passed_filters.path_prefix == "raw/sources/file/NetSuite Help Docs/"
 
 
 def test_query_rejects_top_k_above_limit() -> None:

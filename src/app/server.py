@@ -241,8 +241,8 @@ def _run_wiki_query(
         return _tool_error(exc)
     settings = resolution.resolved.settings.retrieval
     filter_values = filters or {}
-    if not isinstance(filter_values, dict) or set(filter_values) - {"type", "tags"}:
-        return {"ok": False, "code": "invalid_filters", "error": "filters may only contain type and tags"}
+    if not isinstance(filter_values, dict) or set(filter_values) - {"type", "tags", "path_prefix"}:
+        return {"ok": False, "code": "invalid_filters", "error": "filters may only contain type, tags, and path_prefix"}
     try:
         typed_filters = QueryFilters.from_mapping(filter_values)
     except ValueError as exc:
