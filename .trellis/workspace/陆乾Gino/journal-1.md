@@ -700,3 +700,24 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Status
 
 [OK] **Completed**
+
+
+## Session 21: 架构深化 5 候选实施完成
+
+**Date**: 2026-08-11
+**Task**: 架构深化 5 候选实施完成
+**Branch**: `v0.9.23`
+
+### Summary
+
+完成 v1 检索引擎删除与符号迁移、声明式 MCP 注册器、PageMutationCoordinator 提交序列、共享 metadata filter 谓词；全量 610 个测试和 Ruff 通过，任务已归档。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3b1e73f` | (see git log) |
+
+### Status
+
+[OK] **Completed**
