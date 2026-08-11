@@ -17,6 +17,7 @@ from retrieval.retrieval_eval import (
     RetrievalEvalError,
     RetrievalEvalManifest,
     calculate_ranking_metrics,
+    evaluate_retrieval_gate,
     load_retrieval_dataset,
     percentile_95,
     run_retrieval_evaluation,
@@ -29,10 +30,12 @@ from retrieval.retrieval_index import RetrievalIndexStore
 from archive.archive_service import ArchiveService
 from wiki.knowledge_compiler import filesystem_path
 from retrieval.vector_provider import DeterministicFakeProvider
+from runtime.runtime_config import ConfigRegistry, write_global_config
 from wiki.wiki_io import write_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
 import wiki.wiki_query as wiki_query_module
+import app.server as server_module
 
 
 _FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "retrieval"
@@ -228,6 +231,7 @@ def test_ranking_metrics_match_hand_calculation() -> None:
     expected_ideal = 7 + 1 / math.log2(3)
     assert metrics == {
         "recall": 1.0,
+        "precision": pytest.approx(2 / 3),
         "mrr": 0.5,
         "ndcg": pytest.approx(expected_dcg / expected_ideal),
         "hits": 2,
@@ -244,7 +248,7 @@ def test_ranking_metrics_deduplicate_repeated_document_paths() -> None:
         relevant,
     )
 
-    assert metrics == {"recall": 1.0, "mrr": 1.0, "ndcg": 1.0, "hits": 1, "relevant_total": 1}
+    assert metrics == {"recall": 1.0, "precision": pytest.approx(0.1), "mrr": 1.0, "ndcg": 1.0, "hits": 1, "relevant_total": 1}
 
 
 def test_filter_evaluation_requires_every_requested_tag() -> None:
@@ -252,6 +256,46 @@ def test_filter_evaluation_requires_every_requested_tag() -> None:
 
     assert _results_match_filters(results, {"filter_tags": ["finance"]})
     assert not _results_match_filters(results, {"filter_tags": ["finance", "approval"]})
+    assert _results_match_filters(results, {"path_prefix": "wiki/concepts/"})
+    assert not _results_match_filters(results, {"path_prefix": "wiki/projects/"})
+
+
+def test_retrieval_gate_checks_frozen_identity_and_lexical_policy() -> None:
+    baseline = {
+        "metadata": {
+            "dataset_id": "fixture",
+            "dataset_revision": "1",
+            "vault_fingerprint": {"value": "vault"},
+            "ranking": {"version": "ranking-v1"},
+            "parameters": {
+                "retrieval_mode": "lexical",
+                "vector_enabled": False,
+                "measure_context_budget": True,
+                "context_budget_mode": "engine_context_pack",
+            },
+        },
+        "metrics": {
+            "recall_at_k_macro": 0.8,
+            "ndcg_at_k_macro": 0.75,
+            "filter_correctness": 1.0,
+            "no_answer_false_positive_rate": 0.0,
+            "p95_latency_ms": 100.0,
+            "context_budget": {"measured_cases": 1, "within_budget": True, "violations": []},
+        },
+    }
+    candidate = deepcopy(baseline)
+    candidate["metrics"]["p95_latency_ms"] = 105.0
+
+    gate = evaluate_retrieval_gate(candidate, baseline)
+
+    assert gate["passed"] is True
+    assert gate["status"] == "passed"
+    assert gate["checks"]["lexical_only"]["passed"] is True
+
+    candidate["metadata"]["parameters"]["vector_enabled"] = True
+    failed = evaluate_retrieval_gate(candidate, baseline)
+    assert failed["passed"] is False
+    assert failed["checks"]["lexical_only"]["passed"] is False
 
 
 def test_loader_rejects_invalid_grade_duplicate_id_and_filters(tmp_path: Path) -> None:
@@ -273,6 +317,25 @@ def test_loader_rejects_invalid_grade_duplicate_id_and_filters(tmp_path: Path) -
     dataset.write_text(json.dumps(invalid_filters) + "\n", encoding="utf-8")
     with pytest.raises(RetrievalEvalError, match="unsupported filters"):
         load_retrieval_dataset(dataset)
+
+
+def test_loader_normalizes_public_filter_aliases(tmp_path: Path) -> None:
+    dataset = _copy_dataset(tmp_path)
+    row = json.loads(dataset.read_text(encoding="utf-8").splitlines()[0])
+    row["filters"] = {
+        "type": "concept",
+        "tags": ["finance", "approval"],
+        "pathPrefix": "wiki/concepts/",
+    }
+    dataset.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    loaded = load_retrieval_dataset(dataset)
+
+    assert loaded.cases[0].filters == {
+        "filter_type": "concept",
+        "filter_tags": ["finance", "approval"],
+        "path_prefix": "wiki/concepts/",
+    }
 
 
 def test_path_validation_rejects_missing_relevant_page(tmp_path: Path) -> None:
@@ -311,10 +374,15 @@ def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tm
     report = run_retrieval_evaluation(vault, dataset, repeats=2, query_version="v2")
 
     assert report["metadata"]["parameters"]["top_k"] == 10
-    assert report["metadata"]["vault_fingerprint"]["file_count"] == 4
+    assert report["metadata"]["vault_fingerprint"]["file_count"] == 5
     assert report["metrics"]["recall_at_k_macro"] == 0.8
+    assert report["metrics"]["recall_at_k_micro"] == pytest.approx(5 / 6)
+    assert report["metrics"]["precision_at_k_macro"] == pytest.approx(0.1)
+    assert report["metrics"]["precision_at_k_micro"] == pytest.approx(0.1)
     assert report["metrics"]["mrr_at_k_macro"] == 0.8
     assert report["metrics"]["ndcg_at_k_macro"] == 0.8
+    assert set(report["metrics"]["ranking_by_k"]) == {"1", "3", "5", "10"}
+    assert report["metrics"]["slice_metrics"]["language:zh-CN"]["case_count"] == 1
     assert report["metrics"]["no_answer_false_positive_rate"] == 0.0
     assert report["metrics"]["filter_correctness"] == 1.0
     assert report["metrics"]["latency_sample_count"] == 12
@@ -333,6 +401,40 @@ def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tm
     del legacy_report["metadata"]["ranking"]
     legacy_output = write_retrieval_eval_report(legacy_report, tmp_path / "legacy-reports")
     assert "legacy-unversioned" in Path(legacy_output["markdown"]).read_text(encoding="utf-8")
+
+
+def test_mcp_entrypoint_uses_public_lexical_contract_without_vector_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = _copy_vault(tmp_path)
+    _build_passage_store(vault)
+    config_path = tmp_path / "config" / "config.yaml"
+    write_global_config(config_path, vault_name="eval", vault_root=vault)
+    monkeypatch.setattr(server_module, "CONFIG_REGISTRY", ConfigRegistry.from_file(config_path))
+    dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
+
+    report = run_retrieval_evaluation(
+        vault,
+        dataset,
+        entrypoint="mcp",
+        retrieval_mode="lexical",
+        measure_context_budget=False,
+    )
+
+    assert report["metadata"]["parameters"]["entrypoint"] == "mcp"
+    assert report["metadata"]["parameters"]["vector_enabled"] is False
+    assert all(case["pipeline"]["retrieval_mode"] == "lexical" for case in report["cases"])
+    assert all(case["pipeline"]["counters"]["vector_hits"] == 0 for case in report["cases"])
+    assert report["metrics"]["filter_correctness"] == 1.0
+    assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
+
+
+def test_mcp_entrypoint_rejects_non_lexical_mode_before_query(tmp_path: Path) -> None:
+    vault = _copy_vault(tmp_path)
+    dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
+
+    with pytest.raises(RetrievalEvalError, match="lexical-only") as error:
+        run_retrieval_evaluation(vault, dataset, entrypoint="mcp", retrieval_mode="hybrid", vector_config={"model_path": "unused"})
+
+    assert error.value.code == "mcp_requires_lexical"
 
 
 def test_no_answer_without_results_is_not_a_false_positive_at_zero_threshold(tmp_path: Path) -> None:

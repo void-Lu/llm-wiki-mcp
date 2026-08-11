@@ -8,11 +8,12 @@ import math
 import statistics
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_filter_aliases, normalize_metadata_filters
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from wiki.wiki_query import DEFAULT_TOP_K
 from retrieval.query_pipeline import QueryFilters, RANKING_POLICY_VERSION, run_query_v2
@@ -22,7 +23,8 @@ from wiki.knowledge_compiler import filesystem_path
 
 
 RETRIEVAL_EVAL_SCHEMA_VERSION = 1
-_ALLOWED_FILTERS = {"project", "filter_type", "filter_tags"}
+_ALLOWED_FILTERS = {"project", "filter_type", "filter_tags", "type", "tags", "path_prefix", "pathPrefix"}
+_EVALUATION_KS = (1, 3, 5, 10)
 
 
 class RetrievalEvalError(ValueError):
@@ -130,7 +132,7 @@ def calculate_ranking_metrics(
     *,
     top_k: int = DEFAULT_TOP_K,
 ) -> dict[str, float | int | None]:
-    """Calculate Recall, MRR and nDCG without any dependency on the query code."""
+    """Calculate Recall, Precision, MRR and nDCG without query-code dependencies."""
     if top_k <= 0:
         raise RetrievalEvalError("invalid_top_k", "top_k must be greater than zero")
     grades = {item.path: item.grade for item in relevant}
@@ -141,7 +143,7 @@ def calculate_ranking_metrics(
     hits = [path for path in ranked if path in grades]
     relevant_total = len(grades)
     if not relevant_total:
-        return {"recall": None, "mrr": None, "ndcg": None, "hits": 0, "relevant_total": 0}
+        return {"recall": None, "precision": None, "mrr": None, "ndcg": None, "hits": 0, "relevant_total": 0}
 
     first_rank = next((index for index, path in enumerate(ranked, 1) if path in grades), None)
     dcg = sum((2**grades[path] - 1) / math.log2(index + 1) for index, path in enumerate(ranked, 1) if path in grades)
@@ -149,6 +151,7 @@ def calculate_ranking_metrics(
     ideal_dcg = sum((2**grade - 1) / math.log2(index + 1) for index, grade in enumerate(ideal_grades, 1))
     return {
         "recall": len(hits) / relevant_total,
+        "precision": len(hits) / top_k,
         "mrr": 1 / first_rank if first_rank is not None else 0.0,
         "ndcg": dcg / ideal_dcg if ideal_dcg else 0.0,
         "hits": len(hits),
@@ -196,8 +199,9 @@ def run_retrieval_evaluation(
     vector_config: Mapping[str, Any] | None = None,
     query_version: str = "v2",
     scope: Literal["auto", "knowledge", "history", "all", "archive"] = "knowledge",
+    entrypoint: Literal["engine", "mcp"] = "engine",
 ) -> dict[str, Any]:
-    """Execute the public query API only; this function never mutates the vault."""
+    """Run a read-only retrieval evaluation through the engine or MCP boundary."""
     if top_k <= 0:
         raise RetrievalEvalError("invalid_top_k", "top_k must be greater than zero")
     if repeats <= 0:
@@ -206,6 +210,10 @@ def run_retrieval_evaluation(
         raise RetrievalEvalError("invalid_context_budget_case_limit", "context_budget_case_limit must be non-negative")
     if retrieval_mode not in {"lexical", "vector", "hybrid"}:
         raise RetrievalEvalError("invalid_retrieval_mode", "retrieval_mode must be lexical, vector, or hybrid")
+    if entrypoint not in {"engine", "mcp"}:
+        raise RetrievalEvalError("invalid_entrypoint", "entrypoint must be engine or mcp")
+    if entrypoint == "mcp" and retrieval_mode != "lexical":
+        raise RetrievalEvalError("mcp_requires_lexical", "the MCP evaluation entrypoint is lexical-only")
     if retrieval_mode != "lexical" and not vector_config:
         raise RetrievalEvalError("vector_config_missing", "vector and hybrid evaluation require a local vector configuration")
     if query_version != "v2":
@@ -217,13 +225,25 @@ def run_retrieval_evaluation(
 
     # Warm the interpreter and parser without treating it as a latency sample.
     first = dataset.cases[0]
-    _query_case(root, first, top_k=top_k, include_context_pack=False, retrieval_mode=retrieval_mode, vector_config=vector_config, query_version=query_version, scope=scope)
+    _run_case(
+        root,
+        first,
+        top_k=top_k,
+        include_context_pack=False,
+        retrieval_mode=retrieval_mode,
+        vector_config=vector_config,
+        query_version=query_version,
+        scope=scope,
+        entrypoint=entrypoint,
+    )
 
     cases: list[dict[str, Any]] = []
     latency_samples: list[float] = []
     recall_values: list[float] = []
+    precision_values: list[float] = []
     mrr_values: list[float] = []
     ndcg_values: list[float] = []
+    ranking_values_by_k: dict[int, dict[str, list[float]]] = {}
     total_hits = 0
     total_relevant = 0
     no_answer_cases = 0
@@ -240,7 +260,17 @@ def run_retrieval_evaluation(
         rankings: list[list[str]] = []
         for _ in range(repeats):
             started = time.perf_counter()
-            result = _query_case(root, case, top_k=top_k, include_context_pack=False, retrieval_mode=retrieval_mode, vector_config=vector_config, query_version=query_version, scope=scope)
+            result = _run_case(
+                root,
+                case,
+                top_k=top_k,
+                include_context_pack=False,
+                retrieval_mode=retrieval_mode,
+                vector_config=vector_config,
+                query_version=query_version,
+                scope=scope,
+                entrypoint=entrypoint,
+            )
             elapsed_ms = (time.perf_counter() - started) * 1_000
             latency_samples.append(elapsed_ms)
             rankings.append([str(item["path"]) for item in result["results"]])
@@ -251,9 +281,17 @@ def run_retrieval_evaluation(
         result = query_runs[0]["result"]
         ranked_paths = rankings[0]
         metrics = calculate_ranking_metrics(ranked_paths, case.relevant, top_k=top_k)
+        metrics_by_k = _calculate_metrics_by_k(ranked_paths, case.relevant, top_k=top_k)
+        for raw_k, per_k in metrics_by_k.items():
+            k_metrics = ranking_values_by_k.setdefault(raw_k, {"recall": [], "precision": [], "mrr": [], "ndcg": []})
+            for metric_name in ("recall", "precision", "mrr", "ndcg"):
+                value = per_k[metric_name]
+                if value is not None:
+                    k_metrics[metric_name].append(float(value))
         recall = metrics["recall"]
         if recall is not None:
             recall_values.append(float(recall))
+            precision_values.append(float(metrics["precision"] or 0.0))
             mrr_values.append(float(metrics["mrr"] or 0.0))
             ndcg_values.append(float(metrics["ndcg"] or 0.0))
             total_hits += int(metrics["hits"] or 0)
@@ -273,8 +311,18 @@ def run_retrieval_evaluation(
             no_answer_false_positives += int(false_positive)
 
         budget: dict[str, Any] | None = None
-        if measure_context_budget and (context_budget_case_limit is None or case_index < context_budget_case_limit):
-            context_result = _query_case(root, case, top_k=top_k, include_context_pack=True, retrieval_mode=retrieval_mode, vector_config=vector_config, query_version=query_version, scope=scope)
+        if entrypoint == "engine" and measure_context_budget and (context_budget_case_limit is None or case_index < context_budget_case_limit):
+            context_result = _run_case(
+                root,
+                case,
+                top_k=top_k,
+                include_context_pack=True,
+                retrieval_mode=retrieval_mode,
+                vector_config=vector_config,
+                query_version=query_version,
+                scope=scope,
+                entrypoint=entrypoint,
+            )
             raw_budget = context_result.get("budget") or context_result.get("context_pack", {}).get("budget", {})
             budget = dict(raw_budget)
             raw_used = budget.get("used", {})
@@ -306,11 +354,14 @@ def run_retrieval_evaluation(
                 "id": case.id,
                 "query": case.query,
                 "answerable": case.answerable,
+                "language": case.language,
+                "tags": list(case.tags),
                 "filters": case.filters,
                 "ranked_paths": ranked_paths,
                 "ranking_runs": rankings,
                 "latency_ms": [item["latency_ms"] for item in query_runs],
                 "metrics": metrics,
+                "metrics_by_k": metrics_by_k,
                 "top_score": top_score,
                 "no_answer_false_positive": false_positive,
                 "filter_correct": filter_correct,
@@ -342,6 +393,9 @@ def run_retrieval_evaluation(
                 "vector_enabled": retrieval_mode != "lexical",
                 "query_version": query_version,
                 "scope": scope,
+                "entrypoint": entrypoint,
+                "telemetry_enabled": False,
+                "context_budget_mode": "engine_context_pack" if entrypoint == "engine" else "mcp_public_budget_not_exposed",
             },
             "query_v2": {
                 "scope_authority_lifecycle": scope_contracts,
@@ -352,8 +406,19 @@ def run_retrieval_evaluation(
         },
         "metrics": {
             "recall_at_k_macro": _mean_or_none(recall_values),
+            "recall_at_k_micro": total_hits / total_relevant if total_relevant else None,
+            "precision_at_k_macro": _mean_or_none(precision_values),
+            "precision_at_k_micro": total_hits / (len(recall_values) * top_k) if recall_values else None,
             "mrr_at_k_macro": _mean_or_none(mrr_values),
             "ndcg_at_k_macro": _mean_or_none(ndcg_values),
+            "ranking_by_k": {
+                str(k): {
+                    metric_name: _mean_or_none(values[metric_name])
+                    for metric_name in ("recall", "precision", "mrr", "ndcg")
+                }
+                for k, values in sorted(ranking_values_by_k.items())
+            },
+            "slice_metrics": _build_slice_metrics(cases),
             "relevant_hits": total_hits,
             "relevant_total": total_relevant,
             "no_answer_false_positive_rate": no_answer_false_positives / no_answer_cases if no_answer_cases else None,
@@ -375,6 +440,119 @@ def run_retrieval_evaluation(
             },
         },
         "cases": cases,
+    }
+
+
+def evaluate_retrieval_gate(
+    candidate: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    *,
+    max_metric_regression: float = 0.02,
+    max_latency_growth: float = 0.10,
+    max_no_answer_false_positive_rate: float = 0.05,
+) -> dict[str, Any]:
+    """Compare a candidate report with a frozen baseline using stable gates."""
+    candidate_metadata = candidate.get("metadata")
+    baseline_metadata = baseline.get("metadata")
+    candidate_metrics = candidate.get("metrics")
+    baseline_metrics = baseline.get("metrics")
+    if not all(isinstance(value, Mapping) for value in (candidate_metadata, baseline_metadata, candidate_metrics, baseline_metrics)):
+        return {"passed": False, "status": "unproven", "reason": "report_shape_missing", "checks": {}}
+
+    checks: dict[str, dict[str, Any]] = {}
+
+    def add_check(name: str, passed: bool, *, actual: Any = None, expected: Any = None, reason: str | None = None) -> None:
+        payload: dict[str, Any] = {"passed": bool(passed)}
+        if actual is not None:
+            payload["actual"] = actual
+        if expected is not None:
+            payload["expected"] = expected
+        if reason:
+            payload["reason"] = reason
+        checks[name] = payload
+
+    candidate_fingerprint = candidate_metadata.get("vault_fingerprint")
+    baseline_fingerprint = baseline_metadata.get("vault_fingerprint")
+    candidate_ranking = candidate_metadata.get("ranking")
+    baseline_ranking = baseline_metadata.get("ranking")
+    for name, candidate_value, baseline_value in (
+        ("dataset_id", candidate_metadata.get("dataset_id"), baseline_metadata.get("dataset_id")),
+        ("dataset_revision", candidate_metadata.get("dataset_revision"), baseline_metadata.get("dataset_revision")),
+        ("vault_fingerprint", candidate_fingerprint.get("value") if isinstance(candidate_fingerprint, Mapping) else None, baseline_fingerprint.get("value") if isinstance(baseline_fingerprint, Mapping) else None),
+        ("ranking_version", candidate_ranking.get("version") if isinstance(candidate_ranking, Mapping) else None, baseline_ranking.get("version") if isinstance(baseline_ranking, Mapping) else None),
+    ):
+        add_check(name, bool(candidate_value) and candidate_value == baseline_value, actual=candidate_value, expected=baseline_value, reason="baseline_identity_mismatch" if candidate_value != baseline_value else None)
+
+    candidate_parameters = candidate_metadata.get("parameters")
+    if not isinstance(candidate_parameters, Mapping):
+        candidate_parameters = {}
+    add_check(
+        "lexical_only",
+        candidate_parameters.get("retrieval_mode") == "lexical" and candidate_parameters.get("vector_enabled") is False,
+        actual={"retrieval_mode": candidate_parameters.get("retrieval_mode"), "vector_enabled": candidate_parameters.get("vector_enabled")},
+        expected={"retrieval_mode": "lexical", "vector_enabled": False},
+    )
+
+    for metric_name in ("recall_at_k_macro", "ndcg_at_k_macro"):
+        candidate_value = _finite_number(candidate_metrics.get(metric_name))
+        baseline_value = _finite_number(baseline_metrics.get(metric_name))
+        if candidate_value is None or baseline_value is None:
+            add_check(metric_name, False, actual=candidate_value, expected=baseline_value, reason="metric_unproven")
+        else:
+            add_check(
+                metric_name,
+                candidate_value >= baseline_value - max_metric_regression,
+                actual=candidate_value,
+                expected={"minimum": baseline_value - max_metric_regression, "baseline": baseline_value},
+            )
+
+    filter_correctness = _finite_number(candidate_metrics.get("filter_correctness"))
+    add_check("filter_correctness", filter_correctness is not None and filter_correctness >= 1.0, actual=filter_correctness, expected=1.0)
+
+    no_answer_rate = _finite_number(candidate_metrics.get("no_answer_false_positive_rate"))
+    add_check(
+        "no_answer_false_positive_rate",
+        no_answer_rate is not None and no_answer_rate <= max_no_answer_false_positive_rate,
+        actual=no_answer_rate,
+        expected=max_no_answer_false_positive_rate,
+    )
+
+    candidate_p95 = _finite_number(candidate_metrics.get("p95_latency_ms"))
+    baseline_p95 = _finite_number(baseline_metrics.get("p95_latency_ms"))
+    if candidate_p95 is None or baseline_p95 is None:
+        add_check("p95_latency_ms", False, actual=candidate_p95, expected=baseline_p95, reason="latency_unproven")
+    else:
+        add_check(
+            "p95_latency_ms",
+            candidate_p95 <= baseline_p95 * (1.0 + max_latency_growth),
+            actual=candidate_p95,
+            expected={"maximum": baseline_p95 * (1.0 + max_latency_growth), "baseline": baseline_p95},
+        )
+
+    context_budget = candidate_metrics.get("context_budget")
+    context_mode = candidate_parameters.get("context_budget_mode")
+    if context_mode == "mcp_public_budget_not_exposed":
+        add_check("context_budget", True, actual="not_applicable", expected="mcp_public_budget_not_exposed")
+    else:
+        budget_passed = (
+            candidate_parameters.get("measure_context_budget") is True
+            and isinstance(context_budget, Mapping)
+            and (_finite_number(context_budget.get("measured_cases")) or 0.0) > 0
+            and bool(context_budget.get("within_budget"))
+            and not context_budget.get("violations")
+        )
+        add_check("context_budget", budget_passed, actual=context_budget, expected={"within_budget": True, "violations": []})
+
+    passed = all(bool(check.get("passed")) for check in checks.values())
+    return {
+        "passed": passed,
+        "status": "passed" if passed else "failed",
+        "thresholds": {
+            "max_metric_regression": max_metric_regression,
+            "max_latency_growth": max_latency_growth,
+            "max_no_answer_false_positive_rate": max_no_answer_false_positive_rate,
+        },
+        "checks": checks,
     }
 
 
@@ -401,6 +579,9 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         "## 指标",
         "",
         f"- Recall@{metadata['parameters']['top_k']}（macro）：{_format_metric(metrics['recall_at_k_macro'])}",
+        f"- Recall@{metadata['parameters']['top_k']}（micro）：{_format_metric(metrics.get('recall_at_k_micro'))}",
+        f"- Precision@{metadata['parameters']['top_k']}（macro）：{_format_metric(metrics.get('precision_at_k_macro'))}",
+        f"- Precision@{metadata['parameters']['top_k']}（micro）：{_format_metric(metrics.get('precision_at_k_micro'))}",
         f"- MRR@{metadata['parameters']['top_k']}（macro）：{_format_metric(metrics['mrr_at_k_macro'])}",
         f"- nDCG@{metadata['parameters']['top_k']}（macro）：{_format_metric(metrics['ndcg_at_k_macro'])}",
         f"- 无答案误命中率：{_format_metric(metrics['no_answer_false_positive_rate'])}",
@@ -414,6 +595,16 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
     for case in report["cases"]:
         first_path = case["ranked_paths"][0] if case["ranked_paths"] else "（无结果）"
         lines.append(f"- `{case['id']}`：首项 `{first_path}`；过滤器 {'通过' if case['filter_correct'] else '失败'}")
+    gate = report.get("gate")
+    if isinstance(gate, Mapping):
+        lines.extend(
+            [
+                "",
+                "## Baseline gate",
+                "",
+                f"- 状态：{'通过' if gate.get('passed') else '未通过'}（{gate.get('status', 'unknown')}）",
+            ]
+        )
     markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"json": str(json_path), "markdown": str(markdown_path)}
 
@@ -473,15 +664,195 @@ def _parse_filters(raw: object, case_id: str) -> dict[str, Any]:
     if unknown:
         raise RetrievalEvalError("invalid_filters", f"case {case_id}: unsupported filters: {', '.join(unknown)}")
     filters: dict[str, Any] = {}
-    for name in ("project", "filter_type"):
+    for name in ("project",):
         if name in data:
             filters[name] = _nonempty_string(data[name], "invalid_filters", f"case {case_id}: {name} must be a string")
-    if "filter_tags" in data:
-        tags = data["filter_tags"]
-        if not isinstance(tags, list) or not tags or any(not isinstance(tag, str) or not tag.strip() for tag in tags):
-            raise RetrievalEvalError("invalid_filters", f"case {case_id}: filter_tags must be a non-empty list of strings")
-        filters["filter_tags"] = list(tags)
+
+    public_filters: dict[str, Any] = {}
+    for public_name, legacy_name in (("type", "filter_type"), ("tags", "filter_tags")):
+        if public_name in data and legacy_name in data and data[public_name] != data[legacy_name]:
+            raise RetrievalEvalError("invalid_filters", f"case {case_id}: {public_name} and {legacy_name} disagree")
+        if public_name in data:
+            public_filters[public_name] = data[public_name]
+        elif legacy_name in data:
+            public_filters[public_name] = data[legacy_name]
+    if "type" in public_filters and (not isinstance(public_filters["type"], str) or not public_filters["type"].strip()):
+        raise RetrievalEvalError("invalid_filters", f"case {case_id}: type must be a non-empty string")
+    if "path_prefix" in data:
+        public_filters["path_prefix"] = data["path_prefix"]
+    if "pathPrefix" in data:
+        public_filters["pathPrefix"] = data["pathPrefix"]
+    try:
+        normalized = normalize_metadata_filters(
+            normalize_filter_aliases(public_filters),
+            allowed=QUERY_METADATA_FILTERS,
+            preserve_path_trailing=True,
+        )
+    except ValueError as exc:
+        raise RetrievalEvalError("invalid_filters", f"case {case_id}: {exc}") from exc
+    if "type" in normalized:
+        filters["filter_type"] = normalized["type"]
+    if "tags" in normalized:
+        tags = list(normalized["tags"])
+        if not tags:
+            raise RetrievalEvalError("invalid_filters", f"case {case_id}: tags must be a non-empty list of strings")
+        filters["filter_tags"] = tags
+    if "path_prefix" in normalized:
+        filters["path_prefix"] = normalized["path_prefix"]
+    elif "path_prefix" in public_filters or "pathPrefix" in public_filters:
+        raise RetrievalEvalError("invalid_filters", f"case {case_id}: path_prefix must be a non-empty vault-relative string")
     return filters
+
+
+def _calculate_metrics_by_k(
+    ranked_paths: Sequence[str],
+    relevant: Sequence[Relevance],
+    *,
+    top_k: int,
+) -> dict[int, dict[str, float | int | None]]:
+    ks = sorted({k for k in _EVALUATION_KS if k <= top_k} | {top_k})
+    return {k: calculate_ranking_metrics(ranked_paths, relevant, top_k=k) for k in ks}
+
+
+def _build_slice_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    buckets: dict[str, list[Mapping[str, Any]]] = {"all": list(cases)}
+    for case in cases:
+        language = case.get("language")
+        if isinstance(language, str) and language:
+            buckets.setdefault(f"language:{language}", []).append(case)
+        tags = case.get("tags")
+        if isinstance(tags, list):
+            for tag in tags:
+                if isinstance(tag, str) and tag:
+                    buckets.setdefault(f"tag:{tag}", []).append(case)
+        pipeline = case.get("pipeline")
+        if isinstance(pipeline, Mapping):
+            scope = pipeline.get("scope")
+            if isinstance(scope, str) and scope:
+                buckets.setdefault(f"scope:{scope}", []).append(case)
+
+    result: dict[str, dict[str, Any]] = {}
+    for name, bucket in sorted(buckets.items()):
+        ranking_metrics = [case.get("metrics") for case in bucket if isinstance(case.get("metrics"), Mapping)]
+        answerable = [case for case in bucket if case.get("answerable") is True]
+        no_answer = [case for case in bucket if case.get("answerable") is False]
+        result[name] = {
+            "case_count": len(bucket),
+            "answerable_case_count": len(answerable),
+            "recall_at_k_macro": _mean_or_none([float(metrics["recall"]) for metrics in ranking_metrics if metrics.get("recall") is not None]),
+            "precision_at_k_macro": _mean_or_none([float(metrics["precision"]) for metrics in ranking_metrics if metrics.get("precision") is not None]),
+            "mrr_at_k_macro": _mean_or_none([float(metrics["mrr"]) for metrics in ranking_metrics if metrics.get("mrr") is not None]),
+            "ndcg_at_k_macro": _mean_or_none([float(metrics["ndcg"]) for metrics in ranking_metrics if metrics.get("ndcg") is not None]),
+            "filter_correctness": _mean_or_none([1.0 if case.get("filter_correct") else 0.0 for case in bucket]),
+            "no_answer_false_positive_rate": _mean_or_none([1.0 if case.get("no_answer_false_positive") else 0.0 for case in no_answer]),
+            "p95_latency_ms": percentile_95([float(value) for case in bucket for value in case.get("latency_ms", [])]),
+        }
+    return result
+
+
+def _run_case(
+    root: Path,
+    case: RetrievalEvalCase,
+    *,
+    top_k: int,
+    include_context_pack: bool,
+    retrieval_mode: Literal["lexical", "vector", "hybrid"],
+    vector_config: Mapping[str, Any] | None,
+    query_version: str,
+    scope: Literal["auto", "knowledge", "history", "all", "archive"],
+    entrypoint: Literal["engine", "mcp"],
+) -> dict[str, Any]:
+    if entrypoint == "mcp":
+        return _mcp_query_case(root, case, top_k=top_k, query_version=query_version, scope=scope)
+    return _query_case(
+        root,
+        case,
+        top_k=top_k,
+        include_context_pack=include_context_pack,
+        retrieval_mode=retrieval_mode,
+        vector_config=vector_config,
+        query_version=query_version,
+        scope=scope,
+    )
+
+
+def _mcp_query_case(
+    root: Path,
+    case: RetrievalEvalCase,
+    *,
+    top_k: int,
+    query_version: str,
+    scope: Literal["auto", "knowledge", "history", "all", "archive"],
+) -> dict[str, Any]:
+    """Call the registered public tool while proving its runtime is lexical-only."""
+    if query_version != "v2":
+        raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
+    try:
+        import app.server as server_module
+
+        resolution = server_module.resolve_tool_vault(vault_root=str(root))
+        settings = resolution.resolved.settings.retrieval
+        if not settings.lexical_enabled or settings.embedding.enabled:
+            raise RetrievalEvalError(
+                "mcp_not_lexical",
+                "the selected vault MCP configuration is not lexical-only",
+            )
+        active_registry = server_module.CONFIG_REGISTRY
+        lexical_settings = replace(resolution.resolved.settings, telemetry=TelemetrySettings(enabled=False))
+        vaults = dict(active_registry.config.vaults)
+        vaults[resolution.logical_name] = lexical_settings
+        server_module.CONFIG_REGISTRY = replace(
+            active_registry,
+            config=replace(active_registry.config, vaults=vaults),
+        )
+        try:
+            response = server_module.wiki_query(
+                question=case.query,
+                scope=scope,
+                project=case.filters.get("project"),
+                filters=_public_filters(case.filters),
+                top_k=top_k,
+                vault_root=str(root),
+            )
+        finally:
+            server_module.CONFIG_REGISTRY = active_registry
+    except RetrievalEvalError:
+        raise
+    except Exception as exc:
+        raise RetrievalEvalError("mcp_query_failed", "the public wiki_query call failed") from exc
+    if not isinstance(response, Mapping):
+        raise RetrievalEvalError("mcp_query_failed", "the public wiki_query response was not an object")
+    if response.get("ok") is not True:
+        code = response.get("code")
+        safe_code = str(code) if isinstance(code, str) and code else "mcp_query_error"
+        raise RetrievalEvalError("mcp_query_error", f"wiki_query returned {safe_code}")
+    results = response.get("results")
+    pipeline = response.get("pipeline")
+    if not isinstance(results, list):
+        raise RetrievalEvalError("mcp_contract_invalid", "wiki_query results must be a list")
+    if not isinstance(pipeline, Mapping):
+        raise RetrievalEvalError("mcp_contract_invalid", "wiki_query pipeline must be an object")
+    mode = pipeline.get("retrieval_mode")
+    vector_hits = (pipeline.get("counters") or {}).get("vector_hits", 0) if isinstance(pipeline.get("counters"), Mapping) else 0
+    if mode not in {None, "lexical"} or vector_hits:
+        raise RetrievalEvalError("mcp_not_lexical", "the public wiki_query response was not lexical-only")
+    return {
+        "ok": True,
+        "results": results,
+        "pipeline": dict(pipeline),
+        "budget": response.get("budget", {}),
+    }
+
+
+def _public_filters(filters: Mapping[str, Any]) -> dict[str, Any] | None:
+    public: dict[str, Any] = {}
+    if filters.get("filter_type"):
+        public["type"] = filters["filter_type"]
+    if filters.get("filter_tags"):
+        public["tags"] = list(filters["filter_tags"])
+    if filters.get("path_prefix"):
+        public["path_prefix"] = filters["path_prefix"]
+    return public or None
 
 
 def _query_case(
@@ -506,7 +877,11 @@ def _query_case(
         case.query,
         scope=scope,
         project=case.filters.get("project"),
-        filters=QueryFilters(case.filters.get("filter_type"), tuple(case.filters.get("filter_tags") or ())),
+        filters=QueryFilters(
+            case.filters.get("filter_type"),
+            tuple(case.filters.get("filter_tags") or ()),
+            case.filters.get("path_prefix"),
+        ),
         top_k=top_k,
         embedding=embedding,
         telemetry=TelemetrySettings(enabled=False),
@@ -517,7 +892,9 @@ def _query_case(
 
 def _results_match_filters(results: Sequence[Mapping[str, Any]], filters: Mapping[str, Any]) -> bool:
     for item in results:
-        path = str(item["path"])
+        path = str(item.get("path") or "")
+        if not path:
+            return False
         frontmatter = item.get("frontmatter") or item.get("metadata")
         if not isinstance(frontmatter, Mapping):
             return False
@@ -530,6 +907,8 @@ def _results_match_filters(results: Sequence[Mapping[str, Any]], filters: Mappin
             tags = raw_tags if isinstance(raw_tags, list) else [raw_tags]
             if not set(filters["filter_tags"]).issubset({str(tag) for tag in tags}):
                 return False
+        if "path_prefix" in filters and not _in_path_prefix(path, str(filters["path_prefix"])):
+            return False
     return True
 
 
@@ -537,12 +916,21 @@ def _in_project_scope(path: str, project: str) -> bool:
     return path.startswith(f"wiki/projects/{project}/") or path.startswith(f"raw/sources/file/{project}/")
 
 
+def _in_path_prefix(path: str, prefix: str) -> bool:
+    normalized_path = path.replace("\\", "/").lstrip("/")
+    normalized_prefix = prefix.replace("\\", "/").strip(" /")
+    return bool(normalized_prefix) and (
+        normalized_path == normalized_prefix
+        or normalized_path.startswith(f"{normalized_prefix}/")
+    )
+
+
 def _result_summary(item: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "path": item["path"],
-        "score": item["score"],
-        "scores": item["scores"],
-        "source_kind": item["source_kind"],
+        "path": item.get("path", ""),
+        "score": item.get("score", 0.0),
+        "scores": item.get("scores", {}),
+        "source_kind": item.get("source_kind", ""),
     }
 
 
@@ -573,6 +961,13 @@ def _normalise_relative_path(value: object, case_id: str) -> str:
 
 def _mean_or_none(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
 
 
 def _median(values: Sequence[int]) -> float | None:

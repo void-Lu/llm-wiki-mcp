@@ -11,6 +11,7 @@ from wiki.ingest_service import sync_retrieval_index
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.retrieval_eval import (
     RetrievalEvalError,
+    evaluate_retrieval_gate,
     load_retrieval_dataset,
     run_retrieval_evaluation,
     write_retrieval_eval_report,
@@ -111,8 +112,10 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluation_parser.add_argument("--no-context-budget", action="store_true", help="Skip the separate context budget measurement pass.")
     evaluation_parser.add_argument("--context-budget-case-limit", type=int, default=1, help="Number of leading cases measured in the separate context budget pass (default: 1).")
     evaluation_parser.add_argument("--retrieval-mode", choices=("lexical", "vector", "hybrid"), default="lexical", help="Evaluation path (default: lexical).")
+    evaluation_parser.add_argument("--entrypoint", choices=("engine", "mcp"), default="engine", help="Evaluation boundary (default: engine; mcp is lexical-only).")
     evaluation_parser.add_argument("--query-version", choices=("v2",), default="v2", help="Query contract to evaluate (only v2 is supported).")
     evaluation_parser.add_argument("--scope", choices=("auto", "knowledge", "history", "all", "archive"), default="knowledge", help="Query V2 corpus scope (default: knowledge).")
+    evaluation_parser.add_argument("--baseline-report", help="Optional frozen retrieval-eval.json used for the regression gate.")
     evaluation_parser.add_argument("--vector-model-path", help="Required local BGE-M3 directory for vector or hybrid evaluation.")
     evaluation_parser.add_argument("--vector-index-path", help="Optional vault-relative vector index directory for vector or hybrid evaluation.")
 
@@ -260,6 +263,7 @@ def _run_retrieval_eval(args: argparse.Namespace) -> int:
         measure_context_budget=not args.no_context_budget,
         context_budget_case_limit=args.context_budget_case_limit,
         retrieval_mode=args.retrieval_mode,
+        entrypoint=args.entrypoint,
         query_version=args.query_version,
         scope=args.scope,
         vector_config=(
@@ -272,6 +276,14 @@ def _run_retrieval_eval(args: argparse.Namespace) -> int:
             else None
         ),
     )
+    if args.baseline_report:
+        try:
+            baseline_raw = json.loads(Path(args.baseline_report).expanduser().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RetrievalEvalError("baseline_invalid", "baseline report could not be read as JSON") from exc
+        if not isinstance(baseline_raw, dict):
+            raise RetrievalEvalError("baseline_invalid", "baseline report must be a JSON object")
+        report["gate"] = evaluate_retrieval_gate(report, baseline_raw)
     reports = write_retrieval_eval_report(report, args.output_dir)
     _print_json(
         {
@@ -279,10 +291,11 @@ def _run_retrieval_eval(args: argparse.Namespace) -> int:
             "dataset_id": report["metadata"]["dataset_id"],
             "dataset_revision": report["metadata"]["dataset_revision"],
             "metrics": report["metrics"],
+            "gate": report.get("gate"),
             "reports": reports,
         }
     )
-    return 0
+    return 0 if not args.baseline_report or report["gate"]["passed"] else 2
 
 
 def _vector_config_from_args(args: argparse.Namespace) -> dict[str, object]:

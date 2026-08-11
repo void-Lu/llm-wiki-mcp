@@ -206,6 +206,8 @@ def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys:
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
     assert output["metrics"]["recall_at_k_macro"] == 0.8
+    assert output["metrics"]["precision_at_k_macro"] == pytest.approx(0.1)
+    assert output["gate"] is None
     assert Path(output["reports"]["json"]).is_file()
     assert Path(output["reports"]["markdown"]).is_file()
 
