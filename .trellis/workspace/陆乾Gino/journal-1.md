@@ -679,3 +679,24 @@ Implemented passage-level SQLite FTS retrieval, vector schema v2, isolated archi
 ### Next Steps
 
 - 用户自行使用 git add -f 提交被 docs ignore 规则忽略的最终报告
+
+
+## Session 20: 完成非向量检索评测
+
+**Date**: 2026-08-11
+**Task**: 完成非向量检索评测
+**Branch**: `v0.9.22`
+
+### Summary
+
+实现 lexical-only engine/MCP 检索评测：增加 Precision 与多 K/macro-micro/切片指标、公共过滤器归一化、MCP 只读契约 adapter、冻结 baseline gate、CLI 参数和中文文档；补充确定性多相关页面 fixture。focused 28 项、全量 601 项 pytest、ruff 与 diff check 通过；未执行 mypy，因为项目环境没有 mypy executable。保留未相关的 .netsuite-mcp/。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `00a9f84` | (see git log) |
+
+### Status
+
+[OK] **Completed**
