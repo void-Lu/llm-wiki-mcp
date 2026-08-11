@@ -6,11 +6,17 @@ from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 import threading
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from common.privacy_policy import normalize_vault_relative
 from wiki.atomic_file import AtomicFileError, FaultBarrier, atomic_write_text, sha256_file
+from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore
+from wiki.wiki_index import refresh_indexes
+from wiki.wiki_io import read_markdown_page, refresh_page_retrieval
+from wiki.wiki_log import append_log_entry
+from wiki.wiki_models import WikiLogEntry
+from wiki.wiki_overview import refresh_overview
 
 
 Projection = Callable[[], Mapping[str, object] | None]
@@ -188,6 +194,135 @@ class PageMutationCoordinator:
             return recovered
         return self.run_projections(operation_id, projections, fault=fault)
 
+    def projections_for(self, operation: PageOperation) -> dict[str, Projection]:
+        """Build the standard projection set for a committed page operation."""
+
+        target = self._target(operation.page_path)
+        if not target.is_file():
+            return {
+                stage: (lambda: {"ok": False, "code": "page_not_found"})
+                for stage in PAGE_STAGES
+            }
+        page = read_markdown_page(target, self.root)
+        source_hashes = _source_hashes(page.frontmatter)
+        sources = _sources(page.frontmatter)
+        freshness = str(page.frontmatter.get("freshness") or ("fresh" if source_hashes else "review_required"))
+        generated = bool(page.frontmatter.get("generated"))
+        maintenance = str(page.frontmatter.get("maintenance") or ("auto" if generated else "manual"))
+        lifecycle = str(page.frontmatter.get("lifecycle") or "active")
+        replaced_by = page.frontmatter.get("replaced_by")
+
+        def dependencies() -> dict[str, object]:
+            KnowledgeDependencies(self.root).update_page(
+                operation.page_path,
+                operation.intended_hash,
+                source_hashes,
+                generated=generated,
+                maintenance=maintenance,
+                lifecycle=lifecycle,
+                replaced_by=str(replaced_by) if replaced_by else None,
+                freshness=freshness if freshness in {"fresh", "stale", "review_required"} else "review_required",
+            )
+            return {"ok": True, "state": "ready"}
+
+        def retrieval() -> dict[str, object]:
+            return refresh_page_retrieval(self.root, target)
+
+        def navigation() -> dict[str, object]:
+            return refresh_indexes(self.root)
+
+        def overview() -> dict[str, object]:
+            return refresh_overview(self.root)
+
+        def audit_log() -> dict[str, object]:
+            return append_log_entry(
+                self.root,
+                WikiLogEntry(
+                    operation="update" if operation.operation_kind == "update" else "note",
+                    title=page.title,
+                    paths=[operation.page_path],
+                    sources=sources,
+                    project=str(page.frontmatter.get("project") or ""),
+                    status="ok",
+                    operation_id=operation.operation_id,
+                ),
+            )
+
+        return {
+            "dependencies": dependencies,
+            "retrieval": retrieval,
+            "navigation": navigation,
+            "overview": overview,
+            "audit_log": audit_log,
+        }
+
+    def commit_with_projections(
+        self,
+        operation_id: str,
+        text: str,
+        *,
+        expected_hash: str | None = None,
+        fault: FaultBarrier | None = None,
+    ) -> dict[str, object]:
+        """Commit a prepared operation and run its standard projections."""
+
+        operation = self.store.get_operation(operation_id)
+        if operation is None:
+            return {"ok": False, "code": "operation_not_found"}
+        if operation.state == "completed":
+            return {
+                "ok": True,
+                "state": "completed",
+                "operation_id": operation.operation_id,
+                "page_hash": operation.intended_hash,
+                "already_applied": True,
+            }
+        if operation.state == "prepared":
+            commit_result = self.commit(operation_id, text, expected_hash=expected_hash, fault=fault)
+            if not commit_result.get("ok"):
+                return commit_result
+        elif operation.state not in {"page_committed", "repair_pending"}:
+            return {
+                "ok": False,
+                "code": "operation_not_committed",
+                "state": operation.state,
+                "operation_id": operation.operation_id,
+            }
+        result = self.run_projections(operation_id, self.projections_for(operation), fault=fault)
+        result.setdefault("page_hash", operation.intended_hash)
+        return result
+
+    def write_and_project(
+        self,
+        *,
+        request_key: str,
+        operation_kind: str,
+        page_path: str,
+        base_hash: str | None,
+        intended_hash: str,
+        text: str,
+        expected_hash: str | None = None,
+        fault: FaultBarrier | None = None,
+    ) -> dict[str, object]:
+        """Prepare, commit, and project one page mutation as one deep operation."""
+
+        try:
+            operation = self.prepare(
+                request_key=request_key,
+                operation_kind=operation_kind,
+                page_path=page_path,
+                base_hash=base_hash,
+                intended_hash=intended_hash,
+            )
+        except PageOperationError as exc:
+            return {"ok": False, "code": exc.code, "error": str(exc)}
+        return self.commit_with_projections(
+            operation.operation_id,
+            text,
+            expected_hash=expected_hash,
+            fault=fault,
+        )
+
     def _classify_commit_failure(self, operation: PageOperation, target: Path) -> dict[str, object]:
         classification = self._classify_disk(operation, target)
         if classification == "intended":
@@ -245,6 +380,20 @@ def _hash_if_exists(path: Path) -> str | None:
         return sha256_file(path)
     except OSError:
         return None
+
+
+def _source_hashes(frontmatter: Mapping[str, Any]) -> dict[str, str]:
+    value = frontmatter.get("source_hashes")
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): str(item) for key, item in value.items() if str(key) and str(item)}
+
+
+def _sources(frontmatter: Mapping[str, Any]) -> list[str]:
+    value = frontmatter.get("sources", [])
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)] if value else []
 
 
 __all__ = ["PageMutationCoordinator", "PageMutationError", "Projection", "fault_barrier"]

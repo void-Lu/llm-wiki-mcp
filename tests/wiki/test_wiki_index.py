@@ -6,7 +6,7 @@ from wiki.wiki_index import refresh_indexes
 from wiki.wiki_io import write_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
-from wiki.wiki_query import wiki_query
+from retrieval.query_pipeline import run_query_v2
 
 
 def _page(path: str, title: str, summary: str = "") -> WikiPage:
@@ -102,4 +102,4 @@ def test_refresh_indexes_never_recreates_retired_source_namespace(tmp_path: Path
     assert result["ok"] is True
     assert legacy.exists()
     assert not (root / "wiki/sources/index.md").exists()
-    assert wiki_query(root, "legacy noise", top_k=5)["results"] == []
+    assert run_query_v2(root, "legacy noise", top_k=5, retrieval_mode="lexical")["results"] == []

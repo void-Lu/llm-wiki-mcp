@@ -14,6 +14,10 @@ uv sync --extra dev --extra vector
 
 本仓库提交了 `uv.lock`；开发时优先使用 `uv sync --extra dev` 创建/同步 `.venv`，并安装 `dev` 可选依赖。
 
+历史部署资料可能仍使用仓库旧名称 `netsuite-llm-wiki-mcp-server`，或使用
+`NETSUITE_LLM_WIKI_*` 环境变量；当前入口和配置变量以本文档中的 `llm-wiki-mcp-*`
+与 `LLM_WIKI_*` 为准。
+
 ### MCP SDK 2.x
 
 运行依赖固定在 `mcp>=2,<3`。stdio 启动方式和现有 MCP 客户端配置保持不变；服务器握手版本由运行时 provenance 通过 `MCPServer(..., version=...)` 公开上报。
@@ -158,6 +162,8 @@ LLM_WIKI_VAULT_ROOT = "$LLM_WIKI_VAULT_ROOT"
 | `wiki_query`            | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；检索策略来自启动时配置快照。              |
 | `wiki_archive`          | 归档生命周期的`plan/apply`。                                                                                     |
 | `wiki_restore`          | 不可变归档包的`plan/apply`。                                                                                     |
+
+`wiki_write_note` 成功写入后返回 `state`、`operation_id`、`page_hash`；若页面已提交但派生投影待修复，响应会额外给出 `repair_action` 与 `failed_stage`，调用方应执行指定 repair，而不是重复创建整页。
 
 不再注册 `wiki_generation` worker 工具。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 

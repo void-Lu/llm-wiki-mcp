@@ -10,8 +10,6 @@ from typing import Any
 from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
 from wiki.page_mutation import PageMutationCoordinator
-from wiki.page_operation_store import PageOperationError
-from wiki.page_repair import PageRepairService
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
@@ -326,57 +324,29 @@ def save_obsidian_note(
     base_hash = sha256(target.read_bytes()).hexdigest() if target.is_file() else None
     intended_hash = sha256(prepared.text.encode("utf-8")).hexdigest()
     coordinator = PageMutationCoordinator(root)
-    try:
-        operation = coordinator.prepare(
-            request_key=f"note:{relative_path.as_posix()}:{base_hash or 'missing'}:{intended_hash}",
-            operation_kind="update" if base_hash is not None else "create",
-            page_path=relative_path.as_posix(),
-            base_hash=base_hash,
-            intended_hash=intended_hash,
-        )
-    except PageOperationError as exc:
-        return _error(exc.code, "page operation could not be prepared")
-    if operation.state == "completed":
-        projection_result: dict[str, object] = {"ok": True, "state": "completed", "already_applied": True, "operation_id": operation.operation_id}
-    elif operation.state == "prepared":
-        commit_result = coordinator.commit(operation.operation_id, prepared.text, expected_hash=base_hash)
-        if not commit_result.get("ok"):
-            return dict(commit_result)
-        projection_result = coordinator.run_projections(operation.operation_id, PageRepairService(root).projections_for(operation))
-    elif operation.state in {"page_committed", "repair_pending"}:
-        projection_result = coordinator.run_projections(operation.operation_id, PageRepairService(root).projections_for(operation))
-    else:
-        return _error("operation_not_committed", "page operation is not ready for projection")
+    projection_result = coordinator.write_and_project(
+        request_key=f"note:{relative_path.as_posix()}:{base_hash or 'missing'}:{intended_hash}",
+        operation_kind="update" if base_hash is not None else "create",
+        page_path=relative_path.as_posix(),
+        base_hash=base_hash,
+        intended_hash=intended_hash,
+        text=prepared.text,
+        expected_hash=base_hash,
+    )
     if not projection_result.get("ok"):
         return dict(projection_result)
-    completed_operation = coordinator.store.get_operation(operation.operation_id)
+    operation_id = str(projection_result.get("operation_id") or "")
+    completed_operation = coordinator.store.get_operation(operation_id) if operation_id else None
     stages = completed_operation.stages if completed_operation is not None else {}
     dependency_projection = stages.get("dependencies", {}).get("result", {"ok": True, "state": "ready"})
+    broken_wikilinks = validate_wikilinks(redacted_content, root)
     result: dict[str, Any] = {
         "ok": True,
         "state": projection_result.get("state", "completed"),
         "path": relative_path.as_posix(),
         "created": True,
-        "operation_id": operation.operation_id,
-        "page_hash": intended_hash,
-        "redacted_count": prepared.redacted_count,
-        "indexed": None,
-        "wikilink_target": name[:-3] if name.endswith(".md") else name,
-        "normalized_wikilinks": normalized_wikilink_count,
-        "broken_wikilinks": validate_wikilinks(redacted_content, root),
-        "provenance_status": "verified" if resolved_sources else "provenance_unverified",
-        "freshness": "fresh" if resolved_sources else "review_required",
-        "dependency_projection": dependency_projection,
-    }
-    if projection_result.get("state") == "repair_pending":
-        result["repair_action"] = "repair_page_operation"
-        result["failed_stage"] = projection_result.get("failed_stage")
-
-    broken_wikilinks = validate_wikilinks(redacted_content, root)
-    result: dict[str, Any] = {
-        "ok": True,
-        "path": relative_path.as_posix(),
-        "created": True,
+        "operation_id": operation_id,
+        "page_hash": projection_result.get("page_hash", intended_hash),
         "redacted_count": redacted_count,
         "indexed": None,
         "wikilink_target": name[:-3] if name.endswith(".md") else name,
@@ -386,6 +356,9 @@ def save_obsidian_note(
         "freshness": "fresh" if resolved_sources else "review_required",
         "dependency_projection": dependency_projection,
     }
+    if projection_result.get("state") == "repair_pending":
+        result["repair_action"] = projection_result.get("repair_action", "repair_page_operation")
+        result["failed_stage"] = projection_result.get("failed_stage")
     if related_pages is not None:
         result["related_pages_skipped"] = related_pages_skipped
     if sources is not None and not chat_derived:

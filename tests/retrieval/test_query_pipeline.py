@@ -10,9 +10,9 @@ from retrieval.query_pipeline import (
     run_query_v2,
 )
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
+from retrieval.vector_index import vector_index_records
 import retrieval.query_pipeline as query_pipeline_module
 from runtime.runtime_config import EmbeddingSettings
-import wiki.wiki_query as wiki_query_module
 from wiki.wiki_io import write_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
@@ -67,6 +67,24 @@ def test_query_filters_rejects_non_string_path_prefix() -> None:
     except ValueError:
         return
     raise AssertionError("expected ValueError for non-string path_prefix")
+
+
+def test_v2_path_prefix_respects_directory_boundary(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/target.md", "Target", "path boundary marker", type="concept")
+    sibling = root / "wiki/concept-extras/sibling.md"
+    sibling.parent.mkdir(parents=True, exist_ok=True)
+    sibling.write_text("---\ntitle: Sibling\ntype: concept\n---\n\npath boundary marker", encoding="utf-8")
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "path boundary marker",
+        filters=QueryFilters.from_mapping({"path_prefix": "wiki/concepts"}),
+    )
+
+    assert [item["path"] for item in result["results"]] == ["wiki/concepts/target.md"]
 
 
 def test_v2_returns_result_body_without_context_pack(tmp_path: Path) -> None:
@@ -1378,7 +1396,7 @@ def test_v2_raw_content_never_enters_vector_records(tmp_path: Path) -> None:
     raw.write_text("raw-only vector-leak sentinel", encoding="utf-8")
     refresh_indexes(root)
 
-    records = wiki_query_module.vector_index_records(root)
+    records = vector_index_records(root)
 
     assert all("vector-leak" not in record.text for record in records)
 

@@ -25,7 +25,7 @@ from retrieval.retrieval_eval import (
     write_retrieval_eval_report,
     _results_match_filters,
 )
-from retrieval.vector_index import VectorIndexStore
+from retrieval.vector_index import VectorIndexStore, vector_index_records
 from retrieval.retrieval_index import RetrievalIndexStore
 from archive.archive_service import ArchiveService
 from wiki.knowledge_compiler import filesystem_path
@@ -34,7 +34,6 @@ from runtime.runtime_config import ConfigRegistry, write_global_config
 from wiki.wiki_io import write_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
-import wiki.wiki_query as wiki_query_module
 import app.server as server_module
 
 
@@ -155,7 +154,7 @@ def test_v2_vector_evaluation_uses_the_requested_vault_relative_index(tmp_path: 
     RetrievalIndexStore(vault).build(RetrievalIndexStore(vault).iter_vault_pages())
     provider = DeterministicFakeProvider({"expense automation": [1, 0, 0, 0], "accounts payable operations": [1, 0, 0, 0]})
     index_path = vault / ".llm-wiki" / "v2-eval"
-    VectorIndexStore(vault, index_path).build(wiki_query_module.vector_index_records(vault), provider, include_raw_sources=False)
+    VectorIndexStore(vault, index_path).build(vector_index_records(vault), provider, include_raw_sources=False)
     monkeypatch.setattr("retrieval.query_pipeline.LocalBgeM3Provider", lambda *_args, **_kwargs: provider)
     dataset = RetrievalEvalDataset(RetrievalEvalManifest("v2-vector", "1", 0.5), (RetrievalEvalCase("semantic", "expense automation", (Relevance(path.as_posix(), 3),), {}, True, "en", (), ""),))
 
@@ -190,7 +189,7 @@ def test_vector_and_hybrid_evaluation_improve_zero_lexical_recall_without_metric
     )
     _build_passage_store(vault)
     store = VectorIndexStore(vault)
-    store.build(wiki_query_module.vector_index_records(vault), provider, include_raw_sources=False)
+    store.build(vector_index_records(vault), provider, include_raw_sources=False)
     monkeypatch.setattr("retrieval.query_pipeline.LocalBgeM3Provider", lambda *args, **kwargs: provider)
     dataset = RetrievalEvalDataset(
         RetrievalEvalManifest("vector-ablation", "1", 0.5),
@@ -258,6 +257,18 @@ def test_filter_evaluation_requires_every_requested_tag() -> None:
     assert not _results_match_filters(results, {"filter_tags": ["finance", "approval"]})
     assert _results_match_filters(results, {"path_prefix": "wiki/concepts/"})
     assert not _results_match_filters(results, {"path_prefix": "wiki/projects/"})
+
+
+def test_filter_evaluation_uses_frontmatter_project_and_rejects_scalar_tags() -> None:
+    result = {
+        "path": "wiki/projects/Billing/guide.md",
+        "source_kind": "project",
+        "frontmatter": {"project": "Billing", "tags": ["finance"]},
+    }
+
+    assert _results_match_filters([result], {"project": "billing", "filter_type": "project", "filter_tags": ["finance"]})
+    scalar_tags = {**result, "frontmatter": {"project": "Billing", "tags": "finance"}}
+    assert not _results_match_filters([scalar_tags], {"project": "billing", "filter_tags": ["finance"]})
 
 
 def test_retrieval_gate_checks_frozen_identity_and_lexical_policy() -> None:

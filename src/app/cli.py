@@ -17,9 +17,9 @@ from retrieval.retrieval_eval import (
     write_retrieval_eval_report,
 )
 from runtime.runtime_config import ConfigRegistry, RuntimeConfig, RuntimeConfigError, resolve_runtime_config, write_global_config
-from retrieval.vector_index import VectorIndexError, VectorIndexStore, parse_vector_settings
+from retrieval.query_pipeline import DEFAULT_TOP_K
+from retrieval.vector_index import VectorIndexError, VectorIndexStore, parse_vector_settings, vector_index_records
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError, local_provider_readiness
-from wiki.wiki_query import DEFAULT_TOP_K, vector_index_records
 from archive.archive_migration import apply_legacy_migration, plan_legacy_migration
 from archive.archive_service import ArchiveService
 from wiki.page_repair import PageRepairService

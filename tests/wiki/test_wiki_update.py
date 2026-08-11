@@ -3,7 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 
 from retrieval.retrieval_index import RetrievalIndexStore
-from wiki.page_repair import PageRepairService
+from wiki.page_mutation import PageMutationCoordinator
 from wiki.update_plan_store import UpdatePlanStore
 from wiki.wiki_update import apply_update, preview_update
 
@@ -90,7 +90,7 @@ def test_plan_is_consumed_before_projection_failure_and_replay_is_already_applie
     def failing_projections(self, operation):
         return {"dependencies": lambda: {"ok": False, "code": "dependency_unavailable"}}
 
-    monkeypatch.setattr(PageRepairService, "projections_for", failing_projections)
+    monkeypatch.setattr(PageMutationCoordinator, "projections_for", failing_projections)
     result = apply_update(tmp_path, "wiki/concepts/general/a.md", "new", plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
     assert result["ok"] is True
     assert result["state"] == "repair_pending"

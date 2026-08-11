@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
 from retrieval.context_packer import ContextPassage, estimate_tokens, pack_context
-from codegraph.codegraph_policy import is_codegraph_raw_path, is_project_code_page
+from codegraph.codegraph_policy import is_codegraph_raw_path
 from retrieval.lexical_analyzer import (
     QualifiedIdentifier,
     edit_distance,
@@ -27,13 +27,14 @@ from retrieval.lexical_analyzer import (
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
-from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_metadata_filters
+from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_metadata_filters, page_matches_filters
 from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, vector_settings_from_embedding
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError
-from wiki.wiki_query import QueryCandidate, _apply_graph_expansion, _build_graph
+from retrieval.graph_retrieval import QueryCandidate, apply_graph_expansion, build_graph
 
 
+DEFAULT_TOP_K = 10
 RANKING_POLICY_VERSION = "query-v2-passage-rrf-10"
 RRF_K = 60
 RAW_FALLBACK_LIMIT = 20
@@ -204,14 +205,14 @@ def _query_expansion(
     for page in store.page_candidates():
         raw_frontmatter = page.get("frontmatter")
         frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, dict) else {}
-        if not _project_page_allowed(frontmatter, project):
+        if not page_matches_filters(frontmatter, "wiki", project=project):
             continue
         title_words.update(tokens(str(page.get("title") or "")))
     if raw_store is not None:
         for page in raw_store.page_candidates():
             raw_frontmatter = page.get("frontmatter")
             frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, dict) else {}
-            if not _project_page_allowed(frontmatter, project):
+            if not page_matches_filters(frontmatter, "raw", project=project):
                 continue
             title_words.update(tokens(str(page.get("title") or "")))
     base_latin = [
@@ -403,32 +404,15 @@ def _eligible(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, scope: st
 def _matches_request(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, project: str | None, filters: QueryFilters) -> bool:
     """Apply the same boundary filters to FTS and vector-only candidates."""
     frontmatter = metadata.get(hit.page_path, {})
-    if not _project_page_allowed(frontmatter, project):
-        return False
-    return _filters_allow_page(frontmatter, hit.source_kind, filters, page_path=hit.page_path)
-
-
-def _project_page_allowed(frontmatter: Mapping[str, Any], project: str | None) -> bool:
-    """Apply the logical project corpus boundary consistently after recall."""
-
-    page_project = str(frontmatter.get("project") or "").casefold()
-    if is_project_code_page(frontmatter):
-        return project is not None and page_project == project.casefold()
-    if project and page_project and page_project != project.casefold():
-        return False
-    return True
-
-
-def _filters_allow_page(frontmatter: Mapping[str, Any], source_kind: str, filters: QueryFilters, page_path: str = "") -> bool:
-    if filters.path_prefix and not page_path.replace("\\", "/").startswith(filters.path_prefix):
-        return False
-    if filters.type and str(frontmatter.get("type") or source_kind) != filters.type:
-        return False
-    if filters.tags:
-        tags = frontmatter.get("tags") or ()
-        if not isinstance(tags, (list, tuple)) or not set(filters.tags).issubset({str(tag) for tag in tags}):
-            return False
-    return True
+    return page_matches_filters(
+        frontmatter,
+        hit.source_kind,
+        project=project,
+        page_type=filters.type,
+        tags=filters.tags,
+        path_prefix=filters.path_prefix,
+        page_path=hit.page_path,
+    )
 
 
 @dataclass(frozen=True)
@@ -1525,7 +1509,7 @@ def _graph_expand(
         candidate.fusion_score = seed_scores[path]
     if not scored:
         return {}, []
-    _apply_graph_expansion(scored, candidates, _build_graph(root, candidates), max_graph_hops=2, collect_reasons=debug)
+    apply_graph_expansion(scored, candidates, build_graph(root, candidates), max_graph_hops=2, collect_reasons=debug)
     added = [path for path in scored if path not in seed_scores]
     return scored, store.passages_for_pages(added, limit_per_page=1)
 
@@ -2055,7 +2039,7 @@ def run_query_v2(
     scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"] = "auto",
     project: str | None = None,
     filters: QueryFilters | None = None,
-    top_k: int = 10,
+    top_k: int = DEFAULT_TOP_K,
     hard_budget_tokens: int = 16_000,
     embedding: EmbeddingSettings | None = None,
     telemetry: TelemetrySettings | None = None,
@@ -2151,12 +2135,13 @@ def run_query_v2(
         frontmatter = item.get("frontmatter")
         if not isinstance(frontmatter, dict):
             frontmatter = {}
-        if not _project_page_allowed(frontmatter, project):
-            continue
-        if not _filters_allow_page(
+        if not page_matches_filters(
             frontmatter,
             str(item.get("source_kind") or ""),
-            filters,
+            project=project,
+            page_type=filters.type,
+            tags=filters.tags,
+            path_prefix=filters.path_prefix,
             page_path=str(item.get("path") or ""),
         ):
             continue

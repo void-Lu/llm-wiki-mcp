@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import wraps
 import json
@@ -27,9 +28,8 @@ from runtime.runtime_config import (
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from wiki.wiki_files import wiki_status as run_wiki_status
 from wiki.ingest_service import ingest_file as run_ingest_file
-from wiki.wiki_query import DEFAULT_TOP_K
 from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext, QueryExecutionRegistry
-from retrieval.query_pipeline import QueryFilters, run_query_v2
+from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, run_query_v2
 from retrieval.query_telemetry import QueryTelemetry
 from wiki.content_catalog import (
     DEFAULT_BODY_BUDGET,
@@ -117,6 +117,17 @@ def _content_ref_vault(value: object) -> str | None:
         return None
 
 
+def _infer_content_ref_vault(value: object) -> str | None:
+    """Return the logical vault encoded by a content reference when valid."""
+
+    reference_vault = _content_ref_vault(value)
+    if reference_vault is None:
+        return None
+    try:
+        default_resolution = resolve_tool_vault(registry=CONFIG_REGISTRY)
+    except RuntimeConfigError:
+        return reference_vault
+    return reference_vault if default_resolution.logical_name != reference_vault else None
 def attach_no_results_outcome(payload: dict[str, Any]) -> dict[str, Any]:
     """Make an empty successful query explicit without broadening its source boundary."""
     if payload.get("ok") is not True or payload.get("results") != [] or "code" in payload:
@@ -191,19 +202,49 @@ _TOOL_ANNOTATIONS = {
 }
 
 
-def _publicize_tool_result(value: object, kwargs: Mapping[str, object]) -> object:
+_ACTIVE_TOOL_ARGS: ContextVar[Mapping[str, object] | None] = ContextVar("active_tool_args", default=None)
+_ACTIVE_TOOL_RESOLUTION: ContextVar[ToolVaultResolution | None] = ContextVar("active_tool_resolution", default=None)
+_ACTIVE_TOOL_WARNINGS: ContextVar[tuple[str, ...]] = ContextVar("active_tool_warnings", default=())
+
+
+def _registered_resolution() -> ToolVaultResolution:
+    """Resolve the current tool's vault once, at the registry boundary."""
+
+    cached = _ACTIVE_TOOL_RESOLUTION.get()
+    if cached is not None:
+        return cached
+    args = _ACTIVE_TOOL_ARGS.get()
+    if args is None:
+        return resolve_tool_vault()
+    vault_value = args.get("vault")
+    vault_root_value = args.get("vault_root")
+    vault_root_camel_value = args.get("vaultRoot")
+    resolution = resolve_tool_vault(
+        vault=vault_value if isinstance(vault_value, str) else None,
+        vault_root=vault_root_value if isinstance(vault_root_value, str) else None,
+        vaultRoot=vault_root_camel_value if isinstance(vault_root_camel_value, str) else None,
+    )
+    _ACTIVE_TOOL_RESOLUTION.set(resolution)
+    return resolution
+
+
+def _publicize_tool_result(
+    value: object,
+    kwargs: Mapping[str, object],
+    resolution: ToolVaultResolution | None = None,
+) -> object:
     if isinstance(value, PublicResult):
         payload = value.to_dict()
     elif isinstance(value, Mapping):
         payload = dict(value)
     else:
         return value
-    logical_vault = kwargs.get("vault")
+    logical_vault = resolution.logical_name if resolution is not None else kwargs.get("vault")
     vault_root_value = kwargs.get("vault_root") or kwargs.get("vaultRoot")
     vault_root = vault_root_value if isinstance(vault_root_value, (str, Path)) else None
     if not isinstance(logical_vault, str):
-        logical_vault = _content_ref_vault(payload.get("content_ref"))
-        if logical_vault is None:
+        logical_vault = _infer_content_ref_vault(payload.get("content_ref"))
+        if logical_vault is None and resolution is None:
             try:
                 logical_vault = resolve_tool_vault(
                     vault_root=str(vault_root) if vault_root is not None else None,
@@ -227,16 +268,86 @@ def _publicize_tool_result(value: object, kwargs: Mapping[str, object]) -> objec
     return {**public_error.to_payload(), **extras}
 
 
-def _register(function: Any) -> Any:
-    """Register every public tool with one schema/privacy/error boundary."""
+def _register(
+    function: Callable[..., Any] | None = None,
+    *,
+    aliases: Mapping[str, str] | None = None,
+    content_ref_param: str | None = None,
+    filter_param: str | None = None,
+    budget_param: str | None = None,
+) -> Any:
+    """Register a tool and centralize its boundary normalization pipeline."""
+
+    if function is None:
+        return lambda target: _register(
+            target,
+            aliases=aliases,
+            content_ref_param=content_ref_param,
+            filter_param=filter_param,
+            budget_param=budget_param,
+        )
+
+    alias_map = dict(aliases or {})
 
     @wraps(function)
     def registered(*args: object, **kwargs: object) -> object:
+        normalized = dict(kwargs)
+        for alias, canonical in alias_map.items():
+            if alias not in normalized or normalized[alias] is None:
+                continue
+            # Legacy catalog aliases were last-write-wins; noteType was a
+            # fallback for a missing note_type.  Preserve both contracts.
+            if function.__name__ == "wiki_write_note" and normalized.get(canonical):
+                continue
+            normalized[canonical] = normalized[alias]
+        for alias in alias_map:
+            normalized.pop(alias, None)
+
+        if filter_param and normalized.get(filter_param) is not None:
+            try:
+                filter_value = normalized[filter_param]
+                if not isinstance(filter_value, Mapping):
+                    return public_error("invalid_filters")
+                normalized[filter_param] = normalize_filter_aliases(filter_value)
+            except ValueError:
+                return public_error("invalid_filters")
+
+        pending_warnings: list[str] = []
+        if budget_param:
+            raw_budget = normalized.get(budget_param)
+            if isinstance(raw_budget, int) and raw_budget > MAX_BODY_BUDGET:
+                normalized[budget_param] = MAX_BODY_BUDGET
+                pending_warnings.append("body_budget_clamped")
+
+        if content_ref_param and not normalized.get("vault") and not normalized.get("vault_root") and not normalized.get("vaultRoot"):
+            inferred_vault = _infer_content_ref_vault(normalized.get(content_ref_param))
+            if inferred_vault is not None:
+                normalized["vault"] = inferred_vault
+
+        args_token = _ACTIVE_TOOL_ARGS.set(normalized)
+        resolution_token = _ACTIVE_TOOL_RESOLUTION.set(None)
+        warning_token = _ACTIVE_TOOL_WARNINGS.set(tuple(pending_warnings))
         try:
-            value = function(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - MCP boundary must be stable
-            return public_error_from_exception(exc)
-        return _publicize_tool_result(value, kwargs)
+            try:
+                value = function(*args, **normalized)
+            except RuntimeConfigError as exc:
+                return _tool_error(exc)
+            except Exception as exc:  # noqa: BLE001 - MCP boundary must be stable
+                return public_error_from_exception(exc)
+            resolution = _ACTIVE_TOOL_RESOLUTION.get()
+            projected = _publicize_tool_result(value, normalized, resolution)
+            if isinstance(projected, Mapping):
+                result = dict(projected)
+                if resolution is not None:
+                    result = attach_warnings(result, resolution.warnings)
+                if pending_warnings and result.get("ok") is True:
+                    result = attach_warnings(result, tuple(pending_warnings))
+                return result
+            return projected
+        finally:
+            _ACTIVE_TOOL_WARNINGS.reset(warning_token)
+            _ACTIVE_TOOL_RESOLUTION.reset(resolution_token)
+            _ACTIVE_TOOL_ARGS.reset(args_token)
 
     registered_tool = mcp.tool(
         annotations=_TOOL_ANNOTATIONS.get(
@@ -290,18 +401,19 @@ def _with_timeout(
         max_concurrency=max_concurrency,
         cancel_grace_seconds=cancel_grace_seconds,
     )
-    return registry.run(function, timeout_seconds=timeout_seconds)
+    context = copy_context()
+    return registry.run(
+        lambda cancellation: context.run(function, cancellation),
+        timeout_seconds=timeout_seconds,
+    )
 
 
-@_register
+@_register()
 def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Return read-only health, index and policy status for a logical vault."""
     if detail not in {"summary", "indexes", "generation", "archive"}:
         return {"ok": False, "code": "invalid_status_detail", "error": "detail must be summary, indexes, generation, or archive"}
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     status = dict(wiki_status_tool(str(resolution.root)))
     status.pop("vault_root", None)
     codegraph = status.get("codegraph")
@@ -336,10 +448,13 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
         status = {key: status[key] for key in ("ok", "vault", "queue", "query_execution", "config", "version", "runtime") if key in status}
     elif detail == "archive":
         status = {key: status[key] for key in ("ok", "vault", "archive_index", "archive_operations", "archive_state", "config", "version", "runtime") if key in status}
-    return attach_warnings(status, resolution.warnings)
+    return status
 
 
-@_register
+@_register(
+    aliases={"storeScope": "store_scope", "pageSize": "page_size"},
+    filter_param="filters",
+)
 def wiki_list(
     store_scope: Literal["active", "raw", "archive"] = "active",
     page_size: int = DEFAULT_CATALOG_PAGE_SIZE,
@@ -353,28 +468,20 @@ def wiki_list(
 ) -> dict[str, Any]:
     """List metadata from one physical scope; filters may target a file or directory prefix."""
 
-    if storeScope is not None:
-        store_scope = storeScope
-    if pageSize is not None:
-        page_size = pageSize
-    try:
-        normalized_filters = normalize_filter_aliases(filters)
-    except ValueError as exc:
-        return {"ok": False, "code": "invalid_filters", "error": str(exc)}
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-        result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).list_items(
-            scope=store_scope,
-            filters=normalized_filters,
-            page_size=page_size,
-            cursor=cursor,
-        )
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
-    return attach_warnings(result, resolution.warnings)
+    resolution = _registered_resolution()
+    return ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).list_items(
+        scope=store_scope,
+        filters=filters,
+        page_size=page_size,
+        cursor=cursor,
+    )
 
 
-@_register
+@_register(
+    aliases={"contentRef": "content_ref", "includeBody": "include_body", "maxBytes": "max_bytes"},
+    content_ref_param="content_ref",
+    budget_param="max_bytes",
+)
 def wiki_get(
     content_ref: str | None = None,
     include_body: bool = False,
@@ -389,41 +496,15 @@ def wiki_get(
 ) -> dict[str, Any]:
     """Read an opaque reference; body is opt-in and capped at the server budget."""
 
-    if contentRef is not None:
-        content_ref = contentRef
-    if includeBody is not None:
-        include_body = includeBody
-    if maxBytes is not None:
-        max_bytes = maxBytes
     if not content_ref:
         return {"ok": False, "code": "invalid_content_ref", "error": "content_ref is required"}
-    budget_clamped = max_bytes > MAX_BODY_BUDGET
-    if budget_clamped:
-        max_bytes = MAX_BODY_BUDGET
-    inferred_vault = vault
-    if inferred_vault is None and not vault_root and not vaultRoot:
-        reference_vault = _content_ref_vault(content_ref)
-        if reference_vault is not None:
-            try:
-                default_resolution = resolve_tool_vault(registry=CONFIG_REGISTRY)
-            except RuntimeConfigError:
-                inferred_vault = reference_vault
-            else:
-                if default_resolution.logical_name != reference_vault:
-                    inferred_vault = reference_vault
-    try:
-        resolution = resolve_tool_vault(vault=inferred_vault, vault_root=vault_root, vaultRoot=vaultRoot)
-        result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).get_item(
-            content_ref,
-            include_body=include_body,
-            max_bytes=max_bytes,
-            cursor=cursor,
-        )
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
-    if budget_clamped and result.get("ok") is True:
-        result = attach_warnings(result, ("body_budget_clamped",))
-    return attach_warnings(result, resolution.warnings)
+    resolution = _registered_resolution()
+    return ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).get_item(
+        content_ref,
+        include_body=include_body,
+        max_bytes=max_bytes,
+        cursor=cursor,
+    )
 
 
 QueryScope = Literal["auto", "knowledge", "history", "all", "archive", "raw"]
@@ -479,10 +560,7 @@ def _run_wiki_query(
     confirmation_token: str | None,
     cancellation: QueryCancellationContext | None = None,
 ) -> dict[str, Any]:
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     settings = resolution.resolved.settings.retrieval
     telemetry_settings = resolution.resolved.settings.telemetry
     telemetry_recorder = QueryTelemetry(resolution.root) if telemetry_settings.enabled else None
@@ -553,11 +631,11 @@ def _run_wiki_query(
                 worker_state="failed",
             )
         raise
-    return attach_warnings(attach_no_results_outcome(result), resolution.warnings)
+    return attach_no_results_outcome(result)
 
 
-@_register
-def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, expansion_terms: dict[str, list[str]] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, confirmation_token: str | None = None) -> dict[str, Any]:
+@_register(aliases={"topK": "top_k"}, filter_param="filters")
+def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, topK: int | None = None, expansion_terms: dict[str, list[str]] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, confirmation_token: str | None = None) -> dict[str, Any]:
     """Query a vault using its immutable retrieval and context profile.
 
     ``filters`` accepts ``type`` (string), ``tags`` (list of strings), and
@@ -587,10 +665,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     normalized_expansion, expansion_error = _validate_expansion_terms(expansion_terms)
     if expansion_error:
         return {"ok": False, "code": "invalid_expansion_terms", "error": expansion_error}
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     execution = resolution.resolved.settings.retrieval.execution
     return _with_timeout(
         lambda cancellation: _run_wiki_query(
@@ -613,7 +688,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     )
 
 
-@_register
+@_register(aliases={"noteType": "note_type"})
 def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None, sources: list[str] | None = None) -> dict[str, Any]:
     """Create a manual page, optionally linking adopted Wiki pages and raw sources.
 
@@ -622,29 +697,23 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
     Raw provenance belongs in ``sources``; chat-derived pages continue to use
     ``chat_sources``.
     """
-    selected_type = note_type or noteType
+    selected_type = note_type
     if not selected_type:
         return {"ok": False, "code": "missing_note_type", "error": "note_type is required"}
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, chat_metadata=chat_metadata, chat_derived=chat_derived, chat_sources=chat_sources, related_pages=related_pages, related_pages_heading=related_pages_heading, sources=sources, overwrite=False, auto_index=True, vault_root=str(resolution.root))
-    return attach_warnings(result, resolution.warnings)
+    return result
 
 
-@_register
+@_register()
 def wiki_ingest(source_path: str, source_name: str, project: str = "", source_type: str = "file", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Ingest one explicit file; text is indexed and other files become raw assets."""
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     result = run_ingest_file(vault_root=resolution.root, project=project, source_name=source_name, source_path=source_path, source_type=source_type)
-    return attach_warnings(result, resolution.warnings)
+    return result
 
 
-@_register
+@_register()
 def wiki_codegraph_import(sync: Literal["sync"] = "sync", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, workspace_root: str | None = None) -> dict[str, Any]:
     """Synchronise the current workspace's CodeGraph snapshot into the Wiki.
 
@@ -654,69 +723,57 @@ def wiki_codegraph_import(sync: Literal["sync"] = "sync", vault: str | None = No
     """
     if sync != "sync":
         return {"ok": False, "code": "invalid_codegraph_operation", "error": "only sync is supported"}
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     try:
         result = run_codegraph_sync(resolution.root, workspace_root=workspace_root)
     except CodeGraphSyncError as exc:
         result = {"ok": False, "code": exc.code, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001 - keep the MCP boundary structured
         result = {"ok": False, "code": "codegraph_sync_failed", "error": str(exc)}
-    return attach_warnings(result, resolution.warnings)
+    return result
 
 
-@_register
+@_register()
 def wiki_update(page_path: str, incoming_body: str, action: str = "preview", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, incoming_frontmatter: dict[str, Any] | None = None, plan_id: str | None = None, expected_hash: str | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None) -> dict[str, Any]:
     """Preview or apply a controlled update, optionally appending Wiki links."""
     if action not in {"preview", "apply"}:
         return {"ok": False, "code": "invalid_action", "error": "action must be preview or apply"}
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     if action == "preview":
         result = run_preview_update(resolution.root, page_path, incoming_body, incoming_frontmatter, related_pages=related_pages, related_pages_heading=related_pages_heading)
     else:
         result = run_apply_update(resolution.root, page_path, incoming_body, incoming_frontmatter=incoming_frontmatter, plan_id=plan_id, expected_hash=expected_hash, related_pages=related_pages, related_pages_heading=related_pages_heading)
-    return attach_warnings(result, resolution.warnings)
+    return result
 
 
-@_register
+@_register()
 def wiki_archive(target: str, reason: str = "manual", cascade: bool = False, action: str = "plan", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Plan/apply archive lifecycle operations; purge is intentionally not public."""
     if action not in {"plan", "apply"}:
         return {"ok": False, "code": "invalid_action", "error": "action must be plan or apply"}
     if action == "plan" and not is_archive_reason(reason):
         return {"ok": False, "code": "invalid_archive_reason", "error": f"reason must be one of: {', '.join(sorted(ARCHIVE_REASONS))}"}
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     try:
         service = ArchiveService(resolution.root, actor="mcp")
         result = service.plan_archive(target, reason=reason, cascade=cascade) if action == "plan" else service.apply(plan_id or "")
     except Exception as exc:
         result = {"ok": False, "code": getattr(exc, "code", "archive_apply_failed"), "error": str(exc)}
-    return attach_warnings(result, resolution.warnings)
+    return result
 
 
-@_register
+@_register()
 def wiki_restore(archive_id: str, action: str = "plan", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Plan/apply restoration of an immutable archive bundle."""
     if action not in {"plan", "apply"}:
         return {"ok": False, "code": "invalid_action", "error": "action must be plan or apply"}
-    try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
-    except RuntimeConfigError as exc:
-        return _tool_error(exc)
+    resolution = _registered_resolution()
     try:
         service = ArchiveService(resolution.root, actor="mcp")
         result = service.plan_restore(archive_id) if action == "plan" else service.apply(plan_id or "")
     except Exception as exc:
         result = {"ok": False, "code": getattr(exc, "code", "restore_apply_failed"), "error": str(exc)}
-    return attach_warnings(result, resolution.warnings)
+    return result
 
 
 def main() -> None:

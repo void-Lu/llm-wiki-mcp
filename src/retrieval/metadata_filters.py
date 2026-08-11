@@ -5,10 +5,62 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from codegraph.codegraph_policy import is_project_code_page
+
 SUPPORTED_METADATA_FILTERS = frozenset(
     {"type", "tags", "path_prefix", "project", "freshness", "lifecycle", "corpus"}
 )
 QUERY_METADATA_FILTERS = frozenset({"type", "tags", "path_prefix"})
+
+
+def path_matches_prefix(page_path: str, path_prefix: str) -> bool:
+    """Match a vault path against a normalized directory boundary."""
+
+    normalized_path = str(page_path).replace("\\", "/").strip("/")
+    normalized_prefix = str(path_prefix).replace("\\", "/").strip(" /").rstrip("/")
+    if not normalized_prefix:
+        return True
+    return normalized_path == normalized_prefix or normalized_path.startswith(f"{normalized_prefix}/")
+
+
+def page_matches_filters(
+    frontmatter: Mapping[str, Any],
+    source_kind: str,
+    *,
+    project: str | None = None,
+    page_type: str | None = None,
+    tags: Sequence[str] = (),
+    path_prefix: str | None = None,
+    page_path: str = "",
+) -> bool:
+    """Apply the production metadata boundary to one retrieved page.
+
+    Project matching follows the query boundary: CodeGraph pages must carry
+    the requested project, while ordinary pages with no project metadata stay
+    eligible.  Type falls back to ``source_kind`` and requested tags must be
+    a subset of list-like page metadata; scalar tag metadata never matches.
+    """
+
+    page_project = str(frontmatter.get("project") or "").casefold()
+    if is_project_code_page(frontmatter):
+        if project is None or page_project != project.casefold():
+            return False
+    elif project and page_project and page_project != project.casefold():
+        return False
+
+    if page_type and str(frontmatter.get("type") or source_kind) != page_type:
+        return False
+
+    if tags:
+        raw_tags = frontmatter.get("tags")
+        if not isinstance(raw_tags, (list, tuple)):
+            return False
+        if not set(tags).issubset({str(tag) for tag in raw_tags}):
+            return False
+
+    if path_prefix and not path_matches_prefix(page_path, path_prefix):
+        return False
+    return True
 
 
 def normalize_filter_aliases(
@@ -114,4 +166,6 @@ __all__ = [
     "metadata_filter_fingerprint",
     "normalize_filter_aliases",
     "normalize_metadata_filters",
+    "page_matches_filters",
+    "path_matches_prefix",
 ]

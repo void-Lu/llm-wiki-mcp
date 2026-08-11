@@ -12,7 +12,6 @@ import yaml
 
 from codegraph.codegraph_policy import is_codegraph_managed_path
 from wiki.page_mutation import PageMutationCoordinator
-from wiki.page_repair import PageRepairService
 from wiki.atomic_file import sha256_file
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
@@ -241,8 +240,11 @@ def apply_update(
                 pass
             return _attach_related_page_skips({"ok": True, "state": "repair_pending", "code": "plan_consume_pending", "repair_action": "repair_page_operation", "operation_id": operation.operation_id, "page_hash": updated_hash}, related_pages, related_pages_skipped)
 
-    projection = PageRepairService(root)
-    projection_result = coordinator.run_projections(operation.operation_id, projection.projections_for(operation))
+    projection_result = coordinator.commit_with_projections(
+        operation.operation_id,
+        prepared.text,
+        expected_hash=current_hash,
+    )
     if not projection_result.get("ok"):
         return _attach_related_page_skips(dict(projection_result), related_pages, related_pages_skipped)
     completed_operation = coordinator.store.get_operation(operation.operation_id)

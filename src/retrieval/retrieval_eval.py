@@ -13,10 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_filter_aliases, normalize_metadata_filters
+from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_filter_aliases, normalize_metadata_filters, page_matches_filters, path_matches_prefix
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
-from wiki.wiki_query import DEFAULT_TOP_K
-from retrieval.query_pipeline import QueryFilters, RANKING_POLICY_VERSION, run_query_v2
+from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, RANKING_POLICY_VERSION, run_query_v2
 from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
 from retrieval.vector_index import parse_vector_settings
 from wiki.knowledge_compiler import filesystem_path
@@ -881,16 +880,19 @@ def _query_case(
     if retrieval_mode != "lexical":
         settings = parse_vector_settings(root, dict(vector_config or {}))
         embedding = EmbeddingSettings(enabled=True, provider=settings.provider, model_path=settings.model_path, index_path=settings.index_path, device=settings.device, batch_size=settings.batch_size, max_sequence_length=settings.max_sequence_length, candidate_limit=settings.candidate_limit, rrf_k=settings.rrf_k, min_vector_score=settings.min_vector_score)
+    query_filter_values: dict[str, Any] = {}
+    if "type" in case.filters or "filter_type" in case.filters:
+        query_filter_values["type"] = case.filters.get("type", case.filters.get("filter_type"))
+    if "tags" in case.filters or "filter_tags" in case.filters:
+        query_filter_values["tags"] = case.filters.get("tags", case.filters.get("filter_tags"))
+    if "path_prefix" in case.filters or "pathPrefix" in case.filters:
+        query_filter_values["path_prefix"] = case.filters.get("path_prefix", case.filters.get("pathPrefix"))
     return run_query_v2(
         root,
         case.query,
         scope=scope,
         project=case.filters.get("project"),
-        filters=QueryFilters(
-            case.filters.get("filter_type"),
-            tuple(case.filters.get("filter_tags") or ()),
-            case.filters.get("path_prefix"),
-        ),
+        filters=QueryFilters.from_mapping(query_filter_values),
         top_k=top_k,
         embedding=embedding,
         telemetry=TelemetrySettings(enabled=False),
@@ -900,6 +902,25 @@ def _query_case(
 
 
 def _results_match_filters(results: Sequence[Mapping[str, Any]], filters: Mapping[str, Any]) -> bool:
+    if "type" in filters and "filter_type" in filters and filters["type"] != filters["filter_type"]:
+        return False
+    if "tags" in filters and "filter_tags" in filters and filters["tags"] != filters["filter_tags"]:
+        return False
+    raw_filters: dict[str, Any] = {}
+    for name in ("project", "type", "tags", "path_prefix", "pathPrefix"):
+        if name in filters:
+            raw_filters[name] = filters[name]
+    for public_name, legacy_name in (("type", "filter_type"), ("tags", "filter_tags")):
+        if public_name not in raw_filters and legacy_name in filters:
+            raw_filters[public_name] = filters[legacy_name]
+    try:
+        normalized = normalize_metadata_filters(
+            normalize_filter_aliases(raw_filters),
+            allowed=QUERY_METADATA_FILTERS | {"project"},
+        )
+    except ValueError:
+        return False
+
     for item in results:
         path = str(item.get("path") or "")
         if not path:
@@ -907,31 +928,19 @@ def _results_match_filters(results: Sequence[Mapping[str, Any]], filters: Mappin
         frontmatter = item.get("frontmatter") or item.get("metadata")
         if not isinstance(frontmatter, Mapping):
             return False
-        if "project" in filters and not _in_project_scope(path, str(filters["project"])):
-            return False
-        if "filter_type" in filters and frontmatter.get("type") != filters["filter_type"]:
-            return False
-        if "filter_tags" in filters:
-            raw_tags = frontmatter.get("tags", [])
-            tags = raw_tags if isinstance(raw_tags, list) else [raw_tags]
-            if not set(filters["filter_tags"]).issubset({str(tag) for tag in tags}):
-                return False
-        if "path_prefix" in filters and not _in_path_prefix(path, str(filters["path_prefix"])):
+        if not page_matches_filters(
+            frontmatter,
+            str(item.get("source_kind") or "wiki"),
+            project=normalized.get("project"),
+            page_type=normalized.get("type"),
+            tags=tuple(normalized.get("tags", ())),
+            path_prefix=normalized.get("path_prefix"),
+            page_path=path,
+        ):
             return False
     return True
 
 
-def _in_project_scope(path: str, project: str) -> bool:
-    return path.startswith(f"wiki/projects/{project}/") or path.startswith(f"raw/sources/file/{project}/")
-
-
-def _in_path_prefix(path: str, prefix: str) -> bool:
-    normalized_path = path.replace("\\", "/").lstrip("/")
-    normalized_prefix = prefix.replace("\\", "/").strip(" /")
-    return bool(normalized_prefix) and (
-        normalized_path == normalized_prefix
-        or normalized_path.startswith(f"{normalized_prefix}/")
-    )
 
 
 def _result_summary(item: Mapping[str, Any]) -> dict[str, Any]:

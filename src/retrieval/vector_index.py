@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -14,14 +15,18 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Iterable, Sequence
 
+from codegraph.codegraph_policy import is_codegraph_raw_path
+from retrieval.graph_retrieval import QueryCandidate
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from runtime.runtime_config import EmbeddingSettings
 from retrieval.vector_provider import VectorProvider, VectorProviderIdentity
+from wiki.wiki_io import read_markdown_page, split_frontmatter
 
 VECTOR_INDEX_SCHEMA_VERSION = 2
 DEFAULT_VECTOR_CANDIDATE_LIMIT = 50
 DEFAULT_RRF_K = 60
 DEFAULT_MIN_VECTOR_SCORE = 0.5
+_PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
 
 _DOCUMENT_READ_CACHE: dict[str, tuple[tuple[int, int], list[dict[str, object]]]] = {}
 _DOCUMENT_READ_CACHE_LOCK = threading.Lock()
@@ -537,3 +542,169 @@ def _utc_now() -> str:
 
 def _elapsed_ms(started_at: float) -> float:
     return round((perf_counter() - started_at) * 1000, 3)
+
+
+def vector_index_records(vault_root: str | Path, *, include_raw_sources: bool = False) -> list[VectorRecord]:
+    """Return the complete eligible corpus for explicit vector lifecycle actions.
+
+    A built retrieval projection is the normal source.  The bounded source
+    fallback is retained only for an explicit first vector build in a vault
+    that has not received its first retrieval-index build yet.
+    """
+
+    from retrieval.retrieval_index import RetrievalIndexStore
+
+    root = Path(vault_root).expanduser().resolve()
+    store = RetrievalIndexStore(root)
+    if store.status().get("ok"):
+        return [
+            VectorRecord(
+                path=str(record["page_path"]),
+                page_path=str(record["page_path"]),
+                passage_id=str(record["passage_id"]),
+                content_hash=str(record["content_hash"]),
+                text=str(record["text"]),
+                source_kind=str(record["source_kind"]),
+                corpus="active",
+            )
+            for record in store.vector_records()
+            if not str(record["page_path"]).startswith("wiki/sources/")
+            and (include_raw_sources or str(record["corpus"]) != "history")
+        ]
+    return _vector_records(_candidate_pages(root, include_raw_sources=include_raw_sources))
+
+
+def _vector_records(candidates: list[QueryCandidate]) -> list[VectorRecord]:
+    records: list[VectorRecord] = []
+    for candidate in candidates:
+        content = {"title": candidate.title, "body": candidate.body, "frontmatter": candidate.frontmatter}
+        serialized = json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+        records.append(
+            VectorRecord(
+                path=candidate.rel,
+                content_hash=hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+                text=f"{candidate.title}\n{candidate.body}",
+                source_kind=candidate.source_kind,
+                page_path=candidate.rel,
+                corpus="active",
+            )
+        )
+    return records
+
+
+def _candidate_pages(root: Path, include_raw_sources: bool = False, *, scope: str = "active") -> list[QueryCandidate]:
+    """Read source pages only for the explicit pre-projection vector fallback."""
+
+    from retrieval.retrieval_index import RetrievalIndexStore
+
+    store_scope = "raw" if scope == "raw" else "archive" if scope == "archive" else "active"
+    store = RetrievalIndexStore(root, scope=store_scope)
+    if store.status().get("ok"):
+        projected = list(store.page_candidates())
+        if scope == "active" and include_raw_sources:
+            raw_store = RetrievalIndexStore(root, scope="raw")
+            raw_status = raw_store.status()
+            if raw_status.get("ok") and raw_status.get("state") == "fresh":
+                projected.extend(raw_store.page_candidates())
+        candidates: list[QueryCandidate] = []
+        seen_paths: set[str] = set()
+        for item in projected:
+            relative = str(item["path"])
+            if relative in seen_paths:
+                continue
+            if scope == "archive":
+                allowed = True
+            elif scope == "raw":
+                allowed = relative.startswith("raw/sources/") and not is_codegraph_raw_path(relative)
+            else:
+                allowed = not relative.startswith("wiki/sources/") and (
+                    include_raw_sources or not relative.startswith("raw/")
+                )
+            if not allowed:
+                continue
+            seen_paths.add(relative)
+            candidates.append(
+                QueryCandidate(
+                    path=root / relative,
+                    rel=relative,
+                    title=str(item["title"]),
+                    body=str(item["body"]),
+                    frontmatter={
+                        str(key): value
+                        for key, value in (item["frontmatter"] if isinstance(item["frontmatter"], dict) else {}).items()
+                    },
+                    source_kind="raw" if str(item["source_kind"]) in {"raw", "raw_chat"} else "wiki",
+                )
+            )
+        return candidates
+    if scope in {"archive", "raw"}:
+        return []
+
+    candidates: list[QueryCandidate] = []
+    wiki = root / "wiki"
+    if wiki.exists():
+        for path in sorted(wiki.rglob("*.md")):
+            if _is_structural_page(path):
+                continue
+            relative = path.relative_to(root).as_posix()
+            if relative.startswith(("wiki/archives/", "wiki/sources/")):
+                continue
+            candidates.append(_wiki_candidate(path, root))
+    raw_sources = root / "raw" / "sources"
+    if include_raw_sources and raw_sources.exists():
+        for path in sorted(raw_sources.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            if (
+                path.is_file()
+                and not is_codegraph_raw_path(relative)
+                and path.suffix.lower() in {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}
+            ):
+                candidates.append(_raw_candidate(path, root))
+    return candidates
+
+
+def _is_structural_page(path: Path) -> bool:
+    if path.name in {"index.md", "log.md", "overview.md"}:
+        return True
+    if not _PAGED_NAVIGATION_PAGE_RE.match(path.name):
+        return False
+    frontmatter, _ = split_frontmatter(path.read_text(encoding="utf-8"))
+    return frontmatter.get("generated") is True and frontmatter.get("navigation") is True
+
+
+def _wiki_candidate(path: Path, root: Path) -> QueryCandidate:
+    page = read_markdown_page(path, root)
+    return QueryCandidate(
+        path=path,
+        rel=path.relative_to(root).as_posix(),
+        title=page.title,
+        body=page.body,
+        frontmatter=page.frontmatter,
+        source_kind="wiki",
+    )
+
+
+def _raw_candidate(path: Path, root: Path) -> QueryCandidate:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    title = path.stem
+    if path.suffix.lower() == ".md":
+        frontmatter, body = split_frontmatter(text)
+        title = str(frontmatter.get("title") or _first_heading(body) or path.stem)
+        text = body
+    else:
+        frontmatter = {}
+    return QueryCandidate(
+        path=path,
+        rel=path.relative_to(root).as_posix(),
+        title=title,
+        body=text,
+        frontmatter=frontmatter,
+        source_kind="raw",
+    )
+
+
+def _first_heading(body: str) -> str:
+    for line in body.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""

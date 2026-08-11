@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-本仓库是一个本地 MCP server：把明确文件、人工笔记和受控更新写入外部 Obsidian Markdown Wiki，并用关键词 + wikilink 图查询返回可引用 context pack。安装、MCP 客户端配置和工具清单以 [README.md](README.md) 为准；这里保留开发时最需要的命令和跨文件架构约定。
+本仓库是一个本地 MCP server：把明确文件、人工笔记和受控更新写入外部 Obsidian Markdown Wiki，并由 Query V2 通过 passage FTS、可选向量和 wikilink 图查询返回可引用结果。安装、MCP 客户端配置和工具清单以 [README.md](README.md) 为准；这里保留开发时最需要的命令和跨文件架构约定。
 
 ## 常用命令
 
@@ -57,7 +57,9 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### 查询与图谱能力
 
-[wiki_query.py](src/wiki/wiki_query.py) 主路径是关键词/CJK bigram 命中 → wikilink、shared source、common neighbor、same type 图扩展 → token budget 裁剪 → numbered citation context pack。可选的本地混合向量检索（`enable_vector=true` + `vector` extra + 显式 `vector build`）在词法和向量独立召回后使用 RRF 融合（缩放后叠加到 `fusion_score`），再加图扩展；默认关闭，不引入 Chroma、`.rag-index` 或外部 embedding 主路径。
+[query_pipeline.py](src/retrieval/query_pipeline.py) 是唯一查询引擎入口（Query V2）：passage FTS/vector 召回 → RRF 融合 → 有界强-seed 图扩展 → 上下文预算裁剪，并将紧凑正文直接放入结果项；MCP 工具 `wiki_query` 只负责公共边界与运行时配置解析。
+
+[graph_retrieval.py](src/retrieval/graph_retrieval.py) 提供 Query V2 共用的 wikilink、shared source、common neighbor、same type 有界图扩展；[vector_index.py](src/retrieval/vector_index.py) 提供 `VectorRecord`、`vector_index_records` 及显式向量生命周期所需的索引记录回退。v1 的 `src/wiki/wiki_query.py` 私有查询引擎已删除，不要重新引入第二套检索入口。
 
 [wikilinks.py](src/wiki/wikilinks.py) 提供 wikilink 格式化和解析工具函数：`format_wikilink`（含表格内 `\| 转义）、`normalize_wikilink_targets`（小写化 + 表格别名处理）、`wikilink_targets`、`split_wikilink_inner`、`table_wikilink_alias_pipe_lines` 等。query、update 等模块统一使用此模块处理 wikilink，不内嵌正则。
 

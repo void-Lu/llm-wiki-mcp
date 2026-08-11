@@ -37,7 +37,7 @@ from wiki.knowledge_dependencies import KnowledgeDependencies  # noqa: E402
 from retrieval.retrieval_index import RetrievalIndexStore  # noqa: E402
 from retrieval.vector_index import VectorIndexStore  # noqa: E402
 from wiki.wiki_io import split_frontmatter  # noqa: E402
-from wiki.wiki_query import vector_index_records  # noqa: E402
+from retrieval.vector_index import vector_index_records  # noqa: E402
 
 
 def _sha256_bytes(value: bytes) -> str:

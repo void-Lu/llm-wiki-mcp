@@ -10,6 +10,7 @@ import yaml
 
 from wiki.note_writer import save_obsidian_note
 from wiki.chat_memory import ChatMemoryService
+from wiki.page_mutation import PageMutationCoordinator
 
 
 @pytest.fixture
@@ -458,3 +459,33 @@ def test_write_note_returns_wikilink_target_and_normalizes_wikilinks(vault: Path
     text = path.read_text(encoding="utf-8")
     assert "[[Target-Page]]" in text
     assert "[[Target Page]]" not in text
+
+
+def test_write_note_returns_page_operation_contract(vault: Path) -> None:
+    result = _save(vault, note_type="spec", project="project-a", filename="operation-contract")
+
+    assert result["ok"] is True
+    assert result["state"] == "completed"
+    assert isinstance(result["operation_id"], str) and result["operation_id"]
+    assert isinstance(result["page_hash"], str) and len(result["page_hash"]) == 64
+    assert "repair_action" not in result
+    assert "failed_stage" not in result
+
+
+def test_write_note_exposes_repair_contract_when_projection_fails(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failing_projections(self: PageMutationCoordinator, operation: object) -> dict[str, object]:
+        del self, operation
+        return {"dependencies": lambda: {"ok": False, "code": "dependency_unavailable"}}
+
+    monkeypatch.setattr(PageMutationCoordinator, "projections_for", failing_projections)
+    result = _save(vault, note_type="spec", project="project-a", filename="repair-contract")
+
+    assert result["ok"] is True
+    assert result["state"] == "repair_pending"
+    assert isinstance(result["operation_id"], str) and result["operation_id"]
+    assert isinstance(result["page_hash"], str) and len(result["page_hash"]) == 64
+    assert result["repair_action"] == "repair_page_operation"
+    assert result["failed_stage"] == "dependencies"
