@@ -389,8 +389,9 @@ class RetrievalIndexStore:
             clauses.append("EXISTS (SELECT 1 FROM json_each(pages.frontmatter_json, '$.tags') WHERE json_each.value = ?)")
             params.append(tag)
         if normalized.get("path_prefix"):
-            clauses.append("pages.path LIKE ?")
-            params.append(f"{str(normalized['path_prefix']).rstrip('/')}/%")
+            path_prefix = str(normalized["path_prefix"]).rstrip("/")
+            clauses.append("(pages.path = ? OR pages.path LIKE ?)")
+            params.extend((path_prefix, f"{path_prefix}/%"))
         for field, column in (("project", "project"), ("freshness", "freshness"), ("lifecycle", "lifecycle_status"), ("corpus", "corpus")):
             if normalized.get(field):
                 clauses.append(f"pages.{column} = ?")

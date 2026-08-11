@@ -14,6 +14,8 @@ from mcp import Client
 from runtime.runtime_config import ConfigRegistry, RuntimeConfigError, write_global_config
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 import app.server as server_module
+from wiki.content_catalog import MAX_BODY_BUDGET
+from wiki.content_reference import ContentRefV1
 from app.server import (
     attach_no_results_outcome,
     attach_warnings,
@@ -384,6 +386,81 @@ def test_query_passes_path_prefix_filter_to_pipeline(monkeypatch: pytest.MonkeyP
     assert passed_filters.path_prefix == "raw/sources/file/NetSuite Help Docs/"
 
 
+def test_query_normalizes_camel_case_path_prefix_and_rejects_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Nested camelCase filters must be normalized at the MCP boundary."""
+    from retrieval.query_pipeline import QueryFilters
+
+    registry, vault_root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    captured: dict[str, object] = {}
+
+    def fake_run_query(root: Path, question: str, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"ok": True, "question": question, "results": []}
+
+    monkeypatch.setattr("app.server.run_query_v2", fake_run_query)
+
+    result = wiki_query(
+        question="serverWidget",
+        scope="raw",
+        filters={"pathPrefix": "raw/sources/file/NetSuite Help Docs/"},
+        vault_root=str(vault_root),
+    )
+
+    assert result["ok"] is True
+    passed_filters = captured["filters"]
+    assert isinstance(passed_filters, QueryFilters)
+    assert passed_filters.path_prefix == "raw/sources/file/NetSuite Help Docs/"
+
+    conflict = wiki_query(
+        question="serverWidget",
+        scope="raw",
+        filters={
+            "path_prefix": "raw/sources/file/one/",
+            "pathPrefix": "raw/sources/file/two/",
+        },
+        vault_root=str(vault_root),
+    )
+    assert conflict["ok"] is False
+    assert conflict["code"] == "invalid_filters"
+
+
+def test_list_normalizes_camel_case_path_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, vault_root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    captured: dict[str, object] = {}
+
+    def fake_list(self: object, *, scope: object, filters: object, page_size: object, cursor: object) -> dict[str, object]:
+        captured["filters"] = filters
+        return {"ok": True, "scope": scope, "items": [], "page_size": page_size}
+
+    monkeypatch.setattr("app.server.ContentCatalogService.list_items", fake_list)
+
+    result = wiki_list(
+        filters={"pathPrefix": "raw/sources/file/NetSuite Help Docs/"},
+        vault_root=str(vault_root),
+    )
+
+    assert result["ok"] is True
+    assert captured["filters"] == {"path_prefix": "raw/sources/file/NetSuite Help Docs/"}
+
+
+def test_list_filter_alias_conflict_returns_public_error_envelope() -> None:
+    result = wiki_list(
+        filters={"path_prefix": "raw/one/", "pathPrefix": "raw/two/"},
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_filters"
+    assert result["message"] == "the query filters are invalid"
+    assert result["error"] == result["message"]
+    assert result["retryable"] is False
+    assert isinstance(result["correlation_id"], str)
+
+
 def test_query_rejects_top_k_above_limit() -> None:
     result = wiki_query(question="hello", top_k=41)
     assert result["ok"] is False
@@ -484,6 +561,54 @@ def test_catalog_tools_accept_camel_case_argument_names(monkeypatch: pytest.Monk
     assert captured["content_ref"] == "cr1_abc"
     assert captured["include_body"] is True
     assert captured["max_bytes"] == 2048
+
+
+def test_wiki_get_clamps_oversized_body_budget(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    captured: dict[str, object] = {}
+
+    def fake_get(self: object, content_ref: str, *, include_body: object, max_bytes: object, cursor: object) -> dict[str, object]:
+        captured.update(content_ref=content_ref, include_body=include_body, max_bytes=max_bytes)
+        return {"ok": True, "content_ref": content_ref}
+
+    monkeypatch.setattr("app.server.ContentCatalogService.get_item", fake_get)
+
+    result = wiki_get(contentRef="cr1_abc", includeBody=True, maxBytes=50000, vault_root=str(root))
+
+    assert result["ok"] is True
+    assert captured["max_bytes"] == MAX_BODY_BUDGET
+    assert "body_budget_clamped" in result["warnings"]
+
+
+def test_wiki_get_infers_configured_vault_from_content_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary.mkdir()
+    secondary.mkdir()
+    config_path = tmp_path / "config" / "config.yaml"
+    write_global_config(config_path, vault_name="primary", vault_root=primary, make_default=True)
+    write_global_config(config_path, vault_name="secondary", vault_root=secondary, make_default=False)
+    registry = ConfigRegistry.from_file(config_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+
+    reference = ContentRefV1("secondary", "active", "page", "wiki/concepts/secondary.md").encode()
+    captured: dict[str, object] = {}
+
+    def fake_get(self: object, content_ref: str, *, include_body: object, max_bytes: object, cursor: object) -> dict[str, object]:
+        captured["logical_vault"] = getattr(self, "logical_vault")
+        return {"ok": True, "content_ref": content_ref, "identity": "wiki/concepts/secondary.md"}
+
+    monkeypatch.setattr("app.server.ContentCatalogService.get_item", fake_get)
+
+    result = wiki_get(content_ref=reference)
+
+    assert result["ok"] is True
+    assert captured["logical_vault"] == "secondary"
+    assert result["vault"] == "secondary"
 
 
 def test_wiki_get_requires_content_ref_or_camel_alias() -> None:

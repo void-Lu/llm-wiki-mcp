@@ -34,8 +34,11 @@ from retrieval.query_telemetry import QueryTelemetry
 from wiki.content_catalog import (
     DEFAULT_BODY_BUDGET,
     DEFAULT_CATALOG_PAGE_SIZE,
+    MAX_BODY_BUDGET,
     ContentCatalogService,
 )
+from wiki.content_reference import ContentRefV1, ContentReferenceError
+from retrieval.metadata_filters import normalize_filter_aliases
 from archive.archive_models import ARCHIVE_REASONS, is_archive_reason
 from archive.archive_service import ArchiveService
 from codegraph.codegraph_sync import CodeGraphSyncError, sync_codegraph as run_codegraph_sync
@@ -103,6 +106,15 @@ def attach_warnings(payload: dict[str, Any], warnings: tuple[str, ...] | list[st
     result = dict(payload)
     result["warnings"] = [*result.get("warnings", []), *warnings]
     return result
+
+
+def _content_ref_vault(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return ContentRefV1.decode(value).vault
+    except ContentReferenceError:
+        return None
 
 
 def attach_no_results_outcome(payload: dict[str, Any]) -> dict[str, Any]:
@@ -190,13 +202,15 @@ def _publicize_tool_result(value: object, kwargs: Mapping[str, object]) -> objec
     vault_root_value = kwargs.get("vault_root") or kwargs.get("vaultRoot")
     vault_root = vault_root_value if isinstance(vault_root_value, (str, Path)) else None
     if not isinstance(logical_vault, str):
-        try:
-            logical_vault = resolve_tool_vault(
-                vault_root=str(vault_root) if vault_root is not None else None,
-                registry=CONFIG_REGISTRY,
-            ).logical_name
-        except Exception:  # noqa: BLE001 - projection must never expose resolver details
-            logical_vault = None
+        logical_vault = _content_ref_vault(payload.get("content_ref"))
+        if logical_vault is None:
+            try:
+                logical_vault = resolve_tool_vault(
+                    vault_root=str(vault_root) if vault_root is not None else None,
+                    registry=CONFIG_REGISTRY,
+                ).logical_name
+            except Exception:  # noqa: BLE001 - projection must never expose resolver details
+                logical_vault = None
     projected = project_public_result(
         payload,
         logical_vault=logical_vault if isinstance(logical_vault, str) else None,
@@ -337,17 +351,21 @@ def wiki_list(
     storeScope: Literal["active", "raw", "archive"] | None = None,
     pageSize: int | None = None,
 ) -> dict[str, Any]:
-    """List metadata from one explicitly selected physical content scope."""
+    """List metadata from one physical scope; filters may target a file or directory prefix."""
 
     if storeScope is not None:
         store_scope = storeScope
     if pageSize is not None:
         page_size = pageSize
     try:
+        normalized_filters = normalize_filter_aliases(filters)
+    except ValueError as exc:
+        return {"ok": False, "code": "invalid_filters", "error": str(exc)}
+    try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
         result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).list_items(
             scope=store_scope,
-            filters=filters,
+            filters=normalized_filters,
             page_size=page_size,
             cursor=cursor,
         )
@@ -369,7 +387,7 @@ def wiki_get(
     includeBody: bool | None = None,
     maxBytes: int | None = None,
 ) -> dict[str, Any]:
-    """Read metadata for an opaque content reference, with opt-in bounded body."""
+    """Read an opaque reference; body is opt-in and capped at the server budget."""
 
     if contentRef is not None:
         content_ref = contentRef
@@ -379,8 +397,14 @@ def wiki_get(
         max_bytes = maxBytes
     if not content_ref:
         return {"ok": False, "code": "invalid_content_ref", "error": "content_ref is required"}
+    budget_clamped = max_bytes > MAX_BODY_BUDGET
+    if budget_clamped:
+        max_bytes = MAX_BODY_BUDGET
+    inferred_vault = vault
+    if inferred_vault is None and not vault_root and not vaultRoot:
+        inferred_vault = _content_ref_vault(content_ref)
     try:
-        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+        resolution = resolve_tool_vault(vault=inferred_vault, vault_root=vault_root, vaultRoot=vaultRoot)
         result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).get_item(
             content_ref,
             include_body=include_body,
@@ -389,6 +413,8 @@ def wiki_get(
         )
     except RuntimeConfigError as exc:
         return _tool_error(exc)
+    if budget_clamped and result.get("ok") is True:
+        result = attach_warnings(result, ("body_budget_clamped",))
     return attach_warnings(result, resolution.warnings)
 
 
@@ -471,7 +497,10 @@ def _run_wiki_query(
             )
 
         cancellation.set_cancel_handler(record_cancellation)
-    filter_values = filters or {}
+    try:
+        filter_values = normalize_filter_aliases(filters) or {}
+    except ValueError as exc:
+        return {"ok": False, "code": "invalid_filters", "error": str(exc)}
     if not isinstance(filter_values, dict) or set(filter_values) - {"type", "tags", "path_prefix"}:
         return {"ok": False, "code": "invalid_filters", "error": "filters may only contain type, tags, and path_prefix"}
     try:
@@ -524,8 +553,10 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     """Query a vault using its immutable retrieval and context profile.
 
     ``filters`` accepts ``type`` (string), ``tags`` (list of strings), and
-    ``path_prefix`` (string, e.g. ``"wiki/concepts/netsuite-script-types/"``)
-    to restrict results to a specific directory.
+    ``path_prefix``/``pathPrefix`` (string, e.g.
+    ``"wiki/concepts/netsuite-script-types/"``) to restrict results to a
+    directory. Raw query results are relevance hits, not catalog existence
+    checks, and do not provide ``content_ref`` values for ``wiki_get``.
 
     When the vault has no indexed answer, the response includes
     ``expansion_suggestions``: the Latin terms in the question that do not

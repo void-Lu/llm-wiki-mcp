@@ -11,6 +11,33 @@ SUPPORTED_METADATA_FILTERS = frozenset(
 QUERY_METADATA_FILTERS = frozenset({"type", "tags", "path_prefix"})
 
 
+def normalize_filter_aliases(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalize public aliases without changing filter validation semantics.
+
+    ``path_prefix`` is the canonical internal name.  ``pathPrefix`` remains a
+    compatibility input at the public boundary, but accepting both spellings
+    with different values would make the effective filter depend on iteration
+    order.  Reject that ambiguity before the shared field allow-list runs.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("filters must be an object")
+
+    normalized = dict(value)
+    if "path_prefix" in value and "pathPrefix" in value:
+        if value["path_prefix"] != value["pathPrefix"]:
+            raise ValueError("filters.path_prefix and filters.pathPrefix must match")
+        normalized.pop("pathPrefix")
+    elif "pathPrefix" in value:
+        normalized["path_prefix"] = value["pathPrefix"]
+        normalized.pop("pathPrefix")
+    return normalized
+
+
 def normalize_metadata_filters(
     value: Mapping[str, Any] | None,
     *,
@@ -24,10 +51,7 @@ def normalize_metadata_filters(
     while allowing ``wiki_query`` to retain its existing three-field contract.
     """
 
-    if value is None:
-        value = {}
-    if not isinstance(value, Mapping):
-        raise ValueError("filters must be an object")
+    value = normalize_filter_aliases(value) or {}
     unknown = set(value) - set(allowed)
     if unknown:
         names = ", ".join(sorted(map(str, unknown)))
@@ -88,5 +112,6 @@ __all__ = [
     "QUERY_METADATA_FILTERS",
     "SUPPORTED_METADATA_FILTERS",
     "metadata_filter_fingerprint",
+    "normalize_filter_aliases",
     "normalize_metadata_filters",
 ]

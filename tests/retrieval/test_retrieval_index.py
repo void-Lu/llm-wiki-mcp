@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from retrieval.lexical_analyzer import raw_prefix_fts_query
+from retrieval.metadata_filters import normalize_filter_aliases
 from retrieval.retrieval_index import RetrievalIndexStore
 
 
@@ -146,3 +147,32 @@ def test_raw_prefix_search_recovers_morphology_but_excludes_codegraph(tmp_path: 
     hits = raw.search_fts("ingest", mode="raw_prefix")
 
     assert [hit.page_path for hit in hits] == ["raw/sources/file/default/ingestion.md"]
+
+
+def test_metadata_filter_alias_normalization_is_canonical_and_rejects_conflicts() -> None:
+    assert normalize_filter_aliases({"pathPrefix": "wiki/concepts/"}) == {"path_prefix": "wiki/concepts/"}
+    assert normalize_filter_aliases(
+        {"path_prefix": "wiki/concepts/", "pathPrefix": "wiki/concepts/"}
+    ) == {"path_prefix": "wiki/concepts/"}
+
+    try:
+        normalize_filter_aliases({"path_prefix": "wiki/one", "pathPrefix": "wiki/two"})
+    except ValueError as error:
+        assert str(error) == "filters.path_prefix and filters.pathPrefix must match"
+    else:
+        raise AssertionError("conflicting path filter aliases should be rejected")
+
+
+def test_catalog_path_prefix_matches_exact_identity_and_excludes_siblings(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(root, "raw/sources/file/demo.md", "exact identity")
+    _write(root, "raw/sources/file/demo/child.md", "nested child")
+    _write(root, "raw/sources/file/demo-sibling.md", "sibling")
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+
+    exact = store.list_catalog_items(filters={"path_prefix": "raw/sources/file/demo.md"})
+    assert [item["path"] for item in exact["items"]] == ["raw/sources/file/demo.md"]
+
+    directory = store.list_catalog_items(filters={"path_prefix": "raw/sources/file/demo"})
+    assert [item["path"] for item in directory["items"]] == ["raw/sources/file/demo/child.md"]
