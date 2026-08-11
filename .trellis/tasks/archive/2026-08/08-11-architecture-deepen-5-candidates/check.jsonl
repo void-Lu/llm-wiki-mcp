@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/index.md","reason":"按 backend 层规范检查任务范围和质量门。"}
+{"file":".trellis/spec/backend/runtime-configuration.md","reason":"检查工具 schema、vault 解析、错误码和 warning 兼容性。"}
+{"file":".trellis/spec/backend/retrieval-evaluation.md","reason":"检查 Query V2、评估器、filter 和 top_k 的共享语义。"}
+{"file":".trellis/spec/backend/local-vector-retrieval.md","reason":"检查检索索引迁移、只读降级和语料隔离。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行测试、lint、跨层数据流和复用审查。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查是否仍有重复注册、过滤和常量实现。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查服务边界返回字段和错误传播。"}
