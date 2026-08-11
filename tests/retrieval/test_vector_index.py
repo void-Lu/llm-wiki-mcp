@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -14,9 +15,9 @@ class RecordingFakeProvider(DeterministicFakeProvider):
         super().__init__({"intent": [1, 0, 0, 0], "other": [0, 1, 0, 0]})
         self.document_batches: list[list[str]] = []
 
-    def embed_documents(self, texts):
+    def embed_documents(self, texts, *, context=None):
         self.document_batches.append(list(texts))
-        return super().embed_documents(texts)
+        return super().embed_documents(texts, context=context)
 
 
 def _records() -> list[VectorRecord]:
@@ -37,7 +38,9 @@ def test_build_status_update_and_search_are_explicit_and_incremental(tmp_path: P
 
     assert built["state"] == "fresh"
     assert built["document_count"] == 2
-    assert {"model_load", "embed_documents", "write_index", "total"} <= set(built["timings_ms"])
+    assert {"model_load", "embed_documents", "write_index", "total"} <= set(
+        cast(dict[str, float], built["timings_ms"])
+    )
     assert provider.document_batches == [["intent document body", "other document body"]]
     stored = store.documents_path.read_text(encoding="utf-8")
     assert "document body" not in stored
@@ -51,7 +54,9 @@ def test_build_status_update_and_search_are_explicit_and_incremental(tmp_path: P
 
     assert updated["state"] == "fresh"
     assert updated["changes"] == {"added": 0, "modified": 1, "deleted": 0, "unchanged": 1}
-    assert {"read_manifest", "model_load", "read_documents", "compare_records", "embed_documents", "write_index", "total"} <= set(updated["timings_ms"])
+    assert {"read_manifest", "model_load", "read_documents", "compare_records", "embed_documents", "write_index", "total"} <= set(
+        cast(dict[str, float], updated["timings_ms"])
+    )
     assert provider.document_batches[-1] == ["intent changed body"]
 
 

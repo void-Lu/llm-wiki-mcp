@@ -6,7 +6,10 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Iterator, Iterable
+
+from wiki.source_provenance import source_path_key
 
 
 VALID_LIFECYCLE = {"active", "stale", "review_required", "superseded", "deprecated", "archived"}
@@ -24,6 +27,62 @@ class KnowledgeDependencies:
         self.path = self.root / ".llm-wiki" / "knowledge-dependencies.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+
+    @classmethod
+    def read_page_projection(cls, vault_root: str | Path, path: str) -> dict[str, object]:
+        """Read one projection without creating or modifying the dependency DB.
+
+        Repair and migration planning must be able to prove that a dry-run did
+        not create ``.llm-wiki`` state.  The normal constructor intentionally
+        initializes the database, so read-only callers use this separate URI
+        entry point instead.
+        """
+
+        root = Path(vault_root).expanduser().resolve()
+        database = root / ".llm-wiki" / "knowledge-dependencies.sqlite3"
+        if not database.is_file():
+            return {"state": "missing", "edges": {}}
+        try:
+            connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+        except sqlite3.Error:
+            return {"state": "incompatible", "edges": {}}
+        try:
+            page = connection.execute(
+                "SELECT path,page_hash,freshness,lifecycle,generated,maintenance,replaced_by FROM knowledge_pages WHERE path=?",
+                (path,),
+            ).fetchone()
+            if page is None:
+                return {"state": "absent", "edges": {}}
+            edges = {
+                row["source_path"]: row["source_hash"]
+                for row in connection.execute(
+                    "SELECT source_path,source_hash FROM source_edges WHERE page_path=? ORDER BY source_path",
+                    (path,),
+                )
+            }
+            return {
+                "state": "ready",
+                "path": page["path"],
+                "page_hash": page["page_hash"],
+                "freshness": page["freshness"],
+                "lifecycle": page["lifecycle"],
+                "generated": bool(page["generated"]),
+                "maintenance": page["maintenance"],
+                "replaced_by": page["replaced_by"],
+                "edges": edges,
+            }
+        except sqlite3.Error:
+            return {"state": "incompatible", "edges": {}}
+        finally:
+            connection.close()
+
+    def remove_page(self, path: str) -> None:
+        """Remove one projection for a compensating migration rollback."""
+
+        with self._connection() as conn:
+            conn.execute("DELETE FROM source_edges WHERE page_path=?", (path,))
+            conn.execute("DELETE FROM knowledge_pages WHERE path=?", (path,))
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -50,7 +109,7 @@ class KnowledgeDependencies:
         self,
         path: str,
         page_hash: str,
-        sources: dict[str, str],
+        sources: Mapping[str, str] | Iterable[object],
         *,
         generated: bool,
         maintenance: str = "auto",
@@ -67,12 +126,25 @@ class KnowledgeDependencies:
         with self._connection() as conn:
             conn.execute("INSERT INTO knowledge_pages(path,page_hash,freshness,lifecycle,generated,maintenance,replaced_by,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET page_hash=excluded.page_hash,freshness=excluded.freshness,lifecycle=excluded.lifecycle,generated=excluded.generated,maintenance=excluded.maintenance,replaced_by=excluded.replaced_by,updated_at=excluded.updated_at", (path, page_hash, freshness, lifecycle, int(generated), maintenance, replaced_by, _now()))
             conn.execute("DELETE FROM source_edges WHERE page_path=?", (path,))
-            conn.executemany("INSERT INTO source_edges(source_path,source_hash,page_path) VALUES(?,?,?)", [(source, digest, path) for source, digest in sources.items()])
+            conn.executemany(
+                "INSERT INTO source_edges(source_path,source_hash,page_path) VALUES(?,?,?)",
+                [(source, digest, path) for source, digest in _source_edge_values(sources)],
+            )
 
     def source_changed(self, source_path: str, source_hash: str | None = None) -> list[str]:
-        """Mark all dependents stale and return their paths exactly once."""
+        """Mark dependents of a changed source, filtered by the new hash."""
+        normalized_source = _normalize_source_key(source_path)
         with self._connection() as conn:
-            rows = conn.execute("SELECT DISTINCT p.path FROM knowledge_pages p JOIN source_edges e ON e.page_path=p.path WHERE e.source_path=? AND p.lifecycle IN ('active','stale','review_required')", (source_path,)).fetchall()
+            if source_hash is None:
+                rows = conn.execute(
+                    "SELECT DISTINCT p.path FROM knowledge_pages p JOIN source_edges e ON e.page_path=p.path WHERE e.source_path=? AND p.lifecycle IN ('active','stale','review_required')",
+                    (normalized_source,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT DISTINCT p.path FROM knowledge_pages p JOIN source_edges e ON e.page_path=p.path WHERE e.source_path=? AND e.source_hash<>? AND p.lifecycle IN ('active','stale','review_required')",
+                    (normalized_source, source_hash),
+                ).fetchall()
             paths = [row["path"] for row in rows]
             for path in paths:
                 row = conn.execute("SELECT generated,maintenance FROM knowledge_pages WHERE path=?", (path,)).fetchone()
@@ -80,17 +152,19 @@ class KnowledgeDependencies:
                 conn.execute("UPDATE knowledge_pages SET freshness=?,lifecycle=?,updated_at=? WHERE path=?", (freshness, freshness, _now(), path))
             return paths
 
-    def mark_fresh_if_sources(self, path: str, current_sources: dict[str, str]) -> bool:
+    def mark_fresh_if_sources(self, path: str, current_sources: Mapping[str, str] | Iterable[object]) -> bool:
+        expected_sources = dict(_source_edge_values(current_sources))
         with self._connection() as conn:
             stored = {row["source_path"]: row["source_hash"] for row in conn.execute("SELECT source_path,source_hash FROM source_edges WHERE page_path=?", (path,))}
-            if stored != current_sources:
+            if stored != expected_sources:
                 return False
             conn.execute("UPDATE knowledge_pages SET freshness='fresh',lifecycle='active',updated_at=? WHERE path=?", (_now(), path))
             return True
 
     def dependents(self, source_path: str) -> list[str]:
+        normalized_source = _normalize_source_key(source_path)
         with self._connection() as conn:
-            return [row["page_path"] for row in conn.execute("SELECT page_path FROM source_edges WHERE source_path=? ORDER BY page_path", (source_path,))]
+            return [row["page_path"] for row in conn.execute("SELECT page_path FROM source_edges WHERE source_path=? ORDER BY page_path", (normalized_source,))]
 
     def lifecycle(self, path: str, *, state: str, replaced_by: str | None = None) -> dict[str, Any]:
         if state not in VALID_LIFECYCLE:
@@ -113,9 +187,35 @@ class KnowledgeDependencies:
             row = conn.execute("SELECT lifecycle,replaced_by,generated FROM knowledge_pages WHERE path=?", (path,)).fetchone()
             return bool(row and row["generated"] and row["lifecycle"] == "superseded" and row["replaced_by"])
 
-    def rebuild(self, pages: Iterable[tuple[str, str, dict[str, str], bool, str, str, str | None]]) -> None:
+    def rebuild(self, pages: Iterable[tuple[str, str, Mapping[str, str] | Iterable[object], bool, str, str, str | None]]) -> None:
         with self._connection() as conn:
             conn.execute("DELETE FROM source_edges")
             conn.execute("DELETE FROM knowledge_pages")
         for path, digest, sources, generated, maintenance, lifecycle, replaced_by in pages:
             self.update_page(path, digest, sources, generated=generated, maintenance=maintenance, lifecycle=lifecycle, replaced_by=replaced_by)
+
+
+def _source_edge_values(sources: Mapping[str, str] | Iterable[object]) -> list[tuple[str, str]]:
+    """Project mappings or resolved source models into canonical DB edges."""
+
+    if isinstance(sources, Mapping):
+        values = sources.items()
+    else:
+        values = []
+        for source in sources:
+            relative = getattr(source, "relative_path", getattr(source, "path", None))
+            digest = getattr(source, "sha256", getattr(source, "source_hash", None))
+            if relative is None or digest is None:
+                raise ValueError("sources must contain path and hash")
+            values.append((relative, digest))
+    result: list[tuple[str, str]] = []
+    for relative, digest in values:
+        result.append((_normalize_source_key(relative), str(digest)))
+    return result
+
+
+def _normalize_source_key(value: object) -> str:
+    try:
+        return source_path_key(str(value).replace("\\", "/"))
+    except (TypeError, ValueError):
+        return str(value).replace("\\", "/")

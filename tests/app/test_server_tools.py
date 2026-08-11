@@ -36,6 +36,8 @@ CORE_TOOLS = {
     "wiki_write_note",
     "wiki_update",
     "wiki_query",
+    "wiki_list",
+    "wiki_get",
     "wiki_archive",
     "wiki_restore",
 }
@@ -223,11 +225,12 @@ def test_mcp_query_schema_accepts_raw_scope_and_forwards_it(monkeypatch: pytest.
 def test_wiki_query_rejects_invalid_scope() -> None:
     payload = wiki_query(question="raw", scope="unsupported")  # type: ignore[arg-type]
 
-    assert payload == {
-        "ok": False,
-        "code": "invalid_scope",
-        "error": "scope must be auto, knowledge, history, all, archive, or raw",
-    }
+    assert payload["ok"] is False
+    assert payload["code"] == "invalid_scope"
+    assert payload["message"] == "the query scope is invalid"
+    assert payload["error"] == payload["message"]
+    assert payload["retryable"] is False
+    assert isinstance(payload["correlation_id"], str)
 
 
 def test_public_query_schema_has_logical_vault_and_no_runtime_overrides() -> None:
@@ -333,7 +336,11 @@ def test_archive_tools_return_structured_error_when_service_initialization_fails
 
     result = tool(**kwargs)  # type: ignore[operator]
 
-    assert result == {"ok": False, "code": expected_code, "error": "state directory is not writable"}  # type: ignore[comparison-overlap]
+    assert result["ok"] is False
+    assert result["code"] == expected_code
+    assert result["message"] == "the operation could not be completed"
+    assert result["error"] == result["message"]
+    assert "state directory" not in str(result)
 
 
 def test_query_rejects_runtime_override_filters_before_domain_call() -> None:
@@ -342,7 +349,9 @@ def test_query_rejects_runtime_override_filters_before_domain_call() -> None:
         filters={"index_path": "bad"},
         vault_root=str(Path.cwd()),
     )
-    assert result == {"ok": False, "code": "invalid_filters", "error": "filters may only contain type, tags, and path_prefix"}
+    assert result["ok"] is False
+    assert result["code"] == "invalid_filters"
+    assert result["message"] == "the query filters are invalid"
 
 
 def test_query_passes_path_prefix_filter_to_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -375,7 +384,9 @@ def test_query_passes_path_prefix_filter_to_pipeline(monkeypatch: pytest.MonkeyP
 
 def test_query_rejects_top_k_above_limit() -> None:
     result = wiki_query(question="hello", top_k=41)
-    assert result == {"ok": False, "code": "invalid_top_k", "error": "top_k must be between 1 and 40"}
+    assert result["ok"] is False
+    assert result["code"] == "invalid_top_k"
+    assert result["message"] == "the query limit is invalid"
 
 
 def test_query_enforces_wall_clock_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -409,6 +420,58 @@ def test_write_and_update_schemas_expose_related_page_arguments() -> None:
             assert "related_pages" in update_properties
 
     anyio.run(assert_schema)
+
+
+def test_registry_exposes_strict_ingest_schema_and_tool_contract_annotations() -> None:
+    async def assert_schema() -> None:
+        async with Client(mcp) as client:
+            tools = {item.name: item for item in (await client.list_tools()).tools}
+            ingest = tools["wiki_ingest"]
+            assert "metadata" not in ingest.input_schema.get("properties", {})
+            assert isinstance(ingest.output_schema, dict)
+            status_annotations = tools["wiki_status"].annotations
+            query_annotations = tools["wiki_query"].annotations
+            list_tool = tools["wiki_list"]
+            get_tool = tools["wiki_get"]
+            assert set(get_tool.input_schema.get("required", [])) == {"content_ref"}
+            assert "all" not in str(list_tool.input_schema)
+            assert "body" not in list_tool.input_schema.get("properties", {})
+            assert getattr(list_tool.annotations, "read_only_hint", None) is True
+            assert getattr(list_tool.annotations, "idempotent_hint", None) is True
+            assert getattr(list_tool.annotations, "open_world_hint", None) is False
+            assert getattr(get_tool.annotations, "read_only_hint", None) is True
+            assert getattr(get_tool.annotations, "idempotent_hint", None) is True
+            assert getattr(get_tool.annotations, "open_world_hint", None) is False
+            assert getattr(status_annotations, "read_only_hint", None) is True
+            assert getattr(status_annotations, "idempotent_hint", None) is True
+            assert getattr(status_annotations, "open_world_hint", None) is False
+            assert getattr(query_annotations, "read_only_hint", None) is True
+            assert getattr(query_annotations, "idempotent_hint", None) is True
+
+    anyio.run(assert_schema)
+
+
+def test_legacy_ingest_metadata_is_rejected_without_vault_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    before = {path.relative_to(root).as_posix(): path.stat().st_mtime_ns for path in root.rglob("*") if path.is_file()}
+
+    async def assert_rejected() -> None:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "wiki_ingest",
+                {
+                    "vault": "primary",
+                    "source_path": str(tmp_path / "source.txt"),
+                    "source_name": "source",
+                    "metadata": {"secret": "must not be echoed"},
+                },
+            )
+            assert result.is_error is True
+
+    anyio.run(assert_rejected)
+    after = {path.relative_to(root).as_posix(): path.stat().st_mtime_ns for path in root.rglob("*") if path.is_file()}
+    assert after == before
 
 
 def test_write_note_forwards_related_pages_and_sources(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

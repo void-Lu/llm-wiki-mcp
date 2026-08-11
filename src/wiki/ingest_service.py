@@ -2,32 +2,16 @@
 
 from __future__ import annotations
 
-import shutil
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from wiki.generation_queue import GenerationQueue
+from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter, TEXT_SOURCE_SUFFIXES
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
+from wiki.source_provenance import source_path_key
 from wiki.wiki_paths import safe_segment
-
-TEXT_SOURCE_SUFFIXES = {
-    ".md",
-    ".markdown",
-    ".txt",
-    ".text",
-    ".log",
-    ".csv",
-    ".tsv",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".xml",
-    ".html",
-    ".htm",
-}
-
 
 def sync_retrieval_index(vault_root: str | Path, *, full_build: bool = False) -> dict[str, object]:
     """Shared post-write projection boundary for MCP, batch, and adapters."""
@@ -62,17 +46,34 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
         project_value = safe_segment(project) if project else "default"
     except ValueError as exc:
         return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": str(exc)}
-    is_text_source = _is_text_knowledge_source(source)
+    try:
+        target_name = safe_segment(source.name)
+    except ValueError as exc:
+        return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": "source filename is not a safe target component"}
+    try:
+        snapshot = IngestSnapshotter().snapshot(source)
+    except IngestSnapshotError as exc:
+        return {"ok": False, "code": exc.code, "error": "source snapshot could not be completed"}
+    is_text_source = snapshot.is_text
     target = (
-        root / "raw" / "sources" / type_value / project_value / name_value / source.name
+        root / "raw" / "sources" / type_value / project_value / name_value / target_name
         if is_text_source
-        else root / "raw" / "assets" / project_value / name_value / source.name
+        else root / "raw" / "assets" / project_value / name_value / target_name
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    incoming_hash = _hash_file(source)
-    previous_hash = _hash_file(target) if target.exists() else None
-    if previous_hash != incoming_hash:
-        shutil.copyfile(source, target)
+    incoming_hash = snapshot.content_hash
+    try:
+        previous_hash = _hash_file(target) if target.is_file() else None
+        if previous_hash != incoming_hash:
+            snapshot.commit_to(target)
+        else:
+            snapshot.cleanup()
+    except IngestSnapshotError as exc:
+        snapshot.cleanup()
+        return {"ok": False, "code": exc.code, "error": "source snapshot could not be committed"}
+    except OSError as exc:
+        snapshot.cleanup()
+        del exc
+        return {"ok": False, "code": "source_write_failed", "error": "source snapshot could not be committed"}
     operation = "new" if previous_hash is None else "unchanged" if previous_hash == incoming_hash else "modified"
     if not is_text_source:
         return {
@@ -89,7 +90,7 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     # invalidates dependent page provenance; it never creates a derived page.
     provenance_result: dict[str, Any] | None = None
     if type_value != "chat" and operation != "unchanged":
-        provenance_result = _invalidate_raw_provenance(root, target.relative_to(root))
+        provenance_result = _invalidate_raw_provenance(root, target.relative_to(root), incoming_hash)
     index_scope = "active" if type_value == "chat" else "raw"
     indexed = page_from_file(root, target, scope=index_scope)
     if indexed is None:
@@ -107,11 +108,11 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     return response
 
 
-def _invalidate_raw_provenance(root: Path, relative_path: Path) -> dict[str, Any]:
+def _invalidate_raw_provenance(root: Path, relative_path: Path, source_hash: str) -> dict[str, Any]:
     """Mark raw dependents stale without invoking the retired compiler path."""
 
     relative = relative_path.as_posix()
-    stale = KnowledgeDependencies(root).source_changed(relative)
+    stale = KnowledgeDependencies(root).source_changed(source_path_key(relative), source_hash)
     superseded = GenerationQueue(root).supersede_sources({relative})
     return {
         "stale": stale,
@@ -129,15 +130,10 @@ def _hash_file(path: Path) -> str:
 
 
 def _is_text_knowledge_source(source: Path) -> bool:
-    """Return whether a file is safe to treat as a UTF-8 text knowledge source."""
+    """Return the suffix-side text hint for compatibility callers.
 
-    if source.suffix.casefold() not in TEXT_SOURCE_SUFFIXES:
-        return False
-    try:
-        content = source.read_bytes()
-        if b"\x00" in content:
-            raise UnicodeError("binary content")
-        content.decode("utf-8")
-    except (OSError, UnicodeError):
-        return False
-    return True
+    ``ingest_file`` uses :class:`IngestSnapshotter` so the final decision is
+    made from the bytes read through its single source handle.
+    """
+
+    return source.suffix.casefold() in TEXT_SOURCE_SUFFIXES

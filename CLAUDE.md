@@ -13,6 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 启动 MCP server：`uv run llm-wiki-mcp-server`、`uv run llm-wiki-mcp server` 或 `uv run python -m app.server`
 - CLI 初始化 vault：`uv run llm-wiki-mcp init --vault <name> --root <path> --default`
 - CLI 查看状态：`uv run llm-wiki-mcp status`
+- CLI 修复/审计（admin）：`uv run llm-wiki-mcp repair page-operation|provenance|privacy-audit <plan|apply> --vault <name>`
+- 本机 `uv run pytest` 若报 `uv trampoline failed to canonicalize script path`，改用 `uv run python -m pytest`（已验证可用）。
 
 项目使用 `uv.lock` 管理开发环境。Ruff 配置在 pyproject.toml（`select = ["E9", "F"]`），运行 `uv run ruff check src/`；完成前至少运行相关 `uv run pytest`，较大改动运行全量 `uv run pytest` 和 `uv run ruff check src/`。
 
@@ -29,7 +31,9 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 3. [README.md](README.md) 的工具说明（如果公开行为变化）。
 4. [tests/app/test_server_tools.py](tests/app/test_server_tools.py) 和对应业务测试。
 
-注册工具清单（8 个）：`wiki_status`、`wiki_ingest`、`wiki_codegraph_import`、`wiki_write_note`、`wiki_update`、`wiki_query`、`wiki_archive`、`wiki_restore`。`wiki_generation` worker 工具不再注册；init/config、retrieval-eval、vector/index 生命周期、generation admin、archive admin 和 migration 只保留在 CLI 边界。
+注册工具清单（10 个）：`wiki_status`、`wiki_list`（metadata-only catalog）、`wiki_get`（opaque `content_ref` 精确读取）、`wiki_ingest`、`wiki_codegraph_import`、`wiki_write_note`、`wiki_update`、`wiki_query`、`wiki_archive`、`wiki_restore`。`wiki_generation` worker 工具不再注册；init/config、retrieval-eval、vector/index 生命周期、archive admin、repair/privacy admin 和 migration 只保留在 CLI 边界。
+
+[public_contracts.py](src/app/public_contracts.py) 定义稳定公开契约 `PublicResult`/`PublicError`（含 `correlation_id`）；[server.py](src/app/server.py) 所有工具经统一 `_register` 注册，入参 schema 为 `extra="forbid"` 严格模式。
 
 ### Vault 与路径模型
 
@@ -42,12 +46,14 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### 写入与维护流水线
 
-- 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时，通过 [knowledge_compiler.py](src/wiki/knowledge_compiler.py) 入队知识编译。MCP 工具名为 `wiki_ingest`。
-- 知识编译由 [generation_queue.py](src/wiki/generation_queue.py) 提供 durable job；worker profile 通过 `wiki_generation` 暴露 `status/claim/apply/fail/release`，CLI `generation` 提供同一队列的管理入口。MCP 工具层不直接接收或回显大段 prompt/generation。
+- 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时，[knowledge_compiler.py](src/wiki/knowledge_compiler.py) 只做 raw-only provenance 失效（supersede 相关 generation job）；知识编译/generation 已停用（`generation: enabled: false`）。MCP 工具名为 `wiki_ingest`。
+- [generation_queue.py](src/wiki/generation_queue.py) 仍是 durable job 存储（`create/claim/apply/fail/release/status`），但没有 worker 工具或 CLI 管理入口——仅用于 supersede 已停用 job 类型。
 - 人工笔记写入在 [note_writer.py](src/wiki/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
 - 写入后维护集中在 [wiki_index.py](src/wiki/wiki_index.py)、[wiki_overview.py](src/wiki/wiki_overview.py)、[wiki_log.py](src/wiki/wiki_log.py)。会产生或变更页面的工具通常要刷新 index/overview 并 append log。
 - 受控更新在 [wiki_update.py](src/wiki/wiki_update.py)：`preview_update` 返回 hash、plan_id、locked fields、removed sources 和 diff；`apply_update` 在校验 hash/plan、锁定字段、来源与 active lifecycle 后写页面，并更新 knowledge dependencies、index 和 log。MCP 工具为 `wiki_update`。
 - 归档在 [archive_service.py](src/archive/archive_service.py)：`wiki_archive`/`wiki_restore` 只公开 `plan|apply`；purge、recover、rebuild-index 和 migration 只保留在 CLI/admin 边界。
+- 隐私审计在 [privacy_audit.py](src/wiki/privacy_audit.py)：CLI `repair privacy-audit` 提供 `plan/apply`，默认阻断未审批的 filename/wikilink 变更（CAS + rollback）；脱敏/locator 策略在 [privacy_policy.py](src/common/privacy_policy.py)。
+- 页面写入经 [atomic_file.py](src/wiki/atomic_file.py) 原子写（CAS）；CLI `repair` 边界（`page-operation`/`provenance`/`privacy-audit` 的 plan/apply）由 [page_repair.py](src/wiki/page_repair.py)、[page_operation_store.py](src/wiki/page_operation_store.py)、[provenance_migration.py](src/wiki/provenance_migration.py) 支撑。
 
 ### 查询与图谱能力
 
@@ -57,9 +63,11 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 [wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、generation queue、版本与运行身份，以及 CodeGraph executable 的只读可用性。MCP 工具为 `wiki_status`。
 
+[content_catalog.py](src/wiki/content_catalog.py)（含 [catalog_cursor.py](src/wiki/catalog_cursor.py)、[content_reference.py](src/wiki/content_reference.py)）是 `wiki_list`/`wiki_get` 的只读 catalog 后端：metadata 分页 + opaque `content_ref`，不读正文。
+
 [wiki_models.py](src/wiki/wiki_models.py) 定义核心数据结构 `WikiPage`、`WikiLogEntry`。
 
-[query_pipeline.py](src/retrieval/query_pipeline.py) 是查询引擎核心（V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack。支持 `expansion_terms` 模糊词扩展和 `legacy_response_from_v2` 兼容响应。
+[query_pipeline.py](src/retrieval/query_pipeline.py) 是查询引擎核心（V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack。支持 `expansion_terms` 模糊词扩展和 `filters` 元数据过滤（含 `path_prefix`，见 [metadata_filters.py](src/retrieval/metadata_filters.py)）；查询经 [query_cancellation.py](src/retrieval/query_cancellation.py) 协作式取消与有界并发。
 
 [chat_memory.py](src/wiki/chat_memory.py) 提供不可变、脱敏的 chat source 持久化；`wiki_write_note` 通过 `chat_metadata`/`chat_derived`/`chat_sources` 参数写入 chat source。
 
@@ -98,6 +106,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 查询/检索/向量/wikilink：`test_wiki_query.py`、`test_query_pipeline.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
 - worker/归档/辅助：`test_knowledge_compiler.py`、`test_generation_queue.py`、`test_archive_lifecycle.py`、`test_archive_wiki_sources.py`、`test_git_utils.py`
 - 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_fallback_policy.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`
+- repair/privacy/契约/catalog：`test_cli_repair.py`、`test_cli_repair_admin.py`、`test_page_repair.py`、`test_privacy_audit.py`、`test_provenance_migration.py`、`test_public_contracts.py`、`test_content_catalog.py`、`test_query_cancellation.py`、`test_query_executor.py`、`test_spec_lint.py`（tests/tools/）
 
 ## Agent skills
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -17,7 +19,7 @@ def vault(tmp_path: Path) -> Path:
     return root
 
 
-def _save(vault: Path, **kwargs: object) -> dict[str, object]:
+def _save(vault: Path, **kwargs: Any) -> dict[str, object]:
     auto_index = bool(kwargs.pop("auto_index", False))
     return save_obsidian_note(
         title="测试 Title: RESTlet/同步",
@@ -41,7 +43,8 @@ def _frontmatter_and_body(path: Path) -> tuple[dict[str, object], str]:
 
 def _written_path(vault: Path, result: dict[str, object]) -> Path:
     assert result["ok"] is True
-    path = Path(str(result["absolute_path"]))
+    assert "absolute_path" not in result
+    path = vault / str(result["path"])
     assert path.is_file()
     assert path.resolve().is_relative_to(vault.resolve())
     return path
@@ -270,9 +273,11 @@ def test_frontmatter_fixed_fields_and_old_fields_absent(vault: Path):
     assert frontmatter["project"] == "project-a"
     assert frontmatter["author"] == "copilot"
     assert date.fromisoformat(str(frontmatter["updated_at"])) <= date.today()
-    assert "netsuite" not in frontmatter["tags"]
-    assert "spec" in frontmatter["tags"]
-    assert "custom" in frontmatter["tags"]
+    tags = frontmatter["tags"]
+    assert isinstance(tags, list)
+    assert "netsuite" not in tags
+    assert "spec" in tags
+    assert "custom" in tags
     assert frontmatter["related_objects"] == ["salesorder"]
     assert frontmatter["related_scripts"] == ["customscript_sync"]
     assert "related_records" not in text
@@ -310,7 +315,9 @@ def test_yaml_injection_values_stay_parseable(vault: Path):
     path = _written_path(vault, result)
     frontmatter, body = _frontmatter_and_body(path)
     assert frontmatter["topic"] == injected_title
-    assert frontmatter["tags"][1:] == injected_values
+    tags = frontmatter["tags"]
+    assert isinstance(tags, list)
+    assert tags[1:] == injected_values
     assert frontmatter["related_objects"] == injected_values
     assert frontmatter["related_script_types"] == injected_values
     assert "Body" in body
@@ -344,7 +351,7 @@ def test_no_sensitive_body_returns_zero_redactions(vault: Path):
     assert "普通需求说明" in body
 
 
-def test_related_pages_and_raw_sources_are_written_with_invalid_entries_skipped(vault: Path):
+def test_related_pages_and_raw_sources_are_written_with_verified_provenance(vault: Path):
     related = vault / "wiki" / "concepts" / "related.md"
     related.parent.mkdir(parents=True)
     related.write_text("Related", encoding="utf-8")
@@ -361,7 +368,7 @@ def test_related_pages_and_raw_sources_are_written_with_invalid_entries_skipped(
             {"path": "wiki/concepts/related.md", "title": "Related Page"},
             {"path": "raw/sources/reference.txt", "title": "Raw"},
         ],
-        sources=["raw/sources/reference.txt", "wiki/concepts/related.md"],
+        sources=["raw/sources/reference.txt"],
         vault_root=str(vault),
         auto_index=False,
     )
@@ -369,11 +376,29 @@ def test_related_pages_and_raw_sources_are_written_with_invalid_entries_skipped(
     path = _written_path(vault, result)
     frontmatter, body = _frontmatter_and_body(path)
     assert frontmatter["sources"] == ["raw/sources/reference.txt"]
+    assert frontmatter["source_hashes"] == {"raw/sources/reference.txt": sha256(b"raw").hexdigest()}
     assert "## 参考来源" in body
     assert "[[wiki/concepts/related|Related Page]]" in body
     assert result["related_pages_skipped"][0]["reason"] == "raw_source_use_sources"
-    assert result["sources_skipped"][0]["reason"] == "path_not_allowed"
-    assert result["warnings"]
+    assert result["provenance_status"] == "verified"
+
+
+def test_invalid_explicit_source_fails_before_page_or_dependency_writes(vault: Path):
+    result = _save(
+        vault,
+        note_type="knowledge",
+        domain="common-errors",
+        filename="invalid-source",
+        sources=["wiki/concepts/related.md"],
+    )
+
+    assert result == {
+        "ok": False,
+        "code": "source_path_not_allowed",
+        "error": "source provenance could not be verified",
+    }
+    assert not (vault / "wiki").exists()
+    assert not (vault / ".llm-wiki").exists()
 
 
 def test_save_note_requires_explicit_vault_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

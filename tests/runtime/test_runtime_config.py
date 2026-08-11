@@ -250,7 +250,37 @@ def test_registry_decodes_profiles_and_redacts_public_status(tmp_path: Path) -> 
     assert resolved.settings.retrieval.embedding.max_sequence_length == 256
     assert status["telemetry"]["retention_days"] == 30
     assert "model_path" not in status["retrieval"]["embedding"]
+    assert resolved.settings.retrieval.execution.max_concurrency == 4
+    assert "execution" not in status["retrieval"]
     assert status["archive"]["automatic_purge"] is False
+
+
+def test_registry_decodes_trusted_query_execution_bounds_without_public_exposure(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path / "vault")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "default_vault": "primary",
+                "vaults": {
+                    "primary": {
+                        "root": str(vault),
+                        "retrieval": {"execution": {"max_concurrency": 7, "cancel_grace_seconds": 0.5}},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = ConfigRegistry.from_file(config_path)
+    resolved = registry.resolve_vault()
+    assert resolved.settings.retrieval.execution.max_concurrency == 7
+    assert resolved.settings.retrieval.execution.cancel_grace_seconds == pytest.approx(0.5)
+    retrieval_status = registry.public_status(resolved)["retrieval"]
+    assert isinstance(retrieval_status, dict)
+    assert "execution" not in retrieval_status
 
 
 @pytest.mark.parametrize(

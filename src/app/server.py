@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import wraps
+import json
 from pathlib import Path
-import queue
 import re
 import threading
+import time
 from typing import Any, Literal
 
 from mcp.server import MCPServer
+from mcp.types import CallToolResult, InputRequiredResult, TextContent, ToolAnnotations
 
+from app.public_contracts import PublicError, PublicResult, public_error, public_error_from_exception, project_public_result
+from archive.archive_status_reader import ArchiveStatusReader
 from wiki.note_writer import save_obsidian_note as run_write_note
 from wiki.wiki_update import apply_update as run_apply_update
 from wiki.wiki_update import preview_update as run_preview_update
@@ -22,7 +28,14 @@ from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from wiki.wiki_files import wiki_status as run_wiki_status
 from wiki.ingest_service import ingest_file as run_ingest_file
 from wiki.wiki_query import DEFAULT_TOP_K
+from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext, QueryExecutionRegistry
 from retrieval.query_pipeline import QueryFilters, run_query_v2
+from retrieval.query_telemetry import QueryTelemetry
+from wiki.content_catalog import (
+    DEFAULT_BODY_BUDGET,
+    DEFAULT_CATALOG_PAGE_SIZE,
+    ContentCatalogService,
+)
 from archive.archive_models import ARCHIVE_REASONS, is_archive_reason
 from archive.archive_service import ArchiveService
 from codegraph.codegraph_sync import CodeGraphSyncError, sync_codegraph as run_codegraph_sync
@@ -44,7 +57,41 @@ def _load_registry() -> ConfigRegistry:
 
 CONFIG_REGISTRY = _load_registry()
 QUERY_TIMEOUT_SECONDS = 300
-mcp = MCPServer(
+_QUERY_REGISTRIES: dict[tuple[str, int, float], QueryExecutionRegistry] = {}
+_QUERY_REGISTRY_LOCK = threading.Lock()
+
+
+class StrictMCPServer(MCPServer):
+    """MCPServer with a privacy-safe rejection for unknown input fields."""
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Any = None,
+    ) -> CallToolResult | InputRequiredResult:
+        tool_manager = getattr(self, "_tool_manager", None)
+        tool = tool_manager.get_tool(name) if tool_manager is not None else None
+        if tool is not None:
+            allowed = set(tool.fn_metadata.arg_model.model_fields)
+            allowed.update(
+                field.alias
+                for field in tool.fn_metadata.arg_model.model_fields.values()
+                if field.alias
+            )
+            unknown = set(arguments) - allowed
+            if unknown:
+                payload = public_error("validation_error")
+                return CallToolResult(
+                    content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
+                    structured_content=payload,
+                    is_error=True,
+                )
+        result = await super().call_tool(name, arguments, context)
+        return result
+
+
+mcp = StrictMCPServer(
     "llm-wiki-mcp",
     version=RUNTIME_PROVENANCE.server_version,
 )
@@ -106,7 +153,7 @@ def resolve_tool_vault(*, vault: str | None = None, vault_root: str | None = Non
 
 
 def _tool_error(exc: RuntimeConfigError) -> dict[str, Any]:
-    return {"ok": False, "code": exc.code, "error": str(exc)}
+    return public_error_from_exception(exc, fallback_code=exc.code)
 
 
 def wiki_status_tool(vault_root: str) -> dict[str, Any]:
@@ -118,41 +165,118 @@ def wiki_write_note_tool(*, note_type: str, title: str, content: str, vault_root
     return run_write_note(note_type=note_type, title=title, content=content, vault_root=vault_root, **kwargs)
 
 
-def _register(function: Any) -> Any:
-    return mcp.tool()(function)
+_TOOL_ANNOTATIONS = {
+    "wiki_status": ToolAnnotations(title="Read wiki status", read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "wiki_query": ToolAnnotations(title="Query wiki", read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "wiki_list": ToolAnnotations(title="List wiki content", read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "wiki_get": ToolAnnotations(title="Read wiki content", read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "wiki_ingest": ToolAnnotations(title="Ingest a source", read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "wiki_codegraph_import": ToolAnnotations(title="Import CodeGraph", read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "wiki_write_note": ToolAnnotations(title="Write a wiki note", read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False),
+    "wiki_update": ToolAnnotations(title="Update a wiki page", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
+    "wiki_archive": ToolAnnotations(title="Archive a wiki page", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
+    "wiki_restore": ToolAnnotations(title="Restore a wiki page", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
+}
 
 
-def _with_timeout(function: Any, timeout_seconds: float) -> Any:
-    """Run a synchronous domain call under a wall-clock deadline.
-
-    MCP tool calls are synchronous, so a hung retrieval (corrupt index, slow
-    vector model, graph expansion over a large repository) would otherwise
-    block the tool indefinitely.  The worker is a daemon thread, so a timeout
-    never prevents interpreter shutdown; the caller receives a structured
-    error instead of waiting forever.
-    """
-
-    result_box: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
-
-    def runner() -> None:
-        try:
-            result_box.put(("ok", function()))
-        except BaseException as exc:  # noqa: BLE001 - transport errors back to the caller
-            result_box.put(("error", exc))
-
-    thread = threading.Thread(target=runner, daemon=True, name="wiki-query")
-    thread.start()
-    try:
-        status, value = result_box.get(timeout=timeout_seconds)
-    except queue.Empty:
-        return {
-            "ok": False,
-            "code": "query_timeout",
-            "error": f"query exceeded the {timeout_seconds:.0f}s execution limit",
-        }
-    if status == "ok":
+def _publicize_tool_result(value: object, kwargs: Mapping[str, object]) -> object:
+    if isinstance(value, PublicResult):
+        payload = value.to_dict()
+    elif isinstance(value, Mapping):
+        payload = dict(value)
+    else:
         return value
-    raise value
+    logical_vault = kwargs.get("vault")
+    vault_root_value = kwargs.get("vault_root") or kwargs.get("vaultRoot")
+    vault_root = vault_root_value if isinstance(vault_root_value, (str, Path)) else None
+    if not isinstance(logical_vault, str):
+        try:
+            logical_vault = resolve_tool_vault(
+                vault_root=str(vault_root) if vault_root is not None else None,
+                registry=CONFIG_REGISTRY,
+            ).logical_name
+        except Exception:  # noqa: BLE001 - projection must never expose resolver details
+            logical_vault = None
+    projected = project_public_result(
+        payload,
+        logical_vault=logical_vault if isinstance(logical_vault, str) else None,
+        vault_root=vault_root,
+    )
+    if projected.get("ok") is not False:
+        return projected
+    public_error = PublicError.from_payload(projected)
+    extras = {
+        key: item
+        for key, item in projected.items()
+        if key not in {"ok", "code", "message", "error", "retryable", "correlation_id"}
+    }
+    return {**public_error.to_payload(), **extras}
+
+
+def _register(function: Any) -> Any:
+    """Register every public tool with one schema/privacy/error boundary."""
+
+    @wraps(function)
+    def registered(*args: object, **kwargs: object) -> object:
+        try:
+            value = function(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - MCP boundary must be stable
+            return public_error_from_exception(exc)
+        return _publicize_tool_result(value, kwargs)
+
+    registered_tool = mcp.tool(
+        annotations=_TOOL_ANNOTATIONS.get(
+            function.__name__,
+            ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False),
+        ),
+        structured_output=True,
+    )(registered)
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tool = tool_manager.get_tool(function.__name__) if tool_manager is not None else None
+    if tool is not None:
+        # MCP SDK argument models default to silently ignoring unknown keys.
+        # The public contract is intentionally strict, so make the generated
+        # schema and runtime validator agree at registration time.
+        argument_model = tool.fn_metadata.arg_model
+        argument_model.model_config["extra"] = "forbid"
+        argument_model.model_rebuild(force=True)
+    return registered_tool
+
+
+def _query_registry(
+    *,
+    vault_key: str,
+    max_concurrency: int,
+    cancel_grace_seconds: float,
+) -> QueryExecutionRegistry:
+    key = (vault_key, max_concurrency, cancel_grace_seconds)
+    with _QUERY_REGISTRY_LOCK:
+        registry = _QUERY_REGISTRIES.get(key)
+        if registry is None:
+            registry = QueryExecutionRegistry(
+                max_concurrency=max_concurrency,
+                cancel_grace_seconds=cancel_grace_seconds,
+            )
+            _QUERY_REGISTRIES[key] = registry
+        return registry
+
+
+def _with_timeout(
+    function: Any,
+    timeout_seconds: float,
+    *,
+    vault_key: str = "default",
+    max_concurrency: int = 4,
+    cancel_grace_seconds: float = 0.25,
+) -> Any:
+    """Run a query in the bounded cooperative execution registry."""
+
+    registry = _query_registry(
+        vault_key=vault_key,
+        max_concurrency=max_concurrency,
+        cancel_grace_seconds=cancel_grace_seconds,
+    )
+    return registry.run(function, timeout_seconds=timeout_seconds)
 
 
 @_register
@@ -171,16 +295,84 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
         codegraph.pop("executable", None)
     status["vault"] = resolution.logical_name
     status["config"] = CONFIG_REGISTRY.public_status(resolution.resolved)
-    archive_status = ArchiveService(resolution.root).status()
+    archive_status = ArchiveStatusReader(resolution.root).status()
     status["archive_index"] = {"enabled": resolution.resolved.settings.archive.archive_index_enabled, **archive_status["archive_index"]}
     status["archive_operations"] = archive_status["operations"]
+    status["archive_state"] = {
+        "state": archive_status.get("state", "unknown"),
+        "code": archive_status.get("code", "archive_state_unavailable"),
+    }
+    if archive_status.get("missing_tables"):
+        status["archive_state"]["missing_tables"] = archive_status["missing_tables"]
+    if archive_status.get("missing_columns"):
+        status["archive_state"]["missing_columns"] = archive_status["missing_columns"]
+    execution = resolution.resolved.settings.retrieval.execution
+    execution_status = _query_registry(
+        vault_key=f"{resolution.logical_name}:{resolution.root}",
+        max_concurrency=execution.max_concurrency,
+        cancel_grace_seconds=execution.cancel_grace_seconds,
+    ).status()
+    status["query_execution"] = {
+        "active": execution_status["active"],
+        "pending": execution_status["pending"],
+    }
     if detail == "indexes":
-        status = {key: status[key] for key in ("ok", "vault", "vector", "retrieval", "config", "version", "runtime") if key in status}
+        status = {key: status[key] for key in ("ok", "vault", "vector", "retrieval", "query_execution", "config", "version", "runtime") if key in status}
     elif detail == "generation":
-        status = {key: status[key] for key in ("ok", "vault", "queue", "config", "version", "runtime") if key in status}
+        status = {key: status[key] for key in ("ok", "vault", "queue", "query_execution", "config", "version", "runtime") if key in status}
     elif detail == "archive":
-        status = {key: status[key] for key in ("ok", "vault", "archive_index", "archive_operations", "config", "version", "runtime") if key in status}
+        status = {key: status[key] for key in ("ok", "vault", "archive_index", "archive_operations", "archive_state", "config", "version", "runtime") if key in status}
     return attach_warnings(status, resolution.warnings)
+
+
+@_register
+def wiki_list(
+    store_scope: Literal["active", "raw", "archive"] = "active",
+    page_size: int = DEFAULT_CATALOG_PAGE_SIZE,
+    cursor: str | None = None,
+    filters: dict[str, Any] | None = None,
+    vault: str | None = None,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+) -> dict[str, Any]:
+    """List metadata from one explicitly selected physical content scope."""
+
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+        result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).list_items(
+            scope=store_scope,
+            filters=filters,
+            page_size=page_size,
+            cursor=cursor,
+        )
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    return attach_warnings(result, resolution.warnings)
+
+
+@_register
+def wiki_get(
+    content_ref: str,
+    include_body: bool = False,
+    max_bytes: int = DEFAULT_BODY_BUDGET,
+    cursor: str | None = None,
+    vault: str | None = None,
+    vault_root: str | None = None,
+    vaultRoot: str | None = None,
+) -> dict[str, Any]:
+    """Read metadata for an opaque content reference, with opt-in bounded body."""
+
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+        result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).get_item(
+            content_ref,
+            include_body=include_body,
+            max_bytes=max_bytes,
+            cursor=cursor,
+        )
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    return attach_warnings(result, resolution.warnings)
 
 
 QueryScope = Literal["auto", "knowledge", "history", "all", "archive", "raw"]
@@ -234,12 +426,34 @@ def _run_wiki_query(
     vault_root: str | None,
     vaultRoot: str | None,
     confirmation_token: str | None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> dict[str, Any]:
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:
         return _tool_error(exc)
     settings = resolution.resolved.settings.retrieval
+    telemetry_settings = resolution.resolved.settings.telemetry
+    telemetry_recorder = QueryTelemetry(resolution.root) if telemetry_settings.enabled else None
+    query_started = time.perf_counter()
+    if cancellation is not None and telemetry_recorder is not None:
+        def record_cancellation(event: object) -> None:
+            cancellation_event = event
+            telemetry_recorder.finish_once(
+                question=question,
+                scope=scope,
+                project=project,
+                passage_ids=(),
+                fallback_level="",
+                token_count=0,
+                latency_ms=(time.perf_counter() - query_started) * 1_000,
+                retention_days=telemetry_settings.retention_days,
+                outcome="timeout" if getattr(cancellation_event, "code", "") == "query_timeout" else "cancelled",
+                cancelled_stage=str(getattr(cancellation_event, "cancelled_stage", "")),
+                worker_state="cancellation_pending" if getattr(cancellation_event, "code", "") == "query_timeout" else "cancelled",
+            )
+
+        cancellation.set_cancel_handler(record_cancellation)
     filter_values = filters or {}
     if not isinstance(filter_values, dict) or set(filter_values) - {"type", "tags", "path_prefix"}:
         return {"ok": False, "code": "invalid_filters", "error": "filters may only contain type, tags, and path_prefix"}
@@ -250,21 +464,41 @@ def _run_wiki_query(
     if typed_filters.type and typed_filters.type.casefold() == "code_fact" and not project:
         return {"ok": False, "code": "project_required_for_codegraph", "error": "project is required to query CodeGraph pages"}
     retrieval_mode = "vector" if not settings.lexical_enabled else "hybrid" if settings.embedding.enabled else "lexical"
-    result = run_query_v2(
-        resolution.root,
-        question,
-        scope=scope,
-        project=project,
-        filters=typed_filters,
-        top_k=top_k,
-        hard_budget_tokens=settings.context.hard_budget_tokens,
-        embedding=settings.embedding,
-        telemetry=resolution.resolved.settings.telemetry,
-        lexical_enabled=settings.lexical_enabled,
-        retrieval_mode=retrieval_mode,
-        expansion_terms=expansion_terms,
-        confirmation_token=confirmation_token,
-    )
+    try:
+        result = run_query_v2(
+            resolution.root,
+            question,
+            scope=scope,
+            project=project,
+            filters=typed_filters,
+            top_k=top_k,
+            hard_budget_tokens=settings.context.hard_budget_tokens,
+            embedding=settings.embedding,
+            telemetry=resolution.resolved.settings.telemetry,
+            lexical_enabled=settings.lexical_enabled,
+            retrieval_mode=retrieval_mode,
+            expansion_terms=expansion_terms,
+            confirmation_token=confirmation_token,
+            cancellation=cancellation,
+            telemetry_recorder=telemetry_recorder,
+        )
+    except QueryCancelled:
+        raise
+    except Exception:
+        if telemetry_recorder is not None:
+            telemetry_recorder.finish_once(
+                question=question,
+                scope=scope,
+                project=project,
+                passage_ids=(),
+                fallback_level="",
+                token_count=0,
+                latency_ms=(time.perf_counter() - query_started) * 1_000,
+                retention_days=telemetry_settings.retention_days,
+                outcome="failed",
+                worker_state="failed",
+            )
+        raise
     return attach_warnings(attach_no_results_outcome(result), resolution.warnings)
 
 
@@ -297,9 +531,29 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     normalized_expansion, expansion_error = _validate_expansion_terms(expansion_terms)
     if expansion_error:
         return {"ok": False, "code": "invalid_expansion_terms", "error": expansion_error}
+    try:
+        resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
+    except RuntimeConfigError as exc:
+        return _tool_error(exc)
+    execution = resolution.resolved.settings.retrieval.execution
     return _with_timeout(
-        lambda: _run_wiki_query(question, scope, project, filters, top_k, normalized_expansion, vault, vault_root, vaultRoot, confirmation_token),
+        lambda cancellation: _run_wiki_query(
+            question,
+            scope,
+            project,
+            filters,
+            top_k,
+            normalized_expansion,
+            vault,
+            vault_root,
+            vaultRoot,
+            confirmation_token,
+            cancellation,
+        ),
         QUERY_TIMEOUT_SECONDS,
+        vault_key=f"{resolution.logical_name}:{resolution.root}",
+        max_concurrency=execution.max_concurrency,
+        cancel_grace_seconds=execution.cancel_grace_seconds,
     )
 
 
@@ -324,9 +578,8 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
 
 
 @_register
-def wiki_ingest(source_path: str, source_name: str, project: str = "", source_type: str = "file", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+def wiki_ingest(source_path: str, source_name: str, project: str = "", source_type: str = "file", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Ingest one explicit file; text is indexed and other files become raw assets."""
-    del metadata
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
     except RuntimeConfigError as exc:

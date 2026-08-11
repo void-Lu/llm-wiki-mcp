@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from codegraph.codegraph_policy import is_codegraph_managed_path
-from common.redaction import count_redactions, redact_sensitive_text
+from common.redaction import count_redactions
+from common.privacy_policy import LocatorError, PrivacyPolicy
+from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import safe_segment
 
@@ -15,6 +18,16 @@ class WikiWriteError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class PreparedWikiPage:
+    target: Path
+    relative_path: Path
+    text: str
+    title: str
+    frontmatter: dict[str, Any]
+    redacted_count: int
 
 
 _ALLOWED_PREFIXES = (
@@ -76,7 +89,35 @@ def write_wiki_page(
     overwrite_generated_only: bool = True,
 ) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
-    relative_path = _validate_relative_path(page.relative_path)
+    prepared = prepare_wiki_page(root, page, overwrite_generated_only=overwrite_generated_only)
+    try:
+        written = atomic_write_text(prepared.target, prepared.text)
+    except AtomicFileError as exc:
+        raise WikiWriteError(exc.code, "page could not be written") from exc
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "path": prepared.relative_path.as_posix(),
+        "page_hash": written.content_hash,
+        "redacted_count": prepared.redacted_count,
+    }
+    try:
+        result["retrieval_index"] = refresh_page_retrieval(root, prepared.target)
+    except Exception as exc:
+        result["retrieval_index"] = {"ok": False, "state": "stale", "code": "index_update_failed", "error": str(exc)}
+    return result
+
+
+def prepare_wiki_page(
+    vault_root: str | Path,
+    page: WikiPage,
+    *,
+    overwrite_generated_only: bool = True,
+) -> PreparedWikiPage:
+    """Validate and render a page without changing any durable state."""
+
+    root = Path(vault_root).expanduser().resolve()
+    relative_path = _validate_relative_path(Path(page.relative_path))
     target = (root / relative_path).resolve()
     if not target.is_relative_to(root):
         raise WikiWriteError("path_escape", "resolved page path escapes wiki root")
@@ -91,37 +132,44 @@ def write_wiki_page(
         if is_codegraph_managed_path(relative_path, existing_frontmatter):
             raise WikiWriteError("codegraph_managed_page", f"CodeGraph-managed page is tool-owned: {relative_path.as_posix()}")
 
-    title = redact_sensitive_text(page.title)
-    body = redact_sensitive_text(page.body)
-    frontmatter = _redact_value(dict(page.frontmatter))
+    policy = PrivacyPolicy()
+    title = policy.redact_display_text(page.title)
+    body = policy.redact_display_text(page.body)
+    try:
+        projected_frontmatter = policy.redact_metadata(dict(page.frontmatter))
+    except LocatorError as exc:
+        raise WikiWriteError(exc.code, "frontmatter contains an unsafe locator") from exc
+    frontmatter = projected_frontmatter if isinstance(projected_frontmatter, dict) else {}
     removed_fields = sorted({key for key in ("source_capsules", "source_capsule") if key in frontmatter})
     if removed_fields:
         raise WikiWriteError("source_capsules_removed", "source capsule provenance fields are retired; use raw sources instead")
     frontmatter.setdefault("title", title)
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
     text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{strip_leading_h1(body).strip()}\n"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
     original_text = f"{page.title}\n{page.frontmatter}\n{page.body}"
     redacted_text = f"{title}\n{frontmatter}\n{body}"
-    result = {
-        "ok": True,
-        "path": relative_path.as_posix(),
-        "absolute_path": str(target),
-        "redacted_count": count_redactions(original_text, redacted_text),
-    }
-    # A page write may update an existing store, but it never creates one or
-    # loads a vector model. Full builds remain explicit maintenance actions.
-    try:
-        from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
+    return PreparedWikiPage(
+        target=target,
+        relative_path=relative_path,
+        text=text,
+        title=title,
+        frontmatter=frontmatter,
+        redacted_count=count_redactions(original_text, redacted_text),
+    )
 
-        store = RetrievalIndexStore(root)
-        indexed = page_from_file(root, target, scope="active")
-        if indexed is not None and store.path.exists():
-            result["retrieval_index"] = store.update_page(indexed)
-    except Exception as exc:
-        result["retrieval_index"] = {"ok": False, "state": "stale", "code": "index_update_failed", "error": str(exc)}
-    return result
+
+def refresh_page_retrieval(vault_root: str | Path, target: str | Path) -> dict[str, object]:
+    """Refresh one existing active-page retrieval record without building a store."""
+
+    root = Path(vault_root).expanduser().resolve()
+    page_path = Path(target).resolve()
+    from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
+
+    store = RetrievalIndexStore(root)
+    indexed = page_from_file(root, page_path, scope="active")
+    if indexed is None or not store.path.exists():
+        return {"ok": True, "state": "not_indexed"}
+    return store.update_page(indexed)
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -186,18 +234,6 @@ def _is_valid_project_path(path: Path) -> bool:
     if len(parts) == 4 and parts[3] == "index.md":
         return True
     return len(parts) >= 5 and parts[3] in _PROJECT_SUBDIRS
-
-
-def _redact_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_sensitive_text(value)
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _redact_value(item) for key, item in value.items()}
-    return value
 
 
 def _starts_with(path: Path, prefix: Path) -> bool:

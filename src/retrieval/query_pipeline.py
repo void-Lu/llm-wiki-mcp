@@ -7,7 +7,6 @@ import hashlib
 import json
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +25,9 @@ from retrieval.lexical_analyzer import (
     tokens,
 )
 from retrieval.query_telemetry import QueryTelemetry
+from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
+from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_metadata_filters
 from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, vector_settings_from_embedding
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError
@@ -336,18 +337,12 @@ class QueryFilters:
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "QueryFilters":
-        value = value or {}
-        tags = value.get("tags", ())
-        if isinstance(tags, (str, bytes)) or not isinstance(tags, Sequence) or not all(isinstance(item, str) for item in tags):
-            raise ValueError("filters.tags must be a sequence of strings")
-        page_type = value.get("type")
-        if page_type is not None and not isinstance(page_type, str):
-            raise ValueError("filters.type must be a string")
-        path_prefix = value.get("path_prefix")
-        if path_prefix is not None and not isinstance(path_prefix, str):
-            raise ValueError("filters.path_prefix must be a string")
-        path_prefix = path_prefix.replace("\\", "/").strip() if path_prefix else None
-        return cls(page_type, tuple(tags), path_prefix)
+        normalized = normalize_metadata_filters(value, allowed=QUERY_METADATA_FILTERS, preserve_path_trailing=True)
+        return cls(
+            normalized.get("type"),
+            tuple(normalized.get("tags", ())),
+            normalized.get("path_prefix"),
+        )
 
 
 def classify_intent(question: str) -> str:
@@ -1443,7 +1438,10 @@ def _vector_hits(
     *,
     scope: str,
     allowed_paths: set[str] | None = None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> tuple[dict[str, tuple[int, float]], list[str]]:
+    if cancellation is not None:
+        cancellation.checkpoint("vector")
     if embedding is None or not embedding.enabled or scope in {"archive", "raw"}:
         return {}, []
     try:
@@ -1456,7 +1454,9 @@ def _vector_hits(
             return {}, ["model_missing"]
         provider = LocalBgeM3Provider(settings.model_path, device=settings.device, batch_size=settings.batch_size, max_sequence_length=settings.max_sequence_length)
         store.validate_provider(provider.identity(), include_raw_sources=False)
-        results = store.search(provider.embed_query(question), allowed_paths=allowed_paths, limit=settings.candidate_limit)
+        results = store.search(provider.embed_query(question, context=cancellation), allowed_paths=allowed_paths, limit=settings.candidate_limit)
+        if cancellation is not None:
+            cancellation.checkpoint("vector")
         return {
             result.passage_id: (result.rank, result.score)
             for result in results
@@ -1885,7 +1885,10 @@ def _run_entity_batch(
     retrieval_mode: str,
     hard_budget_tokens: int,
     confirmation_token: str | None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> dict[str, Any]:
+    if cancellation is not None:
+        cancellation.checkpoint("fallback")
     policy = AdaptiveCandidateScorePolicy()
     fingerprint = _batch_fingerprint(
         base_question,
@@ -1945,26 +1948,22 @@ def _run_entity_batch(
     specs = _entity_store_specs(root, primary_store, effective_scope)
     results: list[dict[str, Any]] = []
     counter_totals = {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0, "queries": len(current_entities)}
-    with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, max(len(current_entities), 1))) as executor:
-        futures = [
-            executor.submit(
-                _run_one_entity_batch_query,
-                root,
-                entity,
-                entities,
-                base_question,
-                store_specs=specs,
-                project=project,
-                filters=filters,
-                policy=policy,
-            )
-            for entity in current_entities
-        ]
-        for future in futures:
-            result, counters = future.result()
-            results.append(result)
-            for key, value in counters.items():
-                counter_totals[key] += value
+    for index, entity in enumerate(current_entities):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=1, stage="fallback")
+        result, counters = _run_one_entity_batch_query(
+            root,
+            entity,
+            entities,
+            base_question,
+            store_specs=specs,
+            project=project,
+            filters=filters,
+            policy=policy,
+        )
+        results.append(result)
+        for key, value in counters.items():
+            counter_totals[key] += value
     path_counts: dict[str, int] = {}
     for result in results:
         for candidate in [result.get("primary"), *result.get("alternatives", [])]:
@@ -2066,6 +2065,8 @@ def run_query_v2(
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid",
     expansion_terms: dict[str, list[str]] | None = None,
     confirmation_token: str | None = None,
+    cancellation: QueryCancellationContext | None = None,
+    telemetry_recorder: QueryTelemetry | None = None,
 ) -> dict[str, Any]:
     """Read existing projections and return one canonical result payload.
 
@@ -2074,6 +2075,8 @@ def run_query_v2(
     legacy adapter are intentionally not part of the response contract.
     """
     started = time.perf_counter()
+    cancellation = cancellation or QueryCancellationContext.unbounded()
+    cancellation.checkpoint("status")
     if not question.strip():
         return {"ok": False, "code": "missing_question", "error": "question is required"}
     if not 1 <= top_k <= 40:
@@ -2112,9 +2115,11 @@ def run_query_v2(
             "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [*index_warnings, str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}},
         }
 
+    cancellation.checkpoint("metadata")
     metadata: dict[str, dict[str, Any]] = {}
     provenance: dict[str, dict[str, str]] = {}
-    for item in store.page_candidates():
+    for index, item in enumerate(store.page_candidates()):
+        cancellation.checkpoint_batch(index, every=16, stage="metadata")
         frontmatter = item.get("frontmatter")
         path = str(item["path"])
         metadata[path] = dict(frontmatter) if isinstance(frontmatter, dict) else dict()
@@ -2124,6 +2129,7 @@ def run_query_v2(
         }
     stage_lexical_mode = "strict"
     qualified_fts_hits = 0
+    cancellation.checkpoint("fts")
     try:
         fts, stage_lexical_mode, qualified_fts_hits = (
             _stage_one_fts_hits(
@@ -2140,7 +2146,8 @@ def run_query_v2(
         fts = []
         status = {**status, "code": exc.code}
     allowed_vector_paths: set[str] = set()
-    for item in store.page_candidates():
+    for index, item in enumerate(store.page_candidates()):
+        cancellation.checkpoint_batch(index, every=16, stage="metadata")
         frontmatter = item.get("frontmatter")
         if not isinstance(frontmatter, dict):
             frontmatter = {}
@@ -2160,13 +2167,15 @@ def run_query_v2(
         ):
             continue
         allowed_vector_paths.add(str(item["path"]))
+    cancellation.checkpoint("vector")
     vector, vector_warnings = (
-        _vector_hits(root, question, embedding, scope=effective_scope, allowed_paths=allowed_vector_paths)
+        _vector_hits(root, question, embedding, scope=effective_scope, allowed_paths=allowed_vector_paths, cancellation=cancellation)
         if retrieval_mode != "lexical" and effective_scope != "raw"
         else ({}, [])
     )
     ranked: dict[str, dict[str, Any]] = {}
     for rank, hit in enumerate(fts, 1):
+        cancellation.checkpoint_batch(rank - 1, every=16, stage="fts")
         if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
         item = ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": rank, "title_rank": None, "vector_rank": None, "vector_score": 0.0})
@@ -2174,7 +2183,8 @@ def run_query_v2(
     # A vector hit is identified by passage ID.  Load its existing retrieval
     # projection rather than scanning Markdown, so vector-only recall remains
     # available without adding query-time corpus reads.
-    for hit in store.load_passages(vector):
+    for index, hit in enumerate(store.load_passages(vector)):
+        cancellation.checkpoint_batch(index, every=16, stage="vector")
         if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
         ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0})
@@ -2184,14 +2194,17 @@ def run_query_v2(
     has_primary_recall = bool(ranked)
     expansion_suggestions: list[str] = []
     for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters), 1):
+        cancellation.checkpoint_batch(rank - 1, every=16, stage="vector")
         ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": rank, "vector_rank": None, "vector_score": 0.0})
         ranked[hit.passage_id]["title_rank"] = rank
-    for item in ranked.values():
+    for index, item in enumerate(ranked.values()):
+        cancellation.checkpoint_batch(index, every=16, stage="vector")
         vector_data = vector.get(item["hit"].passage_id)
         if vector_data:
             item["vector_rank"], item["vector_score"] = vector_data
     scored: list[dict[str, Any]] = []
-    for item in ranked.values():
+    for index, item in enumerate(ranked.values()):
+        cancellation.checkpoint_batch(index, every=16, stage="graph")
         hit = item["hit"]
         rrf = (
             (1 / (RRF_K + item["fts_rank"]) if item["fts_rank"] else 0.0)
@@ -2207,6 +2220,7 @@ def run_query_v2(
             12,
         )
         scored.append({**item, "score": total, "rrf": rrf, "exact": bool(exact), "graph_score": 0.0, "graph_reasons": []})
+    cancellation.checkpoint("graph")
     graph_candidates, graph_passages = (
         _graph_expand(
             root, store, metadata, scope=effective_scope, project=project, filters=filters,
@@ -2216,12 +2230,14 @@ def run_query_v2(
         else ({}, [])
     )
     existing_by_path = {item["hit"].page_path: item for item in scored}
-    for path, candidate in graph_candidates.items():
+    for index, (path, candidate) in enumerate(graph_candidates.items()):
+        cancellation.checkpoint_batch(index, every=16, stage="graph")
         if path in existing_by_path:
             existing_by_path[path]["graph_score"] = candidate.graph_score
             existing_by_path[path]["graph_reasons"] = list(candidate.rank_breakdown.graph_reasons)
             existing_by_path[path]["score"] = round(existing_by_path[path]["score"] + candidate.graph_score, 12)
-    for hit in graph_passages:
+    for index, hit in enumerate(graph_passages):
+        cancellation.checkpoint_batch(index, every=16, stage="graph")
         candidate = graph_candidates[hit.page_path]
         scored.append({"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0, "rrf": 0.0, "exact": False, "graph_score": candidate.graph_score, "graph_reasons": list(candidate.rank_breakdown.graph_reasons), "score": candidate.total_score})
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
@@ -2231,7 +2247,8 @@ def run_query_v2(
     # regardless of which sections carried the highest BM25 scores.
     selected: list[dict[str, Any]] = []
     selected_paths: set[str] = set()
-    for item in scored:
+    for index, item in enumerate(scored):
+        cancellation.checkpoint_batch(index, every=16, stage="context")
         page_path = item["hit"].page_path
         if page_path not in selected_paths:
             selected.append(item)
@@ -2245,6 +2262,7 @@ def run_query_v2(
         pool_by_page.setdefault(page_path, []).append(item)
         stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": "active"})
         stats["max"] = max(stats["max"], item["hit"].score)
+    cancellation.checkpoint("context")
     context_items = _build_page_ordered_context(selected, store, hit_stats=hit_stats, pool_by_page=pool_by_page)
     # A true Wiki zero-result query has two sequential recovery stages: active
     # Wiki relaxed recovery, followed only when that stage is empty by the
@@ -2269,7 +2287,9 @@ def run_query_v2(
         else []
     )
 
+    cancellation.checkpoint("fallback")
     if uncovered_latin_terms:
+        cancellation.checkpoint("fallback")
         raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, _raw_lexical_mode = _raw_recovery_candidates(
             root,
             question,
@@ -2296,6 +2316,7 @@ def run_query_v2(
                 store_key = "raw" if page_path.startswith("raw/") else "active"
                 stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": store_key})
                 stats["max"] = max(stats["max"], item["score"])
+            cancellation.checkpoint("context")
             context_items = _build_page_ordered_context(
                 selected,
                 store,
@@ -2305,6 +2326,7 @@ def run_query_v2(
             )
             coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
     if not has_primary_recall and effective_scope in {"knowledge", "all"}:
+        cancellation.checkpoint("fallback")
         # Wiki is the primary corpus.  Try its bounded relaxed projection
         # before opening the independent raw store; a successful Wiki answer
         # must not be mixed with raw evidence or even query the raw DB.
@@ -2315,6 +2337,7 @@ def run_query_v2(
             expansion_terms,
             project,
         )
+        cancellation.checkpoint("fallback")
         wiki_relaxed_items, relaxed_fts_hits, relaxed_warning = _relaxed_recovery_items(
             store,
             metadata,
@@ -2379,6 +2402,7 @@ def run_query_v2(
             if effective_scope == "all":
                 uncovered_latin_terms = _uncovered_latin_terms(question, selected)
                 if uncovered_latin_terms:
+                    cancellation.checkpoint("fallback")
                     raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, _raw_lexical_mode = _raw_recovery_candidates(
                         root,
                         question,
@@ -2405,6 +2429,7 @@ def run_query_v2(
                             store_key = "raw" if page_path.startswith("raw/") else "active"
                             stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": store_key})
                             stats["max"] = max(stats["max"], item["score"])
+                        cancellation.checkpoint("context")
                         context_items = _build_page_ordered_context(
                             selected,
                             store,
@@ -2415,6 +2440,7 @@ def run_query_v2(
                         coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
 
     if not has_primary_recall and not wiki_relaxed_answered and effective_scope in {"knowledge", "all"}:
+        cancellation.checkpoint("fallback")
         raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, raw_lexical_mode = _raw_recovery_candidates(
             root,
             question,
@@ -2442,6 +2468,7 @@ def run_query_v2(
                 pool_by_page.setdefault(page_path, []).append(item)
                 stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": "raw"})
                 stats["max"] = max(stats["max"], item["hit"].score)
+            cancellation.checkpoint("context")
             context_items = _build_page_ordered_context(
                 selected, store, raw_store=raw_store, hit_stats=hit_stats, pool_by_page=pool_by_page
             )
@@ -2454,6 +2481,7 @@ def run_query_v2(
             elif raw_lexical_mode == "relaxed":
                 lexical_mode = "relaxed"
             raw_fallback = bool(selected)
+    cancellation.checkpoint("graph")
     discovery_requested = _discovery_requested(question)
     discovery_source_items: list[dict[str, Any]] = []
     discovery, discovery_entities = _discover_enumerated_entities(selected, context_items)
@@ -2513,6 +2541,7 @@ def run_query_v2(
         "entities": [],
     }
     if discovery_entities:
+        cancellation.checkpoint("fallback")
         batch_payload = _run_entity_batch(
             root,
             discovery_entities,
@@ -2524,6 +2553,7 @@ def run_query_v2(
             retrieval_mode=retrieval_mode,
             hard_budget_tokens=hard_budget_tokens,
             confirmation_token=confirmation_token,
+            cancellation=cancellation,
         )
     public_selected = selected[:top_k]
     additional_selected = selected[top_k:]
@@ -2544,6 +2574,7 @@ def run_query_v2(
         for item in public_context_items
     ]
     k_budget = min(hard_budget_tokens, 400 * top_k)
+    cancellation.checkpoint("context")
     packed: dict[str, Any] = (
         pack_context(passages, hard_limit=hard_budget_tokens, intent=intent, budget_scale=k_budget)
         if include_context_pack
@@ -2658,9 +2689,20 @@ def run_query_v2(
             }
             for item in selected
         ]
+    cancellation.checkpoint("telemetry")
     elapsed = (time.perf_counter() - started) * 1_000
     if telemetry is None or telemetry.enabled:
-        QueryTelemetry(root).record(question=question, scope=scope, project=project, passage_ids=[item["hit"].passage_id for item in selected], fallback_level=str(fallback_payload["level"]), token_count=int(packed["budget"]["used"]), latency_ms=elapsed, retention_days=(telemetry.retention_days if telemetry else 90))
+        (telemetry_recorder or QueryTelemetry(root)).finish_once(
+            question=question,
+            scope=scope,
+            project=project,
+            passage_ids=[item["hit"].passage_id for item in selected],
+            fallback_level=str(fallback_payload["level"]),
+            token_count=int(packed["budget"]["used"]),
+            latency_ms=elapsed,
+            retention_days=(telemetry.retention_days if telemetry else 90),
+            outcome="completed",
+        )
     response = {
         "ok": True,
         "question": question,

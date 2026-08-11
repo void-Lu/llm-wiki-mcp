@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from common.redaction import redact_sensitive_text
+from common.privacy_policy import LocatorError, normalize_vault_relative
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_limits import (
     HARD_PAGE_BYTES,
@@ -32,6 +33,8 @@ def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, o
 
     root = Path(vault_root)
     log_path = root / "wiki" / "log.md"
+    if entry.operation_id and _operation_logged(root, entry.operation_id):
+        return {"ok": True, "path": "wiki/log.md", "deduplicated": True}
     timestamp = entry.timestamp or _now()
     block = _render_log_entry(entry, timestamp)
     preamble, blocks = _read_log_blocks(log_path, "# Log")
@@ -79,15 +82,20 @@ def _render_log_entry(entry: WikiLogEntry, timestamp: str) -> str:
     title = redact_sensitive_text(entry.title)
     project = redact_sensitive_text(entry.project)
     status = redact_sensitive_text(entry.status)
-    return "\n".join([
+    lines = [
         f"## [{timestamp}] {operation} | {title}",
         f"- project: {project}",
         f"- status: {status}",
+    ]
+    if entry.operation_id:
+        lines.append(f"- operation_id: {entry.operation_id}")
+    lines.extend([
         "- paths:",
-        *_indented_items(entry.paths),
+        *_indented_items(entry.paths, field="path"),
         "- sources:",
-        *_indented_items(entry.sources),
+        *_indented_items(entry.sources, field="source"),
     ])
+    return "\n".join(lines)
 
 
 def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: str) -> str:
@@ -95,16 +103,30 @@ def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: st
     title = _bounded_text(redact_sensitive_text(entry.title), 1_024)
     project = _bounded_text(redact_sensitive_text(entry.project), 1_024)
     status = _bounded_text(redact_sensitive_text(entry.status), 1_024)
-    return "\n".join([
+    lines = [
         f"## [{timestamp}] {operation} | {title}",
         f"- project: {project}",
         f"- status: {status} (details archived)",
         f"- detail: [[{archive_rel}|Full record]]",
+    ]
+    if entry.operation_id:
+        lines.append(f"- operation_id: {entry.operation_id}")
+    lines.extend([
         "- paths:",
         f"  - {len(entry.paths)} paths archived",
         "- sources:",
         f"  - {len(entry.sources)} sources archived",
     ])
+    return "\n".join(lines)
+
+
+def _operation_logged(root: Path, operation_id: str) -> bool:
+    marker = f"- operation_id: {operation_id}"
+    candidates = [root / "wiki" / "log.md"]
+    archive_dir = root / ARCHIVES_LOG_DIR
+    if archive_dir.exists():
+        candidates.extend(archive_dir.rglob("*.md"))
+    return any(path.is_file() and marker in path.read_text(encoding="utf-8") for path in candidates)
 
 
 def _render_archive_detail(block: str) -> str:
@@ -114,10 +136,19 @@ def _render_archive_detail(block: str) -> str:
     )
 
 
-def _indented_items(items: list[str]) -> list[str]:
+def _indented_items(items: list[str], *, field: str) -> list[str]:
     if not items:
         return ["  - none"]
+    if field in {"path", "source"}:
+        return [f"  - {_safe_log_locator(item)}" for item in items]
     return [f"  - {redact_sensitive_text(item)}" for item in items]
+
+
+def _safe_log_locator(value: str) -> str:
+    try:
+        return normalize_vault_relative(value)
+    except (LocatorError, TypeError):
+        return "[UNSAFE_LOCATOR]"
 
 
 def _read_log_blocks(log_path: Path, default_preamble: str) -> tuple[str, list[str]]:

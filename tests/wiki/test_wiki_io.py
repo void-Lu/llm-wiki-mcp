@@ -42,7 +42,7 @@ def test_write_wiki_page_redacts_title_and_frontmatter(tmp_path: Path):
         root,
         WikiPage(
             relative_path=Path("wiki/concepts/security/secret.md"),
-            frontmatter={"generated": True, "summary": "Contact a@example.com", "sources": ["token=abc1234567890"]},
+            frontmatter={"generated": True, "summary": "Contact a@example.com", "sources": ["raw/sources/reference.txt"]},
             title="Call 13800138000",
             body="safe body",
         ),
@@ -51,10 +51,28 @@ def test_write_wiki_page_redacts_title_and_frontmatter(tmp_path: Path):
     text = (root / "wiki/concepts/security/secret.md").read_text(encoding="utf-8")
     assert "13800138000" not in text
     assert "a@example.com" not in text
-    assert "token=abc1234567890" not in text
+    assert "raw/sources/reference.txt" in text
     assert "[REDACTED_PHONE]" in text
     assert "[REDACTED_EMAIL]" in text
-    assert "[REDACTED_SECRET]" in text
+
+
+def test_write_wiki_page_rejects_sensitive_locator_without_rewriting_it(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    with pytest.raises(WikiWriteError) as exc_info:
+        write_wiki_page(
+            root,
+            WikiPage(
+                relative_path=Path("wiki/concepts/security/secret.md"),
+                frontmatter={"generated": True, "sources": ["token=abc1234567890"]},
+                title="Safe title",
+                body="safe body",
+            ),
+        )
+
+    assert exc_info.value.code == "sensitive_locator"
+    assert not (root / "wiki/concepts/security/secret.md").exists()
 
 
 def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):

@@ -148,18 +148,20 @@ LLM_WIKI_VAULT_ROOT = "$LLM_WIKI_VAULT_ROOT"
 
 ## 工具
 
-默认 core profile 只注册以下 8 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。`wiki_codegraph_import` 使用 `workspace_root` 指定 CodeGraph 工作区，未传时读取 `LLM_WIKI_WORKSPACE_ROOT`。
+默认 core profile 精确注册以下 10 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。`wiki_codegraph_import` 使用 `workspace_root` 指定 CodeGraph 工作区，未传时读取 `LLM_WIKI_WORKSPACE_ROOT`。
 
-| 工具                      | 说明                                                                                                                                                |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wiki_status`           | 聚合逻辑 vault、检索配置、active/archive index、generation queue、版本与运行身份；不回显绝对路径、模型路径、凭据或脱敏规则正文。`detail=summary     |
-| `wiki_ingest`           | UTF-8 Markdown/纯文本写入`raw/sources/` 并同步 raw FTS；PDF、Office、媒体、脚本等原文件写入 `raw/assets/`，只保存字节/hash，不建立语义索引。    |
-| `wiki_codegraph_import` | 固定执行`sync`：读取当前工作目录 `.codegraph/codegraph.db`，更新最新 CodeGraph raw 快照、项目 architecture 页面和 active retrieval projection。 |
-| `wiki_write_note`       | 仅创建人工知识页，已有目标不会被覆盖。                                                                                                              |
-| `wiki_update`           | 对既有页面执行 `preview                                                                                                                             |
-| `wiki_query`            | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；模型、预算、索引和隐私策略全部来自启动时配置快照。                         |
-| `wiki_archive`          | 归档生命周期的 `plan                                                                                                                                |
-| `wiki_restore`          | 不可变归档包的 `plan                                                                                                                                |
+| 工具 | 说明 |
+| --- | --- |
+| `wiki_status` | 返回 logical vault、配置来源、索引和运行状态摘要；不回显绝对路径、模型路径、凭据或脱敏规则正文。 |
+| `wiki_list` | 只读 metadata catalog；使用 `store_scope=active\|raw\|archive`、page size 和 opaque cursor，不读取正文或 passages。 |
+| `wiki_get` | 只读精确读取；required 输入是 opaque `content_ref`，正文默认关闭，显式 body budget 受硬上限约束。 |
+| `wiki_ingest` | UTF-8 Markdown/纯文本写入 `raw/sources/` 并同步 raw FTS；二进制只保存字节/hash，不建立语义索引。 |
+| `wiki_codegraph_import` | 固定执行 `sync`：读取当前工作目录 `.codegraph/codegraph.db`，更新 CodeGraph raw 快照和 architecture 页面。 |
+| `wiki_write_note` | 仅创建人工知识页，已有目标不会被覆盖。 |
+| `wiki_update` | 对既有页面执行 `preview/apply`，正文 hash、结构 plan 和 CAS 都由服务端校验。 |
+| `wiki_query` | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；检索策略来自启动时配置快照。 |
+| `wiki_archive` | 归档生命周期的 `plan/apply`。 |
+| `wiki_restore` | 不可变归档包的 `plan/apply`。 |
 
 不再注册 `wiki_generation` worker 工具。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 

@@ -70,8 +70,7 @@ def test_append_log_entry_redacts_persisted_strings(tmp_path: Path):
     assert "api_abc1234567890" not in text
     assert "13800138000" not in text
     assert "[REDACTED_EMAIL]" in text
-    assert "[REDACTED_SECRET]" in text
-    assert "[REDACTED_PHONE]" in text
+    assert "[UNSAFE_LOCATOR]" in text
 
 
 def test_read_recent_log_entries_returns_latest_headings(tmp_path: Path):
@@ -172,11 +171,15 @@ def test_append_log_entry_archives_large_single_entry_and_keeps_summary_link(tmp
     )
 
     assert result["ok"] is True
-    assert result["archived"]
+    archived = result["archived"]
+    assert isinstance(archived, list)
+    assert archived
+    first_archived = archived[0]
+    assert isinstance(first_archived, str)
     active = (root / "wiki/log.md").read_text(encoding="utf-8")
-    detail = root / result["archived"][0]
+    detail = root / first_archived
     assert "details archived" in active
-    assert f"[[{result['archived'][0]}|Full record]]" in active
+    assert f"[[{first_archived}|Full record]]" in active
     assert "wiki/archives" not in active
     assert detail.exists()
     assert utf8_size(active) <= TARGET_PAGE_BYTES
@@ -223,14 +226,19 @@ def test_append_log_entry_splits_oversized_record_into_navigable_volumes(tmp_pat
         ),
     )
 
+    assert isinstance(result, dict)
     assert result["ok"] is True
-    archived = [root / path for path in result["archived"]]
+    archived_value = result["archived"]
+    assert isinstance(archived_value, list)
+    archived_paths = [path for path in archived_value if isinstance(path, str)]
+    assert len(archived_paths) == len(archived_value)
+    archived = [root / path for path in archived_paths]
     assert len(archived) >= 2
     assert all(path.is_file() for path in archived)
     assert all(utf8_size(path.read_text(encoding="utf-8")) <= min(TARGET_PAGE_BYTES, HARD_PAGE_BYTES) for path in archived)
 
     active = (root / "wiki/log.md").read_text(encoding="utf-8")
-    assert f"[[{result['archived'][0]}|Full record]]" in active
+    assert f"[[{archived_paths[0]}|Full record]]" in active
     archive_index = root / "archives/log/index.md"
     index_text = archive_index.read_text(encoding="utf-8")
     for number, path in enumerate(archived):

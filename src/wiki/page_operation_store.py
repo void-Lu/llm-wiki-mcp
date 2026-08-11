@@ -1,0 +1,333 @@
+"""Independent SQLite owner for page operations and projection stages."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+import json
+from pathlib import Path
+import secrets
+import sqlite3
+from typing import Any, Iterator, Literal, Mapping, overload
+
+from common.privacy_policy import LocatorError, normalize_vault_relative
+
+
+SCHEMA_VERSION = 1
+PAGE_STAGES = ("dependencies", "retrieval", "navigation", "overview", "audit_log")
+_OPERATION_STATES = {"prepared", "page_committed", "repair_pending", "completed", "failed_precommit", "conflict"}
+
+
+class PageOperationError(ValueError):
+    """A stable page-state or operation-journal failure."""
+
+    def __init__(self, code: str, message: str = "page operation state is unavailable") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class PageOperation:
+    operation_id: str
+    request_key: str
+    operation_kind: str
+    page_path: str
+    base_hash: str | None
+    intended_hash: str
+    state: str
+    created_at: str
+    updated_at: str
+    error_code: str | None = None
+    stages: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "operation_id": self.operation_id,
+            "request_key": self.request_key,
+            "operation_kind": self.operation_kind,
+            "page_path": self.page_path,
+            "base_hash": self.base_hash,
+            "intended_hash": self.intended_hash,
+            "state": self.state,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "error_code": self.error_code,
+            "stages": {key: dict(value) for key, value in self.stages.items()},
+        }
+
+
+class PageOperationStore:
+    """Own ``.llm-wiki/page-state.sqlite3`` and nothing from archive state."""
+
+    def __init__(self, vault_root: str | Path, *, busy_timeout_ms: int = 5000):
+        self.root = Path(vault_root).expanduser().resolve()
+        self.path = self.root / ".llm-wiki" / "page-state.sqlite3"
+        self.busy_timeout_ms = busy_timeout_ms
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        try:
+            connection = sqlite3.connect(self.path, timeout=self.busy_timeout_ms / 1000)
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout={int(self.busy_timeout_ms)}")
+        except sqlite3.Error as exc:
+            raise PageOperationError("page_state_unavailable") from exc
+        try:
+            yield connection
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.commit()
+            except sqlite3.OperationalError as exc:
+                connection.rollback()
+                raise PageOperationError("page_state_busy") from exc
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _initialize(self) -> None:
+        try:
+            with self._connection() as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS page_state_meta(
+                        schema_version INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS page_operations(
+                        operation_id TEXT PRIMARY KEY,
+                        request_key TEXT NOT NULL UNIQUE,
+                        operation_kind TEXT NOT NULL,
+                        page_path TEXT NOT NULL,
+                        base_hash TEXT,
+                        intended_hash TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        error_code TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS page_operation_stages(
+                        operation_id TEXT NOT NULL REFERENCES page_operations(operation_id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        code TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        result_json TEXT,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(operation_id, stage)
+                    );
+                    CREATE TABLE IF NOT EXISTS update_plans(
+                        plan_id TEXT PRIMARY KEY,
+                        page_path TEXT NOT NULL,
+                        base_hash TEXT NOT NULL,
+                        intent_hash TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        operation_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        consumed_hash TEXT
+                    );
+                    """
+                )
+                row = connection.execute("SELECT schema_version FROM page_state_meta LIMIT 1").fetchone()
+                if row is None:
+                    connection.execute("INSERT INTO page_state_meta(schema_version) VALUES(?)", (SCHEMA_VERSION,))
+                elif int(row["schema_version"]) != SCHEMA_VERSION:
+                    raise PageOperationError("page_state_incompatible")
+                connection.commit()
+        except PageOperationError:
+            raise
+        except sqlite3.DatabaseError as exc:
+            raise PageOperationError("page_state_incompatible") from exc
+
+    def create_operation(
+        self,
+        *,
+        request_key: str,
+        operation_kind: str,
+        page_path: str,
+        base_hash: str | None,
+        intended_hash: str,
+        operation_id: str | None = None,
+    ) -> PageOperation:
+        normalized_path = _normalize_page_path(page_path)
+        if not request_key or not intended_hash:
+            raise PageOperationError("operation_invalid")
+        now = _now()
+        operation_id = operation_id or secrets.token_hex(16)
+        with self._transaction() as connection:
+            existing = connection.execute("SELECT * FROM page_operations WHERE request_key=?", (request_key,)).fetchone()
+            if existing is not None:
+                if any(
+                    existing[field] != value
+                    for field, value in {
+                        "operation_kind": operation_kind,
+                        "page_path": normalized_path,
+                        "base_hash": base_hash,
+                        "intended_hash": intended_hash,
+                    }.items()
+                ):
+                    raise PageOperationError("operation_request_conflict")
+                return self._load_with_connection(connection, str(existing["operation_id"]))
+            try:
+                connection.execute(
+                    "INSERT INTO page_operations(operation_id,request_key,operation_kind,page_path,base_hash,intended_hash,state,created_at,updated_at,error_code) VALUES(?,?,?,?,?,?,?,?,?,NULL)",
+                    (operation_id, request_key, operation_kind, normalized_path, base_hash, intended_hash, "prepared", now, now),
+                )
+                connection.executemany(
+                    "INSERT INTO page_operation_stages(operation_id,stage,state,code,attempts,result_json,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    [(operation_id, stage, "pending", None, 0, None, now) for stage in PAGE_STAGES],
+                )
+            except sqlite3.IntegrityError as exc:
+                raise PageOperationError("operation_request_conflict") from exc
+            return self._load_with_connection(connection, operation_id)
+
+    def get_operation(self, operation_id: str) -> PageOperation | None:
+        with self._connection() as connection:
+            return self._load_with_connection(connection, operation_id, missing_ok=True)
+
+    def get_operation_by_request_key(self, request_key: str) -> PageOperation | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT operation_id FROM page_operations WHERE request_key=?", (request_key,)).fetchone()
+            return None if row is None else self._load_with_connection(connection, str(row["operation_id"]))
+
+    def set_operation_state(self, operation_id: str, state: str, *, error_code: str | None = None) -> PageOperation:
+        if state not in _OPERATION_STATES:
+            raise PageOperationError("operation_state_invalid")
+        with self._transaction() as connection:
+            updated = connection.execute(
+                "UPDATE page_operations SET state=?,error_code=?,updated_at=? WHERE operation_id=?",
+                (state, error_code, _now(), operation_id),
+            ).rowcount
+            if updated != 1:
+                raise PageOperationError("operation_not_found")
+            return self._load_with_connection(connection, operation_id)
+
+    def record_stage(
+        self,
+        operation_id: str,
+        stage: str,
+        state: str,
+        *,
+        code: str | None = None,
+        result: Mapping[str, Any] | None = None,
+    ) -> PageOperation:
+        if stage not in PAGE_STAGES:
+            raise PageOperationError("stage_invalid")
+        if state not in {"pending", "running", "succeeded", "failed"}:
+            raise PageOperationError("stage_state_invalid")
+        safe_result = _safe_stage_result(result)
+        with self._transaction() as connection:
+            row = connection.execute("SELECT attempts FROM page_operation_stages WHERE operation_id=? AND stage=?", (operation_id, stage)).fetchone()
+            if row is None:
+                raise PageOperationError("operation_not_found")
+            attempts = int(row["attempts"]) + (1 if state in {"running", "succeeded", "failed"} else 0)
+            connection.execute(
+                "UPDATE page_operation_stages SET state=?,code=?,attempts=?,result_json=?,updated_at=? WHERE operation_id=? AND stage=?",
+                (state, code, attempts, json.dumps(safe_result, ensure_ascii=False, sort_keys=True) if safe_result else None, _now(), operation_id, stage),
+            )
+            return self._load_with_connection(connection, operation_id)
+
+    def pending_operations(self) -> list[PageOperation]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT operation_id FROM page_operations WHERE state IN ('prepared','page_committed','repair_pending') ORDER BY created_at"
+            ).fetchall()
+            return [self._load_with_connection(connection, str(row["operation_id"])) for row in rows]
+
+    @overload
+    def _load_with_connection(
+        self, connection: sqlite3.Connection, operation_id: str, *, missing_ok: Literal[False] = False
+    ) -> PageOperation: ...
+
+    @overload
+    def _load_with_connection(
+        self, connection: sqlite3.Connection, operation_id: str, *, missing_ok: Literal[True]
+    ) -> PageOperation | None: ...
+
+    def _load_with_connection(
+        self, connection: sqlite3.Connection, operation_id: str, *, missing_ok: bool = False
+    ) -> PageOperation | None:
+        row = connection.execute("SELECT * FROM page_operations WHERE operation_id=?", (operation_id,)).fetchone()
+        if row is None:
+            if missing_ok:
+                return None
+            raise PageOperationError("operation_not_found")
+        stage_rows = connection.execute(
+            "SELECT stage,state,code,attempts,result_json,updated_at FROM page_operation_stages WHERE operation_id=? ORDER BY stage",
+            (operation_id,),
+        ).fetchall()
+        stages: dict[str, dict[str, Any]] = {}
+        for stage in stage_rows:
+            raw_result = stage["result_json"]
+            try:
+                result = json.loads(raw_result) if raw_result else {}
+            except (TypeError, json.JSONDecodeError):
+                result = {}
+            stages[str(stage["stage"])] = {
+                "state": str(stage["state"]),
+                "code": stage["code"],
+                "attempts": int(stage["attempts"]),
+                "result": result,
+                "updated_at": str(stage["updated_at"]),
+            }
+        return PageOperation(
+            operation_id=str(row["operation_id"]),
+            request_key=str(row["request_key"]),
+            operation_kind=str(row["operation_kind"]),
+            page_path=str(row["page_path"]),
+            base_hash=str(row["base_hash"]) if row["base_hash"] is not None else None,
+            intended_hash=str(row["intended_hash"]),
+            state=str(row["state"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            error_code=str(row["error_code"]) if row["error_code"] is not None else None,
+            stages=stages,
+        )
+
+    # The update-plan owner shares this database but not archive state.
+    def plan_connection(self) -> Any:
+        return self._transaction()
+
+
+def _normalize_page_path(value: str) -> str:
+    try:
+        return normalize_vault_relative(value.replace("\\", "/"))
+    except (AttributeError, LocatorError) as exc:
+        raise PageOperationError("path_escape") from exc
+
+
+def _safe_stage_result(result: Mapping[str, Any] | None) -> dict[str, object]:
+    if not isinstance(result, Mapping):
+        return {}
+    safe: dict[str, object] = {}
+    for key in ("ok", "state", "code", "repair_action", "deduplicated"):
+        value = result.get(key)
+        if isinstance(value, (str, bool, int, float)) and value is not None:
+            safe[key] = value
+    return safe
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+__all__ = [
+    "PAGE_STAGES",
+    "PageOperation",
+    "PageOperationError",
+    "PageOperationStore",
+    "SCHEMA_VERSION",
+]

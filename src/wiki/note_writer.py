@@ -3,20 +3,21 @@ from __future__ import annotations
 import re
 import string
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from common.redaction import count_redactions, redact_sensitive_text
-from wiki.wiki_index import refresh_indexes
-from wiki.wiki_io import strip_leading_h1
-from wiki.wiki_log import append_log_entry
-from wiki.wiki_models import WikiLogEntry
-from wiki.wiki_overview import refresh_overview
+from common.redaction import count_redactions
+from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
+from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_operation_store import PageOperationError
+from wiki.page_repair import PageRepairService
+from wiki.wiki_io import WikiWriteError, prepare_wiki_page
+from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
-from wiki.reference_section import build_reference_section, skipped_warnings, validate_raw_sources
+from wiki.reference_section import build_reference_section, skipped_warnings
+from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
 
 NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge", "entity", "chat"}
 PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
@@ -167,13 +168,14 @@ def save_obsidian_note(
     if vault_root is None or not str(vault_root).strip():
         return _error("missing_vault_root", "vault_root is required")
     root = Path(vault_root).expanduser().resolve()
-    create_wiki_root(root)
+    policy = PrivacyPolicy()
 
     if note_type not in NOTE_TYPES:
         return _error("invalid_note_type", f"invalid note_type: {note_type}")
     if note_type == "chat":
         if chat_derived:
             return _error("invalid_chat_derived", "chat sources cannot be chat-derived pages")
+        create_wiki_root(root)
         from wiki.chat_memory import ChatMemoryError, ChatMemoryService
 
         try:
@@ -194,16 +196,42 @@ def save_obsidian_note(
         if not validated["ok"]:
             return _error(str(validated["code"]), "chat_sources must reference existing fixed chat revisions")
         provenance = list(validated["sources"])
-    name, name_error = _filename(title, filename)
+
+    resolved_sources: list[ResolvedRawSource] = []
+    provenance_resolver: SourceProvenanceResolver | None = None
+    if chat_derived:
+        source_values: object = [item["path"] for item in provenance]
+    elif sources is not None:
+        source_values = sources
+    else:
+        source_values = None
+    if source_values is not None:
+        provenance_resolver = SourceProvenanceResolver(root)
+        try:
+            resolved_sources = provenance_resolver.resolve_many(source_values)
+        except SourceProvenanceError as exc:
+            return _error(exc.code, "source provenance could not be verified")
+    source_paths = [item.relative_path for item in resolved_sources]
+    source_hashes = source_hash_map(resolved_sources)
+    safe_title = policy.redact_display_text(title)
+    name, name_error = _filename(safe_title, filename)
     if name_error is not None:
         return name_error
     assert name is not None
+    try:
+        name = normalize_vault_relative(name)
+    except LocatorError as exc:
+        return _error(exc.code, "filename violates the privacy policy")
 
     if note_type in PROJECT_NOTE_TYPES:
         project_value, project_error = _safe_segment(project, "missing_project", "project")
         if project_error is not None:
             return project_error
         assert project_value is not None
+        try:
+            project_value = normalize_vault_relative(project_value)
+        except LocatorError as exc:
+            return _error(exc.code, "project violates the privacy policy")
         if note_type == "spec":
             relative_path = Path("wiki") / "projects" / project_value / "specs" / name
         elif note_type == "plan":
@@ -220,6 +248,10 @@ def save_obsidian_note(
         if domain_error is not None:
             return domain_error
         assert domain_value is not None
+        try:
+            domain_value = normalize_vault_relative(domain_value)
+        except LocatorError as exc:
+            return _error(exc.code, "domain violates the privacy policy")
         domain_dir = root / "wiki" / ("entities" if note_type == "entity" else "concepts") / domain_value
         subdir_error = _known_or_existing(domain_value, DOMAINS, domain_dir)
         if subdir_error is not None:
@@ -233,49 +265,126 @@ def save_obsidian_note(
     if target.exists() and not overwrite:
         return _error("file_exists", "target note already exists")
 
-    redacted_content = redact_sensitive_text(content)
-    redacted_count = count_redactions(content, redacted_content)
+    redacted_content = policy.redact_display_text(content)
+    redacted_count = count_redactions(f"{title}\n{content}", f"{safe_title}\n{redacted_content}")
     redacted_content, normalized_wikilink_count = auto_normalize_wikilinks(redacted_content, root)
     related_pages_skipped: list[dict[str, str]] = []
     if related_pages is not None:
         redacted_content, related_pages_skipped = build_reference_section(root, redacted_content, related_pages, heading=related_pages_heading)
-    valid_sources: list[str] = []
     sources_skipped: list[dict[str, str]] = []
-    if sources is not None and not chat_derived:
-        valid_sources, sources_skipped = validate_raw_sources(root, sources)
-    frontmatter = _frontmatter(note_type, title, project, domain, related_script_types, related_objects, related_scripts, tags, zentao_urls, decision_status, status)
+    safe_tags = policy.redact_metadata(tags or [], field="tags")
+    safe_related_script_types = policy.redact_metadata(related_script_types or [], field="related_script_types")
+    safe_related_objects = policy.redact_metadata(related_objects or [], field="related_objects")
+    safe_related_scripts = policy.redact_metadata(related_scripts or [], field="related_scripts")
+    safe_zentao_urls = policy.redact_metadata(zentao_urls or [], field="zentao_urls")
+    frontmatter = _frontmatter(
+        note_type,
+        safe_title,
+        project,
+        domain,
+        safe_related_script_types if isinstance(safe_related_script_types, list) else [],
+        safe_related_objects if isinstance(safe_related_objects, list) else [],
+        safe_related_scripts if isinstance(safe_related_scripts, list) else [],
+        safe_tags if isinstance(safe_tags, list) else [],
+        safe_zentao_urls if isinstance(safe_zentao_urls, list) else [],
+        decision_status,
+        status,
+    )
     if chat_derived:
         frontmatter["chat_derived"] = True
         frontmatter["chat_sources"] = [
             {"source_id": item["source_id"], "revision": item["revision"], "redacted_hash": item["redacted_hash"]}
             for item in provenance
         ]
-        frontmatter["sources"] = [item["path"] for item in provenance]
+        frontmatter["sources"] = source_paths
+        frontmatter["source_hashes"] = source_hashes
     elif sources is not None:
-        frontmatter["sources"] = valid_sources
-    yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
-    note_text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{strip_leading_h1(redacted_content)}"
-
+        frontmatter["sources"] = source_paths
+        frontmatter["source_hashes"] = source_hashes
+    if provenance_resolver is not None:
+        try:
+            resolved_sources = provenance_resolver.verify(resolved_sources)
+        except SourceProvenanceError as exc:
+            return _error(exc.code, "source provenance could not be verified")
+        source_paths = [item.relative_path for item in resolved_sources]
+        source_hashes = source_hash_map(resolved_sources)
+        if chat_derived or sources is not None:
+            frontmatter["sources"] = source_paths
+            frontmatter["source_hashes"] = source_hashes
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(note_text, encoding="utf-8")
-        refresh_indexes(root)
-        refresh_overview(root)
-        append_log_entry(root, WikiLogEntry(operation="concept" if note_type == "knowledge" else "entity" if note_type == "entity" else "note", title=title, paths=[relative_path.as_posix()], sources=[item["path"] for item in provenance], project=project or "", status="ok"))
-    except OSError as exc:
-        return _error("write_failed", str(exc))
+        create_wiki_root(root)
+    except OSError:
+        return _error("write_failed", "wiki root could not be prepared")
+    try:
+        prepared = prepare_wiki_page(
+            root,
+            WikiPage(relative_path, frontmatter, safe_title, redacted_content),
+            overwrite_generated_only=False,
+        )
+    except WikiWriteError as exc:
+        return _error(exc.code, str(exc))
+    base_hash = sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+    intended_hash = sha256(prepared.text.encode("utf-8")).hexdigest()
+    coordinator = PageMutationCoordinator(root)
+    try:
+        operation = coordinator.prepare(
+            request_key=f"note:{relative_path.as_posix()}:{base_hash or 'missing'}:{intended_hash}",
+            operation_kind="update" if base_hash is not None else "create",
+            page_path=relative_path.as_posix(),
+            base_hash=base_hash,
+            intended_hash=intended_hash,
+        )
+    except PageOperationError as exc:
+        return _error(exc.code, "page operation could not be prepared")
+    if operation.state == "completed":
+        projection_result: dict[str, object] = {"ok": True, "state": "completed", "already_applied": True, "operation_id": operation.operation_id}
+    elif operation.state == "prepared":
+        commit_result = coordinator.commit(operation.operation_id, prepared.text, expected_hash=base_hash)
+        if not commit_result.get("ok"):
+            return dict(commit_result)
+        projection_result = coordinator.run_projections(operation.operation_id, PageRepairService(root).projections_for(operation))
+    elif operation.state in {"page_committed", "repair_pending"}:
+        projection_result = coordinator.run_projections(operation.operation_id, PageRepairService(root).projections_for(operation))
+    else:
+        return _error("operation_not_committed", "page operation is not ready for projection")
+    if not projection_result.get("ok"):
+        return dict(projection_result)
+    completed_operation = coordinator.store.get_operation(operation.operation_id)
+    stages = completed_operation.stages if completed_operation is not None else {}
+    dependency_projection = stages.get("dependencies", {}).get("result", {"ok": True, "state": "ready"})
+    result: dict[str, Any] = {
+        "ok": True,
+        "state": projection_result.get("state", "completed"),
+        "path": relative_path.as_posix(),
+        "created": True,
+        "operation_id": operation.operation_id,
+        "page_hash": intended_hash,
+        "redacted_count": prepared.redacted_count,
+        "indexed": None,
+        "wikilink_target": name[:-3] if name.endswith(".md") else name,
+        "normalized_wikilinks": normalized_wikilink_count,
+        "broken_wikilinks": validate_wikilinks(redacted_content, root),
+        "provenance_status": "verified" if resolved_sources else "provenance_unverified",
+        "freshness": "fresh" if resolved_sources else "review_required",
+        "dependency_projection": dependency_projection,
+    }
+    if projection_result.get("state") == "repair_pending":
+        result["repair_action"] = "repair_page_operation"
+        result["failed_stage"] = projection_result.get("failed_stage")
 
     broken_wikilinks = validate_wikilinks(redacted_content, root)
     result: dict[str, Any] = {
         "ok": True,
         "path": relative_path.as_posix(),
-        "absolute_path": str(target),
         "created": True,
         "redacted_count": redacted_count,
         "indexed": None,
         "wikilink_target": name[:-3] if name.endswith(".md") else name,
         "normalized_wikilinks": normalized_wikilink_count,
         "broken_wikilinks": broken_wikilinks,
+        "provenance_status": "verified" if resolved_sources else "provenance_unverified",
+        "freshness": "fresh" if resolved_sources else "review_required",
+        "dependency_projection": dependency_projection,
     }
     if related_pages is not None:
         result["related_pages_skipped"] = related_pages_skipped

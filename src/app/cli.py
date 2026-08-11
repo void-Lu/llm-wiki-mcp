@@ -21,6 +21,9 @@ from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError, l
 from wiki.wiki_query import DEFAULT_TOP_K, vector_index_records
 from archive.archive_migration import apply_legacy_migration, plan_legacy_migration
 from archive.archive_service import ArchiveService
+from wiki.page_repair import PageRepairService
+from wiki.privacy_audit import PrivacyAuditError, PrivacyAuditService
+from wiki.provenance_migration import ProvenanceMigrationError, ProvenanceMigrationService
 
 
 def _runtime_payload(runtime: RuntimeConfig) -> dict[str, Any]:
@@ -139,6 +142,35 @@ def _build_parser() -> argparse.ArgumentParser:
     archive_rebuild = archive_actions.add_parser("rebuild-index"); archive_rebuild.add_argument("--vault", required=True)
     archive_purge = archive_actions.add_parser("purge"); archive_purge.add_argument("--vault", required=True); archive_purge.add_argument("--archive-id", required=True); archive_purge.add_argument("--forget", action="store_true"); archive_purge.add_argument("--authorize", action="store_true")
     archive_migrate = archive_actions.add_parser("migrate"); archive_migrate.add_argument("--vault", required=True); archive_migrate.add_argument("--apply", action="store_true")
+
+    repair_parser = subparsers.add_parser("repair", help="Admin-only repair of committed page projections.")
+    repair_actions = repair_parser.add_subparsers(dest="repair_action", required=True)
+    page_operation = repair_actions.add_parser("page-operation", help="Inspect or repair page operation journal entries.")
+    page_operation_actions = page_operation.add_subparsers(dest="page_operation_action", required=True)
+    page_plan = page_operation_actions.add_parser("plan", help="List pending page operations without changing projections.")
+    page_plan.add_argument("--vault", required=True)
+    page_plan.add_argument("--operation-id")
+    page_apply = page_operation_actions.add_parser("apply", help="Repair one page operation's projections.")
+    page_apply.add_argument("--vault", required=True)
+    page_apply.add_argument("--operation-id", required=True)
+
+    provenance = repair_actions.add_parser("provenance", help="Plan or apply strict raw-source provenance migration.")
+    provenance_actions = provenance.add_subparsers(dest="provenance_action", required=True)
+    provenance_plan = provenance_actions.add_parser("plan", help="Classify provenance without modifying page bytes.")
+    provenance_plan.add_argument("--vault", required=True)
+    provenance_plan.add_argument("--page-path")
+    provenance_apply = provenance_actions.add_parser("apply", help="Apply a provenance plan after page/source CAS checks.")
+    provenance_apply.add_argument("--vault", required=True)
+    provenance_apply.add_argument("--plan-id", required=True)
+
+    privacy_audit = repair_actions.add_parser("privacy-audit", help="Plan or apply an explicit historical privacy audit.")
+    privacy_actions = privacy_audit.add_subparsers(dest="privacy_audit_action", required=True)
+    privacy_plan = privacy_actions.add_parser("plan", help="Report redaction and locator changes without page writes.")
+    privacy_plan.add_argument("--vault", required=True)
+    privacy_apply = privacy_actions.add_parser("apply", help="Apply a privacy plan with CAS and rollback.")
+    privacy_apply.add_argument("--vault", required=True)
+    privacy_apply.add_argument("--plan-id", required=True)
+    privacy_apply.add_argument("--allow-locator-changes", action="store_true", help="Explicitly allow filename/wikilink changes.")
 
     subparsers.add_parser("server", help="Run the MCP server.")
     return parser
@@ -338,6 +370,37 @@ def _run_archive(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 2
 
 
+def _run_repair(args: argparse.Namespace) -> int:
+    if args.repair_action == "page-operation":
+        service = PageRepairService(args.vault)
+        if args.page_operation_action == "plan":
+            payload = service.plan(args.operation_id)
+        elif args.page_operation_action == "apply":
+            payload = service.apply(args.operation_id)
+        else:
+            raise ValueError(f"unknown page-operation action: {args.page_operation_action}")
+    elif args.repair_action == "provenance":
+        service = ProvenanceMigrationService(args.vault)
+        if args.provenance_action == "plan":
+            payload = service.plan(args.page_path)
+        elif args.provenance_action == "apply":
+            payload = service.apply(args.plan_id)
+        else:
+            raise ValueError(f"unknown provenance action: {args.provenance_action}")
+    elif args.repair_action == "privacy-audit":
+        service = PrivacyAuditService(args.vault)
+        if args.privacy_audit_action == "plan":
+            payload = service.plan()
+        elif args.privacy_audit_action == "apply":
+            payload = service.apply(args.plan_id, allow_locator_changes=bool(args.allow_locator_changes))
+        else:
+            raise ValueError(f"unknown privacy-audit action: {args.privacy_audit_action}")
+    else:
+        raise ValueError(f"unknown repair action: {args.repair_action}")
+    _print_json(payload)
+    return 0 if payload.get("ok") else 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -363,6 +426,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_index(args)
         if args.command == "archive":
             return _run_archive(args)
+        if args.command == "repair":
+            return _run_repair(args)
     except RuntimeConfigError as exc:
         _print_json(_error_payload(exc.code, str(exc), config_path=exc.config_path))
         return 2
@@ -371,6 +436,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except (VectorIndexError, VectorProviderError) as exc:
         _print_json(_error_payload(exc.code, str(exc)))
+        return 2
+    except (ProvenanceMigrationError, PrivacyAuditError) as exc:
+        _print_json(_error_payload(exc.code, "administrative plan could not be completed"))
         return 2
     except ValueError as exc:
         _print_json(_error_payload("invalid_config", str(exc)))

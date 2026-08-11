@@ -28,4 +28,6 @@ def test_retired_queued_jobs_are_superseded_and_never_claimed(tmp_path) -> None:
 
     assert queue.claim("worker")["job"] is None
     assert queue.supersede_job_types({"source_capsule", "chat_source_capsule"}) == ["legacy-job"]
-    assert queue.get("legacy-job")["state"] == "superseded"
+    job = queue.get("legacy-job")
+    assert job is not None
+    assert job["state"] == "superseded"

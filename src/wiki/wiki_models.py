@@ -22,3 +22,4 @@ class WikiLogEntry:
     project: str = ""
     status: str = "ok"
     timestamp: str = ""
+    operation_id: str = ""

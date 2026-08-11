@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from common.privacy_policy import LocatorError, normalize_vault_relative
 from wiki.wiki_paths import WikiPathError, safe_segment
 from wiki.wikilinks import format_wikilink, iter_wikilinks
 
@@ -110,7 +111,15 @@ def validate_raw_sources(
 def skipped_warnings(field: str, skipped: Sequence[Mapping[str, str]]) -> list[str]:
     """Format skipped-input details using the server's warning-list convention."""
 
-    return [f"{field} skipped: {item.get('path', '')} ({item.get('reason', 'invalid_path')})" for item in skipped]
+    values: list[str] = []
+    for item in skipped:
+        raw_path = str(item.get("path", ""))
+        try:
+            safe_path = normalize_vault_relative(raw_path)
+        except LocatorError:
+            safe_path = "[UNSAFE_LOCATOR]"
+        values.append(f"{field} skipped: {safe_path} ({item.get('reason', 'invalid_path')})")
+    return values
 
 
 def _validated_relative_path(
@@ -125,6 +134,10 @@ def _validated_relative_path(
         return None, "path_escape"
     if not normalized.startswith(prefix):
         return None, "path_not_allowed"
+    try:
+        normalized = normalize_vault_relative(normalized)
+    except LocatorError as exc:
+        return None, exc.code
 
     parts = normalized.split("/")
     if any(not part or part in {".", ".."} for part in parts):

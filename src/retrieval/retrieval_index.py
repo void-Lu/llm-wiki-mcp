@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 import tempfile
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -18,8 +19,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from common.content_redaction import REDACTION_POLICY_VERSION, redact_for_index
+from common.content_redaction import REDACTION_POLICY_VERSION
 from codegraph.codegraph_policy import is_codegraph_raw_path
+from common.privacy_policy import PrivacyPolicy, project_public_value
 from retrieval.lexical_analyzer import (
     expanded_identifier_phrase_fts_query,
     expanded_relaxed_fts_query,
@@ -32,6 +34,7 @@ from retrieval.lexical_analyzer import (
     relaxed_fts_query,
 )
 from retrieval.passage_chunker import CHUNK_SCHEMA_VERSION, PassageChunk, chunk_markdown
+from retrieval.metadata_filters import normalize_metadata_filters
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_paths import filesystem_path
 
@@ -355,6 +358,147 @@ class RetrievalIndexStore:
             rows = connection.execute("SELECT passages.passage_id, passages.page_path, passages.content_hash, passages.text, pages.source_kind, pages.corpus FROM passages JOIN pages ON pages.path=passages.page_path ORDER BY passages.page_path, passages.ordinal").fetchall()
         return [{"passage_id": row[0], "page_path": row[1], "content_hash": row[2], "text": row[3], "source_kind": row[4], "corpus": row[5]} for row in rows]
 
+    def list_catalog_items(
+        self,
+        *,
+        filters: Mapping[str, Any] | None = None,
+        after: tuple[str, str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, object]:
+        """Read page metadata with one read-only connection.
+
+        This method is intentionally pages-only.  Catalog callers must not
+        accidentally inherit query semantics by joining passages or using the
+        bounded ``page_candidates`` helper.
+        """
+
+        if limit < 1:
+            raise RetrievalIndexError("catalog_page_size_invalid", "catalog page size must be positive")
+        if not self.path.exists():
+            raise RetrievalIndexError("index_missing", "retrieval index is missing")
+        try:
+            normalized = normalize_metadata_filters(filters)
+        except ValueError as exc:
+            raise RetrievalIndexError("invalid_filters", str(exc)) from exc
+        clauses: list[str] = []
+        params: list[object] = []
+        if normalized.get("type"):
+            clauses.append("pages.page_type = ?")
+            params.append(normalized["type"])
+        for tag in normalized.get("tags", ()):
+            clauses.append("EXISTS (SELECT 1 FROM json_each(pages.frontmatter_json, '$.tags') WHERE json_each.value = ?)")
+            params.append(tag)
+        if normalized.get("path_prefix"):
+            clauses.append("pages.path LIKE ?")
+            params.append(f"{str(normalized['path_prefix']).rstrip('/')}/%")
+        for field, column in (("project", "project"), ("freshness", "freshness"), ("lifecycle", "lifecycle_status"), ("corpus", "corpus")):
+            if normalized.get(field):
+                clauses.append(f"pages.{column} = ?")
+                params.append(normalized[field])
+        if after is not None:
+            if len(after) != 2 or not all(isinstance(value, str) for value in after):
+                raise RetrievalIndexError("catalog_cursor_invalid", "catalog cursor key is invalid")
+            clauses.append("(pages.path > ? OR (pages.path = ? AND pages.redacted_content_hash > ?))")
+            params.extend((after[0], after[0], after[1]))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = (
+            "SELECT pages.path, pages.redacted_content_hash, pages.page_type, pages.title, "
+            "pages.summary, pages.project, pages.corpus, pages.authority, pages.lifecycle_status, "
+            "pages.source_kind, pages.frontmatter_json, pages.freshness, pages.original_content_hash, "
+            "pages.mtime_ns, pages.size_bytes, pages.session_id, pages.occurred_at "
+            f"FROM pages {where} ORDER BY pages.path ASC, pages.redacted_content_hash ASC LIMIT ?"
+        )
+        try:
+            with self._connection(readonly=True) as connection:
+                self._ensure_schema(connection)
+                meta = dict(connection.execute("SELECT key, value FROM meta"))
+                rows = connection.execute(sql, [*params, limit + 1]).fetchall()
+        except (sqlite3.Error, RetrievalIndexError) as exc:
+            if isinstance(exc, RetrievalIndexError):
+                raise
+            raise RetrievalIndexError("index_corrupt", "retrieval index cannot be read") from exc
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                frontmatter = json.loads(row[10])
+            except (TypeError, json.JSONDecodeError):
+                frontmatter = {}
+            items.append(
+                {
+                    "path": row[0],
+                    "content_hash": row[1],
+                    "page_type": row[2],
+                    "title": row[3],
+                    "summary": row[4],
+                    "project": row[5],
+                    "corpus": row[6],
+                    "authority": row[7],
+                    "lifecycle_status": row[8],
+                    "source_kind": row[9],
+                    "frontmatter": frontmatter if isinstance(frontmatter, dict) else {},
+                    "freshness": row[11],
+                    "original_content_hash": row[12],
+                    "mtime_ns": row[13],
+                    "size_bytes": row[14],
+                    "session_id": row[15],
+                    "occurred_at": row[16],
+                }
+            )
+        return {
+            "schema_version": RETRIEVAL_SCHEMA_VERSION,
+            "fingerprint": str(meta.get("fingerprint", "")),
+            "items": items,
+            "has_more": has_more,
+        }
+
+    def get_catalog_item(self, page_path: str) -> dict[str, object] | None:
+        """Return one metadata row without reading passages or page content."""
+
+        if not self.path.exists():
+            raise RetrievalIndexError("index_missing", "retrieval index is missing")
+        if not isinstance(page_path, str) or not page_path or "\\" in page_path or ".." in page_path.split("/"):
+            raise RetrievalIndexError("invalid_content_ref", "catalog identity is invalid")
+        try:
+            with self._connection(readonly=True) as connection:
+                self._ensure_schema(connection)
+                row = connection.execute(
+                    "SELECT path, redacted_content_hash, page_type, title, summary, project, corpus, authority, "
+                    "lifecycle_status, source_kind, frontmatter_json, freshness, original_content_hash, mtime_ns, "
+                    "size_bytes, session_id, occurred_at FROM pages WHERE path = ?",
+                    (page_path,),
+                ).fetchone()
+        except (sqlite3.Error, RetrievalIndexError) as exc:
+            if isinstance(exc, RetrievalIndexError):
+                raise
+            raise RetrievalIndexError("index_corrupt", "retrieval index cannot be read") from exc
+        if row is None:
+            return None
+        try:
+            frontmatter = json.loads(row[10])
+        except (TypeError, json.JSONDecodeError):
+            frontmatter = {}
+        return {
+            "path": row[0],
+            "content_hash": row[1],
+            "page_type": row[2],
+            "title": row[3],
+            "summary": row[4],
+            "project": row[5],
+            "corpus": row[6],
+            "authority": row[7],
+            "lifecycle_status": row[8],
+            "source_kind": row[9],
+            "frontmatter": frontmatter if isinstance(frontmatter, dict) else {},
+            "freshness": row[11],
+            "original_content_hash": row[12],
+            "mtime_ns": row[13],
+            "size_bytes": row[14],
+            "session_id": row[15],
+            "occurred_at": row[16],
+        }
+
     def iter_vault_pages(self) -> Iterable[IndexedPage]:
         # Windows paths over MAX_PATH are unreachable without the extended
         # ``\\?\`` prefix; traverse through it so long raw/source trees are
@@ -465,9 +609,24 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
     if not eligible_path(rel, scope=scope):
         return None
     raw = path.read_text(encoding="utf-8", errors="ignore")
-    redacted = redact_for_index(raw)
-    frontmatter, redacted_body = split_frontmatter(redacted.text) if path.suffix.lower() == ".md" else ({}, redacted.text)
-    frontmatter = dict(frontmatter)
+    policy = PrivacyPolicy()
+    original_hash = sha256(raw.encode("utf-8")).hexdigest()
+    if path.suffix.lower() == ".md":
+        original_frontmatter, original_body = split_frontmatter(raw)
+        projected_frontmatter = project_public_value(original_frontmatter, policy=policy)
+        frontmatter = dict(projected_frontmatter) if isinstance(projected_frontmatter, dict) else {}
+        redacted_body = policy.redact_display_text(original_body)
+        redacted_projection = json.dumps(
+            {"frontmatter": frontmatter, "body": redacted_body},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    else:
+        frontmatter = {}
+        redacted_body = policy.redact_display_text(raw)
+        redacted_projection = redacted_body
+    redacted_hash = sha256(redacted_projection.encode("utf-8")).hexdigest()
     stat = path.stat()
     is_chat = rel.startswith("raw/sources/chat/")
     is_raw = rel.startswith("raw/sources/") and not is_chat
@@ -492,7 +651,7 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
     authority = "low" if is_chat or is_raw else "high"
     lifecycle = "active" if scope != "archive" else "archived"
     source_kind = "raw_chat" if is_chat else "raw" if is_raw else str(frontmatter.get("type") or "wiki")
-    return IndexedPage(rel, str(frontmatter.get("title") or path.stem), redacted_body, frontmatter, corpus, authority, lifecycle, source_kind, redacted.original_hash, redacted.redacted_hash, stat.st_mtime_ns, stat.st_size, _chat_session(rel) if is_chat else "", occurred_at)
+    return IndexedPage(rel, str(frontmatter.get("title") or path.stem), redacted_body, frontmatter, corpus, authority, lifecycle, source_kind, original_hash, redacted_hash, stat.st_mtime_ns, stat.st_size, _chat_session(rel) if is_chat else "", occurred_at)
 
 
 def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:

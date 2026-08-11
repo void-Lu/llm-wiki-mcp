@@ -8,6 +8,7 @@ provider is instantiated for an explicit build, update, or enabled query.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import importlib.util
 import json
 import math
@@ -15,7 +16,10 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, Sequence
+
+if TYPE_CHECKING:
+    from retrieval.query_cancellation import QueryCancellationContext
 
 
 _LOCAL_MODEL_CACHE: dict[tuple[str, str, int], tuple[Any, "VectorProviderIdentity"]] = {}
@@ -49,9 +53,9 @@ class VectorProviderIdentity:
 class VectorProvider(Protocol):
     def identity(self) -> VectorProviderIdentity: ...
 
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
+    def embed_documents(self, texts: Sequence[str], *, context: "QueryCancellationContext | None" = None) -> list[list[float]]: ...
 
-    def embed_query(self, text: str) -> list[float]: ...
+    def embed_query(self, text: str, *, context: "QueryCancellationContext | None" = None) -> list[float]: ...
 
 
 class DeterministicFakeProvider:
@@ -86,10 +90,14 @@ class DeterministicFakeProvider:
             dimensions=self._dimensions,
         )
 
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed_documents(self, texts: Sequence[str], *, context: "QueryCancellationContext | None" = None) -> list[list[float]]:
+        if context is not None:
+            context.checkpoint("vector")
         return [self._embed(text) for text in texts]
 
-    def embed_query(self, text: str) -> list[float]:
+    def embed_query(self, text: str, *, context: "QueryCancellationContext | None" = None) -> list[float]:
+        if context is not None:
+            context.checkpoint("vector")
         return self._embed(text)
 
     def _embed(self, text: str) -> list[float]:
@@ -127,32 +135,51 @@ class LocalBgeM3Provider:
         assert self._identity is not None
         return self._identity
 
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed_documents(self, texts: Sequence[str], *, context: "QueryCancellationContext | None" = None) -> list[list[float]]:
         if not texts:
             return []
-        model: Any = self._load_model()
+        if context is not None:
+            context.checkpoint("vector")
+        model: Any = self._load_model(context=context)
         encoder = getattr(model, "encode_document", None)
         if encoder is None:
             encoder = model.encode
-        encoded = encoder(
+        encoded = _call_encoder(
+            encoder,
             list(texts),
+            context=context,
             batch_size=self.batch_size,
             show_progress_bar=False,
             convert_to_numpy=True,
             normalize_embeddings=True,
         )
+        if context is not None:
+            context.checkpoint("vector")
         return [_normalize([float(value) for value in vector]) for vector in encoded.tolist()]
 
-    def embed_query(self, text: str) -> list[float]:
-        model: Any = self._load_model()
+    def embed_query(self, text: str, *, context: "QueryCancellationContext | None" = None) -> list[float]:
+        if context is not None:
+            context.checkpoint("vector")
+        model: Any = self._load_model(context=context)
         encoder = getattr(model, "encode_query", None)
         if encoder is None:
-            return self.embed_documents([text])[0]
-        encoded = encoder(text, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
+            return self.embed_documents([text], context=context)[0]
+        encoded = _call_encoder(
+            encoder,
+            text,
+            context=context,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        if context is not None:
+            context.checkpoint("vector")
         values = encoded.tolist() if hasattr(encoded, "tolist") else encoded
         return _normalize([float(value) for value in values])
 
-    def _load_model(self):
+    def _load_model(self, *, context: "QueryCancellationContext | None" = None):
+        if context is not None:
+            context.checkpoint("vector")
         if self._model is not None:
             return self._model
         if not self.model_path.is_dir():
@@ -206,6 +233,8 @@ class LocalBgeM3Provider:
         with _LOCAL_MODEL_CACHE_LOCK:
             cached = _LOCAL_MODEL_CACHE.setdefault(cache_key, (self._model, self._identity))
         self._model, self._identity = cached
+        if context is not None:
+            context.checkpoint("vector")
         return self._model
 
 
@@ -240,3 +269,18 @@ def _normalize(values: Sequence[float]) -> list[float]:
     if magnitude == 0:
         raise VectorProviderError("invalid_embedding", "embedding provider returned a zero vector")
     return [value / magnitude for value in values]
+
+
+def _call_encoder(encoder: Any, values: Any, *, context: "QueryCancellationContext | None", **kwargs: Any) -> Any:
+    """Pass an optional native timeout only when the provider advertises it."""
+
+    if context is not None:
+        try:
+            parameters = inspect.signature(encoder).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "timeout" in parameters:
+            kwargs["timeout"] = context.remaining
+        if "context" in parameters:
+            kwargs["context"] = context
+    return encoder(values, **kwargs)

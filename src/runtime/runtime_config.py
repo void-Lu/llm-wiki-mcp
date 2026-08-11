@@ -44,11 +44,20 @@ class ContextSettings:
 
 
 @dataclass(frozen=True)
+class QueryExecutionSettings:
+    """Trusted, non-public bounds for cooperative query workers."""
+
+    max_concurrency: int = 4
+    cancel_grace_seconds: float = 0.25
+
+
+@dataclass(frozen=True)
 class RetrievalSettings:
     lexical_enabled: bool = True
     query_version: Literal["v2"] = "v2"
     embedding: EmbeddingSettings = EmbeddingSettings()
     context: ContextSettings = ContextSettings()
+    execution: QueryExecutionSettings = QueryExecutionSettings()
 
 
 @dataclass(frozen=True)
@@ -230,7 +239,7 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     if not isinstance(root, str) or not root:
         raise RuntimeConfigError(f"vaults.{name}.root is required", code="invalid_config", config_path=path)
     retrieval_raw = _mapping(raw.get("retrieval", {}), "retrieval", path)
-    _unknown_keys(retrieval_raw, {"lexical_enabled", "query_version", "embedding", "context"}, "retrieval", path)
+    _unknown_keys(retrieval_raw, {"lexical_enabled", "query_version", "embedding", "context", "execution"}, "retrieval", path)
     query_version = retrieval_raw.get("query_version", "v2")
     if query_version != "v2":
         raise RuntimeConfigError("retrieval.query_version only supports v2", code="invalid_config", config_path=path)
@@ -243,6 +252,8 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     response_mode = context_raw.get("response_mode", "context_pack")
     if response_mode not in {"context_pack", "legacy"}:
         raise RuntimeConfigError("retrieval.context.response_mode is invalid", code="invalid_config", config_path=path)
+    execution_raw = _mapping(retrieval_raw.get("execution", {}), "retrieval.execution", path)
+    _unknown_keys(execution_raw, {"max_concurrency", "cancel_grace_seconds"}, "retrieval.execution", path)
     privacy_raw = _mapping(raw.get("privacy", {}), "privacy", path)
     _unknown_keys(privacy_raw, {"credential_redaction_enabled", "redaction_rule_version", "pii_policy"}, "privacy", path)
     pii_policy = privacy_raw.get("pii_policy", "preserve")
@@ -269,6 +280,10 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
             query_version=query_version,
             embedding=embedding,
             context=ContextSettings(response_mode=response_mode, hard_budget_tokens=_integer(context_raw.get("hard_budget_tokens"), 16_000, 512, 200_000, "retrieval.context.hard_budget_tokens", path)),
+            execution=QueryExecutionSettings(
+                max_concurrency=_integer(execution_raw.get("max_concurrency"), 4, 1, 32, "retrieval.execution.max_concurrency", path),
+                cancel_grace_seconds=_number(execution_raw.get("cancel_grace_seconds"), 0.25, 0.01, 5.0, "retrieval.execution.cancel_grace_seconds", path),
+            ),
         ),
         privacy=PrivacySettings(
             credential_redaction_enabled=_bool(privacy_raw.get("credential_redaction_enabled"), True, "privacy.credential_redaction_enabled", path),

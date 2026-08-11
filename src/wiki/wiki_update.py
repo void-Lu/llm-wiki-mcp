@@ -5,21 +5,25 @@ from __future__ import annotations
 import difflib
 import hashlib
 from pathlib import Path
+import secrets
 from typing import Any, Mapping
 
 import yaml
 
 from codegraph.codegraph_policy import is_codegraph_managed_path
-from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_repair import PageRepairService
+from wiki.atomic_file import sha256_file
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
-from wiki.wiki_index import refresh_indexes
-from wiki.wiki_io import WikiWriteError, split_frontmatter, write_wiki_page
-from wiki.wiki_log import append_log_entry
-from wiki.wiki_models import WikiLogEntry, WikiPage
+from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
+from wiki.update_plan_store import UpdatePlanError, UpdatePlanStore
+from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
+from wiki.wiki_models import WikiPage
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 
 LOCKED_FIELDS = {"type", "concept_id", "entity_id", "entity_type", "created", "source_path", "source_hash"}
 REMOVED_FIELDS = {"source_capsules", "source_capsule"}
+SERVER_OWNED_FIELDS = {"source_hashes"}
 _ALLOWED = ("wiki/concepts/", "wiki/entities/", "wiki/projects/")
 
 
@@ -55,12 +59,23 @@ def preview_update(
     removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
     if removed_fields:
         return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
+    incoming, resolved_sources, source_error = _prepare_incoming_sources(root, incoming)
+    if source_error is not None:
+        return source_error
     incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages, heading=related_pages_heading)
     incoming_body, normalized_count = auto_normalize_wikilinks(incoming_body, root)
     broken_wikilinks = validate_wikilinks(incoming_body, root)
     violations = _locked_violations(fm, incoming)
     removed_sources = set(_sources(fm)) - set(_sources(incoming)) if "sources" in incoming else set()
-    result = {"ok": True, "action": "preview", "page_path": page_path, "current_hash": _digest(text), "plan_id": _plan_id(page_path, _digest(text), incoming_body, incoming), "locked_fields": sorted(LOCKED_FIELDS), "locked_field_violations": violations, "removed_sources": sorted(removed_sources), "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "diff": "".join(difflib.unified_diff(old_body.splitlines(True), incoming_body.splitlines(True), fromfile="current", tofile="incoming"))}
+    current_hash = sha256_file(target)
+    intent_hash = _plan_id(page_path, current_hash, incoming_body, incoming)
+    try:
+        plan = UpdatePlanStore(str(root)).issue(page_path, current_hash, intent_hash)
+    except UpdatePlanError as exc:
+        return {"ok": False, "code": exc.code}
+    result = {"ok": True, "action": "preview", "page_path": page_path, "current_hash": current_hash, "plan_id": plan.plan_id, "plan_expires_at": plan.expires_at, "locked_fields": sorted(LOCKED_FIELDS), "locked_field_violations": violations, "removed_sources": sorted(removed_sources), "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "diff": "".join(difflib.unified_diff(old_body.splitlines(True), incoming_body.splitlines(True), fromfile="current", tofile="incoming"))}
+    if resolved_sources is not None:
+        result["source_hashes"] = source_hash_map(resolved_sources)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 
@@ -85,19 +100,18 @@ def apply_update(
     existing, _ = split_frontmatter(text)
     if is_codegraph_managed_path(page_path, existing):
         return {"ok": False, "code": "codegraph_managed_page", "error": "CodeGraph-managed pages can only be updated by wiki_codegraph_import"}
-    current_hash = _digest(text)
+    current_hash = sha256_file(target)
     incoming = dict(incoming_frontmatter or {})
     removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
     if removed_fields:
         return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
+    incoming, resolved_sources, source_error = _prepare_incoming_sources(root, incoming)
+    if source_error is not None:
+        return _attach_related_page_skips(source_error, related_pages, [])
     incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages, heading=related_pages_heading)
     incoming_body, normalized_count = auto_normalize_wikilinks(incoming_body, root)
     broken_wikilinks = validate_wikilinks(incoming_body, root)
     expected_plan = _plan_id(page_path, current_hash, incoming_body, incoming)
-    if expected_hash and expected_hash != current_hash:
-        return {"ok": False, "code": "expected_hash_mismatch"}
-    if plan_id and plan_id != expected_plan:
-        return {"ok": False, "code": "plan_stale"}
     if existing.get("lifecycle", "active") != "active":
         return {"ok": False, "code": "inactive_page"}
     violations = _locked_violations(existing, incoming)
@@ -105,28 +119,143 @@ def apply_update(
         return {"ok": False, "code": "locked_field", "fields": violations}
     if "sources" in incoming and not _sources(incoming):
         return {"ok": False, "code": "sources_required"}
+    plan_store = UpdatePlanStore(str(root)) if plan_id else None
+    preflight_plan = plan_store.get(plan_id) if plan_store is not None and plan_id else None
+    if preflight_plan is not None and preflight_plan.state == "consumed":
+        replay_intent = _plan_id(page_path, preflight_plan.base_hash, incoming_body, incoming)
+        if replay_intent == preflight_plan.intent_hash:
+            replay: dict[str, Any] = {"ok": True, "state": "already_applied", "already_applied": True, "operation_id": preflight_plan.operation_id, "page_path": page_path}
+            if preflight_plan.operation_id:
+                assert plan_store is not None
+                operation = plan_store.store.get_operation(preflight_plan.operation_id)
+                if operation is not None and operation.state != "completed":
+                    replay["repair_action"] = "repair_page_operation"
+            return _attach_related_page_skips(replay, related_pages, related_pages_skipped)
+        return _attach_related_page_skips({"ok": False, "code": "plan_intent_drift"}, related_pages, related_pages_skipped)
+    structural_change = bool(incoming) or related_pages is not None
+    if structural_change and not plan_id:
+        return _attach_related_page_skips({"ok": False, "code": "update_plan_required"}, related_pages, related_pages_skipped)
+    if expected_hash is None:
+        return _attach_related_page_skips({"ok": False, "code": "expected_hash_required"}, related_pages, related_pages_skipped)
+    if expected_hash != current_hash:
+        return {"ok": False, "code": "expected_hash_mismatch"}
+    if resolved_sources is not None:
+        try:
+            resolved_sources = SourceProvenanceResolver(root).verify(resolved_sources)
+        except SourceProvenanceError as exc:
+            return _attach_related_page_skips({"ok": False, "code": exc.code}, related_pages, related_pages_skipped)
     final = dict(existing)
     final.update(incoming)
     if existing.get("generated") is True:
         final["generated"] = existing["generated"]
         final["maintenance"] = "manual"
         final.setdefault("generation_provenance", {key: existing.get(key) for key in ("prompt_version", "schema_version", "source_hash") if key in existing})
+    if resolved_sources is not None:
+        final["sources"] = [source.relative_path for source in resolved_sources]
+        final["source_hashes"] = source_hash_map(resolved_sources)
+        final["provenance_unverified"] = False
+        final["freshness"] = "fresh"
+    elif not _stored_source_hashes(existing):
+        final["provenance_unverified"] = True
+        final["freshness"] = "review_required"
     title = str(final.get("title") or target.stem)
     try:
-        write_result = write_wiki_page(
+        prepared = prepare_wiki_page(
             root,
             WikiPage(Path(page_path), final, title, incoming_body),
             overwrite_generated_only=False,
         )
     except WikiWriteError as exc:
         return _attach_related_page_skips({"ok": False, "code": exc.code, "error": str(exc)}, related_pages, related_pages_skipped)
-    updated_text = target.read_text(encoding="utf-8")
-    updated_hash = _digest(updated_text)
-    sources = {source: "" for source in _sources(final)}
-    KnowledgeDependencies(root).update_page(page_path, updated_hash, sources, generated=bool(final.get("generated")), maintenance=str(final.get("maintenance") or "manual"))
-    navigation = refresh_indexes(root)
-    append_log_entry(root, WikiLogEntry(operation="update", title=title, paths=[page_path], sources=list(sources), project=str(final.get("project") or ""), status="ok"))
-    result = {"ok": True, "action": "apply", "page_path": page_path, "hash": updated_hash, "navigation": navigation, "retrieval_index": write_result.get("retrieval_index"), "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks}
+    updated_hash = _digest(prepared.text)
+    assert plan_store is not None or plan_id is None
+    plan_store = plan_store or UpdatePlanStore(str(root))
+    coordinator = PageMutationCoordinator(root, store=plan_store.store)
+    existing_plan = None
+    if plan_id:
+        existing_plan = plan_store.get(plan_id)
+        if existing_plan is None:
+            return _attach_related_page_skips({"ok": False, "code": "plan_unknown"}, related_pages, related_pages_skipped)
+        if existing_plan.state == "consumed":
+            replay: dict[str, Any] = {"ok": True, "state": "already_applied", "already_applied": True, "operation_id": existing_plan.operation_id, "page_path": page_path}
+            if existing_plan.operation_id:
+                operation = plan_store.store.get_operation(existing_plan.operation_id)
+                if operation is not None and operation.state != "completed":
+                    replay["repair_action"] = "repair_page_operation"
+            return _attach_related_page_skips(replay, related_pages, related_pages_skipped)
+        if existing_plan.state == "expired":
+            return _attach_related_page_skips({"ok": False, "code": "plan_expired"}, related_pages, related_pages_skipped)
+        if existing_plan.state not in {"issued", "claimed"}:
+            return _attach_related_page_skips({"ok": False, "code": "plan_unknown"}, related_pages, related_pages_skipped)
+
+    operation = None
+    if existing_plan is not None and existing_plan.state == "claimed" and existing_plan.operation_id:
+        operation = coordinator.store.get_operation(existing_plan.operation_id)
+        if operation is None:
+            return _attach_related_page_skips({"ok": False, "code": "plan_claimed"}, related_pages, related_pages_skipped)
+        if operation.intended_hash != updated_hash:
+            return _attach_related_page_skips({"ok": False, "code": "plan_intent_drift", "operation_id": operation.operation_id}, related_pages, related_pages_skipped)
+        if operation.state == "prepared":
+            return _attach_related_page_skips({"ok": False, "code": "plan_claimed", "operation_id": operation.operation_id}, related_pages, related_pages_skipped)
+    if operation is None:
+        request_key = plan_id or f"body:{secrets.token_urlsafe(18)}"
+        operation = coordinator.prepare(
+            request_key=request_key,
+            operation_kind="update",
+            page_path=page_path,
+            base_hash=current_hash,
+            intended_hash=updated_hash,
+        )
+    if plan_id and existing_plan is not None and existing_plan.state == "issued":
+        try:
+            plan_store.claim(
+                plan_id,
+                page_path=page_path,
+                base_hash=current_hash,
+                intent_hash=expected_plan,
+                operation_id=operation.operation_id,
+            )
+        except UpdatePlanError as exc:
+            try:
+                coordinator.store.set_operation_state(operation.operation_id, "failed_precommit", error_code=exc.code)
+            except Exception:
+                pass
+            return _attach_related_page_skips({"ok": False, "code": exc.code, "operation_id": operation.operation_id}, related_pages, related_pages_skipped)
+
+    if operation.state == "completed":
+        return _attach_related_page_skips({"ok": True, "state": "already_applied", "already_applied": True, "operation_id": operation.operation_id, "page_path": page_path, "hash": operation.intended_hash}, related_pages, related_pages_skipped)
+    if operation.state == "prepared":
+        commit_result = coordinator.commit(operation.operation_id, prepared.text, expected_hash=current_hash)
+        if not commit_result.get("ok"):
+            return _attach_related_page_skips(dict(commit_result), related_pages, related_pages_skipped)
+    elif operation.state not in {"page_committed", "repair_pending"}:
+        return _attach_related_page_skips({"ok": False, "code": "operation_not_committed", "state": operation.state, "operation_id": operation.operation_id}, related_pages, related_pages_skipped)
+
+    if plan_id:
+        try:
+            plan_store.consume(plan_id, operation_id=operation.operation_id, committed_hash=updated_hash)
+        except UpdatePlanError as exc:
+            try:
+                coordinator.store.set_operation_state(operation.operation_id, "repair_pending", error_code=exc.code)
+            except Exception:
+                pass
+            return _attach_related_page_skips({"ok": True, "state": "repair_pending", "code": "plan_consume_pending", "repair_action": "repair_page_operation", "operation_id": operation.operation_id, "page_hash": updated_hash}, related_pages, related_pages_skipped)
+
+    projection = PageRepairService(root)
+    projection_result = coordinator.run_projections(operation.operation_id, projection.projections_for(operation))
+    if not projection_result.get("ok"):
+        return _attach_related_page_skips(dict(projection_result), related_pages, related_pages_skipped)
+    completed_operation = coordinator.store.get_operation(operation.operation_id)
+    stages = completed_operation.stages if completed_operation is not None else {}
+    dependency_projection = stages.get("dependencies", {}).get("result", {"ok": True, "state": "ready"})
+    navigation = stages.get("navigation", {}).get("result")
+    retrieval_index = stages.get("retrieval", {}).get("result")
+    result = {"ok": True, "state": projection_result.get("state", "completed"), "action": "apply", "page_path": page_path, "operation_id": operation.operation_id, "hash": updated_hash, "page_hash": updated_hash, "navigation": navigation, "retrieval_index": retrieval_index, "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "dependency_projection": dependency_projection, "provenance_status": "verified" if _stored_source_hashes(final) else "provenance_unverified", "freshness": str(final.get("freshness") or "review_required")}
+    if projection_result.get("state") == "repair_pending":
+        result["repair_action"] = "repair_page_operation"
+        result["failed_stage"] = projection_result.get("failed_stage")
+    if resolved_sources is not None:
+        result["source_hashes"] = source_hash_map(resolved_sources)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 
@@ -150,6 +279,34 @@ def _locked_violations(existing: Mapping[str, Any], incoming: Mapping[str, Any])
 def _sources(frontmatter: Mapping[str, Any]) -> list[str]:
     value = frontmatter.get("sources", [])
     return [str(item) for item in value] if isinstance(value, list) else ([str(value)] if value else [])
+
+
+def _prepare_incoming_sources(
+    root: Path,
+    incoming: dict[str, Any],
+) -> tuple[dict[str, Any], list[ResolvedRawSource] | None, dict[str, Any] | None]:
+    if SERVER_OWNED_FIELDS & incoming.keys():
+        return incoming, None, {"ok": False, "code": "source_hashes_server_owned"}
+    if "sources" not in incoming:
+        return incoming, None, None
+    values = _sources(incoming)
+    if not values:
+        return incoming, None, {"ok": False, "code": "sources_required"}
+    try:
+        resolved = SourceProvenanceResolver(root).resolve_many(values)
+    except SourceProvenanceError as exc:
+        return incoming, None, {"ok": False, "code": exc.code}
+    prepared = dict(incoming)
+    prepared["sources"] = [source.relative_path for source in resolved]
+    prepared["source_hashes"] = source_hash_map(resolved)
+    return prepared, resolved, None
+
+
+def _stored_source_hashes(frontmatter: Mapping[str, Any]) -> dict[str, str]:
+    value = frontmatter.get("source_hashes")
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): str(item) for key, item in value.items() if str(key) and str(item)}
 
 
 def _with_reference_section(

@@ -19,6 +19,7 @@ from common.redaction import (
     count_redactions,
     redact_sensitive_text,
 )
+from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
 from wiki.wiki_io import read_markdown_page
 from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
@@ -39,13 +40,7 @@ def _canonical(value: Mapping[str, Any]) -> str:
 
 
 def _redact_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_sensitive_text(value)
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, Mapping):
-        return {str(key): _redact_value(item) for key, item in value.items()}
-    return value
+    return PrivacyPolicy().redact_metadata(value)
 
 
 def _redaction_summary(values: list[str]) -> tuple[int, dict[str, int]]:
@@ -77,7 +72,10 @@ def decode_chat_metadata(value: object) -> dict[str, Any]:
     if project is not None:
         if not isinstance(project, str) or not project.strip():
             raise ChatMemoryError("invalid_chat_metadata", "chat_metadata.project must be a non-empty string when supplied")
-        decoded["project"] = project.strip()
+        try:
+            decoded["project"] = normalize_vault_relative(project.strip())
+        except LocatorError as exc:
+            raise ChatMemoryError(exc.code, "chat_metadata.project violates the privacy policy") from exc
     return decoded
 
 
