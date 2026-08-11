@@ -26,6 +26,8 @@ from app.server import (
     wiki_update,
     wiki_status,
     wiki_write_note,
+    wiki_list,
+    wiki_get,
 )
 
 
@@ -433,7 +435,10 @@ def test_registry_exposes_strict_ingest_schema_and_tool_contract_annotations() -
             query_annotations = tools["wiki_query"].annotations
             list_tool = tools["wiki_list"]
             get_tool = tools["wiki_get"]
-            assert set(get_tool.input_schema.get("required", [])) == {"content_ref"}
+            get_properties = get_tool.input_schema.get("properties", {})
+            assert {"content_ref", "contentRef"} <= set(get_properties)
+            assert {"store_scope", "storeScope", "page_size", "pageSize"} <= set(list_tool.input_schema.get("properties", {}))
+            assert not get_tool.input_schema.get("required", [])
             assert "all" not in str(list_tool.input_schema)
             assert "body" not in list_tool.input_schema.get("properties", {})
             assert getattr(list_tool.annotations, "read_only_hint", None) is True
@@ -449,6 +454,42 @@ def test_registry_exposes_strict_ingest_schema_and_tool_contract_annotations() -
             assert getattr(query_annotations, "idempotent_hint", None) is True
 
     anyio.run(assert_schema)
+
+
+def test_catalog_tools_accept_camel_case_argument_names(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """camelCase clients (e.g. VS Code MCP) must be normalized to the snake_case domain contract."""
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    captured: dict[str, object] = {}
+
+    def fake_list(self: object, *, scope: object, filters: object, page_size: object, cursor: object) -> dict[str, object]:
+        captured.update(scope=scope, page_size=page_size)
+        return {"ok": True, "scope": scope, "items": [], "page_size": page_size}
+
+    def fake_get(self: object, content_ref: str, *, include_body: object, max_bytes: object, cursor: object) -> dict[str, object]:
+        captured.update(content_ref=content_ref, include_body=include_body, max_bytes=max_bytes)
+        return {"ok": True, "content_ref": content_ref}
+
+    monkeypatch.setattr("app.server.ContentCatalogService.list_items", fake_list)
+    monkeypatch.setattr("app.server.ContentCatalogService.get_item", fake_get)
+
+    list_result = wiki_list(storeScope="raw", pageSize=7, vault_root=str(root))
+    assert list_result["ok"] is True
+    assert captured["scope"] == "raw"
+    assert captured["page_size"] == 7
+
+    captured.clear()
+    get_result = wiki_get(contentRef="cr1_abc", includeBody=True, maxBytes=2048, vault_root=str(root))
+    assert get_result["ok"] is True
+    assert captured["content_ref"] == "cr1_abc"
+    assert captured["include_body"] is True
+    assert captured["max_bytes"] == 2048
+
+
+def test_wiki_get_requires_content_ref_or_camel_alias() -> None:
+    result = wiki_get()
+    assert result["ok"] is False
+    assert result["code"] == "invalid_content_ref"
 
 
 def test_legacy_ingest_metadata_is_rejected_without_vault_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

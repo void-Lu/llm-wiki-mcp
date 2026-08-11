@@ -334,9 +334,15 @@ def wiki_list(
     vault: str | None = None,
     vault_root: str | None = None,
     vaultRoot: str | None = None,
+    storeScope: Literal["active", "raw", "archive"] | None = None,
+    pageSize: int | None = None,
 ) -> dict[str, Any]:
     """List metadata from one explicitly selected physical content scope."""
 
+    if storeScope is not None:
+        store_scope = storeScope
+    if pageSize is not None:
+        page_size = pageSize
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
         result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).list_items(
@@ -352,16 +358,27 @@ def wiki_list(
 
 @_register
 def wiki_get(
-    content_ref: str,
+    content_ref: str | None = None,
     include_body: bool = False,
     max_bytes: int = DEFAULT_BODY_BUDGET,
     cursor: str | None = None,
     vault: str | None = None,
     vault_root: str | None = None,
     vaultRoot: str | None = None,
+    contentRef: str | None = None,
+    includeBody: bool | None = None,
+    maxBytes: int | None = None,
 ) -> dict[str, Any]:
     """Read metadata for an opaque content reference, with opt-in bounded body."""
 
+    if contentRef is not None:
+        content_ref = contentRef
+    if includeBody is not None:
+        include_body = includeBody
+    if maxBytes is not None:
+        max_bytes = maxBytes
+    if not content_ref:
+        return {"ok": False, "code": "invalid_content_ref", "error": "content_ref is required"}
     try:
         resolution = resolve_tool_vault(vault=vault, vault_root=vault_root, vaultRoot=vaultRoot)
         result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).get_item(
