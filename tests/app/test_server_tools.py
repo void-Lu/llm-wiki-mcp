@@ -11,7 +11,7 @@ import anyio
 import pytest
 from mcp import Client
 
-from runtime.runtime_config import ConfigRegistry, RuntimeConfigError, write_global_config
+from runtime.runtime_config import VAULT_ROOT_ENV, ConfigRegistry, RuntimeConfigError, write_global_config
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 import app.server as server_module
 from wiki.content_catalog import MAX_BODY_BUDGET
@@ -609,6 +609,31 @@ def test_wiki_get_infers_configured_vault_from_content_ref(
     assert result["ok"] is True
     assert captured["logical_vault"] == "secondary"
     assert result["vault"] == "secondary"
+
+
+def test_wiki_get_keeps_environment_default_vault_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codingwork"
+    root.mkdir()
+    registry = ConfigRegistry.from_file(tmp_path / "config.yaml")
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    monkeypatch.setenv(VAULT_ROOT_ENV, str(root))
+
+    reference = ContentRefV1("codingwork", "active", "page", "wiki/concepts/serverwidget.md").encode()
+    captured: dict[str, object] = {}
+
+    def fake_get(self: object, content_ref: str, *, include_body: object, max_bytes: object, cursor: object) -> dict[str, object]:
+        captured["logical_vault"] = getattr(self, "logical_vault")
+        return {"ok": True, "content_ref": content_ref, "identity": "wiki/concepts/serverwidget.md"}
+
+    monkeypatch.setattr("app.server.ContentCatalogService.get_item", fake_get)
+
+    result = wiki_get(content_ref=reference)
+
+    assert result["ok"] is True
+    assert captured["logical_vault"] == "codingwork"
 
 
 def test_wiki_get_requires_content_ref_or_camel_alias() -> None:

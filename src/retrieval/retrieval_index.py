@@ -172,14 +172,20 @@ class RetrievalIndexStore:
             self._mark_stale(); return {"ok": False, "code": "index_update_failed", "state": "stale", "error": str(exc)}
 
     def reconcile(self) -> dict[str, object]:
-        """Explicitly compare source stats and update changed eligible files only."""
+        """Explicitly compare source stats and content hashes for eligible files."""
         if self.scope == "archive":
             return {"ok": False, "code": "reconcile_unsupported", "error": "archive stores are rebuilt from bundles"}
         if not self.path.exists():
             return self.status()
         known = self._page_stats()
+        known_hashes = self._page_hashes()
         current = {page.path: page for page in self.iter_vault_pages()}
-        changed = [page for path, page in current.items() if known.get(path) != (page.mtime_ns, page.size_bytes)]
+        changed = [
+            page
+            for path, page in current.items()
+            if known.get(path) != (page.mtime_ns, page.size_bytes)
+            or known_hashes.get(path) != page.redacted_content_hash
+        ]
         for page in changed:
             update = self.update_page(page)
             if not update.get("ok"):
@@ -586,6 +592,10 @@ class RetrievalIndexStore:
     def _page_stats(self) -> dict[str, tuple[int, int]]:
         with self._connection(readonly=True) as connection:
             return {str(path): (int(mtime), int(size)) for path, mtime, size in connection.execute("SELECT path, mtime_ns, size_bytes FROM pages")}
+
+    def _page_hashes(self) -> dict[str, str]:
+        with self._connection(readonly=True) as connection:
+            return {str(path): str(content_hash) for path, content_hash in connection.execute("SELECT path, redacted_content_hash FROM pages")}
 
     def _fingerprint(self, connection: sqlite3.Connection) -> str:
         rows = connection.execute("SELECT path, redacted_content_hash FROM pages ORDER BY path").fetchall()

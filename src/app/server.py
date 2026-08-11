@@ -402,7 +402,15 @@ def wiki_get(
         max_bytes = MAX_BODY_BUDGET
     inferred_vault = vault
     if inferred_vault is None and not vault_root and not vaultRoot:
-        inferred_vault = _content_ref_vault(content_ref)
+        reference_vault = _content_ref_vault(content_ref)
+        if reference_vault is not None:
+            try:
+                default_resolution = resolve_tool_vault(registry=CONFIG_REGISTRY)
+            except RuntimeConfigError:
+                inferred_vault = reference_vault
+            else:
+                if default_resolution.logical_name != reference_vault:
+                    inferred_vault = reference_vault
     try:
         resolution = resolve_tool_vault(vault=inferred_vault, vault_root=vault_root, vaultRoot=vaultRoot)
         result = ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).get_item(

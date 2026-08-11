@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from retrieval.lexical_analyzer import raw_prefix_fts_query
@@ -45,6 +46,25 @@ def test_active_store_build_search_update_delete_and_reconcile(tmp_path: Path, m
     deleted = store.delete_page("wiki/concepts/invoice.md")
     assert deleted["ok"] is True
     assert not store.search_fts("custbody_invoice_id")
+
+
+def test_reconcile_detects_content_changes_with_unchanged_file_stats(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page = _write(root, "raw/sources/file/demo/page.md", "old body")
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    before = store.get_catalog_item("raw/sources/file/demo/page.md")
+    original_stat = page.stat()
+
+    page.write_text("new body", encoding="utf-8")
+    os.utime(page, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    reconciled = store.reconcile()
+
+    assert reconciled["ok"] is True
+    assert reconciled["changed"] == 1
+    after = store.get_catalog_item("raw/sources/file/demo/page.md")
+    assert before["content_hash"] != after["content_hash"]
 
 
 def test_chat_projection_uses_a_full_session_locator_and_never_uses_year_as_project(tmp_path: Path) -> None:
