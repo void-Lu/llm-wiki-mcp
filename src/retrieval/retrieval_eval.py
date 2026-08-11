@@ -456,7 +456,12 @@ def evaluate_retrieval_gate(
     baseline_metadata = baseline.get("metadata")
     candidate_metrics = candidate.get("metrics")
     baseline_metrics = baseline.get("metrics")
-    if not all(isinstance(value, Mapping) for value in (candidate_metadata, baseline_metadata, candidate_metrics, baseline_metrics)):
+    if (
+        not isinstance(candidate_metadata, Mapping)
+        or not isinstance(baseline_metadata, Mapping)
+        or not isinstance(candidate_metrics, Mapping)
+        or not isinstance(baseline_metrics, Mapping)
+    ):
         return {"passed": False, "status": "unproven", "reason": "report_shape_missing", "checks": {}}
 
     checks: dict[str, dict[str, Any]] = {}
@@ -733,16 +738,20 @@ def _build_slice_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[s
 
     result: dict[str, dict[str, Any]] = {}
     for name, bucket in sorted(buckets.items()):
-        ranking_metrics = [case.get("metrics") for case in bucket if isinstance(case.get("metrics"), Mapping)]
+        ranking_metrics: list[Mapping[str, Any]] = []
+        for case in bucket:
+            metrics = case.get("metrics")
+            if isinstance(metrics, Mapping):
+                ranking_metrics.append(metrics)
         answerable = [case for case in bucket if case.get("answerable") is True]
         no_answer = [case for case in bucket if case.get("answerable") is False]
         result[name] = {
             "case_count": len(bucket),
             "answerable_case_count": len(answerable),
-            "recall_at_k_macro": _mean_or_none([float(metrics["recall"]) for metrics in ranking_metrics if metrics.get("recall") is not None]),
-            "precision_at_k_macro": _mean_or_none([float(metrics["precision"]) for metrics in ranking_metrics if metrics.get("precision") is not None]),
-            "mrr_at_k_macro": _mean_or_none([float(metrics["mrr"]) for metrics in ranking_metrics if metrics.get("mrr") is not None]),
-            "ndcg_at_k_macro": _mean_or_none([float(metrics["ndcg"]) for metrics in ranking_metrics if metrics.get("ndcg") is not None]),
+            "recall_at_k_macro": _mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("recall")) is not None]),
+            "precision_at_k_macro": _mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("precision")) is not None]),
+            "mrr_at_k_macro": _mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("mrr")) is not None]),
+            "ndcg_at_k_macro": _mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("ndcg")) is not None]),
             "filter_correctness": _mean_or_none([1.0 if case.get("filter_correct") else 0.0 for case in bucket]),
             "no_answer_false_positive_rate": _mean_or_none([1.0 if case.get("no_answer_false_positive") else 0.0 for case in no_answer]),
             "p95_latency_ms": percentile_95([float(value) for case in bucket for value in case.get("latency_ms", [])]),
