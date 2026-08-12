@@ -40,6 +40,9 @@ uv run python -m app.server
 ```bash
 uv run llm-wiki-mcp init --vault <name> --root <path> --default
 uv run llm-wiki-mcp status
+uv run llm-wiki-mcp index status --vault <path> [--scope active|raw|archive]
+uv run llm-wiki-mcp index build --vault <path> [--scope active|raw|archive]
+uv run llm-wiki-mcp index update --vault <path> [--scope active|raw|archive]
 uv run llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir>
 uv run llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir> --retrieval-mode hybrid --vector-model-path <local-bge-m3-path>
 uv run llm-wiki-mcp vector status --vault <path>
@@ -171,6 +174,14 @@ LLM_WIKI_VAULT_ROOT = "$LLM_WIKI_VAULT_ROOT"
 
 仓库内 `tests/fixtures/retrieval/` 只用于 CI 的确定性框架验证，报告不能当作生产 vault 基线。真实 vault 评测只需提供 vault 根目录、版本化 JSONL/manifest 和相对路径标注；不要提交正文、绝对路径或敏感日志。没有冻结真实数据集时，baseline gate 应标记为 `unproven`，而不是虚构生产结论。
 
+### 整改后的架构边界
+
+- 所有 durable Markdown 写入都经过 `atomic_write_text` 和 `PageMutationCoordinator`：先以 CAS 提交页面事实，再按 durable operation journal 执行依赖、检索、导航、overview 和 audit log 投影。页面已经提交但投影失败时返回 `repair_pending`/`repair_action`，调用方应修复同一 operation，不要重复创建页面。
+- `wiki_write_note`、`wiki_update` 和 chat source 共用上述协调器。普通页面变更只对 RetrievalIndexStore 做单页增量 `update_page`/`delete_page`/`rename_page`，导航索引由 `refresh_navigation` 单独维护；不会在 MCP 写入路径隐式执行全量检索建库。索引缺失或不兼容时返回 `rebuild_required`，使用显式 `index build|update` 或 admin repair 处理。
+- Query V2 为每个 active/raw store 捕获一次不可变 `QueryCorpusSnapshot`，召回、过滤、向量、图扩展和回退都复用同一快照；`assemble_recovery` 是回退分支、命中统计、候选池和 context pack 的唯一装配边界，并在阶段间执行协作式取消检查。
+- `retrieval-eval` 通过不可变 `EvaluationRuntimeSnapshot` 和 `EvaluationQueryService` 统一 engine、MCP 与 gold 评测调用；评测不会修改全局配置注册表、索引或 telemetry。没有冻结真实 vault 数据集和 manifest 时，生产基线仍是 `unproven`。
+- 路径安全和 slug 规则分别由 `wiki_paths.safe_segment`、`wiki_paths.slug` 统一负责。旧人工笔记文件名通过显式兼容参数保持大小写和 ASCII 标点行为；现有文件不自动迁移或改名。
+
 ### 可选本地向量检索
 
 向量检索默认关闭。唯一支持的 provider 是本地 `local_bge_m3`；模型目录在 `config set-retrieval` 写入用户级配置，加载时启用离线模式和 `local_files_only`，缺模型或未安装 `vector` extra 时只会结构化降级到关键词/图结果。为使 BGE-M3 的 CPU 全量建库可控，文档 embedding 默认上限为 256 tokens；该值是索引身份的一部分，改变后必须执行 full build。
@@ -187,7 +198,7 @@ wiki_query(
 )
 ```
 
-Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，先做 passage FTS/vector 召回，再以 RRF 和有界强-seed graph 扩展排序；退役的 `wiki/sources`、superseded 与 deprecated 页面不会进入 active 正文。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
+Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，在每个物理 store 上先捕获一次不可变 `QueryCorpusSnapshot`，再做 passage FTS/vector 召回、RRF 融合和有界强-seed graph 扩展排序；退役的 `wiki/sources`、superseded 与 deprecated 页面不会进入 active 正文。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
 
 查询引擎固定为 V2；配置中的 `retrieval.query_version` 仅保留明确的 `v2` 值，旧 `v1` 配置会在启动解码时拒绝。若旧客户端只需要旧响应字段，可使用 `retrieval.context.response_mode=legacy`，它只适配已经完成的 V2 结果，不会切换检索引擎。
 
@@ -296,7 +307,9 @@ wiki_ingest
 ```
 wiki_update(preview) → current_hash + plan_id + locked-field diff
 wiki_update(apply)   → hash/plan 校验 + 锁定字段/来源检查
-                     → 写页面 + 更新依赖 + refresh index + append log
+                     → atomic/CAS 写页面事实 + operation journal
+                     → 更新依赖 + 增量检索投影（或返回 rebuild_required）
+                     → refresh navigation/overview + append log
 
 wiki_archive(plan)   → 生成不可变 bundle 计划
 wiki_archive(apply)  → 写入 archives/bundles + archive index
@@ -304,12 +317,16 @@ wiki_restore(plan)   → 从 bundle 生成恢复计划
 wiki_restore(apply)  → 恢复页面 + 更新 active/archive index
 ```
 
+普通页面提交不调用全量 `refresh_indexes`。缺失、不兼容或损坏的检索库必须通过 `index build|update` 或 admin repair 显式恢复；页面事实与派生索引的状态以 operation result 中的 `state`、`failed_stage`、`repair_action` 为准。
+
 ### 查询流水线
 
 ```
-关键词 / CJK bigrams，带标题/短语/稀有词加权 → 候选页面
+active/raw store → immutable QueryCorpusSnapshot
+  → 关键词 / CJK bigrams，带标题/短语/稀有词加权 → 候选页面
   → 图扩展（wikilink、shared source、common neighbor、same type）
-  → 上下文预算分配
+  → assemble_recovery（回退策略、候选池、命中统计、context pack）
+  → 上下文预算分配与协作式取消
   → 编号引用 context pack
 ```
 
@@ -324,6 +341,12 @@ uv run pytest tests/wiki/test_wiki_query.py
 
 # 运行单个测试函数
 uv run pytest tests/wiki/test_wiki_query.py::test_function_name -v
+
+# 静态检查
+uv run ruff check src/
+
+# 文档与公共 MCP 说明回归
+uv run pytest tests/test_readme_global_mcp_docs.py -q
 ```
 
 ### 约定
@@ -335,6 +358,10 @@ uv run pytest tests/wiki/test_wiki_query.py::test_function_name -v
 - 敏感数据（手机号、邮箱、token）写入前会被脱敏
 - Windows 路径安全：非法字符、ADS 冒号、保留设备名、控制字符、尾随点/空格
 - 文件写入统一 `encoding="utf-8"`（无 BOM）；读取可用 `utf-8-sig` 兼容 Obsidian BOM 文件，但写入绝不产生 BOM
+- durable 文本写入必须走原子写入和页面变更协调器；投影失败时修复已有 operation，不通过重试创建页面来“恢复”
+- 普通页面变更只做增量检索投影；全量索引构建必须是显式 CLI/admin 操作，不能藏在 MCP 查询或写入调用中
+- 查询阶段复用不可变 corpus snapshot 和统一 recovery assembler；评测不得通过修改全局 runtime registry 注入临时配置
+- 路径 segment/slug 规则只能复用 `wiki_paths` owner；兼容旧文件名时使用显式参数，不能批量迁移现有文件
 - 不引入 Chroma、sentence-transformers 或 embedding 模型
 - 不创建 `.rag-index/` 或 `.models/`
 
