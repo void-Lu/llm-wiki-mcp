@@ -320,14 +320,26 @@ def _run_retrieval_gold_sample(args: argparse.Namespace) -> int:
         seed=args.seed,
         dataset_id=args.dataset_id,
     )
-    _print_json(result)
+    _print_json(_gold_cli_payload(result, artifact_names=("template", "manifest")))
     return 0
 
 
 def _run_retrieval_gold_finalize(args: argparse.Namespace) -> int:
     result = finalize_retrieval_gold(args.template, args.manifest, args.vault, args.output_dir)
-    _print_json(result)
+    _print_json(_gold_cli_payload(result, artifact_names=("dataset", "manifest")))
     return 0
+
+
+def _gold_cli_payload(result: dict[str, Any], *, artifact_names: tuple[str, ...]) -> dict[str, Any]:
+    """Return a safe CLI summary without echoing user filesystem paths."""
+
+    payload: dict[str, Any] = {key: value for key, value in result.items() if key not in artifact_names}
+    payload["artifacts"] = {
+        key: Path(str(result[key])).name
+        for key in artifact_names
+        if key in result
+    }
+    return payload
 
 
 def _vector_config_from_args(args: argparse.Namespace) -> dict[str, object]:

@@ -239,6 +239,12 @@ def test_retrieval_gold_sample_cli_writes_redacted_template(tmp_path: Path, caps
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
     assert output["count"] == 4
+    assert "template" not in output
+    assert "manifest" not in output
+    assert output["artifacts"] == {
+        "template": "gold-template.jsonl",
+        "manifest": "gold-template.manifest.json",
+    }
     assert (output_dir / "gold-template.jsonl").is_file()
     assert (output_dir / "gold-template.manifest.json").is_file()
 

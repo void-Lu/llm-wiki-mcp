@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 from retrieval.query_telemetry import redact_query
-from retrieval.retrieval_eval import vault_fingerprint
+from retrieval.retrieval_eval import RetrievalEvalError, _parse_filters, vault_fingerprint
 from wiki.knowledge_compiler import filesystem_path
 
 
@@ -279,6 +279,8 @@ def _materialize_record(raw: Mapping[str, Any], line_number: int, root: Path) ->
     case_id = raw.get("id")
     if not isinstance(case_id, str) or not case_id.strip():
         raise RetrievalGoldError("case_invalid", f"line {line_number}: id must be a non-empty string")
+    if raw.get("schema_version") != GOLD_SCHEMA_VERSION:
+        raise RetrievalGoldError("unsupported_schema", f"case {case_id}: schema_version must be {GOLD_SCHEMA_VERSION}")
     query = raw.get("query")
     if not isinstance(query, str) or not query.strip():
         raise RetrievalGoldError("case_invalid", f"case {case_id}: query is required")
@@ -293,6 +295,10 @@ def _materialize_record(raw: Mapping[str, Any], line_number: int, root: Path) ->
     filters = raw.get("filters", {})
     if not isinstance(filters, dict):
         raise RetrievalGoldError("invalid_filters", f"case {case_id}: filters must be an object")
+    try:
+        normalized_filters = _parse_filters(filters, case_id)
+    except RetrievalEvalError as exc:
+        raise RetrievalGoldError("invalid_filters", str(exc)) from exc
     relevant_raw = raw.get("relevant")
     if not isinstance(relevant_raw, list):
         raise RetrievalGoldError("annotation_incomplete", f"case {case_id}: relevant must be a list")
@@ -330,7 +336,7 @@ def _materialize_record(raw: Mapping[str, Any], line_number: int, root: Path) ->
         "id": case_id.strip(),
         "query": redact_query(query.strip()),
         "scope": scope,
-        "filters": filters,
+        "filters": normalized_filters,
         "answerable": answerable,
         "relevant": relevant,
         "language": language.strip(),

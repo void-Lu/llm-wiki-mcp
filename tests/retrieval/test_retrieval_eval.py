@@ -24,6 +24,7 @@ from retrieval.retrieval_eval import (
     validate_dataset_paths,
     write_retrieval_eval_report,
     _results_match_filters,
+    _require_mcp_lexical_pipeline,
 )
 from retrieval.vector_index import VectorIndexStore, vector_index_records
 from retrieval.retrieval_index import RetrievalIndexStore
@@ -407,6 +408,9 @@ def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tm
     assert str(vault.resolve()) not in json_report
     assert "Recall@10" in markdown_report
     assert "Context budget：通过" in markdown_report
+    assert "confirmation_token" not in json_report
+    assert "source_pages" not in json_report
+    assert "excerpt" not in json_report
 
     legacy_report = deepcopy(report)
     del legacy_report["metadata"]["ranking"]
@@ -436,6 +440,63 @@ def test_mcp_entrypoint_uses_public_lexical_contract_without_vector_hits(tmp_pat
     assert all(case["pipeline"]["counters"]["vector_hits"] == 0 for case in report["cases"])
     assert report["metrics"]["filter_correctness"] == 1.0
     assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
+
+
+def test_mcp_lexical_contract_requires_explicit_mode_and_zero_vector_hits() -> None:
+    with pytest.raises(RetrievalEvalError, match="lexical-only"):
+        _require_mcp_lexical_pipeline({"counters": {"vector_hits": 0}})
+    with pytest.raises(RetrievalEvalError, match="lexical-only"):
+        _require_mcp_lexical_pipeline({"retrieval_mode": "lexical", "counters": {}})
+    with pytest.raises(RetrievalEvalError, match="lexical-only"):
+        _require_mcp_lexical_pipeline({"retrieval_mode": "lexical", "counters": {"vector_hits": 1}})
+    _require_mcp_lexical_pipeline({"retrieval_mode": "lexical", "counters": {"vector_hits": 0}})
+
+
+def test_report_writer_sanitizes_legacy_pipeline_before_persisting(tmp_path: Path) -> None:
+    report = {
+        "metadata": {
+            "dataset_id": "fixture",
+            "dataset_revision": "rev",
+            "parameters": {"top_k": 1},
+            "vault_fingerprint": {"value": "fingerprint", "file_count": 1},
+            "runtime_provenance": {"package_version": "test", "revision": "rev"},
+            "ranking": {"version": "test"},
+            "query_v2": {},
+        },
+        "metrics": {
+            "recall_at_k_macro": 1.0,
+            "recall_at_k_micro": 1.0,
+            "precision_at_k_macro": 1.0,
+            "precision_at_k_micro": 1.0,
+            "mrr_at_k_macro": 1.0,
+            "ndcg_at_k_macro": 1.0,
+            "no_answer_false_positive_rate": 0.0,
+            "context_budget": {"within_budget": True},
+            "filter_correctness": 1.0,
+            "p95_latency_ms": 1.0,
+        },
+        "cases": [
+            {
+                "id": "case",
+                "ranked_paths": [],
+                "filter_correct": True,
+                "pipeline": {
+                    "retrieval_mode": "lexical",
+                    "counters": {"vector_hits": 0},
+                    "discovery": {"evidence": {"excerpt": "secret"}},
+                    "confirmation_token": "secret-token",
+                    "fallback": {"level": "raw", "reasons": ["safe_reason", "contains spaces and details"]},
+                },
+            }
+        ],
+    }
+    output = write_retrieval_eval_report(report, tmp_path / "reports")
+    text = Path(output["json"]).read_text(encoding="utf-8")
+    assert "secret" not in text
+    assert "confirmation_token" not in text
+    assert "excerpt" not in text
+    assert "safe_reason" in text
+    assert "contains spaces and details" not in text
 
 
 def test_mcp_entrypoint_rejects_non_lexical_mode_before_query(tmp_path: Path) -> None:

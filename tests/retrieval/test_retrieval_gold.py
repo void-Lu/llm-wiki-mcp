@@ -111,3 +111,23 @@ def test_finalize_rejects_absolute_or_missing_relevant_path(tmp_path: Path) -> N
     with pytest.raises(RetrievalGoldError) as error:
         finalize_retrieval_gold(sampled["template"], sampled["manifest"], vault, tmp_path / "final")
     assert error.value.code == "invalid_relevant_path"
+
+
+def test_finalize_rejects_unsupported_filters(tmp_path: Path) -> None:
+    vault = _telemetry_vault(tmp_path)
+    sampled = sample_retrieval_gold(vault, tmp_path / "gold", count=4)
+    template = Path(sampled["template"])
+    records = [json.loads(line) for line in template.read_text(encoding="utf-8").splitlines()]
+    for record in records:
+        record.update(
+            {
+                "answerable": True,
+                "relevant": [{"path": "wiki/concepts/invoice.md", "grade": 3}],
+                "needs_review": False,
+                "filters": {"unsupported": "value"},
+            }
+        )
+    template.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+    with pytest.raises(RetrievalGoldError, match="unsupported filters"):
+        finalize_retrieval_gold(sampled["template"], sampled["manifest"], vault, tmp_path / "final")

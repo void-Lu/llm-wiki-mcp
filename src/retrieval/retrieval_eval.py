@@ -349,7 +349,7 @@ def run_retrieval_evaluation(
                 budget_violations.append(case.id)
             packed_token_samples.append(used)
 
-        pipeline = result.get("pipeline", {})
+        pipeline = _pipeline_summary(result.get("pipeline", {}))
         fallback = pipeline.get("fallback", {}) if isinstance(pipeline, Mapping) else {}
         fallback_level = str(fallback.get("level", "legacy")) if isinstance(fallback, Mapping) else "legacy"
         if fallback_level not in {"none", "legacy"}:
@@ -397,8 +397,9 @@ def run_retrieval_evaluation(
                 "no_answer_false_positive": false_positive,
                 "filter_correct": filter_correct,
                 "context_budget": budget,
-                "pipeline": result["pipeline"],
-                "warnings": result["pipeline"].get("stage_1_5_vector_warnings", result["pipeline"].get("warnings", [])),
+                "pipeline": pipeline,
+                "warnings": [],
+                "warning_count": pipeline.get("warning_count", 0),
                 "result_summary": [_result_summary(item) for item in result["results"]],
                 "diagnosis": diagnosis,
             }
@@ -621,13 +622,14 @@ def evaluate_retrieval_gate(
 
 def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Path) -> dict[str, str]:
     """Write machine-readable JSON and a compact Markdown summary."""
+    safe_report = _sanitise_report_for_output(report)
     target = Path(output_dir).expanduser().resolve()
     target.mkdir(parents=True, exist_ok=True)
     json_path = target / "retrieval-eval.json"
     markdown_path = target / "retrieval-eval.md"
-    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    metadata = report["metadata"]
-    metrics = report["metrics"]
+    json_path.write_text(json.dumps(safe_report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    metadata = safe_report["metadata"]
+    metrics = safe_report["metrics"]
     ranking_metadata = metadata.get("ranking")
     ranking_version = ranking_metadata.get("version", "legacy-unversioned") if isinstance(ranking_metadata, Mapping) else "legacy-unversioned"
     lines = [
@@ -658,10 +660,10 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         "## Case 摘要",
         "",
     ]
-    for case in report["cases"]:
+    for case in safe_report["cases"]:
         first_path = case["ranked_paths"][0] if case["ranked_paths"] else "（无结果）"
         lines.append(f"- `{case['id']}`：首项 `{first_path}`；过滤器 {'通过' if case['filter_correct'] else '失败'}")
-    gate = report.get("gate")
+    gate = safe_report.get("gate")
     if isinstance(gate, Mapping):
         lines.extend(
             [
@@ -673,6 +675,27 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         )
     markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"json": str(json_path), "markdown": str(markdown_path)}
+
+
+def _sanitise_report_for_output(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy a report and remove evidence-bearing pipeline fields before output."""
+
+    try:
+        safe_report = json.loads(json.dumps(dict(report), ensure_ascii=False))
+    except (TypeError, ValueError) as exc:
+        raise RetrievalEvalError("report_invalid", "retrieval evaluation report must be JSON serializable") from exc
+    if not isinstance(safe_report, dict):
+        raise RetrievalEvalError("report_invalid", "retrieval evaluation report must be an object")
+    cases = safe_report.get("cases")
+    if isinstance(cases, list):
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            pipeline = _pipeline_summary(case.get("pipeline", {}))
+            case["pipeline"] = pipeline
+            case["warnings"] = []
+            case["warning_count"] = pipeline.get("warning_count", 0)
+    return safe_report
 
 
 def _parse_manifest(raw: object) -> RetrievalEvalManifest:
@@ -992,16 +1015,135 @@ def _mcp_query_case(
         raise RetrievalEvalError("mcp_contract_invalid", "wiki_query results must be a list")
     if not isinstance(pipeline, Mapping):
         raise RetrievalEvalError("mcp_contract_invalid", "wiki_query pipeline must be an object")
-    mode = pipeline.get("retrieval_mode")
-    vector_hits = (pipeline.get("counters") or {}).get("vector_hits", 0) if isinstance(pipeline.get("counters"), Mapping) else 0
-    if mode not in {None, "lexical"} or vector_hits:
-        raise RetrievalEvalError("mcp_not_lexical", "the public wiki_query response was not lexical-only")
+    _require_mcp_lexical_pipeline(pipeline)
     return {
         "ok": True,
         "results": results,
-        "pipeline": dict(pipeline),
+        "pipeline": _pipeline_summary(pipeline),
         "budget": response.get("budget", {}),
     }
+
+
+def _require_mcp_lexical_pipeline(pipeline: Mapping[str, Any]) -> None:
+    """Enforce the public MCP contract used by lexical-only evaluations."""
+
+    mode = pipeline.get("retrieval_mode")
+    counters = pipeline.get("counters")
+    vector_hits = counters.get("vector_hits") if isinstance(counters, Mapping) else None
+    if mode != "lexical" or type(vector_hits) is not int or vector_hits != 0:
+        raise RetrievalEvalError("mcp_not_lexical", "the public wiki_query response was not lexical-only")
+
+
+def _pipeline_summary(pipeline: object) -> dict[str, Any]:
+    """Keep report provenance useful without persisting query/source evidence."""
+
+    if not isinstance(pipeline, Mapping):
+        return {}
+    summary: dict[str, Any] = {}
+    for key in ("authority", "corpus", "scope", "retrieval_mode", "ranking_version", "lexical_enabled"):
+        value = pipeline.get(key)
+        if isinstance(value, (str, bool)):
+            summary[key] = value
+
+    counters = pipeline.get("counters")
+    if isinstance(counters, Mapping):
+        safe_counters: dict[str, int | float] = {}
+        for key in (
+            "additional",
+            "fts_hits",
+            "graph_hits",
+            "qualified_fts_hits",
+            "qualified_hits",
+            "queries",
+            "raw_fts_hits",
+            "raw_hits",
+            "relaxed_fts_hits",
+            "relaxed_hits",
+            "returned",
+            "selected",
+            "vector_hits",
+        ):
+            value = counters.get(key)
+            if type(value) is int or (isinstance(value, float) and math.isfinite(value)):
+                safe_counters[key] = value
+        if safe_counters:
+            summary["counters"] = safe_counters
+
+    fallback = pipeline.get("fallback")
+    if isinstance(fallback, Mapping):
+        safe_fallback: dict[str, Any] = {}
+        level = fallback.get("level")
+        if isinstance(level, str):
+            safe_fallback["level"] = level
+        reasons = fallback.get("reasons")
+        if isinstance(reasons, list):
+            safe_fallback["reason_count"] = len(reasons)
+            safe_reasons = [
+                reason.strip()[:120]
+                for reason in reasons
+                if isinstance(reason, str) and reason.strip() and _is_safe_reason_code(reason)
+            ]
+            if safe_reasons:
+                safe_fallback["reasons"] = safe_reasons
+        if safe_fallback:
+            summary["fallback"] = safe_fallback
+
+    coverage = pipeline.get("coverage")
+    if isinstance(coverage, Mapping):
+        safe_coverage: dict[str, Any] = {}
+        triggered = coverage.get("triggered")
+        if isinstance(triggered, bool):
+            safe_coverage["triggered"] = triggered
+        uncovered = coverage.get("uncovered_latin_terms")
+        if isinstance(uncovered, list):
+            safe_coverage["uncovered_latin_term_count"] = len(uncovered)
+        if safe_coverage:
+            summary["coverage"] = safe_coverage
+
+    batch = pipeline.get("batch")
+    if isinstance(batch, Mapping):
+        safe_batch: dict[str, Any] = {}
+        for key in ("status", "max_batch_items"):
+            value = batch.get(key)
+            if isinstance(value, (str, int)) and not isinstance(value, bool):
+                safe_batch[key] = value
+        for key, source_key in (
+            ("entity_count", "entity_count"),
+            ("ambiguous_count", "ambiguous"),
+            ("failed_entity_count", "failed_entities"),
+            ("pending_entity_count", "pending_entities"),
+            ("unresolved_count", "unresolved"),
+        ):
+            value = batch.get(source_key)
+            if isinstance(value, list):
+                safe_batch[key] = len(value)
+            elif type(value) is int:
+                safe_batch[key] = value
+        batch_counters = batch.get("counters")
+        if isinstance(batch_counters, Mapping):
+            safe_batch["counters"] = {
+                str(key): value
+                for key, value in batch_counters.items()
+                if type(value) is int or (isinstance(value, float) and math.isfinite(value))
+            }
+        if safe_batch:
+            summary["batch"] = safe_batch
+
+    warnings = pipeline.get("warnings")
+    vector_warnings = pipeline.get("stage_1_5_vector_warnings")
+    warning_count = 0
+    if isinstance(warnings, list):
+        warning_count += len(warnings)
+    if isinstance(vector_warnings, list):
+        warning_count += len(vector_warnings)
+    summary["warning_count"] = warning_count
+    return summary
+
+
+def _is_safe_reason_code(value: str) -> bool:
+    """Accept only bounded identifier-like fallback reason codes."""
+
+    return all(character.isalnum() or character in {"_", ":", ".", "-"} for character in value.strip())
 
 
 def _public_filters(filters: Mapping[str, Any]) -> dict[str, Any] | None:
