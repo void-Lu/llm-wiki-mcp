@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import secrets
 
-from wiki.page_operation_store import PageOperationError, PageOperationStore, _normalize_page_path
+from wiki.page_operation_store import PageOperationError, PageOperationStore
 
 
 class UpdatePlanError(ValueError):
@@ -54,12 +54,12 @@ class UpdatePlanStore:
 
     @property
     def path(self):
-        return self.store.path
+        return self.store.database_path
 
     def issue(self, page_path: str, base_hash: str, intent_hash: str, *, ttl_seconds: int = 300) -> UpdatePlan:
         if not base_hash or not intent_hash or ttl_seconds <= 0:
             raise UpdatePlanError("update_plan_invalid")
-        normalized_path = _normalize_page_path(page_path)
+        normalized_path = self.store.normalize_page_path(page_path)
         now = _now()
         expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
         plan_id = secrets.token_urlsafe(32)
@@ -80,7 +80,7 @@ class UpdatePlanStore:
     def get(self, plan_id: str) -> UpdatePlan | None:
         if not plan_id:
             return None
-        with self.store._connection() as connection:
+        with self.store.connection() as connection:
             return self._get_with_connection(connection, plan_id, missing_ok=True)
 
     inspect = get
@@ -94,7 +94,7 @@ class UpdatePlanStore:
         intent_hash: str,
         operation_id: str,
     ) -> UpdatePlan:
-        normalized_path = _normalize_page_path(page_path)
+        normalized_path = self.store.normalize_page_path(page_path)
         with self.store.plan_connection() as connection:
             plan = self._get_with_connection(connection, plan_id, missing_ok=True)
             if plan is None:

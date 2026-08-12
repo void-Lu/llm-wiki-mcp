@@ -19,13 +19,11 @@ from wiki.update_plan_store import UpdatePlanError, UpdatePlanStore
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
+from wiki.wiki_paths import WikiPathError, validate_wiki_page_path
 
 LOCKED_FIELDS = {"type", "concept_id", "entity_id", "entity_type", "created", "source_path", "source_hash"}
 REMOVED_FIELDS = {"source_capsules", "source_capsule"}
 SERVER_OWNED_FIELDS = {"source_hashes"}
-_ALLOWED = ("wiki/concepts/", "wiki/entities/", "wiki/projects/")
-
-
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -262,15 +260,14 @@ def apply_update(
 
 
 def _target(root: Path, page_path: str) -> Path | dict[str, Any]:
-    normalized = page_path.replace("\\", "/")
-    relative = Path(normalized)
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-        return {"ok": False, "code": "path_escape"}
+    try:
+        relative = validate_wiki_page_path(page_path, allow_navigation_index=False)
+    except WikiPathError as exc:
+        code = "update_path_not_allowed" if exc.code in {"navigation_index_forbidden", "invalid_wiki_path"} else exc.code
+        return {"ok": False, "code": code}
     path = (root / relative).resolve()
     if not path.is_relative_to(root):
         return {"ok": False, "code": "path_escape"}
-    if not any(normalized.startswith(prefix) for prefix in _ALLOWED) or path.name == "index.md":
-        return {"ok": False, "code": "update_path_not_allowed"}
     return path
 
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from common.fallback_policy import FallbackDecision
-from retrieval.context_packer import estimate_tokens
+from retrieval.context_packer import estimate_response_tokens
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import RetrievalIndexStore
 
@@ -88,7 +88,7 @@ def _build_page_ordered_context(
             cancellation.checkpoint_batch(hit_index, every=16, stage="context")
             if page_hit.passage_id in seen_ids:
                 continue
-            item_tokens = estimate_tokens(page_hit.text)
+            item_tokens = estimate_response_tokens(page_hit.text)
             if page_tokens + item_tokens > PAGE_TOKEN_BUDGET:
                 break
             page_tokens += item_tokens

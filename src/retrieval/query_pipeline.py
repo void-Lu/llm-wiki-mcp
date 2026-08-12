@@ -289,7 +289,7 @@ def _effective_scope(scope: str, intent: str) -> tuple[str, tuple[str, ...]]:
     return scope, ()
 
 
-def _is_source_index(path: str, frontmatter: dict[str, Any]) -> bool:
+def _is_source_index(path: str, frontmatter: Mapping[str, Any]) -> bool:
     page_type = str(frontmatter.get("type") or "").casefold()
     return (
         page_type in {"source_index", "source-index", "index", "source_summary"}
@@ -303,7 +303,7 @@ def _is_retired_source_namespace(path: str) -> bool:
     return normalized == "wiki/sources" or normalized.startswith("wiki/sources/")
 
 
-def _eligible(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, scope: str) -> bool:
+def _eligible(hit: PassageHit, metadata: Mapping[str, Mapping[str, Any]], *, scope: str) -> bool:
     fm = metadata.get(hit.page_path, {})
     if scope == "raw":
         normalized_path = hit.page_path.replace("\\", "/")
@@ -326,7 +326,13 @@ def _eligible(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, scope: st
     return scope == "raw" or scope == "all" or (scope == "history" and history) or (scope == "knowledge" and not history) or scope == "archive"
 
 
-def _matches_request(hit: PassageHit, metadata: dict[str, dict[str, Any]], *, project: str | None, filters: QueryFilters) -> bool:
+def _matches_request(
+    hit: PassageHit,
+    metadata: Mapping[str, Mapping[str, Any]],
+    *,
+    project: str | None,
+    filters: QueryFilters,
+) -> bool:
     """Apply the same boundary filters to FTS and vector-only candidates."""
     frontmatter = metadata.get(hit.page_path, {})
     return page_matches_filters(
@@ -349,6 +355,15 @@ class AdaptiveCandidateScorePolicy:
     high_score_ratio: float = BATCH_HIGH_SCORE_RATIO
     ambiguity_ratio: float = BATCH_AMBIGUITY_RATIO
     max_selected_candidates: int = BATCH_MAX_SELECTED_CANDIDATES
+
+
+@dataclass(frozen=True)
+class _EntityStoreSpec:
+    """One entity-batch store paired with its invocation snapshot."""
+
+    store: RetrievalIndexStore
+    scope: str
+    snapshot: QueryCorpusSnapshot
 
 
 _DISCOVERY_HEADING_RE = re.compile(r"^\s*(?P<marks>#{2,6})\s+(?P<label>.+?)\s*$")
@@ -416,13 +431,6 @@ def _discovery_fragments(line: str) -> list[tuple[str, str, str]]:
     if item:
         return [("list", item.group("label"), "list")]
     return []
-
-
-def _discovery_line(line: str) -> tuple[str, str, str] | None:
-    """Return the first structured label for compatibility with callers."""
-
-    fragments = _discovery_fragments(line)
-    return fragments[0] if fragments else None
 
 
 def _clean_discovery_label(value: str) -> str:
@@ -1326,6 +1334,8 @@ def _merge_coverage_items(
     active_items: Sequence[dict[str, Any]],
     raw_items: Sequence[dict[str, Any]],
     uncovered_terms: Sequence[str],
+    *,
+    rrf_k: int = RRF_K,
 ) -> list[dict[str, Any]]:
     """Fuse active and raw page ranks using normalized, source-local signals."""
 
@@ -1345,7 +1355,7 @@ def _merge_coverage_items(
         if is_raw and not covered:
             continue
         coverage_ratio = len(covered) / total_terms
-        source_rrf = (RRF_K + 1) / (RRF_K + source_rank)
+        source_rrf = (rrf_k + 1) / (rrf_k + source_rank)
         authority = 0.0 if is_raw else min(max(float(item.get("score", 0.0)) / 100.0, 0.0), 0.35)
         fused_score = round(coverage_ratio + source_rrf + authority, 12)
         ranked.append(
@@ -1363,6 +1373,13 @@ def _merge_coverage_items(
         )
     ranked.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     return ranked
+
+
+def _effective_rrf_k(embedding: EmbeddingSettings | None) -> int:
+    """Resolve one query invocation's immutable RRF scale."""
+
+    value = getattr(embedding, "rrf_k", RRF_K)
+    return value if isinstance(value, int) and value > 0 else RRF_K
 
 
 def _vector_hits(
@@ -1572,13 +1589,19 @@ def _entity_store_specs(
     root: Path,
     primary_store: RetrievalIndexStore,
     effective_scope: str,
-) -> list[tuple[RetrievalIndexStore, str, dict[str, dict[str, Any]]]]:
-    specs = [(primary_store, effective_scope, _store_metadata(primary_store))]
+    *,
+    snapshot: QueryCorpusSnapshot,
+    raw_snapshot: QueryCorpusSnapshot | None,
+    raw_store: RetrievalIndexStore | None,
+) -> list[_EntityStoreSpec]:
+    specs = [_EntityStoreSpec(primary_store, effective_scope, snapshot)]
     if effective_scope in {"knowledge", "all"}:
-        raw_store = RetrievalIndexStore(root, scope="raw")
-        raw_status = raw_store.status()
+        entity_raw_store = raw_store or RetrievalIndexStore(root, scope="raw")
+        raw_status = entity_raw_store.status()
         if raw_status.get("ok") and raw_status.get("state") == "fresh":
-            specs.append((raw_store, "raw", _store_metadata(raw_store)))
+            if raw_snapshot is None:
+                raise RuntimeError("raw entity store requires the invocation snapshot")
+            specs.append(_EntityStoreSpec(entity_raw_store, "raw", raw_snapshot))
     return specs
 
 
@@ -1639,7 +1662,7 @@ def _run_one_entity_batch_query(
     all_entities: Sequence[dict[str, Any]],
     base_question: str,
     *,
-    store_specs: Sequence[tuple[RetrievalIndexStore, str, dict[str, dict[str, Any]]]],
+    store_specs: Sequence[_EntityStoreSpec],
     project: str | None,
     filters: QueryFilters,
     policy: AdaptiveCandidateScorePolicy,
@@ -1648,7 +1671,10 @@ def _run_one_entity_batch_query(
     query_text = _entity_query_text(entity, base_question, all_entities)
     counters = {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0}
     try:
-        for store, store_scope, metadata in store_specs:
+        for spec in store_specs:
+            store = spec.store
+            store_scope = spec.scope
+            metadata = spec.snapshot.metadata
             hits, local_counters = _search_entity_store(
                 store,
                 entity,
@@ -1829,6 +1855,9 @@ def _run_entity_batch(
     retrieval_mode: str,
     hard_budget_tokens: int,
     confirmation_token: str | None,
+    snapshot: QueryCorpusSnapshot,
+    raw_snapshot: QueryCorpusSnapshot | None,
+    raw_store: RetrievalIndexStore | None,
     cancellation: QueryCancellationContext | None = None,
 ) -> dict[str, Any]:
     if cancellation is not None:
@@ -1889,7 +1918,14 @@ def _run_entity_batch(
             "counters": {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0, "queries": 0},
         }
     current_entities = list(entities[offset : offset + BATCH_MAX_ITEMS])
-    specs = _entity_store_specs(root, primary_store, effective_scope)
+    specs = _entity_store_specs(
+        root,
+        primary_store,
+        effective_scope,
+        snapshot=snapshot,
+        raw_snapshot=raw_snapshot,
+        raw_store=raw_store,
+    )
     results: list[dict[str, Any]] = []
     counter_totals = {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0, "raw_hits": 0, "queries": len(current_entities)}
     for index, entity in enumerate(current_entities):
@@ -2039,6 +2075,7 @@ def run_query_v2(
     if project:
         project = project.casefold()
     intent = classify_intent(question)
+    effective_rrf_k = _effective_rrf_k(embedding) if retrieval_mode != "lexical" else RRF_K
     effective_scope, scope_rules = _effective_scope(scope, intent)
     root = Path(vault_root).expanduser().resolve()
     store_scope = "raw" if effective_scope == "raw" else "archive" if effective_scope == "archive" else "active"
@@ -2143,13 +2180,13 @@ def run_query_v2(
         cancellation.checkpoint_batch(index, every=16, stage="graph")
         hit = item["hit"]
         rrf = (
-            (1 / (RRF_K + item["fts_rank"]) if item["fts_rank"] else 0.0)
-            + (1 / (RRF_K + item["title_rank"]) if item["title_rank"] else 0.0)
-            + (1 / (RRF_K + item["vector_rank"]) if item["vector_rank"] else 0.0)
+            (1 / (effective_rrf_k + item["fts_rank"]) if item["fts_rank"] else 0.0)
+            + (1 / (effective_rrf_k + item["title_rank"]) if item["title_rank"] else 0.0)
+            + (1 / (effective_rrf_k + item["vector_rank"]) if item["vector_rank"] else 0.0)
         )
         exact = int(question.casefold() in {hit.title.casefold(), hit.page_path.casefold()})
         total = round(
-            rrf * (RRF_K + 1)
+            rrf * (effective_rrf_k + 1)
             + _authority_bonus(hit, intent, effective_scope, metadata)
             + _title_overlap_bonus(hit, question)
             + exact * 0.5,
@@ -2218,7 +2255,7 @@ def run_query_v2(
     def capture_raw_snapshot() -> QueryCorpusSnapshot:
         nonlocal raw_snapshot, raw_store_for_snapshot
         if raw_snapshot is None:
-            raw_store_for_snapshot = raw_store_for_snapshot or RetrievalIndexStore(root, scope="raw")
+            raw_store_for_snapshot = raw_store_for_snapshot or raw_store or RetrievalIndexStore(root, scope="raw")
             raw_status = raw_store_for_snapshot.status()
             if not raw_status.get("ok") or raw_status.get("state") != "fresh":
                 raw_snapshot = QueryCorpusSnapshot.empty("raw")
@@ -2253,7 +2290,7 @@ def run_query_v2(
             item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
         ]
         if raw_candidate_items:
-            merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms)
+            merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms, rrf_k=effective_rrf_k)
             selected = _adaptive_expand(merged, top_k)[:top_k]
             selected_paths = {item["hit"].page_path for item in selected}
             combined_items = [*scored, *raw_candidate_items]
@@ -2360,7 +2397,7 @@ def run_query_v2(
                         item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
                     ]
                     if raw_candidate_items:
-                        merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms)
+                        merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms, rrf_k=effective_rrf_k)
                         selected = _adaptive_expand(merged, top_k)[:top_k]
                         selected_paths = {item["hit"].page_path for item in selected}
                         combined_items = [*wiki_relaxed_items, *raw_candidate_items]
@@ -2482,6 +2519,10 @@ def run_query_v2(
     }
     if discovery_entities:
         cancellation.checkpoint("fallback")
+        batch_raw_snapshot = raw_snapshot
+        if effective_scope in {"knowledge", "all"}:
+            batch_raw_snapshot = capture_raw_snapshot()
+        batch_raw_store = raw_store or raw_store_for_snapshot
         batch_payload = _run_entity_batch(
             root,
             discovery_entities,
@@ -2493,6 +2534,9 @@ def run_query_v2(
             retrieval_mode=retrieval_mode,
             hard_budget_tokens=hard_budget_tokens,
             confirmation_token=confirmation_token,
+            snapshot=snapshot,
+            raw_snapshot=batch_raw_snapshot,
+            raw_store=batch_raw_store,
             cancellation=cancellation,
         )
     public_selected = selected[:top_k]

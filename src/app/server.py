@@ -39,7 +39,11 @@ from wiki.content_catalog import (
     ContentCatalogService,
 )
 from wiki.content_reference import ContentRefV1, ContentReferenceError
-from retrieval.metadata_filters import normalize_filter_aliases
+from retrieval.metadata_filters import (
+    QUERY_METADATA_FILTERS,
+    SUPPORTED_METADATA_FILTERS,
+    normalize_metadata_filters,
+)
 from archive.archive_models import ARCHIVE_REASONS, is_archive_reason
 from archive.archive_service import ArchiveService
 from codegraph.codegraph_sync import CodeGraphSyncError, sync_codegraph as run_codegraph_sync
@@ -295,6 +299,8 @@ def _register(
     aliases: Mapping[str, str] | None = None,
     content_ref_param: str | None = None,
     filter_param: str | None = None,
+    filter_allowed: frozenset[str] | None = None,
+    fallback_aliases: frozenset[str] | None = None,
     budget_param: str | None = None,
 ) -> Any:
     """Register a tool and centralize its boundary normalization pipeline."""
@@ -305,10 +311,13 @@ def _register(
             aliases=aliases,
             content_ref_param=content_ref_param,
             filter_param=filter_param,
+            filter_allowed=filter_allowed,
+            fallback_aliases=fallback_aliases,
             budget_param=budget_param,
         )
 
     alias_map = dict(aliases or {})
+    fallback_aliases = frozenset(fallback_aliases or ())
 
     @wraps(function)
     def registered(*args: object, **kwargs: object) -> object:
@@ -316,9 +325,7 @@ def _register(
         for alias, canonical in alias_map.items():
             if alias not in normalized or normalized[alias] is None:
                 continue
-            # Legacy catalog aliases were last-write-wins; noteType was a
-            # fallback for a missing note_type.  Preserve both contracts.
-            if function.__name__ == "wiki_write_note" and normalized.get(canonical):
+            if alias in fallback_aliases and normalized.get(canonical):
                 continue
             normalized[canonical] = normalized[alias]
         for alias in alias_map:
@@ -329,7 +336,11 @@ def _register(
                 filter_value = normalized[filter_param]
                 if not isinstance(filter_value, Mapping):
                     return public_error("invalid_filters")
-                normalized[filter_param] = normalize_filter_aliases(filter_value)
+                normalized[filter_param] = normalize_metadata_filters(
+                    filter_value,
+                    allowed=filter_allowed or SUPPORTED_METADATA_FILTERS,
+                    preserve_path_trailing=True,
+                )
             except ValueError:
                 return public_error("invalid_filters")
 
@@ -475,6 +486,7 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
 @_register(
     aliases={"storeScope": "store_scope", "pageSize": "page_size"},
     filter_param="filters",
+    filter_allowed=SUPPORTED_METADATA_FILTERS,
 )
 def wiki_list(
     store_scope: Literal["active", "raw", "archive"] = "active",
@@ -605,13 +617,7 @@ def _run_wiki_query(
 
         cancellation.set_cancel_handler(record_cancellation)
     try:
-        filter_values = normalize_filter_aliases(filters) or {}
-    except ValueError as exc:
-        return {"ok": False, "code": "invalid_filters", "error": str(exc)}
-    if not isinstance(filter_values, dict) or set(filter_values) - {"type", "tags", "path_prefix"}:
-        return {"ok": False, "code": "invalid_filters", "error": "filters may only contain type, tags, and path_prefix"}
-    try:
-        typed_filters = QueryFilters.from_mapping(filter_values)
+        typed_filters = QueryFilters.from_mapping(filters)
     except ValueError as exc:
         return {"ok": False, "code": "invalid_filters", "error": str(exc)}
     if typed_filters.type and typed_filters.type.casefold() == "code_fact" and not project:
@@ -655,7 +661,11 @@ def _run_wiki_query(
     return attach_no_results_outcome(result)
 
 
-@_register(aliases={"topK": "top_k"}, filter_param="filters")
+@_register(
+    aliases={"topK": "top_k"},
+    filter_param="filters",
+    filter_allowed=QUERY_METADATA_FILTERS,
+)
 def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = None, filters: dict[str, Any] | None = None, top_k: int = DEFAULT_TOP_K, topK: int | None = None, expansion_terms: dict[str, list[str]] | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, confirmation_token: str | None = None) -> dict[str, Any]:
     """Query a vault using its immutable retrieval and context profile.
 
@@ -709,7 +719,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     )
 
 
-@_register(aliases={"noteType": "note_type"})
+@_register(aliases={"noteType": "note_type"}, fallback_aliases=frozenset({"noteType"}))
 def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None, sources: list[str] | None = None) -> dict[str, Any]:
     """Create a manual page, optionally linking adopted Wiki pages and raw sources.
 
@@ -722,7 +732,7 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
     if not selected_type:
         return {"ok": False, "code": "missing_note_type", "error": "note_type is required"}
     resolution = _registered_resolution()
-    result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, chat_metadata=chat_metadata, chat_derived=chat_derived, chat_sources=chat_sources, related_pages=related_pages, related_pages_heading=related_pages_heading, sources=sources, overwrite=False, auto_index=True, vault_root=str(resolution.root))
+    result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, chat_metadata=chat_metadata, chat_derived=chat_derived, chat_sources=chat_sources, related_pages=related_pages, related_pages_heading=related_pages_heading, sources=sources, overwrite=False, vault_root=str(resolution.root))
     return result
 
 

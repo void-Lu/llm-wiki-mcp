@@ -169,6 +169,44 @@ def test_write_wiki_page_rejects_path_escape(tmp_path: Path):
 @pytest.mark.parametrize(
     "relative_path",
     [
+        Path("wiki/index.md"),
+        Path("wiki/projects/alpha/index.md"),
+        Path("wiki/concepts/general/index.md"),
+        Path("wiki/entities/customer/index.md"),
+    ],
+)
+def test_write_wiki_page_rejects_navigation_indexes_at_ordinary_boundary(tmp_path: Path, relative_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    with pytest.raises(WikiWriteError) as exc_info:
+        write_wiki_page(
+            root,
+            WikiPage(relative_path=relative_path, frontmatter={"generated": True}, title="Index", body="body"),
+            overwrite_generated_only=False,
+        )
+
+    assert exc_info.value.code == "invalid_wiki_path"
+
+
+def test_explicit_navigation_boundary_may_write_generated_index(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    result = write_wiki_page(
+        root,
+        WikiPage(relative_path=Path("wiki/concepts/general/index.md"), frontmatter={"generated": True}, title="General", body="body"),
+        overwrite_generated_only=False,
+        allow_navigation_index=True,
+    )
+
+    assert result["ok"] is True
+    assert (root / "wiki/concepts/general/index.md").is_file()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
         Path("wiki/projects/CON/specs/page.md"),
         Path("wiki/projects/alpha/specs/bad:name.md"),
         Path("wiki/projects/alpha/specs/COM1.md"),

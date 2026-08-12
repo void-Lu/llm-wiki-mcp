@@ -30,6 +30,11 @@ def test_page_repair_rebuilds_only_projections_and_audits_once(tmp_path: Path) -
     plan = service.plan(operation.operation_id)
     assert plan["ok"] is True
     assert "body" not in str(plan)
+    summary = plan["operations"][0]
+    assert set(summary) == set(operation.to_dict())
+    assert summary["request_key"] == "repair-request"
+    assert summary["created_at"] == operation.created_at
+    assert "body" not in str(summary)
     first = service.apply(operation.operation_id)
     second = service.apply(operation.operation_id)
 

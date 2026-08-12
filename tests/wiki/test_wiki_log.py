@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -337,3 +338,95 @@ def test_log_multi_file_write_is_per_file_atomic_not_a_cross_file_transaction(tm
     assert first.read_text(encoding="utf-8") == "new first"
     assert second.read_text(encoding="utf-8") == "old second"
     assert list(first.parent.glob(".*.tmp")) == []
+
+
+def test_operation_index_rebuilds_once_and_deduplicates_after_restart(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    entry = WikiLogEntry(operation="update", title="Indexed", operation_id="operation-001", timestamp="2026-05-26T10:20:30Z")
+
+    first = append_log_entry(root, entry)
+    assert first["operation_index_rebuilt"] is True
+    manifest = root / ".llm-wiki/log-operation-index.json"
+    assert json.loads(manifest.read_text(encoding="utf-8"))["operation_ids"] == ["operation-001"]
+
+    wiki_log._OPERATION_INDEX_CACHE.clear()
+    duplicate = append_log_entry(root, entry)
+    assert duplicate["deduplicated"] is True
+    assert "operation_index_rebuilt" not in duplicate
+    assert (root / "wiki/log.md").read_text(encoding="utf-8").count("- operation_id: operation-001") == 1
+
+
+def test_operation_index_normal_append_does_not_scan_archive_volumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    append_log_entry(root, WikiLogEntry(operation="update", title="First", operation_id="operation-002"))
+    wiki_log._OPERATION_INDEX_CACHE.clear()
+
+    def fail_scan(_root: Path) -> set[str]:
+        raise AssertionError("normal append must load the manifest instead of scanning archives")
+
+    monkeypatch.setattr(wiki_log, "_scan_operation_ids", fail_scan)
+    result = append_log_entry(root, WikiLogEntry(operation="update", title="Second", operation_id="operation-003"))
+
+    assert result["ok"] is True
+    assert "operation_index_rebuilt" not in result
+
+
+def test_corrupt_operation_index_rebuilds_from_active_and_archived_logs(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    entry = WikiLogEntry(operation="update", title="Corruptible", operation_id="operation-004")
+    append_log_entry(root, entry)
+    (root / ".llm-wiki/log-operation-index.json").write_text("{not json", encoding="utf-8")
+    wiki_log._OPERATION_INDEX_CACHE.clear()
+
+    result = append_log_entry(root, entry)
+
+    assert result["deduplicated"] is True
+    assert result["operation_index_rebuilt"] is True
+
+
+def test_operation_index_rebuild_finds_ids_in_rotated_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    monkeypatch.setattr(wiki_log, "MAX_LOG_ENTRIES", 2)
+    monkeypatch.setattr(wiki_log, "TARGET_LOG_ENTRIES", 1)
+    first = WikiLogEntry(operation="update", title="Archived", operation_id="operation-archive-001")
+    append_log_entry(root, first)
+    append_log_entry(root, WikiLogEntry(operation="update", title="Active", operation_id="operation-archive-002"))
+    append_log_entry(root, WikiLogEntry(operation="update", title="Newest", operation_id="operation-archive-003"))
+    assert "Archived" not in (root / "wiki/log.md").read_text(encoding="utf-8")
+
+    (root / ".llm-wiki/log-operation-index.json").unlink()
+    wiki_log._OPERATION_INDEX_CACHE.clear()
+    result = append_log_entry(root, first)
+
+    assert result["deduplicated"] is True
+    assert result["operation_index_rebuilt"] is True
+
+
+def test_operation_index_manifest_failure_rebuilds_after_log_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    wiki_log._write_operation_index(root, set())
+    original_atomic_write_text = wiki_log.atomic_write_text
+
+    def fail_manifest(target: str | Path, text: str, *, fault=None):
+        if Path(target).name == "log-operation-index.json":
+            raise AtomicFileError("injected_manifest_failure")
+        return original_atomic_write_text(target, text, fault=fault)
+
+    monkeypatch.setattr(wiki_log, "atomic_write_text", fail_manifest)
+    entry = WikiLogEntry(operation="update", title="Manifest fault", operation_id="operation-005")
+    with pytest.raises(AtomicFileError) as error:
+        append_log_entry(root, entry)
+    assert error.value.code == "injected_manifest_failure"
+    assert (root / "wiki/log.md").read_text(encoding="utf-8").count("- operation_id: operation-005") == 1
+
+    monkeypatch.setattr(wiki_log, "atomic_write_text", original_atomic_write_text)
+    wiki_log._OPERATION_INDEX_CACHE.clear()
+    retry = append_log_entry(root, entry)
+    assert retry["deduplicated"] is True
+    assert retry["operation_index_rebuilt"] is True
+    assert (root / "wiki/log.md").read_text(encoding="utf-8").count("- operation_id: operation-005") == 1

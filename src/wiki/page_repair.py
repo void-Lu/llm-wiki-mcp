@@ -32,16 +32,12 @@ class PageRepairService:
 
 
 def _operation_summary(operation: PageOperation) -> dict[str, object]:
-    return {
-        "operation_id": operation.operation_id,
-        "operation_kind": operation.operation_kind,
-        "page_path": operation.page_path,
-        "base_hash": operation.base_hash,
-        "intended_hash": operation.intended_hash,
-        "state": operation.state,
-        "error_code": operation.error_code,
-        "stages": {key: dict(value) for key, value in operation.stages.items()},
+    summary = operation.to_dict()
+    summary["stages"] = {
+        key: PageOperationStore.safe_stage_record(value)
+        for key, value in operation.stages.items()
     }
+    return summary
 
 
 __all__ = ["PageRepairService"]

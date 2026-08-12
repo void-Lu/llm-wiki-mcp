@@ -34,6 +34,22 @@ def test_page_state_is_separate_from_archive_state_and_does_not_store_body(tmp_p
     assert "secret" not in stage_json
 
 
+def test_page_operation_store_exposes_public_path_and_connection_helpers(tmp_path: Path) -> None:
+    store = PageOperationStore(tmp_path)
+
+    assert store.database_path == store.path
+    assert store.normalize_page_path(r"wiki\concepts\page.md") == "wiki/concepts/page.md"
+    with store.connection() as connection:
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+
+
+def test_update_plan_store_does_not_reach_into_private_page_store_api() -> None:
+    source = Path("src/wiki/update_plan_store.py").read_text(encoding="utf-8")
+
+    assert "self.store._connection" not in source
+    assert "_normalize_page_path" not in source
+
+
 def test_operation_state_and_stage_results_are_recoverable(tmp_path: Path) -> None:
     store = PageOperationStore(tmp_path)
     operation = store.create_operation(
@@ -70,6 +86,7 @@ def test_stage_result_keeps_bounded_projection_summary_only(tmp_path: Path) -> N
         result={
             "ok": True,
             "written": ["wiki/index.md", "C:\\secret\\absolute.md"],
+            "changed": ["wiki/index.md"],
             "batch": {"kind": "navigation", "boundary": "page-submit", "secret": "hidden"},
             "body": "secret body",
         },
@@ -79,8 +96,30 @@ def test_stage_result_keeps_bounded_projection_summary_only(tmp_path: Path) -> N
     assert loaded is not None
     assert loaded.stages["navigation"]["result"] == {
         "ok": True,
+        "changed": ["wiki/index.md"],
         "batch": {"boundary": "page-submit", "kind": "navigation"},
     }
+
+
+def test_stage_result_keeps_relative_navigation_changes(tmp_path: Path) -> None:
+    store = PageOperationStore(tmp_path)
+    operation = store.create_operation(
+        request_key="request-navigation-changes",
+        operation_kind="update",
+        page_path="wiki/concepts/page.md",
+        base_hash="base",
+        intended_hash="intent",
+    )
+    store.record_stage(
+        operation.operation_id,
+        "navigation",
+        "succeeded",
+        result={"ok": True, "changed": ["wiki/concepts/index.md", "C:\\secret\\index.md"]},
+    )
+
+    loaded = store.get_operation(operation.operation_id)
+    assert loaded is not None
+    assert loaded.stages["navigation"]["result"] == {"ok": True}
 
 
 def test_page_state_schema_version_mismatch_is_rejected(tmp_path: Path) -> None:

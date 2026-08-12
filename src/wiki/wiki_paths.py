@@ -55,6 +55,41 @@ TOP_LEVEL_DIRS = (
 )
 
 
+_WIKI_PAGE_PREFIXES = (
+    Path("wiki/projects"),
+    Path("wiki/concepts"),
+    Path("wiki/entities"),
+)
+_WIKI_FORBIDDEN_PARTS = {"objects"}
+_WIKI_FORBIDDEN_PREFIXES = (
+    Path("wiki/code"),
+    Path("wiki/decisions"),
+    Path("wiki/troubleshooting"),
+    Path("wiki/requirements"),
+    Path("wiki/knowledge"),
+    Path("wiki/synthesis"),
+    Path("wiki/comparisons"),
+    Path("wiki/maintenance"),
+    Path("projects"),
+)
+_WIKI_PROJECT_SUBDIRS = {
+    "specs",
+    "plans",
+    "architecture",
+    "pipelines",
+    "troubleshooting",
+    "researches",
+}
+_WIKI_RESERVED_STRUCTURE_PARTS = {
+    "wiki",
+    "projects",
+    "concepts",
+    "entities",
+    "archives",
+    *_WIKI_PROJECT_SUBDIRS,
+}
+
+
 DEFAULT_SCHEMA_TEXT = """# Schema
 
 本文件是 LLM Wiki 的维护规约。Agent 在摄入资料、生成页面、回答问题、受控更新或执行归档维护前，应先遵守这里的目录、frontmatter、来源追踪和安全规则。
@@ -209,6 +244,83 @@ class WikiPathError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def is_navigation_index_path(value: str | Path) -> bool:
+    """Return whether *value* is an index owned by navigation projection."""
+
+    path = _logical_path(value)
+    parts = path.parts
+    if path.name.casefold() != "index.md" or not parts or parts[0].casefold() != "wiki":
+        return False
+    if path == Path("wiki/index.md"):
+        return True
+    if len(parts) >= 3 and parts[1].casefold() in {"concepts", "entities"}:
+        return True
+    return len(parts) == 4 and parts[1].casefold() == "projects"
+
+
+def validate_wiki_page_path(
+    value: str | Path,
+    *,
+    allow_navigation_index: bool = False,
+) -> Path:
+    """Validate one vault-relative Wiki page path.
+
+    This is the sole owner of page-prefix, path-segment, Windows-safety and
+    generated-navigation-index policy. Callers translate ``WikiPathError``
+    into their own stable public error envelope.
+    """
+
+    normalized = _logical_path(value)
+    if normalized.is_absolute() or any(part in {"", ".", ".."} for part in normalized.parts):
+        raise WikiPathError("path_escape", "page path must stay inside wiki root")
+    if normalized.suffix.casefold() != ".md":
+        raise WikiPathError("invalid_wiki_path", "wiki page must be a markdown file")
+
+    navigation_index = is_navigation_index_path(normalized)
+    if navigation_index and not allow_navigation_index:
+        raise WikiPathError(
+            "navigation_index_forbidden",
+            "generated navigation indexes are writable only by navigation or admin boundaries",
+        )
+    if any(_starts_with(normalized, prefix) for prefix in _WIKI_FORBIDDEN_PREFIXES):
+        raise WikiPathError("invalid_wiki_path", f"page path is outside the confirmed wiki structure: {normalized.as_posix()}")
+    if any(part.casefold() in _WIKI_FORBIDDEN_PARTS for part in normalized.parts):
+        raise WikiPathError("invalid_wiki_path", f"objects directories are not part of the confirmed wiki structure: {normalized.as_posix()}")
+    if not navigation_index and not any(_starts_with(normalized, prefix) for prefix in _WIKI_PAGE_PREFIXES):
+        raise WikiPathError("invalid_wiki_path", f"page path is outside the confirmed wiki structure: {normalized.as_posix()}")
+    if _starts_with(normalized, Path("wiki/projects")) and not _is_valid_project_path(normalized):
+        raise WikiPathError("invalid_wiki_path", f"project page path is outside the confirmed project structure: {normalized.as_posix()}")
+
+    for part in normalized.parts:
+        if part.casefold() in _WIKI_RESERVED_STRUCTURE_PARTS:
+            continue
+        stem = Path(part).stem if part.casefold().endswith(".md") else part
+        try:
+            safe_segment(stem)
+        except WikiPathError:
+            raise
+        except ValueError as exc:
+            raise WikiPathError("invalid_path_component", str(exc)) from exc
+    return normalized
+
+
+def _logical_path(value: str | Path) -> Path:
+    if isinstance(value, Path):
+        return Path(*value.parts)
+    return Path(str(value).replace("\\", "/"))
+
+
+def _starts_with(path: Path, prefix: Path) -> bool:
+    return path.parts[: len(prefix.parts)] == prefix.parts
+
+
+def _is_valid_project_path(path: Path) -> bool:
+    parts = path.parts
+    if len(parts) == 4 and parts[3].casefold() == "index.md":
+        return True
+    return len(parts) >= 5 and parts[3] in _WIKI_PROJECT_SUBDIRS
 
 
 @dataclass(frozen=True)

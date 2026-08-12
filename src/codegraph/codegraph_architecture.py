@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from wiki.wikilinks import format_wikilink
+
 EXECUTION_EDGE_KINDS = frozenset({"calls", "instantiates"})
 SUPPORTED_LANGUAGES = frozenset({"python", "javascript", "typescript", "js", "ts", "node", "suitescript", "suite_script", "suite-script"})
 ENTRYPOINT_NAMES = frozenset({"main", "run", "handler", "execute", "entrypoint"})
@@ -547,7 +549,7 @@ def render_pipeline_index(ir: ArchitectureIR, pipeline: PipelineSnapshot, part_p
         "## 完整表格分片",
     ]
     for index, path in enumerate(part_paths, start=1):
-        lines.append(f"- [[{path[:-3]}|第 {index} 片]]")
+        lines.append(f"- {format_wikilink(path[:-3], f'第 {index} 片')}")
     return "\n".join(lines)
 
 
@@ -564,10 +566,10 @@ def render_overview(ir: ArchitectureIR, snapshot: Any, file_page_map: Mapping[st
     if not ir.pipelines:
         lines.append("- 未识别到可信入口；没有生成 pipeline 页面。")
     for pipeline in ir.pipelines:
-        lines.append(f"- [[{pipeline.page_path[:-3]}|{pipeline.pipeline_id}]]（`{pipeline.pipeline_status}`；{len(pipeline.node_order)} 个节点）")
+        lines.append(f"- {format_wikilink(pipeline.page_path[:-3], pipeline.pipeline_id)}（`{pipeline.pipeline_status}`；{len(pipeline.node_order)} 个节点）")
     lines.extend(["", "## 文件事实索引"])
     for source_path in sorted(file_page_map):
-        lines.append(f"- [[{file_page_map[source_path][:-3]}|{source_path}]]")
+        lines.append(f"- {format_wikilink(file_page_map[source_path][:-3], source_path)}")
     return "\n".join(lines)
 
 
@@ -774,7 +776,7 @@ def _node_label(ir: ArchitectureIR, node_id: str) -> str:
 
 def _file_link(file_page_map: Mapping[str, str], file_path: str) -> str:
     target = file_page_map.get(file_path)
-    return f"（[[{target[:-3]}|文件页]]）" if target else ""
+    return f"（{format_wikilink(target[:-3], '文件页')}）" if target else ""
 
 
 def _location(node: IRNode) -> str:

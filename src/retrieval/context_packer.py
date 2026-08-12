@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
-
-_WORD_RE = re.compile(r"\S+")
+from retrieval.token_units import count_response_tokens
 
 
 @dataclass(frozen=True)
@@ -21,9 +19,16 @@ class ContextPassage:
     citation_metadata: Mapping[str, str] = field(default_factory=dict)
 
 
+def estimate_response_tokens(value: str) -> int:
+    """Count response-budget units; this scale is not a passage chunk limit."""
+
+    return max(1, count_response_tokens(value)) if value else 0
+
+
 def estimate_tokens(value: str) -> int:
-    """Cheap stable estimator shared by response packing and telemetry."""
-    return max(1, len(_WORD_RE.findall(value))) if value else 0
+    """Compatibility facade for callers of the former response estimator."""
+
+    return estimate_response_tokens(value)
 
 
 def _deduplicate_overlap(previous: str, current: str) -> str:
@@ -72,7 +77,7 @@ def pack_context(
         content = _deduplicate_overlap(previous_by_path.get(item.path, ""), item.content).strip()
         if not content:
             continue
-        tokens = estimate_tokens(content)
+        tokens = estimate_response_tokens(content)
         if used + tokens > budget:
             continue
         if output and output[-1]["path"] == item.path and output[-1]["heading"] == item.heading:
@@ -98,4 +103,4 @@ def pack_context(
         }
         for item in output
     ]
-    return {"passages": output, "citations": citations, "budget": {"target": target, "total": budget, "used": used, "omitted": max(0, sum(estimate_tokens(item.content) for item in candidates) - used)}}
+    return {"passages": output, "citations": citations, "budget": {"target": target, "total": budget, "used": used, "omitted": max(0, sum(estimate_response_tokens(item.content) for item in candidates) - used)}}

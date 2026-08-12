@@ -9,6 +9,7 @@ from retrieval.query_pipeline import (
     _uncovered_latin_terms,
     run_query_v2,
 )
+from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
 from retrieval.vector_index import vector_index_records
 import retrieval.query_pipeline as query_pipeline_module
@@ -468,6 +469,51 @@ def test_coverage_fusion_uses_raw_source_rank_not_bm25_absolute_value() -> None:
     changed_magnitude = _merge_coverage_items([active], [raw_first, raw_second], ["rag"])
 
     assert [item["hit"].page_path for item in changed_magnitude] == [item["hit"].page_path for item in baseline]
+
+
+def test_coverage_fusion_uses_effective_rrf_k() -> None:
+    active = {
+        "hit": PassageHit("a", "wiki/concepts/active.md", "Active", (), "active rag", 1.0, "knowledge", "high", "concept"),
+        "score": 4.0,
+    }
+    raw = [
+        {
+            "hit": PassageHit("r", "raw/sources/references/rag.md", "RAG", (), "rag evidence", 1.0, "raw", "low", "raw"),
+            "score": 1.0,
+        },
+        {
+            "hit": PassageHit("r2", "raw/sources/references/rag-2.md", "RAG 2", (), "rag evidence", 0.5, "raw", "low", "raw"),
+            "score": 0.5,
+        },
+    ]
+
+    small = _merge_coverage_items([active], raw, ["rag"], rrf_k=10)
+    large = _merge_coverage_items([active], raw, ["rag"], rrf_k=120)
+
+    small_second = next(item for item in small if item["hit"].page_path.endswith("rag-2.md"))
+    large_second = next(item for item in large if item["hit"].page_path.endswith("rag-2.md"))
+    assert small_second["source_local_rrf"] != large_second["source_local_rrf"]
+    assert small_second["score"] != large_second["score"]
+
+
+def test_entity_batch_uses_passed_snapshot_without_metadata_reload(monkeypatch) -> None:
+    import retrieval.query_pipeline as module
+
+    pages = ({"path": "wiki/entities/auth.md", "frontmatter": {"type": "entity"}, "title": "N/auth"},)
+    snapshot = QueryCorpusSnapshot("active", pages, {"wiki/entities/auth.md": {"type": "entity"}}, {})
+    store = object()
+
+    monkeypatch.setattr(module, "_store_metadata", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("metadata must come from snapshot")))
+    specs = module._entity_store_specs(
+        Path("."),
+        store,  # type: ignore[arg-type]
+        "knowledge",
+        snapshot=snapshot,
+        raw_snapshot=None,
+        raw_store=None,
+    )
+
+    assert specs[0].snapshot is snapshot
 
 
 def test_v2_excludes_retired_source_namespace_even_when_legacy_files_remain(tmp_path: Path) -> None:
@@ -1479,6 +1525,24 @@ def test_v2_vector_only_recall_does_not_bypass_filters(tmp_path: Path, monkeypat
 
     result = run_query_v2(root, "unrelated query", project="beta", filters=QueryFilters(type="concept", tags=("finance",)))
     assert result["results"] == []
+
+
+def test_v2_lexical_only_ignores_embedding_rrf_k(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/rrf.md", "RRF", "rrf lexical setting", type="concept")
+    refresh_indexes(root)
+
+    baseline = run_query_v2(root, "rrf lexical setting", retrieval_mode="lexical")
+    configured = run_query_v2(
+        root,
+        "rrf lexical setting",
+        retrieval_mode="lexical",
+        embedding=EmbeddingSettings(rrf_k=10),
+    )
+
+    assert [item["path"] for item in configured["results"]] == [item["path"] for item in baseline["results"]]
+    assert [item["scores"] for item in configured["results"]] == [item["scores"] for item in baseline["results"]]
 
 
 def test_v2_discovers_structured_qualified_entities_and_batches_in_discovery_order(tmp_path: Path) -> None:

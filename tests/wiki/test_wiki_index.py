@@ -69,6 +69,38 @@ def test_navigation_projection_has_no_retrieval_rebuild_and_admin_path_is_explic
     assert rebuilt["raw"]["operation"] == "build"
     assert calls == ["active", "raw"]
 
+
+def test_refresh_navigation_diffs_utf8_content_before_atomic_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    page = root / "wiki/concepts/invoice.md"
+    page.write_text("---\ntitle: Invoice\ngenerated: true\n---\n\n# Invoice\n", encoding="utf-8")
+    calls: list[str] = []
+    original_atomic_write = wiki_index.atomic_write_text
+
+    def recording_atomic_write(target: Path, text: str, **kwargs: object) -> object:
+        comparable_target = Path(str(target).removeprefix("\\\\?\\"))
+        calls.append(comparable_target.relative_to(root).as_posix())
+        return original_atomic_write(target, text, **kwargs)
+
+    monkeypatch.setattr(wiki_index, "atomic_write_text", recording_atomic_write)
+
+    first = refresh_navigation(root)
+    first_call_count = len(calls)
+    assert first_call_count > 0
+    assert set(first["changed"]) == set(calls)
+
+    calls.clear()
+    second = refresh_navigation(root)
+    assert calls == []
+    assert second["written"] == first["written"]
+    assert second["changed"] == []
+
+    page.write_text(page.read_text(encoding="utf-8").replace("title: Invoice", "title: Invoice 更新"), encoding="utf-8")
+    third = refresh_navigation(root)
+    assert third["changed"] == ["wiki/concepts/index.md"]
+    assert calls == ["wiki/concepts/index.md"]
+
 def test_refresh_indexes_creates_project_index_grouped_by_subdirectories(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

@@ -184,6 +184,14 @@ def test_explicit_filename_rejects_path_separators_as_path_escape(vault: Path, f
     assert result["code"] == "path_escape"
 
 
+@pytest.mark.parametrize("filename", ["index", "index.md"])
+def test_note_writer_rejects_navigation_index_filename(vault: Path, filename: str) -> None:
+    result = _save(vault, note_type="knowledge", domain="common-errors", filename=filename)
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_wiki_path"
+
+
 @pytest.mark.parametrize("filename", ["CON", "con.md", "NUL.tar.gz", "COM1", "COM¹.md", "LPT9"])
 def test_explicit_filename_rejects_windows_reserved_device_names(vault: Path, filename: str):
     result = _save(vault, note_type="spec", project="project-a", filename=filename)

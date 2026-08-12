@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 
 from common.redaction import redact_sensitive_text
 from common.privacy_policy import LocatorError, normalize_vault_relative
@@ -21,11 +23,18 @@ from wiki.wiki_limits import (
 )
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_paths import ARCHIVES_LOG_DIR, ARCHIVES_LOG_PATH
+from wiki.wikilinks import format_wikilink
 
 _LOG_HEADING_RE = re.compile(r"^## \[([^\]]+)\] (\S+) \| (.+)$")
 _INDEX_PAGE_RE = re.compile(r"^index(?:-\d{2,})?\.md$")
 _ARCHIVE_HEADER = "---\ntype: log_archive\ngenerated: true\narchived: true\n---\n\n# Log archive"
 _ARCHIVE_NAVIGATION_INDEX = "archives/log/index.md"
+_OPERATION_INDEX_SCHEMA_VERSION = 1
+_OPERATION_INDEX_PATH = Path(".llm-wiki/log-operation-index.json")
+_OPERATION_ID_RE = re.compile(r"^- operation_id:\s*(\S+)\s*$")
+_OPERATION_INDEX_CACHE: dict[Path, set[str]] = {}
+_OPERATION_INDEX_FORCE_REBUILD: set[Path] = set()
+_OPERATION_INDEX_LOCK = RLock()
 
 
 def append_log_entry(
@@ -38,41 +47,59 @@ def append_log_entry(
 
     root = Path(vault_root)
     log_path = root / "wiki" / "log.md"
-    if entry.operation_id and _operation_logged(root, entry.operation_id):
-        return {"ok": True, "path": "wiki/log.md", "deduplicated": True}
+    operation_index: set[str] | None = None
+    operation_index_rebuilt = False
+    if entry.operation_id:
+        operation_index, operation_index_rebuilt = _load_operation_index(root)
+        if entry.operation_id in operation_index:
+            result: dict[str, object] = {"ok": True, "path": "wiki/log.md", "deduplicated": True}
+            if operation_index_rebuilt:
+                result["operation_index_rebuilt"] = True
+            return result
     timestamp = entry.timestamp or _now()
     block = _render_log_entry(entry, timestamp)
     preamble, blocks = _read_log_blocks(log_path, "# Log")
     archived_paths: list[Path] = []
 
-    if utf8_size(_join_log_blocks(preamble, [block])) > _archive_target_bytes():
-        try:
-            detail_paths = _write_archive_document(root, timestamp, [block], prefix="log", fault=fault)
-        except AtomicFileError:
-            raise
-        except ValueError:
-            return {
-                "ok": False,
-                "code": "log_entry_too_large",
-                "error": "log entry cannot fit into a bounded archive page",
-                "path": "wiki/log.md",
-            }
-        archived_paths.extend(detail_paths)
-        block = _render_archive_summary(entry, timestamp, detail_paths[0].relative_to(root).as_posix())
+    try:
+        if utf8_size(_join_log_blocks(preamble, [block])) > _archive_target_bytes():
+            try:
+                detail_paths = _write_archive_document(root, timestamp, [block], prefix="log", fault=fault)
+            except AtomicFileError:
+                raise
+            except ValueError:
+                return {
+                    "ok": False,
+                    "code": "log_entry_too_large",
+                    "error": "log entry cannot fit into a bounded archive page",
+                    "path": "wiki/log.md",
+                }
+            archived_paths.extend(detail_paths)
+            block = _render_archive_summary(entry, timestamp, detail_paths[0].relative_to(root).as_posix())
 
-    next_blocks = [*blocks, block]
-    keep, overflow = _rotate_blocks(preamble, next_blocks)
-    if overflow:
-        archived_paths.extend(_write_archived_log_blocks(root, "wiki-log", overflow, fault=fault))
-    _atomic_write(log_path, _join_log_blocks(preamble, keep), fault=fault)
+        next_blocks = [*blocks, block]
+        keep, overflow = _rotate_blocks(preamble, next_blocks)
+        if overflow:
+            archived_paths.extend(_write_archived_log_blocks(root, "wiki-log", overflow, fault=fault))
+        _atomic_write(log_path, _join_log_blocks(preamble, keep), fault=fault)
 
-    for archive_path in archived_paths:
-        _append_archive_log(root, archive_path, fault=fault)
-    _write_archive_index(root, fault=fault)
+        for archive_path in archived_paths:
+            _append_archive_log(root, archive_path, fault=fault)
+        if archived_paths or not (root / ARCHIVES_LOG_DIR / "index.md").exists():
+            _write_archive_index(root, fault=fault)
+        if entry.operation_id:
+            assert operation_index is not None
+            operation_index = {*operation_index, entry.operation_id}
+            _write_operation_index(root, operation_index, fault=fault)
+    except Exception:
+        if entry.operation_id:
+            _force_operation_index_rebuild(root)
+        raise
     return {
         "ok": True,
         "path": "wiki/log.md",
         "archived": [path.relative_to(root).as_posix() for path in archived_paths],
+        **({"operation_index_rebuilt": True} if operation_index_rebuilt else {}),
     }
 
 
@@ -114,7 +141,7 @@ def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: st
         f"## [{timestamp}] {operation} | {title}",
         f"- project: {project}",
         f"- status: {status} (details archived)",
-        f"- detail: [[{archive_rel}|Full record]]",
+        f"- detail: {format_wikilink(archive_rel, 'Full record')}",
     ]
     if entry.operation_id:
         lines.append(f"- operation_id: {entry.operation_id}")
@@ -128,12 +155,81 @@ def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: st
 
 
 def _operation_logged(root: Path, operation_id: str) -> bool:
-    marker = f"- operation_id: {operation_id}"
+    """Check the vault-local operation index without scanning archive volumes."""
+
+    operation_ids, _rebuilt = _load_operation_index(root)
+    return operation_id in operation_ids
+
+
+def _load_operation_index(root: Path) -> tuple[set[str], bool]:
+    root = root.expanduser().resolve()
+    with _OPERATION_INDEX_LOCK:
+        if root in _OPERATION_INDEX_CACHE and root not in _OPERATION_INDEX_FORCE_REBUILD:
+            return _OPERATION_INDEX_CACHE[root], False
+        force_rebuild = root in _OPERATION_INDEX_FORCE_REBUILD
+        _OPERATION_INDEX_FORCE_REBUILD.discard(root)
+        manifest = root / _OPERATION_INDEX_PATH
+        operation_ids = None if force_rebuild else _read_operation_index(manifest)
+        rebuilt = operation_ids is None
+        if rebuilt:
+            operation_ids = _scan_operation_ids(root)
+            _write_operation_index(root, operation_ids)
+        _OPERATION_INDEX_CACHE[root] = operation_ids
+        return operation_ids, rebuilt
+
+
+def _read_operation_index(path: Path) -> set[str] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema_version") != _OPERATION_INDEX_SCHEMA_VERSION:
+        return None
+    values = payload.get("operation_ids")
+    if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+        return None
+    return set(values)
+
+
+def _scan_operation_ids(root: Path) -> set[str]:
     candidates = [root / "wiki" / "log.md"]
     archive_dir = root / ARCHIVES_LOG_DIR
     if archive_dir.exists():
         candidates.extend(archive_dir.rglob("*.md"))
-    return any(path.is_file() and marker in path.read_text(encoding="utf-8") for path in candidates)
+    operation_ids: set[str] = set()
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        operation_ids.update(match.group(1) for line in lines if (match := _OPERATION_ID_RE.match(line)))
+    return operation_ids
+
+
+def _write_operation_index(
+    root: Path,
+    operation_ids: set[str],
+    *,
+    fault: FaultBarrier | None = None,
+) -> None:
+    path = root / _OPERATION_INDEX_PATH
+    payload = {
+        "schema_version": _OPERATION_INDEX_SCHEMA_VERSION,
+        "operation_ids": sorted(operation_ids),
+    }
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", fault=fault)
+    with _OPERATION_INDEX_LOCK:
+        _OPERATION_INDEX_CACHE[root.expanduser().resolve()] = operation_ids
+        _OPERATION_INDEX_FORCE_REBUILD.discard(root.expanduser().resolve())
+
+
+def _force_operation_index_rebuild(root: Path) -> None:
+    with _OPERATION_INDEX_LOCK:
+        root = root.expanduser().resolve()
+        _OPERATION_INDEX_CACHE.pop(root, None)
+        _OPERATION_INDEX_FORCE_REBUILD.add(root)
 
 
 def _render_archive_detail(block: str) -> str:
@@ -299,9 +395,9 @@ def _archive_target_bytes() -> int:
 
 def _archive_navigation_placeholder(prefix: str, year: str, month: str) -> str:
     return " · ".join([
-        f"← [[archives/log/{year}/{month}/{prefix}-999999.md|Previous volume]]",
-        f"[[{_ARCHIVE_NAVIGATION_INDEX}|Archive index]]",
-        f"[[archives/log/{year}/{month}/{prefix}-999999.md|Next volume]] →",
+        f"← {format_wikilink(f'archives/log/{year}/{month}/{prefix}-999999.md', 'Previous volume')}",
+        format_wikilink(_ARCHIVE_NAVIGATION_INDEX, "Archive index"),
+        f"{format_wikilink(f'archives/log/{year}/{month}/{prefix}-999999.md', 'Next volume')} →",
     ])
 
 
@@ -313,16 +409,16 @@ def _archive_navigation_footer(
     number: int,
     total: int,
 ) -> str:
-    links = [f"[[{_ARCHIVE_NAVIGATION_INDEX}|Archive index]]"]
+    links = [format_wikilink(_ARCHIVE_NAVIGATION_INDEX, "Archive index")]
     current_sequence = first_sequence + number - 1
     if number > 1:
         links.insert(
             0,
-            f"← [[archives/log/{year}/{month}/{prefix}-{current_sequence - 1:03d}.md|Previous volume]]",
+            f"← {format_wikilink(f'archives/log/{year}/{month}/{prefix}-{current_sequence - 1:03d}.md', 'Previous volume')}",
         )
     if number < total:
         links.append(
-            f"[[archives/log/{year}/{month}/{prefix}-{current_sequence + 1:03d}.md|Next volume]] →"
+            f"{format_wikilink(f'archives/log/{year}/{month}/{prefix}-{current_sequence + 1:03d}.md', 'Next volume')} →"
         )
     return " · ".join(links)
 
@@ -385,7 +481,7 @@ def _write_archive_index(root: Path, *, fault: FaultBarrier | None = None) -> No
             if _INDEX_PAGE_RE.match(path.name):
                 continue
             rel = path.relative_to(root).as_posix()
-            entries.append(f"- [[{rel}|{path.stem}]]")
+            entries.append(f"- {format_wikilink(rel, path.stem)}")
     base_header = "---\ntype: index\ngenerated: true\nnavigation: true\n---\n\n# Log archives"
     pages, oversized = partition_rendered_units(entries or ["- 无"], base_header, _index_footer_placeholder(), _archive_target_bytes())
     if oversized:
@@ -409,17 +505,21 @@ def _write_archive_index(root: Path, *, fault: FaultBarrier | None = None) -> No
 
 def _index_footer_placeholder() -> str:
     index_pages = f"{_ARCHIVE_NAVIGATION_INDEX[:-3]}-9999.md"
-    return f"← [[{index_pages}|Previous]] · [[{_ARCHIVE_NAVIGATION_INDEX}|Archive index]] · [[{index_pages}|Next]]"
+    return " · ".join([
+        f"← {format_wikilink(index_pages, 'Previous')}",
+        format_wikilink(_ARCHIVE_NAVIGATION_INDEX, "Archive index"),
+        f"{format_wikilink(index_pages, 'Next')}",
+    ])
 
 
 def _index_footer(number: int, total: int) -> str:
     links = []
     if number > 1:
         previous = _ARCHIVE_NAVIGATION_INDEX if number == 2 else f"archives/log/index-{number - 1:02d}.md"
-        links.append(f"← [[{previous}|Previous]]")
+        links.append(f"← {format_wikilink(previous, 'Previous')}")
     if number < total:
         next_page = f"archives/log/index-{number + 1:02d}.md"
-        links.append(f"[[{next_page}|Next]] →")
+        links.append(f"{format_wikilink(next_page, 'Next')} →")
     return " · ".join(links)
 
 

@@ -67,6 +67,55 @@ class PageOperationStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
+    @property
+    def database_path(self) -> Path:
+        """Return the database path owned by this store."""
+
+        return self.path
+
+    @staticmethod
+    def normalize_page_path(value: str) -> str:
+        """Normalize a vault-relative page path at the public store boundary."""
+
+        return _normalize_page_path(value)
+
+    @staticmethod
+    def safe_stage_result(result: Mapping[str, Any] | None) -> dict[str, object]:
+        """Project a stage result to the bounded, non-sensitive journal summary."""
+
+        return _safe_stage_result(result)
+
+    @staticmethod
+    def safe_stage_record(stage: Mapping[str, Any] | None) -> dict[str, object]:
+        """Project a serialized stage record without exposing arbitrary metadata."""
+
+        if not isinstance(stage, Mapping):
+            return {}
+        safe: dict[str, object] = {}
+        state = stage.get("state")
+        if isinstance(state, str):
+            safe["state"] = state
+        code = stage.get("code")
+        if isinstance(code, str):
+            safe["code"] = code
+        attempts = stage.get("attempts")
+        if isinstance(attempts, int) and not isinstance(attempts, bool):
+            safe["attempts"] = attempts
+        updated_at = stage.get("updated_at")
+        if isinstance(updated_at, str):
+            safe["updated_at"] = updated_at
+        safe_result = _safe_stage_result(stage.get("result"))
+        if safe_result:
+            safe["result"] = safe_result
+        return safe
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """Open a read connection through the store-owned lifecycle."""
+
+        with self._connection() as connection:
+            yield connection
+
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         try:
@@ -162,7 +211,7 @@ class PageOperationStore:
         intended_hash: str,
         operation_id: str | None = None,
     ) -> PageOperation:
-        normalized_path = _normalize_page_path(page_path)
+        normalized_path = self.normalize_page_path(page_path)
         if not request_key or not intended_hash:
             raise PageOperationError("operation_invalid")
         now = _now()
@@ -228,7 +277,7 @@ class PageOperationStore:
             raise PageOperationError("stage_invalid")
         if state not in {"pending", "running", "succeeded", "failed"}:
             raise PageOperationError("stage_state_invalid")
-        safe_result = _safe_stage_result(result)
+        safe_result = self.safe_stage_result(result)
         with self._transaction() as connection:
             row = connection.execute("SELECT attempts FROM page_operation_stages WHERE operation_id=? AND stage=?", (operation_id, stage)).fetchone()
             if row is None:
@@ -313,11 +362,11 @@ def _safe_stage_result(result: Mapping[str, Any] | None) -> dict[str, object]:
     if not isinstance(result, Mapping):
         return {}
     safe: dict[str, object] = {}
-    for key in ("ok", "state", "code", "repair_action", "deduplicated", "operation", "affected_count", "written", "batch"):
+    for key in ("ok", "state", "code", "repair_action", "deduplicated", "operation", "affected_count", "written", "changed", "batch"):
         value = result.get(key)
         if isinstance(value, (str, bool, int, float)) and value is not None:
             safe[key] = value
-        elif key == "written" and isinstance(value, (list, tuple)):
+        elif key in {"written", "changed"} and isinstance(value, (list, tuple)):
             paths = [item for item in value if isinstance(item, str) and not Path(item).is_absolute()]
             if len(paths) == len(value):
                 safe[key] = paths[:64]

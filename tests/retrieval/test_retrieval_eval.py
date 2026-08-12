@@ -13,6 +13,7 @@ import pytest
 
 from retrieval.retrieval_eval import (
     EvaluationQueryService,
+    EvaluationFilterContract,
     EvaluationRuntimeSnapshot,
     Relevance,
     RetrievalEvalCase,
@@ -22,6 +23,7 @@ from retrieval.retrieval_eval import (
     calculate_ranking_metrics,
     evaluate_retrieval_gate,
     load_retrieval_dataset,
+    normalize_evaluation_filter_contract,
     parse_evaluation_filters,
     percentile_95,
     run_retrieval_evaluation,
@@ -88,6 +90,19 @@ def test_v2_report_fields_mark_missing_frozen_comparison_unproven(tmp_path: Path
 
 
 def test_public_evaluation_contract_normalizes_filter_aliases_and_redacts_identity() -> None:
+    contract = normalize_evaluation_filter_contract(
+        {"project": "Alpha", "type": "concept", "filter_tags": ["runbook"], "pathPrefix": "wiki/concepts/"},
+        "aliases",
+    )
+    assert isinstance(contract, EvaluationFilterContract)
+    assert dict(contract.public) == {"type": "concept", "tags": ["runbook"], "path_prefix": "wiki/concepts/"}
+    assert dict(contract.query) == dict(contract.public)
+    assert dict(contract.matcher) == {
+        "type": "concept",
+        "tags": ("runbook",),
+        "path_prefix": "wiki/concepts/",
+        "project": "Alpha",
+    }
     assert parse_evaluation_filters(
         {"project": "Alpha", "type": "concept", "filter_tags": ["runbook"], "pathPrefix": "wiki/concepts/"},
         "aliases",
@@ -97,6 +112,8 @@ def test_public_evaluation_contract_normalizes_filter_aliases_and_redacts_identi
         "filter_tags": ["runbook"],
         "path_prefix": "wiki/concepts/",
     }
+    with pytest.raises(RetrievalEvalError, match="type and filter_type disagree"):
+        normalize_evaluation_filter_contract({"type": "concept", "filter_type": "entity"}, "conflict")
     assert safe_report_identity(
         {
             "metadata": {

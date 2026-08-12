@@ -38,6 +38,7 @@ from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_paths import safe_segment
 from wiki.wiki_limits import TARGET_PAGE_BYTES, utf8_size
+from wiki.wikilinks import format_wikilink
 
 
 CODEGRAPH_SOURCE_NAME = "codegraph"
@@ -645,7 +646,7 @@ def _render_file_body(source_path: str, file_item: Mapping[str, Any], nodes: Ite
     if not pipeline_values:
         lines.append("- 未被识别为可信入口的技术 pipeline 成员。")
     for pipeline in pipeline_values:
-        lines.append(f"- [[{pipeline.page_path[:-3]}|{pipeline.pipeline_id}]]")
+        lines.append(f"- {format_wikilink(pipeline.page_path[:-3], pipeline.pipeline_id)}")
     return "\n".join(lines)
 
 
@@ -661,7 +662,7 @@ def _render_pipeline_body(pipeline: PipelineSnapshot, node_by_id: Mapping[str, M
     ]
     for path in pipeline.member_files:
         target = file_page_map.get(path)
-        lines.append(f"- [[{target[:-3] if target else path}|{path}]]" if target else f"- `{path}`")
+        lines.append(f"- {format_wikilink(target[:-3], path)}" if target else f"- `{path}`")
     lines.extend(["", "## 执行关系"])
     pipeline_edge_keys = set(pipeline.edge_keys) | set(pipeline.external_edge_keys)
     selected_edges = [edge for edge in edges if (str(edge.get("source") or ""), str(edge.get("target") or ""), str(edge.get("kind") or "")) in pipeline_edge_keys]
@@ -701,11 +702,11 @@ def _render_overview_body(snapshot: GraphSnapshot, pipelines: Iterable[PipelineS
     if not pipeline_values:
         lines.append("- 未识别到可信技术入口。")
     for pipeline in pipeline_values:
-        lines.append(f"- [[{pipeline.page_path[:-3]}|{pipeline.pipeline_id}]]（`{pipeline.pipeline_status}`）")
+        lines.append(f"- {format_wikilink(pipeline.page_path[:-3], pipeline.pipeline_id)}（`{pipeline.pipeline_status}`）")
     lines.extend(["", "## 文件事实"])
     for source_path in sorted(file_page_map):
         target = file_page_map[source_path]
-        lines.append(f"- [[{target[:-3]}|{source_path}]]")
+        lines.append(f"- {format_wikilink(target[:-3], source_path)}")
     return "\n".join(lines)
 
 

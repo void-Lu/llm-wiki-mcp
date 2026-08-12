@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
+from retrieval.token_units import count_passage_tokens, passage_token_units
+
 CHUNK_SCHEMA_VERSION = 2
 DEFAULT_TARGET_TOKENS = 450
 DEFAULT_MIN_TOKENS = 100
@@ -29,8 +31,15 @@ class PassageChunk:
 
 
 def approximate_tokens(text: str) -> list[str]:
-    # CJK characters carry more semantic weight than whitespace-delimited words.
-    return re.findall(r"[A-Za-z0-9_]+|[一-鿿]|[^\s]", text)
+    """Compatibility facade for the passage-unit tokenizer."""
+
+    return passage_token_units(text)
+
+
+def estimate_passage_tokens(text: str) -> int:
+    """Count passage/chunk units used by chunk limits and index rows."""
+
+    return count_passage_tokens(text)
 
 
 def chunk_markdown(page_path: str, body: str, *, target_tokens: int = DEFAULT_TARGET_TOKENS, max_tokens: int = DEFAULT_MAX_TOKENS, overlap_tokens: int = DEFAULT_OVERLAP_TOKENS) -> list[PassageChunk]:
@@ -61,7 +70,7 @@ def chunk_markdown(page_path: str, body: str, *, target_tokens: int = DEFAULT_TA
         content_hash = hashlib.sha256(clean.encode("utf-8")).hexdigest()
         anchor = _anchor(heading_path)
         identity = f"v{CHUNK_SCHEMA_VERSION}\0{page_path}\0{anchor}\0{ordinal}\0{content_hash}"
-        result.append(PassageChunk(hashlib.sha256(identity.encode("utf-8")).hexdigest(), page_path, heading_path, anchor, ordinal, clean, len(approximate_tokens(clean)), content_hash))
+        result.append(PassageChunk(hashlib.sha256(identity.encode("utf-8")).hexdigest(), page_path, heading_path, anchor, ordinal, clean, estimate_passage_tokens(clean), content_hash))
     return result
 
 
@@ -123,7 +132,7 @@ def _split_group(heading: tuple[str, ...], text: str, target: int, maximum: int,
     result: list[tuple[tuple[str, ...], str]] = []
     current: list[str] = []
     for unit in units:
-        unit_tokens = approximate_tokens(unit)
+        unit_tokens = passage_token_units(unit)
         if len(unit_tokens) > maximum:
             if current:
                 result.append((heading, "\n\n".join(current))); current = []
@@ -133,9 +142,9 @@ def _split_group(heading: tuple[str, ...], text: str, target: int, maximum: int,
                     result.append((heading, " ".join(words)))
             continue
         proposal = "\n\n".join([*current, unit])
-        if current and len(approximate_tokens(proposal)) > target:
+        if current and estimate_passage_tokens(proposal) > target:
             result.append((heading, "\n\n".join(current)))
-            tail = approximate_tokens(current[-1])[-overlap:]
+            tail = passage_token_units(current[-1])[-overlap:]
             current = [(" ".join(tail) + "\n\n" + unit).strip()] if tail else [unit]
         else:
             current.append(unit)

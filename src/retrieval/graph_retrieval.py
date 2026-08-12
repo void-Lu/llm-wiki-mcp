@@ -28,6 +28,12 @@ class RankBreakdown:
     rrf_contribution: float = 0.0
 
 
+@dataclass(frozen=True)
+class RelationshipEvidence:
+    reasons: tuple[dict[str, Any], ...]
+    score: float
+
+
 @dataclass
 class QueryCandidate:
     path: Path
@@ -113,10 +119,9 @@ def apply_graph_expansion(
                 candidate = candidates_by_rel.get(rel)
                 if candidate is None:
                     continue
-                relationship_reasons = relationship_reasons_for(seed, rel, graph) if collect_reasons else []
-                relationship_score = sum(float(reason["score"]) for reason in relationship_reasons)
-                if not collect_reasons:
-                    relationship_score = relationship_score_for(seed, rel, graph)
+                evidence = relationship_evidence_for(seed, rel, graph)
+                relationship_reasons = list(evidence.reasons) if collect_reasons else []
+                relationship_score = evidence.score
                 raw_contribution = relationship_score * decay
                 graph_cap = _graph_score_cap(candidate)
                 applied = max(0.0, min(raw_contribution, graph_cap - candidate.graph_score))
@@ -149,7 +154,7 @@ def apply_graph_expansion(
                 break
 
 
-def relationship_reasons_for(left: str, right: str, graph: Graph) -> list[dict[str, Any]]:
+def relationship_evidence_for(left: str, right: str, graph: Graph) -> RelationshipEvidence:
     reasons: list[dict[str, Any]] = []
     if right in graph.neighbors.get(left, set()):
         reasons.append({"kind": "direct_wikilink", "source": left, "target": right, "score": 3.0})
@@ -163,24 +168,19 @@ def relationship_reasons_for(left: str, right: str, graph: Graph) -> list[dict[s
             reasons.append({"kind": "common_neighbor", "source": left, "target": right, "value": neighbor, "score": 1.5 / math.log(degree + 1)})
     if graph.types.get(left) and graph.types.get(left) == graph.types.get(right):
         reasons.append({"kind": "same_type", "source": left, "target": right, "value": graph.types[left], "score": 1.0})
-    return reasons
+    return RelationshipEvidence(tuple(reasons), _stable_score(sum(float(reason["score"]) for reason in reasons)))
+
+
+def relationship_reasons_for(left: str, right: str, graph: Graph) -> list[dict[str, Any]]:
+    """Compatibility projection of the shared relationship evidence owner."""
+
+    return [dict(reason) for reason in relationship_evidence_for(left, right, graph).reasons]
 
 
 def relationship_score_for(left: str, right: str, graph: Graph) -> float:
-    score = 0.0
-    if right in graph.neighbors.get(left, set()):
-        score += 3.0
-    shared_sources = graph.sources.get(left, set()) & graph.sources.get(right, set())
-    if shared_sources:
-        score += 4.0 * len(shared_sources)
-    common = graph.neighbors.get(left, set()) & graph.neighbors.get(right, set())
-    for neighbor in common:
-        degree = len(graph.neighbors.get(neighbor, set()))
-        if degree > 1:
-            score += 1.5 / math.log(degree + 1)
-    if graph.types.get(left) and graph.types.get(left) == graph.types.get(right):
-        score += 1.0
-    return score
+    """Compatibility projection of the shared relationship evidence owner."""
+
+    return relationship_evidence_for(left, right, graph).score
 
 
 def _graph_score_cap(candidate: QueryCandidate) -> float:

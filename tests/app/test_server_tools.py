@@ -692,6 +692,32 @@ def test_write_note_forwards_related_pages_and_sources(monkeypatch: pytest.Monke
     assert calls["related_pages"] == related_pages
     assert calls["sources"] == sources
     assert calls["vault_root"] == str(root)
+    assert "auto_index" not in calls
+
+
+def test_write_note_canonical_alias_wins_and_legacy_alias_is_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    calls: dict[str, object] = {}
+
+    def fake_writer(**kwargs: object) -> dict[str, object]:
+        calls.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr("app.server.wiki_write_note_tool", fake_writer)
+
+    result = wiki_write_note(
+        title="Title",
+        content="Body",
+        note_type="knowledge",
+        noteType="legacy",
+        vault="primary",
+    )
+
+    assert result == {"ok": True}
+    assert calls["note_type"] == "knowledge"
+    assert calls["vault_root"] == str(root)
+    assert "auto_index" not in calls
 
 
 def test_update_forwards_related_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

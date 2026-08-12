@@ -11,7 +11,7 @@ from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy
 from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.wiki_models import WikiPage
-from wiki.wiki_paths import safe_segment
+from wiki.wiki_paths import WikiPathError, validate_wiki_page_path
 
 
 class WikiWriteError(ValueError):
@@ -28,44 +28,6 @@ class PreparedWikiPage:
     title: str
     frontmatter: dict[str, Any]
     redacted_count: int
-
-
-_ALLOWED_PREFIXES = (
-    Path("wiki/projects"),
-    Path("wiki/concepts"),
-    Path("wiki/entities"),
-)
-
-_FORBIDDEN_PARTS = {"objects"}
-_FORBIDDEN_PREFIXES = (
-    Path("wiki/code"),
-    Path("wiki/decisions"),
-    Path("wiki/troubleshooting"),
-    Path("wiki/requirements"),
-    Path("wiki/knowledge"),
-    Path("wiki/synthesis"),
-    Path("wiki/comparisons"),
-    Path("wiki/maintenance"),
-    Path("projects"),
-)
-
-_PROJECT_SUBDIRS = {
-    "specs",
-    "plans",
-    "architecture",
-    "pipelines",
-    "troubleshooting",
-    "researches",
-}
-
-_RESERVED_STRUCTURE_PARTS = {
-    "wiki",
-    "projects",
-    "concepts",
-    "entities",
-    "archives",
-    *_PROJECT_SUBDIRS,
-}
 
 
 def read_markdown_page(path: str | Path, vault_root: str | Path | None = None) -> WikiPage:
@@ -87,9 +49,16 @@ def write_wiki_page(
     vault_root: str | Path,
     page: WikiPage,
     overwrite_generated_only: bool = True,
+    *,
+    allow_navigation_index: bool = False,
 ) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
-    prepared = prepare_wiki_page(root, page, overwrite_generated_only=overwrite_generated_only)
+    prepared = prepare_wiki_page(
+        root,
+        page,
+        overwrite_generated_only=overwrite_generated_only,
+        allow_navigation_index=allow_navigation_index,
+    )
     try:
         written = atomic_write_text(prepared.target, prepared.text)
     except AtomicFileError as exc:
@@ -113,11 +82,12 @@ def prepare_wiki_page(
     page: WikiPage,
     *,
     overwrite_generated_only: bool = True,
+    allow_navigation_index: bool = False,
 ) -> PreparedWikiPage:
     """Validate and render a page without changing any durable state."""
 
     root = Path(vault_root).expanduser().resolve()
-    relative_path = _validate_relative_path(Path(page.relative_path))
+    relative_path = _validate_relative_path(Path(page.relative_path), allow_navigation_index=allow_navigation_index)
     target = (root / relative_path).resolve()
     if not target.is_relative_to(root):
         raise WikiWriteError("path_escape", "resolved page path escapes wiki root")
@@ -212,41 +182,12 @@ def strip_leading_h1(body: str) -> str:
     return "\n".join(rest)
 
 
-def _validate_relative_path(path: Path) -> Path:
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise WikiWriteError("path_escape", "page path must stay inside wiki root")
-    normalized = Path(*path.parts)
-    if normalized.suffix.lower() != ".md":
-        raise WikiWriteError("invalid_wiki_path", "wiki page must be a markdown file")
-    if any(_starts_with(normalized, prefix) for prefix in _FORBIDDEN_PREFIXES):
-        raise WikiWriteError("invalid_wiki_path", f"page path is outside the confirmed wiki structure: {normalized.as_posix()}")
-    if any(part.casefold() in _FORBIDDEN_PARTS for part in normalized.parts):
-        raise WikiWriteError("invalid_wiki_path", f"objects directories are not part of the confirmed wiki structure: {normalized.as_posix()}")
-    if not any(_starts_with(normalized, prefix) for prefix in _ALLOWED_PREFIXES):
-        raise WikiWriteError("invalid_wiki_path", f"page path is outside the confirmed wiki structure: {normalized.as_posix()}")
-    if _starts_with(normalized, Path("wiki/projects")) and not _is_valid_project_path(normalized):
-        raise WikiWriteError("invalid_wiki_path", f"project page path is outside the confirmed project structure: {normalized.as_posix()}")
-    for part in normalized.parts:
-        if part in _RESERVED_STRUCTURE_PARTS:
-            continue
-        stem = Path(part).stem if part.endswith(".md") else part
-        try:
-            safe_segment(stem)
-        except ValueError as exc:
-            code = getattr(exc, "code", "invalid_path_component")
-            raise WikiWriteError(code, str(exc)) from exc
-    return normalized
-
-
-def _is_valid_project_path(path: Path) -> bool:
-    parts = path.parts
-    if len(parts) == 4 and parts[3] == "index.md":
-        return True
-    return len(parts) >= 5 and parts[3] in _PROJECT_SUBDIRS
-
-
-def _starts_with(path: Path, prefix: Path) -> bool:
-    return path.parts[: len(prefix.parts)] == prefix.parts
+def _validate_relative_path(path: Path, *, allow_navigation_index: bool = False) -> Path:
+    try:
+        return validate_wiki_page_path(path, allow_navigation_index=allow_navigation_index)
+    except WikiPathError as exc:
+        code = "invalid_wiki_path" if exc.code == "navigation_index_forbidden" else exc.code
+        raise WikiWriteError(code, str(exc)) from exc
 
 
 def _extract_title(body: str) -> str:

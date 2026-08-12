@@ -16,7 +16,6 @@ from typing import Any, Literal, cast
 
 from retrieval.metadata_filters import (
     QUERY_METADATA_FILTERS,
-    normalize_filter_aliases,
     normalize_metadata_filters,
     page_matches_filters,
     path_matches_prefix,
@@ -36,12 +35,14 @@ _EVALUATION_KS = (1, 3, 5, 10)
 
 __all__ = [
     "EvaluationQueryService",
+    "EvaluationFilterContract",
     "EvaluationRuntimeSnapshot",
     "RetrievalEvalCase",
     "RetrievalEvalDataset",
     "RetrievalEvalError",
     "RetrievalEvalManifest",
     "Relevance",
+    "normalize_evaluation_filter_contract",
     "parse_evaluation_filters",
     "safe_report_identity",
     "vault_fingerprint",
@@ -54,6 +55,23 @@ class RetrievalEvalError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class EvaluationFilterContract:
+    """Pure projections of one evaluation filter boundary.
+
+    ``internal`` keeps the historical dataset representation, ``public`` is
+    the nested MCP filter payload, ``query`` is ready for ``QueryFilters``,
+    and ``matcher`` is the production metadata predicate input.  Keeping the
+    projections together prevents each evaluation entrypoint from pairing
+    public/legacy aliases independently.
+    """
+
+    internal: Mapping[str, Any]
+    public: Mapping[str, Any]
+    query: Mapping[str, Any]
+    matcher: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -958,52 +976,89 @@ def _parse_case(raw: object, line_number: int) -> RetrievalEvalCase:
     return RetrievalEvalCase(case_id, query, tuple(relevance), filters, answerable, language, tuple(tags_raw), notes, scope)
 
 
-def parse_evaluation_filters(raw: object, case_id: str = "<unknown>") -> dict[str, Any]:
-    """Normalize public and legacy dataset filter aliases into one contract."""
+def normalize_evaluation_filter_contract(
+    raw: object,
+    case_id: str = "<unknown>",
+) -> EvaluationFilterContract:
+    """Build every evaluator filter projection from one pure boundary.
+
+    Dataset fixtures historically used ``filter_type``/``filter_tags`` while
+    the MCP boundary uses ``type``/``tags``.  This helper pairs those aliases,
+    validates the public vocabulary, and returns the internal, MCP, query and
+    production-matcher projections together so callers cannot drift apart.
+    """
 
     data = _mapping(raw, "invalid_filters", f"case {case_id}: filters must be an object")
     unknown = sorted(set(data) - _ALLOWED_FILTERS)
     if unknown:
         raise RetrievalEvalError("invalid_filters", f"case {case_id}: unsupported filters: {', '.join(unknown)}")
-    filters: dict[str, Any] = {}
-    for name in ("project",):
-        if name in data:
-            filters[name] = _nonempty_string(data[name], "invalid_filters", f"case {case_id}: {name} must be a string")
 
-    public_filters: dict[str, Any] = {}
+    project: str | None = None
+    if "project" in data:
+        project = _nonempty_string(data["project"], "invalid_filters", f"case {case_id}: project must be a string")
+
+    public_input: dict[str, Any] = {}
     for public_name, legacy_name in (("type", "filter_type"), ("tags", "filter_tags")):
         if public_name in data and legacy_name in data and data[public_name] != data[legacy_name]:
             raise RetrievalEvalError("invalid_filters", f"case {case_id}: {public_name} and {legacy_name} disagree")
         if public_name in data:
-            public_filters[public_name] = data[public_name]
+            public_input[public_name] = data[public_name]
         elif legacy_name in data:
-            public_filters[public_name] = data[legacy_name]
-    if "type" in public_filters and (not isinstance(public_filters["type"], str) or not public_filters["type"].strip()):
+            public_input[public_name] = data[legacy_name]
+    if "type" in public_input and (not isinstance(public_input["type"], str) or not public_input["type"].strip()):
         raise RetrievalEvalError("invalid_filters", f"case {case_id}: type must be a non-empty string")
     if "path_prefix" in data:
-        public_filters["path_prefix"] = data["path_prefix"]
+        public_input["path_prefix"] = data["path_prefix"]
     if "pathPrefix" in data:
-        public_filters["pathPrefix"] = data["pathPrefix"]
+        public_input["pathPrefix"] = data["pathPrefix"]
+
     try:
         normalized = normalize_metadata_filters(
-            normalize_filter_aliases(public_filters),
+            public_input,
             allowed=QUERY_METADATA_FILTERS,
             preserve_path_trailing=True,
         )
     except ValueError as exc:
         raise RetrievalEvalError("invalid_filters", f"case {case_id}: {exc}") from exc
+
+    internal: dict[str, Any] = {}
+    if project is not None:
+        internal["project"] = project
     if "type" in normalized:
-        filters["filter_type"] = normalized["type"]
+        internal["filter_type"] = normalized["type"]
     if "tags" in normalized:
         tags = list(normalized["tags"])
         if not tags:
             raise RetrievalEvalError("invalid_filters", f"case {case_id}: tags must be a non-empty list of strings")
-        filters["filter_tags"] = tags
+        internal["filter_tags"] = tags
     if "path_prefix" in normalized:
-        filters["path_prefix"] = normalized["path_prefix"]
-    elif "path_prefix" in public_filters or "pathPrefix" in public_filters:
+        internal["path_prefix"] = normalized["path_prefix"]
+    elif "path_prefix" in public_input or "pathPrefix" in public_input:
         raise RetrievalEvalError("invalid_filters", f"case {case_id}: path_prefix must be a non-empty vault-relative string")
-    return filters
+
+    public: dict[str, Any] = {}
+    if "type" in normalized:
+        public["type"] = normalized["type"]
+    if "tags" in normalized:
+        public["tags"] = list(normalized["tags"])
+    if "path_prefix" in normalized:
+        public["path_prefix"] = normalized["path_prefix"]
+
+    matcher = dict(normalized)
+    if project is not None:
+        matcher["project"] = project
+    return EvaluationFilterContract(
+        internal=internal,
+        public=public,
+        query=dict(public),
+        matcher=matcher,
+    )
+
+
+def parse_evaluation_filters(raw: object, case_id: str = "<unknown>") -> dict[str, Any]:
+    """Compatibility facade returning the historical internal filter shape."""
+
+    return dict(normalize_evaluation_filter_contract(raw, case_id).internal)
 
 
 def _parse_filters(raw: object, case_id: str) -> dict[str, Any]:
@@ -1309,14 +1364,7 @@ def _is_safe_reason_code(value: str) -> bool:
 
 
 def _public_filters(filters: Mapping[str, Any]) -> dict[str, Any] | None:
-    public: dict[str, Any] = {}
-    if filters.get("filter_type"):
-        public["type"] = filters["filter_type"]
-    if filters.get("filter_tags"):
-        public["tags"] = list(filters["filter_tags"])
-    if filters.get("path_prefix"):
-        public["path_prefix"] = filters["path_prefix"]
-    return public or None
+    return dict(normalize_evaluation_filter_contract(filters).public) or None
 
 
 def _query_case(
@@ -1336,20 +1384,14 @@ def _query_case(
     if retrieval_mode != "lexical":
         settings = parse_vector_settings(root, dict(vector_config or {}))
         embedding = EmbeddingSettings(enabled=True, provider=settings.provider, model_path=settings.model_path, index_path=settings.index_path, device=settings.device, batch_size=settings.batch_size, max_sequence_length=settings.max_sequence_length, candidate_limit=settings.candidate_limit, rrf_k=settings.rrf_k, min_vector_score=settings.min_vector_score)
-    query_filter_values: dict[str, Any] = {}
-    if "type" in case.filters or "filter_type" in case.filters:
-        query_filter_values["type"] = case.filters.get("type", case.filters.get("filter_type"))
-    if "tags" in case.filters or "filter_tags" in case.filters:
-        query_filter_values["tags"] = case.filters.get("tags", case.filters.get("filter_tags"))
-    if "path_prefix" in case.filters or "pathPrefix" in case.filters:
-        query_filter_values["path_prefix"] = case.filters.get("path_prefix", case.filters.get("pathPrefix"))
+    filter_contract = normalize_evaluation_filter_contract(case.filters, case.id)
 
     return run_query_v2(
         root,
         case.query,
         scope=scope,
         project=case.filters.get("project"),
-        filters=QueryFilters.from_mapping(query_filter_values),
+        filters=QueryFilters.from_mapping(dict(filter_contract.query)),
         top_k=top_k,
         embedding=embedding,
         telemetry=TelemetrySettings(enabled=False),
@@ -1359,23 +1401,9 @@ def _query_case(
 
 
 def _results_match_filters(results: Sequence[Mapping[str, Any]], filters: Mapping[str, Any]) -> bool:
-    if "type" in filters and "filter_type" in filters and filters["type"] != filters["filter_type"]:
-        return False
-    if "tags" in filters and "filter_tags" in filters and filters["tags"] != filters["filter_tags"]:
-        return False
-    raw_filters: dict[str, Any] = {}
-    for name in ("project", "type", "tags", "path_prefix", "pathPrefix"):
-        if name in filters:
-            raw_filters[name] = filters[name]
-    for public_name, legacy_name in (("type", "filter_type"), ("tags", "filter_tags")):
-        if public_name not in raw_filters and legacy_name in filters:
-            raw_filters[public_name] = filters[legacy_name]
     try:
-        normalized = normalize_metadata_filters(
-            normalize_filter_aliases(raw_filters),
-            allowed=QUERY_METADATA_FILTERS | {"project"},
-        )
-    except ValueError:
+        normalized = normalize_evaluation_filter_contract(filters).matcher
+    except RetrievalEvalError:
         return False
 
     for item in results:

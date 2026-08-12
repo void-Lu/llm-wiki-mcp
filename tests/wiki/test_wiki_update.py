@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from hashlib import sha256
 
+import pytest
+
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.update_plan_store import UpdatePlanStore
@@ -80,6 +82,19 @@ def test_update_gates_require_expected_hash_and_plan_for_structure(tmp_path) -> 
     assert apply_update(tmp_path, "wiki/concepts/general/a.md", "new")["code"] == "expected_hash_required"
     assert apply_update(tmp_path, "wiki/concepts/general/a.md", "new", expected_hash=current_hash, incoming_frontmatter={"summary": "new"})["code"] == "update_plan_required"
     assert apply_update(tmp_path, "wiki/concepts/general/a.md", "new", expected_hash=current_hash, plan_id="unknown") ["code"] == "plan_unknown"
+
+
+@pytest.mark.parametrize(
+    "page_path",
+    [
+        "wiki/index.md",
+        "wiki/projects/alpha/index.md",
+        "wiki/concepts/general/index.md",
+        "wiki/entities/customer/index.md",
+    ],
+)
+def test_update_rejects_navigation_indexes_at_ordinary_boundary(tmp_path, page_path: str) -> None:
+    assert preview_update(tmp_path, page_path, "new")["code"] == "update_path_not_allowed"
 
 
 def test_plan_is_consumed_before_projection_failure_and_replay_is_already_applied(tmp_path, monkeypatch) -> None:
