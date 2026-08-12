@@ -1,6 +1,0 @@
-{"file": ".trellis/spec/backend/runtime-provenance.md", "reason": "检查 archive 管理/status/error 没有破坏公共 runtime contract。"}
-{"file": ".trellis/spec/backend/local-vector-retrieval.md", "reason": "检查 active/archive store 物理隔离、可重建和 query 零写入。"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "审查 archive/restore/purge 从计划到文件、索引、事件和响应的完整 round-trip。"}
-{"file": ".trellis/tasks/07-31-concept-first-wiki-retrieval/research/current-retrieval-architecture.md", "reason": "核对旧 archives/log/query 排除和现有删除行为的迁移风险。"}
-{"file": ".trellis/tasks/07-31-concept-first-wiki-retrieval/research/corpus-and-archive-lifecycle-decisions.md", "reason": "检查实现满足不可变、多版本、强引用、显式 purge 和无长期旧目录兼容层。"}
-{"file": ".trellis/tasks/07-31-concept-first-wiki-retrieval/research/public-tool-surface-decisions.md", "reason": "检查 archive/restore plan/apply、安全拒绝和非公开 purge/recovery/migration。"}
