@@ -54,6 +54,35 @@ def test_operation_state_and_stage_results_are_recoverable(tmp_path: Path) -> No
     assert loaded.stages["retrieval"]["result"] == {"ok": False, "repair_action": "repair_page_operation"}
 
 
+def test_stage_result_keeps_bounded_projection_summary_only(tmp_path: Path) -> None:
+    store = PageOperationStore(tmp_path)
+    operation = store.create_operation(
+        request_key="request-summary",
+        operation_kind="update",
+        page_path="wiki/concepts/page.md",
+        base_hash="base",
+        intended_hash="intent",
+    )
+    store.record_stage(
+        operation.operation_id,
+        "navigation",
+        "succeeded",
+        result={
+            "ok": True,
+            "written": ["wiki/index.md", "C:\\secret\\absolute.md"],
+            "batch": {"kind": "navigation", "boundary": "page-submit", "secret": "hidden"},
+            "body": "secret body",
+        },
+    )
+
+    loaded = store.get_operation(operation.operation_id)
+    assert loaded is not None
+    assert loaded.stages["navigation"]["result"] == {
+        "ok": True,
+        "batch": {"boundary": "page-submit", "kind": "navigation"},
+    }
+
+
 def test_page_state_schema_version_mismatch_is_rejected(tmp_path: Path) -> None:
     store = PageOperationStore(tmp_path)
     connection = sqlite3.connect(store.path)

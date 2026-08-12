@@ -18,8 +18,8 @@ def sync_retrieval_index(vault_root: str | Path, *, full_build: bool = False) ->
 
     active = RetrievalIndexStore(vault_root)
     raw = RetrievalIndexStore(vault_root, scope="raw")
-    active_result = active.reconcile() if active.path.exists() and not full_build else active.build(active.iter_vault_pages())
-    raw_result = raw.reconcile() if raw.path.exists() and not full_build else raw.build(raw.iter_vault_pages())
+    active_result = active.build(active.iter_vault_pages()) if full_build else active.reconcile()
+    raw_result = raw.build(raw.iter_vault_pages()) if full_build else raw.reconcile()
     return {
         "ok": bool(active_result.get("ok")) and bool(raw_result.get("ok")),
         "active": active_result,

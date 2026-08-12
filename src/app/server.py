@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import wraps
@@ -204,7 +205,23 @@ _TOOL_ANNOTATIONS = {
 
 _ACTIVE_TOOL_ARGS: ContextVar[Mapping[str, object] | None] = ContextVar("active_tool_args", default=None)
 _ACTIVE_TOOL_RESOLUTION: ContextVar[ToolVaultResolution | None] = ContextVar("active_tool_resolution", default=None)
+_ACTIVE_TOOL_SNAPSHOT: ContextVar[ToolVaultResolution | None] = ContextVar("active_tool_snapshot", default=None)
 _ACTIVE_TOOL_WARNINGS: ContextVar[tuple[str, ...]] = ContextVar("active_tool_warnings", default=())
+
+
+@contextmanager
+def tool_runtime_snapshot(resolution: ToolVaultResolution):
+    """Run a public tool against an explicit immutable resolution snapshot.
+
+    The snapshot is intentionally context-local so adapters and concurrent
+    callers never need to replace the process-wide configuration registry.
+    """
+
+    token = _ACTIVE_TOOL_SNAPSHOT.set(resolution)
+    try:
+        yield
+    finally:
+        _ACTIVE_TOOL_SNAPSHOT.reset(token)
 
 
 def _registered_resolution() -> ToolVaultResolution:
@@ -213,6 +230,10 @@ def _registered_resolution() -> ToolVaultResolution:
     cached = _ACTIVE_TOOL_RESOLUTION.get()
     if cached is not None:
         return cached
+    snapshot = _ACTIVE_TOOL_SNAPSHOT.get()
+    if snapshot is not None:
+        _ACTIVE_TOOL_RESOLUTION.set(snapshot)
+        return snapshot
     args = _ACTIVE_TOOL_ARGS.get()
     if args is None:
         return resolve_tool_vault()

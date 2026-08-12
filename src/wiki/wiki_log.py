@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import re
-import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 from common.redaction import redact_sensitive_text
 from common.privacy_policy import LocatorError, normalize_vault_relative
+from wiki.atomic_file import AtomicFileError, FaultBarrier, atomic_write_text
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_limits import (
     HARD_PAGE_BYTES,
@@ -28,7 +28,12 @@ _ARCHIVE_HEADER = "---\ntype: log_archive\ngenerated: true\narchived: true\n---\
 _ARCHIVE_NAVIGATION_INDEX = "archives/log/index.md"
 
 
-def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, object]:
+def append_log_entry(
+    vault_root: str | Path,
+    entry: WikiLogEntry,
+    *,
+    fault: FaultBarrier | None = None,
+) -> dict[str, object]:
     """Append one complete log record while keeping every generated log bounded."""
 
     root = Path(vault_root)
@@ -42,7 +47,9 @@ def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, o
 
     if utf8_size(_join_log_blocks(preamble, [block])) > _archive_target_bytes():
         try:
-            detail_paths = _write_archive_document(root, timestamp, [block], prefix="log")
+            detail_paths = _write_archive_document(root, timestamp, [block], prefix="log", fault=fault)
+        except AtomicFileError:
+            raise
         except ValueError:
             return {
                 "ok": False,
@@ -56,12 +63,12 @@ def append_log_entry(vault_root: str | Path, entry: WikiLogEntry) -> dict[str, o
     next_blocks = [*blocks, block]
     keep, overflow = _rotate_blocks(preamble, next_blocks)
     if overflow:
-        archived_paths.extend(_write_archived_log_blocks(root, "wiki-log", overflow))
-    _atomic_write(log_path, _join_log_blocks(preamble, keep))
+        archived_paths.extend(_write_archived_log_blocks(root, "wiki-log", overflow, fault=fault))
+    _atomic_write(log_path, _join_log_blocks(preamble, keep), fault=fault)
 
     for archive_path in archived_paths:
-        _append_archive_log(root, archive_path)
-    _write_archive_index(root)
+        _append_archive_log(root, archive_path, fault=fault)
+    _write_archive_index(root, fault=fault)
     return {
         "ok": True,
         "path": "wiki/log.md",
@@ -199,7 +206,13 @@ def _join_log_blocks(preamble: str, blocks: list[str]) -> str:
     return render_units(preamble, blocks)
 
 
-def _write_archived_log_blocks(root: Path, source_log_name: str, blocks: list[str]) -> list[Path]:
+def _write_archived_log_blocks(
+    root: Path,
+    source_log_name: str,
+    blocks: list[str],
+    *,
+    fault: FaultBarrier | None = None,
+) -> list[Path]:
     grouped: dict[tuple[str, str], list[str]] = defaultdict(list)
     for block in blocks:
         grouped[_archive_month_parts(block)].append(block)
@@ -211,6 +224,7 @@ def _write_archived_log_blocks(root: Path, source_log_name: str, blocks: list[st
                 f"{year}-{month}-01T00:00:00Z",
                 group,
                 prefix=_archive_prefix(source_log_name),
+                fault=fault,
             )
         )
     return written
@@ -227,6 +241,7 @@ def _write_archive_document(
     *,
     prefix: str,
     header: str = _ARCHIVE_HEADER,
+    fault: FaultBarrier | None = None,
 ) -> list[Path]:
     year, month = _archive_month_parts_from_timestamp(timestamp)
     archive_dir = root / ARCHIVES_LOG_DIR / year / month
@@ -243,7 +258,7 @@ def _write_archive_document(
         if utf8_size(rendered) > target_bytes or utf8_size(rendered) > HARD_PAGE_BYTES:
             raise ValueError("archived Markdown page cannot fit into a bounded page")
         contents[path] = rendered
-    _atomic_write_many(contents)
+    _atomic_write_many(contents, fault=fault)
     return paths
 
 
@@ -334,7 +349,7 @@ def _archive_month_parts_from_timestamp(timestamp: str) -> tuple[str, str]:
     return f"{now.year:04d}", f"{now.month:02d}"
 
 
-def _append_archive_log(root: Path, archive_path: Path) -> None:
+def _append_archive_log(root: Path, archive_path: Path, *, fault: FaultBarrier | None = None) -> None:
     archive_log = root / ARCHIVES_LOG_PATH
     timestamp = _now()
     rel = archive_path.relative_to(root).as_posix()
@@ -350,11 +365,11 @@ def _append_archive_log(root: Path, archive_path: Path) -> None:
     preamble, blocks = _read_log_blocks(archive_log, "# Archives Log")
     keep, overflow = _rotate_blocks(preamble, [*blocks, block])
     if overflow:
-        _write_archived_log_blocks(root, "archives-log", overflow)
-    _atomic_write(archive_log, _join_log_blocks(preamble, keep))
+        _write_archived_log_blocks(root, "archives-log", overflow, fault=fault)
+    _atomic_write(archive_log, _join_log_blocks(preamble, keep), fault=fault)
 
 
-def _write_archive_index(root: Path) -> None:
+def _write_archive_index(root: Path, *, fault: FaultBarrier | None = None) -> None:
     directory = root / ARCHIVES_LOG_DIR
     target = directory / "index.md"
     if target.exists() and not _is_generated_page(target):
@@ -386,7 +401,7 @@ def _write_archive_index(root: Path) -> None:
         contents[directory / filename] = rendered
     if any(path.exists() and not _is_generated_page(path) for path in contents):
         return
-    _atomic_write_many(contents)
+    _atomic_write_many(contents, fault=fault)
     for path in directory.glob("index-*.md"):
         if path not in contents and _is_generated_page(path):
             path.unlink()
@@ -415,24 +430,19 @@ def _is_generated_page(path: Path) -> bool:
     return frontmatter.get("generated") is True
 
 
-def _atomic_write_many(contents: dict[Path, str]) -> None:
-    staged: list[tuple[Path, Path]] = []
-    try:
-        for target, text in contents.items():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-            temporary.write_text(text, encoding="utf-8")
-            staged.append((target, temporary))
-        for target, temporary in staged:
-            temporary.replace(target)
-    finally:
-        for _, temporary in staged:
-            if temporary.exists():
-                temporary.unlink()
+def _atomic_write_many(
+    contents: dict[Path, str],
+    *,
+    fault: FaultBarrier | None = None,
+) -> None:
+    """Replace each log file atomically; this is not a cross-file transaction."""
+
+    for target, text in contents.items():
+        atomic_write_text(target, text, fault=fault)
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    _atomic_write_many({path: text})
+def _atomic_write(path: Path, text: str, *, fault: FaultBarrier | None = None) -> None:
+    _atomic_write_many({path: text}, fault=fault)
 
 
 def _bounded_text(text: str, max_bytes: int) -> str:

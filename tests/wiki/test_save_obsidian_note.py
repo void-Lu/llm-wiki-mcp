@@ -307,6 +307,26 @@ def test_empty_slug_returns_code(vault: Path):
     assert result["code"] == "empty_slug"
 
 
+def test_new_note_does_not_migrate_existing_legacy_filename(vault: Path):
+    legacy = vault / "wiki" / "projects" / "project-a" / "specs" / "Legacy-Title.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("legacy body", encoding="utf-8")
+
+    result = save_obsidian_note(
+        note_type="spec",
+        title="Legacy Title",
+        content="new body",
+        project="project-a",
+        filename="New-Title",
+        vault_root=str(vault),
+        auto_index=False,
+    )
+
+    assert result["ok"] is True
+    assert result["path"] == "wiki/projects/project-a/specs/New-Title.md"
+    assert legacy.read_text(encoding="utf-8") == "legacy body"
+
+
 def test_yaml_injection_values_stay_parseable(vault: Path):
     injected_title = "Title with colon: value\n---\n- list item\n&anchor value"
     injected_values = ["plain: colon", "--- marker", "- list syntax", "&anchor-like", "line one\nline two"]

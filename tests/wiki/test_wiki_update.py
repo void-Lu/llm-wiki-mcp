@@ -23,7 +23,7 @@ def test_preview_apply_cas_and_generated_becomes_manual(tmp_path) -> None:
     assert apply_update(tmp_path, "wiki/concepts/general/a.md", "bad", incoming_frontmatter={"concept_id": "other"})["code"] == "locked_field"
 
 
-def test_apply_update_uses_redacted_writer_and_refreshes_existing_retrieval_index(tmp_path) -> None:
+def test_apply_update_uses_redacted_writer_and_refreshes_existing_retrieval_index(tmp_path, monkeypatch) -> None:
     page = tmp_path / "wiki/concepts/general/a.md"
     page.parent.mkdir(parents=True)
     page.write_text(
@@ -32,6 +32,7 @@ def test_apply_update_uses_redacted_writer_and_refreshes_existing_retrieval_inde
     )
     store = RetrievalIndexStore(tmp_path)
     store.build(store.iter_vault_pages())
+    monkeypatch.setattr(RetrievalIndexStore, "build", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("page submit must not full-build retrieval")))
 
     preview = preview_update(
         tmp_path,

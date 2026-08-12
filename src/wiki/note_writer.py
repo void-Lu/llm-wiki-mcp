@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-import string
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
@@ -12,7 +10,7 @@ from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_r
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page
 from wiki.wiki_models import WikiPage
-from wiki.wiki_paths import create_wiki_root
+from wiki.wiki_paths import WikiPathError, create_wiki_root, safe_segment, slug
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 from wiki.reference_section import build_reference_section, skipped_warnings
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
@@ -20,57 +18,24 @@ from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, Sou
 NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge", "entity", "chat"}
 PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
 DOMAINS = {"common-errors", "integration-patterns"}
-WINDOWS_RESERVED_CHARS = set('<>:"|?*')
-WINDOWS_RESERVED_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL"}
-WINDOWS_RESERVED_DEVICE_PREFIXES = ("COM", "LPT")
-WINDOWS_RESERVED_DEVICE_SUFFIXES = set("123456789¹²³")
-
-
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "code": code, "error": message}
 
 
-def _has_path_traversal(value: str) -> bool:
-    path = Path(value)
-    return "/" in value or "\\" in value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts) or len(path.parts) != 1
-
-
-def _has_windows_reserved_character(value: str) -> bool:
-    return any(char in WINDOWS_RESERVED_CHARS or ord(char) < 32 for char in value)
-
-
-def _is_windows_reserved_device_name(value: str) -> bool:
-    base = value.split(".", 1)[0].upper()
-    if base in WINDOWS_RESERVED_DEVICE_NAMES:
-        return True
-    return len(base) == 4 and base[:3] in WINDOWS_RESERVED_DEVICE_PREFIXES and base[3] in WINDOWS_RESERVED_DEVICE_SUFFIXES
-
-
-def _invalid_windows_component(value: str) -> bool:
-    return _has_windows_reserved_character(value) or value.endswith((".", " ")) or _is_windows_reserved_device_name(value)
-
-
-def _slug(value: str) -> str:
-    slug = value.strip()
-    punctuation = re.escape(string.punctuation)
-    slug = re.sub(rf"[\s{punctuation}]+", "-", slug)
-    slug = re.sub(r"-+", "-", slug).strip("-")
-    return slug[:80].rstrip("-")
-
-
 def _filename(title: str, filename: str | None) -> tuple[str | None, dict[str, Any] | None]:
     if filename is None:
-        stem = _slug(title)
+        stem = slug(title, lowercase=False, fallback="", ascii_punctuation=True)
         if not stem:
             return None, _error("empty_slug", "title does not produce a valid filename slug")
         return f"{stem}.md", None
     value = filename.strip()
     if not value:
         return None, _error("empty_slug", "filename is empty")
-    if _has_path_traversal(value):
-        return None, _error("path_escape", "filename must stay inside the target directory")
-    if _invalid_windows_component(value):
-        return None, _error("invalid_filename", "filename contains a Windows-invalid path component")
+    try:
+        safe_segment(value)
+    except WikiPathError as exc:
+        code = "path_escape" if exc.code == "path_escape" else "invalid_filename"
+        return None, _error(code, "filename must stay inside the target directory" if code == "path_escape" else "filename contains a Windows-invalid path component")
     if not value.lower().endswith(".md"):
         value = f"{value}.md"
     if Path(value).stem == "":
@@ -78,14 +43,15 @@ def _filename(title: str, filename: str | None) -> tuple[str | None, dict[str, A
     return value, None
 
 
-def _safe_segment(value: str | None, missing_code: str, label: str) -> tuple[str | None, dict[str, Any] | None]:
+def _required_segment(value: str | None, missing_code: str, label: str) -> tuple[str | None, dict[str, Any] | None]:
     if not value:
         return None, _error(missing_code, f"{label} is required")
-    if _has_path_traversal(value):
-        return None, _error("path_escape", f"{label} must be a single path segment")
-    if _invalid_windows_component(value):
+    try:
+        return safe_segment(value), None
+    except WikiPathError as exc:
+        if exc.code == "path_escape":
+            return None, _error("path_escape", f"{label} must be a single path segment")
         return None, _error("invalid_path_component", f"{label} contains a Windows-invalid path component")
-    return value, None
 
 
 def _known_or_existing(value: str, known_values: set[str], directory: Path) -> dict[str, Any] | None:
@@ -222,7 +188,7 @@ def save_obsidian_note(
         return _error(exc.code, "filename violates the privacy policy")
 
     if note_type in PROJECT_NOTE_TYPES:
-        project_value, project_error = _safe_segment(project, "missing_project", "project")
+        project_value, project_error = _required_segment(project, "missing_project", "project")
         if project_error is not None:
             return project_error
         assert project_value is not None
@@ -242,7 +208,7 @@ def save_obsidian_note(
     else:
         if project:
             return _error("knowledge_project_not_allowed", "knowledge and entity notes do not accept project")
-        domain_value, domain_error = _safe_segment(domain, "missing_domain", "domain")
+        domain_value, domain_error = _required_segment(domain, "missing_domain", "domain")
         if domain_error is not None:
             return domain_error
         assert domain_value is not None

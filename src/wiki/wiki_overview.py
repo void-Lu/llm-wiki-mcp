@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from wiki.atomic_file import FaultBarrier, atomic_write_text
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_log import read_recent_log_entries
 from wiki.wiki_paths import filesystem_path
 
 
-def refresh_overview(vault_root: str | Path) -> dict[str, Any]:
+def refresh_overview(vault_root: str | Path, *, fault: FaultBarrier | None = None) -> dict[str, Any]:
     # Extended-length form keeps deep source subtrees over MAX_PATH countable.
     root = filesystem_path(vault_root)
     wiki_root = root / "wiki"
@@ -49,8 +50,7 @@ def refresh_overview(vault_root: str | Path) -> dict[str, Any]:
         *(recent or ["- 无"]),
         "",
     ]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(target, "\n".join(lines), fault=fault)
     return {"ok": True, "path": "wiki/overview.md"}
 
 

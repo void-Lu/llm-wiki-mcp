@@ -24,7 +24,7 @@ from retrieval.metadata_filters import (
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, RANKING_POLICY_VERSION, run_query_v2
 from retrieval.retrieval_index import RetrievalIndexStore
-from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
+from runtime.runtime_config import EmbeddingSettings, ResolvedVault, TelemetrySettings, VaultSettings
 from retrieval.vector_index import parse_vector_settings
 from wiki.knowledge_compiler import filesystem_path
 
@@ -33,6 +33,19 @@ RETRIEVAL_EVAL_SCHEMA_VERSION = 1
 _SUPPORTED_DATASET_SCHEMA_VERSIONS = {1, 2}
 _ALLOWED_FILTERS = {"project", "filter_type", "filter_tags", "type", "tags", "path_prefix", "pathPrefix"}
 _EVALUATION_KS = (1, 3, 5, 10)
+
+__all__ = [
+    "EvaluationQueryService",
+    "EvaluationRuntimeSnapshot",
+    "RetrievalEvalCase",
+    "RetrievalEvalDataset",
+    "RetrievalEvalError",
+    "RetrievalEvalManifest",
+    "Relevance",
+    "parse_evaluation_filters",
+    "safe_report_identity",
+    "vault_fingerprint",
+]
 
 
 class RetrievalEvalError(ValueError):
@@ -75,6 +88,153 @@ class RetrievalEvalManifest:
 class RetrievalEvalDataset:
     manifest: RetrievalEvalManifest
     cases: tuple[RetrievalEvalCase, ...]
+
+
+@dataclass(frozen=True)
+class EvaluationRuntimeSnapshot:
+    """Immutable runtime/vault settings owned by one evaluation service."""
+
+    root: Path
+    logical_name: str
+    settings: VaultSettings
+
+    @classmethod
+    def lexical_only(cls, vault_root: str | Path) -> "EvaluationRuntimeSnapshot":
+        root = filesystem_path(vault_root)
+        settings = replace(
+            VaultSettings(name=root.name, root=root),
+            telemetry=TelemetrySettings(enabled=False),
+        )
+        return cls(root=root, logical_name=root.name, settings=settings)
+
+    @classmethod
+    def from_mcp_vault(cls, vault_root: str | Path) -> "EvaluationRuntimeSnapshot":
+        """Resolve MCP settings once, then freeze a telemetry-off copy locally."""
+
+        import app.server as server_module
+
+        resolution = server_module.resolve_tool_vault(vault_root=str(vault_root))
+        settings = resolution.resolved.settings
+        if not settings.retrieval.lexical_enabled or settings.retrieval.embedding.enabled:
+            raise RetrievalEvalError(
+                "mcp_not_lexical",
+                "the selected vault MCP configuration is not lexical-only",
+            )
+        return cls(
+            root=resolution.root,
+            logical_name=resolution.logical_name,
+            settings=replace(settings, telemetry=TelemetrySettings(enabled=False)),
+        )
+
+    def tool_resolution(self, server_module: Any) -> Any:
+        """Build the server's immutable resolution without touching its registry."""
+
+        return server_module.ToolVaultResolution(
+            self.root,
+            self.logical_name,
+            ResolvedVault(self.logical_name, self.root, self.settings, "legacy"),
+        )
+
+
+@dataclass(frozen=True)
+class EvaluationQueryService:
+    """Explicit engine/MCP adapter boundary for one runtime snapshot."""
+
+    runtime: EvaluationRuntimeSnapshot
+
+    def run(
+        self,
+        case: RetrievalEvalCase,
+        *,
+        top_k: int,
+        include_context_pack: bool,
+        retrieval_mode: Literal["lexical", "vector", "hybrid"],
+        vector_config: Mapping[str, Any] | None,
+        query_version: str,
+        scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
+        entrypoint: Literal["engine", "mcp"],
+    ) -> dict[str, Any]:
+        if entrypoint == "mcp":
+            return self._run_mcp(case, top_k=top_k, query_version=query_version, scope=scope)
+        return self._run_engine(
+            case,
+            top_k=top_k,
+            include_context_pack=include_context_pack,
+            retrieval_mode=retrieval_mode,
+            vector_config=vector_config,
+            query_version=query_version,
+            scope=scope,
+        )
+
+    def _run_mcp(
+        self,
+        case: RetrievalEvalCase,
+        *,
+        top_k: int,
+        query_version: str,
+        scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
+    ) -> dict[str, Any]:
+        """Call the real public MCP function under a context-local snapshot."""
+
+        if query_version != "v2":
+            raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
+        try:
+            import app.server as server_module
+
+            with server_module.tool_runtime_snapshot(self.runtime.tool_resolution(server_module)):
+                response = server_module.wiki_query(
+                    question=case.query,
+                    scope=scope,
+                    project=case.filters.get("project"),
+                    filters=_public_filters(case.filters),
+                    top_k=top_k,
+                    vault_root=str(self.runtime.root),
+                )
+        except RetrievalEvalError:
+            raise
+        except Exception as exc:
+            raise RetrievalEvalError("mcp_query_failed", "the public wiki_query call failed") from exc
+        if not isinstance(response, Mapping):
+            raise RetrievalEvalError("mcp_query_failed", "the public wiki_query response was not an object")
+        if response.get("ok") is not True:
+            code = response.get("code")
+            safe_code = str(code) if isinstance(code, str) and code else "mcp_query_error"
+            raise RetrievalEvalError("mcp_query_error", f"wiki_query returned {safe_code}")
+        results = response.get("results")
+        pipeline = response.get("pipeline")
+        if not isinstance(results, list):
+            raise RetrievalEvalError("mcp_contract_invalid", "wiki_query results must be a list")
+        if not isinstance(pipeline, Mapping):
+            raise RetrievalEvalError("mcp_contract_invalid", "wiki_query pipeline must be an object")
+        _require_mcp_lexical_pipeline(pipeline)
+        return {
+            "ok": True,
+            "results": results,
+            "pipeline": _pipeline_summary(pipeline),
+            "budget": response.get("budget", {}),
+        }
+
+    def _run_engine(
+        self,
+        case: RetrievalEvalCase,
+        *,
+        top_k: int,
+        include_context_pack: bool,
+        retrieval_mode: Literal["lexical", "vector", "hybrid"],
+        vector_config: Mapping[str, Any] | None,
+        query_version: str,
+        scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
+    ) -> dict[str, Any]:
+        return _query_case(
+            self.runtime.root,
+            case,
+            top_k=top_k,
+            include_context_pack=include_context_pack,
+            retrieval_mode=retrieval_mode,
+            vector_config=vector_config,
+            query_version=query_version,
+            scope=scope,
+        )
 
 
 def load_retrieval_dataset(
@@ -178,7 +338,12 @@ def percentile_95(values: Sequence[float]) -> float:
 
 
 def vault_fingerprint(vault_root: str | Path) -> dict[str, Any]:
-    """Hash queryable wiki files by relative path and content without exposing either."""
+    """Hash queryable wiki files by relative path and content without exposing either.
+
+    This is the single evaluator-owned fallback fingerprint contract. Callers
+    should reuse its result for both the report and comparison gates rather
+    than walking the vault independently.
+    """
     root = filesystem_path(vault_root)
     wiki = root / "wiki"
     digest = hashlib.sha256()
@@ -195,6 +360,39 @@ def vault_fingerprint(vault_root: str | Path) -> dict[str, Any]:
             digest.update(b"\n")
             count += 1
     return {"algorithm": "sha256(path\\0content_sha256)", "value": digest.hexdigest(), "file_count": count}
+
+
+def safe_report_identity(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract only bounded, non-path identity fields from an eval report."""
+
+    metadata = report.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return {}
+    identity: dict[str, Any] = {}
+    for name in ("dataset_id", "dataset_revision"):
+        value = metadata.get(name)
+        if isinstance(value, str) and value:
+            identity[name] = value
+    fingerprint = metadata.get("vault_fingerprint")
+    if isinstance(fingerprint, Mapping):
+        safe_fingerprint: dict[str, Any] = {}
+        algorithm = fingerprint.get("algorithm")
+        value = fingerprint.get("value")
+        file_count = fingerprint.get("file_count")
+        if isinstance(algorithm, str) and algorithm:
+            safe_fingerprint["algorithm"] = algorithm
+        if isinstance(value, str) and value:
+            safe_fingerprint["value"] = value
+        if type(file_count) is int and file_count >= 0:
+            safe_fingerprint["file_count"] = file_count
+        if safe_fingerprint:
+            identity["vault_fingerprint"] = safe_fingerprint
+    ranking = metadata.get("ranking")
+    if isinstance(ranking, Mapping):
+        version = ranking.get("version")
+        if isinstance(version, str) and version:
+            identity["ranking_version"] = version
+    return identity
 
 
 def run_retrieval_evaluation(
@@ -526,15 +724,15 @@ def evaluate_retrieval_gate(
             payload["reason"] = reason
         checks[name] = payload
 
-    candidate_fingerprint = candidate_metadata.get("vault_fingerprint")
-    baseline_fingerprint = baseline_metadata.get("vault_fingerprint")
-    candidate_ranking = candidate_metadata.get("ranking")
-    baseline_ranking = baseline_metadata.get("ranking")
+    candidate_identity = safe_report_identity(candidate)
+    baseline_identity = safe_report_identity(baseline)
+    candidate_fingerprint = candidate_identity.get("vault_fingerprint")
+    baseline_fingerprint = baseline_identity.get("vault_fingerprint")
     for name, candidate_value, baseline_value in (
-        ("dataset_id", candidate_metadata.get("dataset_id"), baseline_metadata.get("dataset_id")),
-        ("dataset_revision", candidate_metadata.get("dataset_revision"), baseline_metadata.get("dataset_revision")),
+        ("dataset_id", candidate_identity.get("dataset_id"), baseline_identity.get("dataset_id")),
+        ("dataset_revision", candidate_identity.get("dataset_revision"), baseline_identity.get("dataset_revision")),
         ("vault_fingerprint", candidate_fingerprint.get("value") if isinstance(candidate_fingerprint, Mapping) else None, baseline_fingerprint.get("value") if isinstance(baseline_fingerprint, Mapping) else None),
-        ("ranking_version", candidate_ranking.get("version") if isinstance(candidate_ranking, Mapping) else None, baseline_ranking.get("version") if isinstance(baseline_ranking, Mapping) else None),
+        ("ranking_version", candidate_identity.get("ranking_version"), baseline_identity.get("ranking_version")),
     ):
         add_check(name, bool(candidate_value) and candidate_value == baseline_value, actual=candidate_value, expected=baseline_value, reason="baseline_identity_mismatch" if candidate_value != baseline_value else None)
 
@@ -727,7 +925,7 @@ def _parse_case(raw: object, line_number: int) -> RetrievalEvalCase:
     answerable = data.get("answerable")
     if type(answerable) is not bool:
         raise RetrievalEvalError("case_invalid", f"case {case_id}: answerable must be boolean")
-    filters = _parse_filters(data.get("filters", {}), case_id)
+    filters = parse_evaluation_filters(data.get("filters", {}), case_id)
     relevant_raw = data.get("relevant")
     if not isinstance(relevant_raw, list):
         raise RetrievalEvalError("case_invalid", f"case {case_id}: relevant must be a list")
@@ -760,7 +958,9 @@ def _parse_case(raw: object, line_number: int) -> RetrievalEvalCase:
     return RetrievalEvalCase(case_id, query, tuple(relevance), filters, answerable, language, tuple(tags_raw), notes, scope)
 
 
-def _parse_filters(raw: object, case_id: str) -> dict[str, Any]:
+def parse_evaluation_filters(raw: object, case_id: str = "<unknown>") -> dict[str, Any]:
+    """Normalize public and legacy dataset filter aliases into one contract."""
+
     data = _mapping(raw, "invalid_filters", f"case {case_id}: filters must be an object")
     unknown = sorted(set(data) - _ALLOWED_FILTERS)
     if unknown:
@@ -804,6 +1004,12 @@ def _parse_filters(raw: object, case_id: str) -> dict[str, Any]:
     elif "path_prefix" in public_filters or "pathPrefix" in public_filters:
         raise RetrievalEvalError("invalid_filters", f"case {case_id}: path_prefix must be a non-empty vault-relative string")
     return filters
+
+
+def _parse_filters(raw: object, case_id: str) -> dict[str, Any]:
+    """Compatibility alias for older in-repository callers."""
+
+    return parse_evaluation_filters(raw, case_id)
 
 
 def _calculate_metrics_by_k(
@@ -945,10 +1151,8 @@ def _run_case(
     scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
     entrypoint: Literal["engine", "mcp"],
 ) -> dict[str, Any]:
-    if entrypoint == "mcp":
-        return _mcp_query_case(root, case, top_k=top_k, query_version=query_version, scope=scope)
-    return _query_case(
-        root,
+    runtime = EvaluationRuntimeSnapshot.from_mcp_vault(root) if entrypoint == "mcp" else EvaluationRuntimeSnapshot.lexical_only(root)
+    return EvaluationQueryService(runtime).run(
         case,
         top_k=top_k,
         include_context_pack=include_context_pack,
@@ -956,6 +1160,7 @@ def _run_case(
         vector_config=vector_config,
         query_version=query_version,
         scope=scope,
+        entrypoint=entrypoint,
     )
 
 
@@ -967,61 +1172,18 @@ def _mcp_query_case(
     query_version: str,
     scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
 ) -> dict[str, Any]:
-    """Call the registered public tool while proving its runtime is lexical-only."""
-    if query_version != "v2":
-        raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
-    try:
-        import app.server as server_module
+    """Compatibility wrapper for callers that still name the MCP adapter."""
 
-        resolution = server_module.resolve_tool_vault(vault_root=str(root))
-        settings = resolution.resolved.settings.retrieval
-        if not settings.lexical_enabled or settings.embedding.enabled:
-            raise RetrievalEvalError(
-                "mcp_not_lexical",
-                "the selected vault MCP configuration is not lexical-only",
-            )
-        active_registry = server_module.CONFIG_REGISTRY
-        lexical_settings = replace(resolution.resolved.settings, telemetry=TelemetrySettings(enabled=False))
-        vaults = dict(active_registry.config.vaults)
-        vaults[resolution.logical_name] = lexical_settings
-        server_module.CONFIG_REGISTRY = replace(
-            active_registry,
-            config=replace(active_registry.config, vaults=vaults),
-        )
-        try:
-            response = server_module.wiki_query(
-                question=case.query,
-                scope=scope,
-                project=case.filters.get("project"),
-                filters=_public_filters(case.filters),
-                top_k=top_k,
-                vault_root=str(root),
-            )
-        finally:
-            server_module.CONFIG_REGISTRY = active_registry
-    except RetrievalEvalError:
-        raise
-    except Exception as exc:
-        raise RetrievalEvalError("mcp_query_failed", "the public wiki_query call failed") from exc
-    if not isinstance(response, Mapping):
-        raise RetrievalEvalError("mcp_query_failed", "the public wiki_query response was not an object")
-    if response.get("ok") is not True:
-        code = response.get("code")
-        safe_code = str(code) if isinstance(code, str) and code else "mcp_query_error"
-        raise RetrievalEvalError("mcp_query_error", f"wiki_query returned {safe_code}")
-    results = response.get("results")
-    pipeline = response.get("pipeline")
-    if not isinstance(results, list):
-        raise RetrievalEvalError("mcp_contract_invalid", "wiki_query results must be a list")
-    if not isinstance(pipeline, Mapping):
-        raise RetrievalEvalError("mcp_contract_invalid", "wiki_query pipeline must be an object")
-    _require_mcp_lexical_pipeline(pipeline)
-    return {
-        "ok": True,
-        "results": results,
-        "pipeline": _pipeline_summary(pipeline),
-        "budget": response.get("budget", {}),
-    }
+    return EvaluationQueryService(EvaluationRuntimeSnapshot.from_mcp_vault(root)).run(
+        case,
+        top_k=top_k,
+        include_context_pack=False,
+        retrieval_mode="lexical",
+        vector_config=None,
+        query_version=query_version,
+        scope=scope,
+        entrypoint="mcp",
+    )
 
 
 def _require_mcp_lexical_pipeline(pipeline: Mapping[str, Any]) -> None:

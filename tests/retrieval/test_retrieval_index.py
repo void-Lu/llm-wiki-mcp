@@ -48,6 +48,66 @@ def test_active_store_build_search_update_delete_and_reconcile(tmp_path: Path, m
     assert not store.search_fts("custbody_invoice_id")
 
 
+def test_incremental_rename_replaces_only_the_old_and_new_page_projection(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    old_path = _write(root, "wiki/concepts/invoice.md", "# Invoice\n\nold invoice marker")
+    _write(root, "wiki/concepts/other.md", "# Other\n\nother marker")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+
+    new_path = root / "wiki/concepts/bill.md"
+    old_path.rename(new_path)
+    renamed = store.rename_page(
+        "wiki/concepts/invoice.md",
+        next(page for page in store.iter_vault_pages() if page.path == "wiki/concepts/bill.md"),
+    )
+
+    assert renamed["ok"] is True
+    assert renamed["operation"] == "rename"
+    assert renamed["affected_count"] == 2
+    old_hits = store.search_fts("old invoice marker")
+    assert old_hits and old_hits[0].page_path == "wiki/concepts/bill.md"
+    assert store.search_fts("other marker")[0].page_path == "wiki/concepts/other.md"
+
+
+def test_incremental_projection_reports_rebuild_required_without_creating_store(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page = _write(root, "wiki/concepts/invoice.md", "# Invoice\n\ninvoice marker")
+
+    from wiki.wiki_io import refresh_page_retrieval
+
+    result = refresh_page_retrieval(root, page)
+
+    assert result == {
+        "ok": True,
+        "state": "rebuild_required",
+        "code": "index_missing",
+        "operation": "update",
+        "repair_action": "rebuild_retrieval_index",
+    }
+    assert not (root / ".llm-wiki" / "retrieval.sqlite3").exists()
+
+
+def test_incremental_projection_reports_schema_repair_without_full_rebuild(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page = _write(root, "wiki/concepts/invoice.md", "# Invoice\n\ninvoice marker")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+    connection = __import__("sqlite3").connect(store.path)
+    connection.execute("UPDATE meta SET value='999' WHERE key='schema_version'")
+    connection.commit()
+    connection.close()
+
+    from wiki.wiki_io import refresh_page_retrieval
+
+    result = refresh_page_retrieval(root, page)
+
+    assert result["ok"] is True
+    assert result["state"] == "rebuild_required"
+    assert result["code"] == "index_incompatible"
+    assert result["repair_action"] == "rebuild_retrieval_index"
+
+
 def test_reconcile_detects_content_changes_with_unchanged_file_stats(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     page = _write(root, "raw/sources/file/demo/page.md", "old body")
@@ -64,6 +124,8 @@ def test_reconcile_detects_content_changes_with_unchanged_file_stats(tmp_path: P
     assert reconciled["ok"] is True
     assert reconciled["changed"] == 1
     after = store.get_catalog_item("raw/sources/file/demo/page.md")
+    assert before is not None
+    assert after is not None
     assert before["content_hash"] != after["content_hash"]
 
 
@@ -192,7 +254,11 @@ def test_catalog_path_prefix_matches_exact_identity_and_excludes_siblings(tmp_pa
     store.build(store.iter_vault_pages())
 
     exact = store.list_catalog_items(filters={"path_prefix": "raw/sources/file/demo.md"})
-    assert [item["path"] for item in exact["items"]] == ["raw/sources/file/demo.md"]
+    exact_items = exact["items"]
+    assert isinstance(exact_items, list)
+    assert [item["path"] for item in exact_items] == ["raw/sources/file/demo.md"]
 
     directory = store.list_catalog_items(filters={"path_prefix": "raw/sources/file/demo"})
-    assert [item["path"] for item in directory["items"]] == ["raw/sources/file/demo/child.md"]
+    directory_items = directory["items"]
+    assert isinstance(directory_items, list)
+    assert [item["path"] for item in directory_items] == ["raw/sources/file/demo/child.md"]

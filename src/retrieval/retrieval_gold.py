@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 from retrieval.query_telemetry import redact_query
-from retrieval.retrieval_eval import RetrievalEvalError, _parse_filters, vault_fingerprint
+from retrieval.retrieval_eval import RetrievalEvalError, parse_evaluation_filters, vault_fingerprint
 from wiki.knowledge_compiler import filesystem_path
 
 
@@ -296,7 +296,7 @@ def _materialize_record(raw: Mapping[str, Any], line_number: int, root: Path) ->
     if not isinstance(filters, dict):
         raise RetrievalGoldError("invalid_filters", f"case {case_id}: filters must be an object")
     try:
-        normalized_filters = _parse_filters(filters, case_id)
+        normalized_filters = parse_evaluation_filters(filters, case_id)
     except RetrievalEvalError as exc:
         raise RetrievalGoldError("invalid_filters", str(exc)) from exc
     relevant_raw = raw.get("relevant")

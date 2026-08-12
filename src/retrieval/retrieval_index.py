@@ -171,6 +171,35 @@ class RetrievalIndexStore:
         except sqlite3.Error as exc:
             self._mark_stale(); return {"ok": False, "code": "index_update_failed", "state": "stale", "error": str(exc)}
 
+    def rename_page(self, old_page_path: str, page: IndexedPage) -> dict[str, object]:
+        """Atomically replace one indexed path with its renamed projection."""
+
+        if not self.path.exists():
+            status = self.status()
+            return {**status, "operation": "rename", "affected_count": 2}
+        try:
+            with self._connection() as connection:
+                self._ensure_schema(connection)
+                old_ids = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT passage_id FROM passages WHERE page_path = ?", (old_page_path,)
+                    )
+                ]
+                if old_ids:
+                    marks = ",".join("?" for _ in old_ids)
+                    connection.execute(f"DELETE FROM passages_fts WHERE passage_id IN ({marks})", old_ids)
+                    connection.execute(f"DELETE FROM vector_dirty WHERE passage_id IN ({marks})", old_ids)
+                connection.execute("DELETE FROM pages WHERE path = ?", (old_page_path,))
+                self._upsert(connection, page)
+                self._set_meta(connection, {"fingerprint": self._fingerprint(connection), "state": "fresh"})
+                connection.commit()
+            return {**self.status(), "operation": "rename", "affected_count": 2}
+        except (sqlite3.Error, RetrievalIndexError) as exc:
+            self._mark_stale()
+            code = exc.code if isinstance(exc, RetrievalIndexError) else "index_update_failed"
+            return {"ok": False, "code": code, "state": "stale", "operation": "rename"}
+
     def reconcile(self) -> dict[str, object]:
         """Explicitly compare source stats and content hashes for eligible files."""
         if self.scope == "archive":

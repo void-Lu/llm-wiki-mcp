@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import string
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -296,10 +297,32 @@ def create_wiki_root(vault_root: str | Path) -> WikiPaths:
     return WikiPaths(root=root)
 
 
-def slug(value: str) -> str:
+def slug(
+    value: str,
+    *,
+    lowercase: bool = True,
+    fallback: str = "page",
+    ascii_punctuation: bool = False,
+) -> str:
+    """Return the canonical filename/wikilink slug.
+
+    The default mode is used for new canonical references: Unicode word
+    characters are preserved, separators collapse to ``-``, and the result
+    is lower-case with a deterministic ``page`` fallback.  ``lowercase``,
+    ``fallback`` and ``ascii_punctuation`` are explicit compatibility knobs
+    for legacy note filenames; they reuse this owner instead of introducing
+    another slug policy.
+    """
     text = value.strip()
-    text = re.sub(r"[\s\W]+", "-", text, flags=re.UNICODE).strip("-").lower()
-    return text[:80].rstrip("-") or "page"
+    if ascii_punctuation:
+        punctuation = re.escape(string.punctuation)
+        text = re.sub(rf"[\s{punctuation}]+", "-", text)
+    else:
+        text = re.sub(r"[\s\W]+", "-", text, flags=re.UNICODE)
+    text = re.sub(r"-+", "-", text).strip("-")
+    if lowercase:
+        text = text.lower()
+    return text[:80].rstrip("-") or fallback
 
 
 def _has_windows_reserved_character(value: str) -> bool:

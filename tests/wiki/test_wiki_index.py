@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
-from wiki.wiki_index import refresh_indexes
+import pytest
+
+import wiki.wiki_index as wiki_index
+from wiki.atomic_file import AtomicFileError
+from wiki.wiki_index import rebuild_retrieval_index, refresh_indexes, refresh_navigation
 from wiki.wiki_io import write_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
@@ -38,12 +43,31 @@ def test_refresh_indexes_groups_only_active_wiki_categories(tmp_path: Path):
     assert "[[entities/index.md|Entities]]" in index
     assert "[[archives/log.md|Archives Log]]" in index
     assert not (root / "wiki/archives").exists()
-
     concepts_index = (root / "wiki/concepts/index.md").read_text(encoding="utf-8")
     assert "[[suitescript/index.md|suitescript]]" in concepts_index
     entities_index = (root / "wiki/entities/index.md").read_text(encoding="utf-8")
     assert "[[customer/customer.md|Customer]]" in entities_index
 
+
+def test_navigation_projection_has_no_retrieval_rebuild_and_admin_path_is_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_wiki_page(root, _page("wiki/concepts/invoice.md", "Invoice", "invoice marker"))
+    calls: list[str] = []
+
+    from wiki import ingest_service
+
+    monkeypatch.setattr(ingest_service.RetrievalIndexStore, "build", lambda self, pages: calls.append(self.scope) or {"ok": True, "scope": self.scope, "operation": "build"})
+
+    navigation = refresh_navigation(root)
+    assert navigation["ok"] is True
+    assert navigation["batch"] == {"kind": "navigation", "affected_count": len(navigation["written"])}
+    assert calls == []
+
+    rebuilt = cast(dict[str, Any], rebuild_retrieval_index(root))
+    assert rebuilt["active"]["operation"] == "build"
+    assert rebuilt["raw"]["operation"] == "build"
+    assert calls == ["active", "raw"]
 
 def test_refresh_indexes_creates_project_index_grouped_by_subdirectories(tmp_path: Path):
     root = tmp_path / "vault"
@@ -103,3 +127,40 @@ def test_refresh_indexes_never_recreates_retired_source_namespace(tmp_path: Path
     assert legacy.exists()
     assert not (root / "wiki/sources/index.md").exists()
     assert run_query_v2(root, "legacy noise", top_k=5, retrieval_mode="lexical")["results"] == []
+
+
+@pytest.mark.parametrize("stage", ["temp_write", "flush", "replace"])
+def test_top_index_atomic_fault_keeps_existing_index(stage: str, tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    target = root / "wiki/index.md"
+    target.write_text("---\ntype: index\ngenerated: true\n---\n\nold index\n", encoding="utf-8")
+
+    def fault(current: str) -> None:
+        if current == stage:
+            raise RuntimeError("injected")
+
+    with pytest.raises(AtomicFileError):
+        wiki_index._write_top_index(root, fault=fault)
+
+    assert target.read_text(encoding="utf-8") == "---\ntype: index\ngenerated: true\n---\n\nold index\n"
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_top_index_post_replace_fault_keeps_complete_new_index(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    target = root / "wiki/index.md"
+    target.write_text("---\ntype: index\ngenerated: true\n---\n\nold index\n", encoding="utf-8")
+
+    def fault(current: str) -> None:
+        if current == "post_replace":
+            raise RuntimeError("injected")
+
+    with pytest.raises(AtomicFileError):
+        wiki_index._write_top_index(root, fault=fault)
+
+    assert target.read_text(encoding="utf-8") != "---\ntype: index\ngenerated: true\n---\n\nold index\n"
+    assert target.read_text(encoding="utf-8").endswith("# Index\n\n") is False
+    assert "# Index" in target.read_text(encoding="utf-8")
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []

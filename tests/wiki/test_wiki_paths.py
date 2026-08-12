@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from wiki.wiki_paths import WikiPathError, WikiPaths, create_wiki_root, safe_segment
+from wiki.wiki_paths import WikiPathError, WikiPaths, create_wiki_root, safe_segment, slug
 
 
 EXPECTED_DIRS = [
@@ -134,3 +134,21 @@ def test_safe_segment_rejects_path_escape_and_windows_invalid_values(value: str)
 
 def test_safe_segment_returns_valid_single_segment():
     assert safe_segment("Project-A_01") == "Project-A_01"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("MapReduce 上下文对象 API 详解", "mapreduce-上下文对象-api-详解"),
+        ("Upper_CASE", "upper_case"),
+        ("!!!", "page"),
+    ],
+)
+def test_slug_is_the_canonical_lowercase_wikilink_policy(value: str, expected: str):
+    assert slug(value) == expected
+
+
+def test_slug_exposes_explicit_legacy_note_filename_compatibility():
+    assert slug("  修复 RESTlet: 订单/同步!!!  ", lowercase=False, fallback="", ascii_punctuation=True) == "修复-RESTlet-订单-同步"
+    assert slug("Upper_CASE", lowercase=False, fallback="", ascii_punctuation=True) == "Upper-CASE"
+    assert slug("!!!", lowercase=False, fallback="", ascii_punctuation=True) == ""

@@ -167,8 +167,17 @@ def refresh_page_retrieval(vault_root: str | Path, target: str | Path) -> dict[s
 
     store = RetrievalIndexStore(root)
     indexed = page_from_file(root, page_path, scope="active")
-    if indexed is None or not store.path.exists():
-        return {"ok": True, "state": "not_indexed"}
+    if indexed is None:
+        return {"ok": True, "state": "not_indexed", "code": "not_eligible", "operation": "skip"}
+    status = store.status()
+    if not status.get("ok"):
+        return {
+            "ok": True,
+            "state": "rebuild_required",
+            "code": str(status.get("code") or "index_missing"),
+            "operation": "update",
+            "repair_action": "rebuild_retrieval_index",
+        }
     return store.update_page(indexed)
 
 

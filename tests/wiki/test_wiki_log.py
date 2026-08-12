@@ -3,8 +3,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 import wiki.wiki_log as wiki_log
 
+from wiki.atomic_file import AtomicFileError
 from wiki.wiki_limits import HARD_PAGE_BYTES, TARGET_PAGE_BYTES, partition_rendered_units, utf8_size
 from wiki.wiki_limits import split_text_by_utf8
 from wiki.wiki_io import split_frontmatter
@@ -311,3 +314,26 @@ def test_archive_index_never_overwrites_a_manual_paged_index(tmp_path: Path, mon
 
     assert manual_page.read_text(encoding="utf-8").endswith("# Manual archive page\n")
     assert not (archive_dir / "index.md").exists()
+
+
+def test_log_multi_file_write_is_per_file_atomic_not_a_cross_file_transaction(tmp_path: Path) -> None:
+    first = tmp_path / "archives/log/2026/05/log-001.md"
+    second = tmp_path / "archives/log/2026/05/log-002.md"
+    first.parent.mkdir(parents=True)
+    first.write_text("old first", encoding="utf-8")
+    second.write_text("old second", encoding="utf-8")
+    temp_write_count = 0
+
+    def fault(stage: str) -> None:
+        nonlocal temp_write_count
+        if stage == "temp_write":
+            temp_write_count += 1
+            if temp_write_count == 2:
+                raise RuntimeError("injected")
+
+    with pytest.raises(AtomicFileError):
+        wiki_log._atomic_write_many({first: "new first", second: "new second"}, fault=fault)
+
+    assert first.read_text(encoding="utf-8") == "new first"
+    assert second.read_text(encoding="utf-8") == "old second"
+    assert list(first.parent.glob(".*.tmp")) == []

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
-from retrieval.context_packer import ContextPassage, estimate_tokens, pack_context
+from retrieval.context_packer import ContextPassage, pack_context
 from codegraph.codegraph_policy import is_codegraph_raw_path
 from retrieval.lexical_analyzer import (
     QualifiedIdentifier,
@@ -26,6 +26,8 @@ from retrieval.lexical_analyzer import (
 )
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.query_cancellation import QueryCancellationContext
+from retrieval.query_recovery import RecoveryCondition, assemble_recovery
+from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_metadata_filters, page_matches_filters
 from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
@@ -42,9 +44,6 @@ RAW_FALLBACK_CANDIDATE_LIMIT = 160
 IDENTIFIER_PHRASE_BONUS = 20.0
 IDENTIFIER_PHRASE_CANDIDATES = 200
 PAGE_FILL_LIMIT = 500
-PAGE_TOKEN_BUDGET = 2_400
-PAGE_FULL_FILL_MIN_RATIO = 0.6
-PAGE_WEAK_HIT_LIMIT = 3
 FRESHNESS_BONUS_MAX = 12.0
 FRESHNESS_DECAY_DAYS = 90
 STEP_BONUS_MAX = 4.0
@@ -188,6 +187,10 @@ def _query_expansion(
     raw_store: RetrievalIndexStore | None,
     agent_terms: dict[str, list[str]] | None = None,
     project: str | None = None,
+    *,
+    snapshot: QueryCorpusSnapshot | None = None,
+    raw_snapshot: QueryCorpusSnapshot | None = None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> tuple[list[str], dict[str, list[str]], list[str]]:
     """Build query-expansion terms from page titles and caller-supplied maps.
 
@@ -202,16 +205,22 @@ def _query_expansion(
     """
 
     title_words: set[str] = set()
-    for page in store.page_candidates():
+    active_pages = snapshot.pages if snapshot is not None else store.page_candidates()
+    for index, page in enumerate(active_pages):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=16, stage="snapshot")
         raw_frontmatter = page.get("frontmatter")
-        frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, dict) else {}
+        frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, Mapping) else {}
         if not page_matches_filters(frontmatter, "wiki", project=project):
             continue
         title_words.update(tokens(str(page.get("title") or "")))
     if raw_store is not None:
-        for page in raw_store.page_candidates():
+        raw_pages = raw_snapshot.pages if raw_snapshot is not None else raw_store.page_candidates()
+        for index, page in enumerate(raw_pages):
+            if cancellation is not None:
+                cancellation.checkpoint_batch(index, every=16, stage="snapshot")
             raw_frontmatter = page.get("frontmatter")
-            frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, dict) else {}
+            frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, Mapping) else {}
             if not page_matches_filters(frontmatter, "raw", project=project):
                 continue
             title_words.update(tokens(str(page.get("title") or "")))
@@ -239,93 +248,9 @@ def _query_expansion(
     return extra_terms, variants, suggestions
 
 
-def _build_page_ordered_context(
-    selected: list[dict[str, Any]],
-    store: RetrievalIndexStore,
-    *,
-    raw_store: RetrievalIndexStore | None = None,
-    hit_stats: dict[str, dict[str, Any]] | None = None,
-    pool_by_page: dict[str, list[dict[str, Any]]] | None = None,
-) -> list[dict[str, Any]]:
-    """Group context candidates by page, then order them by reading order.
-
-    Paragraph-level BM25 decides which pages are relevant, but its per-segment
-    scores are not a document map: in a how-to or troubleshooting note the fix
-    or install steps usually live in later sections and contain code blocks or
-    tables that dilute BM25, so keeping only the top-scored passages per page
-    drops exactly those steps.  Once a page is selected, every passage of that
-    page is carried in ordinal (reading) order and the global pack budget
-    decides how much fits.  The approach is language- and topic-agnostic: no
-    step/guide keyword lists are involved, so it works for any answer that
-    spans several sections of one document.
-    """
-
-    hit_stats = hit_stats or {}
-    pool_by_page = pool_by_page or {}
-    top_score = max((stats.get("max", 0.0) for stats in hit_stats.values()), default=0.0)
-    # Two-phase assembly.  Phase one guarantees every selected page contributes
-    # its single best-scored passage, so a long FAQ page cannot starve later
-    # relevant pages entirely out of the pack.  Phase two deep-fills the
-    # remaining budget page by page in reading order, so fix steps that live in
-    # later sections of a document are still carried.  The packer consumes
-    # items in this exact order, making the guarantee effective.
-    guaranteed: list[dict[str, Any]] = []
-    deep_fill: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    for sel in selected:
-        page_path = sel["hit"].page_path
-        pool = pool_by_page.get(page_path, [])
-        if not pool:
-            continue
-        best = max(pool, key=lambda item: item["score"])
-        if best["hit"].passage_id not in seen_ids:
-            seen_ids.add(best["hit"].passage_id)
-            guaranteed.append(best)
-    for sel in selected:
-        page_path = sel["hit"].page_path
-        stats = hit_stats.get(page_path)
-        # A page whose best hit is far below the corpus-best score is usually a
-        # broad OR-match (an unrelated clipping or quiz note).  Only its top
-        # scoring hit passages join the pack instead of the whole page.
-        strong_page = stats is None or top_score <= 0 or stats.get("max", 0.0) >= top_score * PAGE_FULL_FILL_MIN_RATIO
-        if not strong_page:
-            for item in pool_by_page.get(page_path, [])[:PAGE_WEAK_HIT_LIMIT]:
-                if item["hit"].passage_id not in seen_ids:
-                    seen_ids.add(item["hit"].passage_id)
-                    deep_fill.append(item)
-            continue
-        page_store = raw_store if raw_store is not None and page_path.startswith("raw/") else store
-        page_hits = page_store.passages_for_pages([page_path], limit_per_page=PAGE_FILL_LIMIT)
-        page_tokens = 0
-        for hit in page_hits:
-            if hit.passage_id in seen_ids:
-                continue
-            tokens = estimate_tokens(hit.text)
-            # A per-page token budget keeps one long reference page (a FAQ or
-            # an overview with many sections) from consuming the whole pack
-            # before later selected pages contribute their fix or setup steps.
-            if page_tokens + tokens > PAGE_TOKEN_BUDGET:
-                break
-            page_tokens += tokens
-            seen_ids.add(hit.passage_id)
-            deep_fill.append(
-                {
-                    "hit": hit,
-                    "fts_rank": sel.get("fts_rank"),
-                    "title_rank": None,
-                    "vector_rank": None,
-                    "vector_score": 0.0,
-                    "rrf": 0.0,
-                    "exact": False,
-                    "graph_score": 0.0,
-                    "graph_reasons": [],
-                    "score": sel.get("score", 0.0),
-                }
-            )
-    return guaranteed + deep_fill
+_COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
 _HISTORY_RE = re.compile(r"(?:之前|上次|讨论|会话|当时|历史|previous|last\s+(?:time|session)|history)", re.I)
 _EXACT_RE = re.compile(r"(?:原文|逐字|代码|字段|field\s+id|api|record|script|exact|verbatim)", re.I)
-_COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
 _RESEARCH_RE = re.compile(r"(?:研究|深入|调研|research|deep\s+dive)", re.I)
 _HOWTO_RE = re.compile(r"(?:步骤|怎么|如何|怎样|流程|做法|配置|安装|介绍|指南|guide|how\s+to|steps?|setup|configure|install)", re.I)
 
@@ -642,6 +567,8 @@ def _discovery_source_items(
     scope: str,
     project: str | None,
     filters: QueryFilters,
+    snapshot: QueryCorpusSnapshot | None = None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> list[dict[str, Any]]:
     """Find bounded discovery pages from an existing SQLite projection.
 
@@ -691,7 +618,10 @@ def _discovery_source_items(
     raw_anchor_terms = set(tokens(anchor_query))
     wildcard = bool(extract_namespace_wildcards(question))
     eligible_pages: list[tuple[str, str, str]] = []
-    for page in store.page_candidates():
+    pages = snapshot.pages if snapshot is not None else store.page_candidates()
+    for index, page in enumerate(pages):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=16, stage="discovery")
         path = str(page["path"])
         title = str(page.get("title") or "")
         probe = PassageHit(
@@ -1079,13 +1009,18 @@ def _title_candidates(
     project: str | None,
     filters: QueryFilters,
     limit: int = 10,
+    snapshot: QueryCorpusSnapshot | None = None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> list[PassageHit]:
     """Add bounded title/provenance signals from existing DB projections."""
     terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", question) if len(term) > 1}
     if not terms:
         return []
     candidates: list[tuple[int, str]] = []
-    for page in store.page_candidates():
+    pages = snapshot.pages if snapshot is not None else store.page_candidates()
+    for index, page in enumerate(pages):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=16, stage="snapshot")
         path = str(page["path"])
         frontmatter = metadata.get(path, {})
         title_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", str(page["title"])) if len(term) > 1}
@@ -1117,6 +1052,7 @@ def _relaxed_recovery_items(
     project: str | None,
     filters: QueryFilters,
     extra_terms: list[str],
+    cancellation: QueryCancellationContext | None = None,
 ) -> tuple[list[dict[str, Any]], int, str]:
     """Read a bounded relaxed candidate set from one existing projection."""
 
@@ -1134,6 +1070,8 @@ def _relaxed_recovery_items(
         return [], 0, exc.code
     items: list[dict[str, Any]] = []
     for rank, hit in enumerate(hits, 1):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
         if not _eligible(hit, metadata, scope=scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
         items.append(
@@ -1207,6 +1145,8 @@ def _raw_recovery_candidates(
     extra_terms: list[str],
     term_variants: dict[str, list[str]],
     top_k: int,
+    snapshot: QueryCorpusSnapshot | None = None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> tuple[RetrievalIndexStore, list[dict[str, Any]], int, str, str]:
     """Run the bounded raw projection recovery for raw evidence paths.
 
@@ -1227,10 +1167,18 @@ def _raw_recovery_candidates(
         return raw_store, [], raw_fts_hits, raw_index_warning, raw_lexical_mode
     if not raw_status.get("ok"):
         return raw_store, [], raw_fts_hits, _raw_index_warning(raw_status), raw_lexical_mode
+    if snapshot is None:
+        snapshot = QueryCorpusSnapshot.capture(
+            raw_store,
+            cancellation=cancellation or QueryCancellationContext.unbounded(),
+        )
     raw_metadata: dict[str, dict[str, Any]] = {}
-    for page in raw_store.page_candidates():
+    pages = snapshot.pages if snapshot is not None else raw_store.page_candidates()
+    for index, page in enumerate(pages):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=16, stage="snapshot")
         frontmatter = page.get("frontmatter")
-        raw_metadata[str(page["path"])] = dict(frontmatter) if isinstance(frontmatter, dict) else {}
+        raw_metadata[str(page["path"])] = dict(frontmatter) if isinstance(frontmatter, Mapping) else {}
 
     raw_items: list[dict[str, Any]] = []
     try:
@@ -1303,6 +1251,8 @@ def _raw_recovery_candidates(
     raw_fts_hits = len(raw_hits)
     query_identifier_phrases = identifier_phrases(question) if raw_lexical_mode == "identifier_phrase" else []
     for rank, hit in enumerate(raw_hits, 1):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
         if not _eligible(hit, raw_metadata, scope=scope):
             continue
         score = hit.score + _raw_recovery_bonus(hit, question, query_identifier_phrases)
@@ -1460,6 +1410,8 @@ def _graph_expand(
     filters: QueryFilters,
     seed_scores: dict[str, float],
     debug: bool,
+    snapshot: QueryCorpusSnapshot | None = None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> tuple[dict[str, QueryCandidate], list[PassageHit]]:
     """Reuse the legacy bounded expander over DB projections, never files.
 
@@ -1469,7 +1421,10 @@ def _graph_expand(
     if scope in {"archive", "raw"} or not seed_scores:
         return {}, []
     candidates: list[QueryCandidate] = []
-    for page in store.page_candidates():
+    pages = snapshot.pages if snapshot is not None else store.page_candidates()
+    for index, page in enumerate(pages):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=16, stage="graph")
         path = str(page["path"])
         frontmatter = metadata.get(path, {})
         probe = PassageHit(
@@ -1514,11 +1469,16 @@ def _graph_expand(
     return scored, store.passages_for_pages(added, limit_per_page=1)
 
 
-def _store_metadata(store: RetrievalIndexStore) -> dict[str, dict[str, Any]]:
+def _store_metadata(
+    store: RetrievalIndexStore,
+    *,
+    snapshot: QueryCorpusSnapshot | None = None,
+) -> dict[str, dict[str, Any]]:
     metadata: dict[str, dict[str, Any]] = {}
-    for page in store.page_candidates():
+    pages = snapshot.pages if snapshot is not None else store.page_candidates()
+    for page in pages:
         frontmatter = page.get("frontmatter")
-        metadata[str(page["path"])] = dict(frontmatter) if isinstance(frontmatter, dict) else {}
+        metadata[str(page["path"])] = dict(frontmatter) if isinstance(frontmatter, Mapping) else {}
     return metadata
 
 
@@ -2099,18 +2059,9 @@ def run_query_v2(
             "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [*index_warnings, str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}},
         }
 
-    cancellation.checkpoint("metadata")
-    metadata: dict[str, dict[str, Any]] = {}
-    provenance: dict[str, dict[str, str]] = {}
-    for index, item in enumerate(store.page_candidates()):
-        cancellation.checkpoint_batch(index, every=16, stage="metadata")
-        frontmatter = item.get("frontmatter")
-        path = str(item["path"])
-        metadata[path] = dict(frontmatter) if isinstance(frontmatter, dict) else dict()
-        provenance[path] = {
-            key: str(item.get(key) or "")
-            for key in ("session_id", "occurred_at", "project", "content_hash")
-        }
+    snapshot = QueryCorpusSnapshot.capture(store, cancellation=cancellation)
+    metadata = {path: dict(frontmatter) for path, frontmatter in snapshot.metadata.items()}
+    provenance = {path: dict(values) for path, values in snapshot.provenance.items()}
     stage_lexical_mode = "strict"
     qualified_fts_hits = 0
     cancellation.checkpoint("fts")
@@ -2130,10 +2081,10 @@ def run_query_v2(
         fts = []
         status = {**status, "code": exc.code}
     allowed_vector_paths: set[str] = set()
-    for index, item in enumerate(store.page_candidates()):
-        cancellation.checkpoint_batch(index, every=16, stage="metadata")
+    for index, item in enumerate(snapshot.pages):
+        cancellation.checkpoint_batch(index, every=16, stage="snapshot")
         frontmatter = item.get("frontmatter")
-        if not isinstance(frontmatter, dict):
+        if not isinstance(frontmatter, Mapping):
             frontmatter = {}
         if not page_matches_filters(
             frontmatter,
@@ -2178,7 +2129,7 @@ def run_query_v2(
     # question, in any language, from using relaxed lexical recovery.
     has_primary_recall = bool(ranked)
     expansion_suggestions: list[str] = []
-    for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters), 1):
+    for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters, snapshot=snapshot, cancellation=cancellation), 1):
         cancellation.checkpoint_batch(rank - 1, every=16, stage="vector")
         ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": rank, "vector_rank": None, "vector_score": 0.0})
         ranked[hit.passage_id]["title_rank"] = rank
@@ -2209,7 +2160,7 @@ def run_query_v2(
     graph_candidates, graph_passages = (
         _graph_expand(
             root, store, metadata, scope=effective_scope, project=project, filters=filters,
-            seed_scores={item["hit"].page_path: item["score"] for item in scored}, debug=debug,
+            seed_scores={item["hit"].page_path: item["score"] for item in scored}, debug=debug, snapshot=snapshot, cancellation=cancellation,
         )
         if effective_scope != "raw"
         else ({}, [])
@@ -2240,15 +2191,14 @@ def run_query_v2(
             selected_paths.add(page_path)
     selected = _adaptive_expand(selected, top_k)
     selected_paths = {item["hit"].page_path for item in selected}
-    hit_stats: dict[str, dict[str, Any]] = {}
-    pool_by_page: dict[str, list[dict[str, Any]]] = {}
-    for item in scored:
-        page_path = item["hit"].page_path
-        pool_by_page.setdefault(page_path, []).append(item)
-        stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": "active"})
-        stats["max"] = max(stats["max"], item["hit"].score)
-    cancellation.checkpoint("context")
-    context_items = _build_page_ordered_context(selected, store, hit_stats=hit_stats, pool_by_page=pool_by_page)
+    recovery = assemble_recovery(
+        selected,
+        condition=RecoveryCondition(),
+        candidates=scored,
+        store=store,
+        cancellation=cancellation,
+    )
+    context_items = recovery.context_items
     # A true Wiki zero-result query has two sequential recovery stages: active
     # Wiki relaxed recovery, followed only when that stage is empty by the
     # dedicated raw-source store.  That path keeps raw evidence isolated from
@@ -2259,10 +2209,22 @@ def run_query_v2(
     raw_fts_hits = 0
     relaxed_fts_hits = 0
     raw_index_warning = ""
-    raw_fallback = False
     coverage_fallback = False
     lexical_mode = stage_lexical_mode
     raw_store: RetrievalIndexStore | None = None
+    raw_snapshot: QueryCorpusSnapshot | None = None
+    raw_store_for_snapshot: RetrievalIndexStore | None = None
+
+    def capture_raw_snapshot() -> QueryCorpusSnapshot:
+        nonlocal raw_snapshot, raw_store_for_snapshot
+        if raw_snapshot is None:
+            raw_store_for_snapshot = raw_store_for_snapshot or RetrievalIndexStore(root, scope="raw")
+            raw_status = raw_store_for_snapshot.status()
+            if not raw_status.get("ok") or raw_status.get("state") != "fresh":
+                raw_snapshot = QueryCorpusSnapshot.empty("raw")
+            else:
+                raw_snapshot = QueryCorpusSnapshot.capture(raw_store_for_snapshot, cancellation=cancellation)
+        return raw_snapshot
     query_extra_terms: list[str] = []
     query_term_variants: dict[str, list[str]] = {}
     wiki_relaxed_answered = False
@@ -2284,6 +2246,8 @@ def run_query_v2(
             extra_terms=[],
             term_variants={},
             top_k=top_k,
+            snapshot=capture_raw_snapshot(),
+            cancellation=cancellation,
         )
         raw_candidate_items = [
             item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
@@ -2293,22 +2257,15 @@ def run_query_v2(
             selected = _adaptive_expand(merged, top_k)[:top_k]
             selected_paths = {item["hit"].page_path for item in selected}
             combined_items = [*scored, *raw_candidate_items]
-            hit_stats = {}
-            pool_by_page = {}
-            for item in combined_items:
-                page_path = item["hit"].page_path
-                pool_by_page.setdefault(page_path, []).append(item)
-                store_key = "raw" if page_path.startswith("raw/") else "active"
-                stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": store_key})
-                stats["max"] = max(stats["max"], item["score"])
-            cancellation.checkpoint("context")
-            context_items = _build_page_ordered_context(
+            recovery = assemble_recovery(
                 selected,
-                store,
+                condition=RecoveryCondition("raw", ("wiki_primary_missing_latin_coverage",), "item"),
+                candidates=combined_items,
+                store=store,
                 raw_store=raw_store,
-                hit_stats=hit_stats,
-                pool_by_page=pool_by_page,
+                cancellation=cancellation,
             )
+            context_items = recovery.context_items
             coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
     if not has_primary_recall and effective_scope in {"knowledge", "all"}:
         cancellation.checkpoint("fallback")
@@ -2321,6 +2278,9 @@ def run_query_v2(
             None,
             expansion_terms,
             project,
+            snapshot=snapshot,
+            raw_snapshot=raw_snapshot,
+            cancellation=cancellation,
         )
         cancellation.checkpoint("fallback")
         wiki_relaxed_items, relaxed_fts_hits, relaxed_warning = _relaxed_recovery_items(
@@ -2331,6 +2291,7 @@ def run_query_v2(
             project=project,
             filters=filters,
             extra_terms=query_extra_terms,
+            cancellation=cancellation,
         )
         if relaxed_warning:
             status = {**status, "code": relaxed_warning}
@@ -2364,19 +2325,14 @@ def run_query_v2(
                     selected_paths.add(page_path)
             selected = _adaptive_expand(selected, top_k)
             selected_paths = {item["hit"].page_path for item in selected}
-            hit_stats = {}
-            pool_by_page = {}
-            for item in wiki_relaxed_items:
-                page_path = item["hit"].page_path
-                pool_by_page.setdefault(page_path, []).append(item)
-                stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": "active"})
-                stats["max"] = max(stats["max"], item["hit"].score)
-            context_items = _build_page_ordered_context(
+            recovery = assemble_recovery(
                 selected,
-                store,
-                hit_stats=hit_stats,
-                pool_by_page=pool_by_page,
+                condition=RecoveryCondition(),
+                candidates=wiki_relaxed_items,
+                store=store,
+                cancellation=cancellation,
             )
+            context_items = recovery.context_items
             lexical_mode = "relaxed"
             wiki_relaxed_answered = True
 
@@ -2397,6 +2353,8 @@ def run_query_v2(
                         extra_terms=query_extra_terms,
                         term_variants=query_term_variants,
                         top_k=top_k,
+                        snapshot=capture_raw_snapshot(),
+                        cancellation=cancellation,
                     )
                     raw_candidate_items = [
                         item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
@@ -2406,22 +2364,15 @@ def run_query_v2(
                         selected = _adaptive_expand(merged, top_k)[:top_k]
                         selected_paths = {item["hit"].page_path for item in selected}
                         combined_items = [*wiki_relaxed_items, *raw_candidate_items]
-                        hit_stats = {}
-                        pool_by_page = {}
-                        for item in combined_items:
-                            page_path = item["hit"].page_path
-                            pool_by_page.setdefault(page_path, []).append(item)
-                            store_key = "raw" if page_path.startswith("raw/") else "active"
-                            stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": store_key})
-                            stats["max"] = max(stats["max"], item["score"])
-                        cancellation.checkpoint("context")
-                        context_items = _build_page_ordered_context(
+                        recovery = assemble_recovery(
                             selected,
-                            store,
+                            condition=RecoveryCondition("raw", ("wiki_primary_missing_latin_coverage",), "item"),
+                            candidates=combined_items,
+                            store=store,
                             raw_store=raw_store,
-                            hit_stats=hit_stats,
-                            pool_by_page=pool_by_page,
+                            cancellation=cancellation,
                         )
+                        context_items = recovery.context_items
                         coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
 
     if not has_primary_recall and not wiki_relaxed_answered and effective_scope in {"knowledge", "all"}:
@@ -2435,6 +2386,8 @@ def run_query_v2(
             extra_terms=query_extra_terms,
             term_variants=query_term_variants,
             top_k=top_k,
+            snapshot=capture_raw_snapshot(),
+            cancellation=cancellation,
         )
         if raw_candidate_items:
             selected = []
@@ -2446,17 +2399,15 @@ def run_query_v2(
                     selected_paths.add(page_path)
             selected = _adaptive_expand(selected, top_k)[:top_k]
             selected_paths = {item["hit"].page_path for item in selected}
-            hit_stats = {}
-            pool_by_page = {}
-            for item in raw_candidate_items:
-                page_path = item["hit"].page_path
-                pool_by_page.setdefault(page_path, []).append(item)
-                stats = hit_stats.setdefault(page_path, {"max": 0.0, "store": "raw"})
-                stats["max"] = max(stats["max"], item["hit"].score)
-            cancellation.checkpoint("context")
-            context_items = _build_page_ordered_context(
-                selected, store, raw_store=raw_store, hit_stats=hit_stats, pool_by_page=pool_by_page
+            recovery = assemble_recovery(
+                selected,
+                condition=RecoveryCondition("raw", ("wiki_zero_results",), "item"),
+                candidates=raw_candidate_items,
+                store=store,
+                raw_store=raw_store,
+                cancellation=cancellation,
             )
+            context_items = recovery.context_items
             if raw_lexical_mode == "qualified_code" and has_qualified_identifier(question):
                 lexical_mode = "qualified_code"
             elif raw_lexical_mode == "identifier_phrase":
@@ -2465,7 +2416,6 @@ def run_query_v2(
                 lexical_mode = "raw_prefix"
             elif raw_lexical_mode == "relaxed":
                 lexical_mode = "relaxed"
-            raw_fallback = bool(selected)
     cancellation.checkpoint("graph")
     discovery_requested = _discovery_requested(question)
     discovery_source_items: list[dict[str, Any]] = []
@@ -2485,6 +2435,8 @@ def run_query_v2(
             scope=effective_scope,
             project=project,
             filters=filters,
+            snapshot=snapshot,
+            cancellation=cancellation,
         )
         discovery, discovery_entities = _discover_enumerated_entities(
             selected,
@@ -2499,7 +2451,8 @@ def run_query_v2(
         candidate_raw_store = raw_store or RetrievalIndexStore(root, scope="raw")
         raw_status = candidate_raw_store.status()
         if raw_status.get("ok") and raw_status.get("state") == "fresh":
-            raw_metadata = _store_metadata(candidate_raw_store)
+            raw_snapshot = raw_snapshot or capture_raw_snapshot()
+            raw_metadata = _store_metadata(candidate_raw_store, snapshot=raw_snapshot)
             raw_discovery_items = _discovery_source_items(
                 candidate_raw_store,
                 raw_metadata,
@@ -2507,6 +2460,8 @@ def run_query_v2(
                 scope="raw",
                 project=project,
                 filters=filters,
+                snapshot=raw_snapshot,
+                cancellation=cancellation,
             )
             discovery, discovery_entities = _discover_enumerated_entities(
                 selected,
@@ -2579,13 +2534,10 @@ def run_query_v2(
         previous["content"] = f"{previous.get('content', '')}\n\n{item.get('content', '')}".strip()
         previous["tokens"] = int(previous.get("tokens") or 0) + int(item.get("tokens") or 0)
     contains_raw = any(item["hit"].source_kind == "raw" for item in selected)
-    raw_fallback_response = effective_scope != "raw" and contains_raw
-    fallback_payload = {
-        "level": "raw" if raw_fallback_response else "none",
-        "reasons": ["wiki_primary_missing_latin_coverage"] if coverage_fallback else ["wiki_zero_results"] if raw_fallback else [],
-        "allowed_source_paths": [item["hit"].page_path for item in selected if item["hit"].source_kind == "raw"] if raw_fallback_response else [],
-        "added_token_usage": 0,
-    }
+    # Recovery owns the final fallback envelope as well as the intermediate
+    # context state.  Keep the public payload projection here, but do not
+    # reconstruct level/reasons/path allowlists a second time.
+    fallback_payload = dict(recovery.fallback)
     def _result_item(item: dict[str, Any], *, citation: str, include_content: bool) -> dict[str, Any]:
         hit = item["hit"]
         result_metadata = (

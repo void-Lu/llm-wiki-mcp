@@ -313,10 +313,22 @@ def _safe_stage_result(result: Mapping[str, Any] | None) -> dict[str, object]:
     if not isinstance(result, Mapping):
         return {}
     safe: dict[str, object] = {}
-    for key in ("ok", "state", "code", "repair_action", "deduplicated"):
+    for key in ("ok", "state", "code", "repair_action", "deduplicated", "operation", "affected_count", "written", "batch"):
         value = result.get(key)
         if isinstance(value, (str, bool, int, float)) and value is not None:
             safe[key] = value
+        elif key == "written" and isinstance(value, (list, tuple)):
+            paths = [item for item in value if isinstance(item, str) and not Path(item).is_absolute()]
+            if len(paths) == len(value):
+                safe[key] = paths[:64]
+        elif key == "batch" and isinstance(value, Mapping):
+            batch: dict[str, object] = {}
+            for name in ("kind", "boundary", "affected_count"):
+                item = value.get(name)
+                if isinstance(item, (str, bool, int, float)) and item is not None:
+                    batch[name] = item
+            if batch:
+                safe[key] = batch
     return safe
 
 

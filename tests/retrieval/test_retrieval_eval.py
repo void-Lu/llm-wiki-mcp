@@ -4,6 +4,7 @@ import json
 import math
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from retrieval.retrieval_eval import (
+    EvaluationQueryService,
+    EvaluationRuntimeSnapshot,
     Relevance,
     RetrievalEvalCase,
     RetrievalEvalDataset,
@@ -19,8 +22,10 @@ from retrieval.retrieval_eval import (
     calculate_ranking_metrics,
     evaluate_retrieval_gate,
     load_retrieval_dataset,
+    parse_evaluation_filters,
     percentile_95,
     run_retrieval_evaluation,
+    safe_report_identity,
     validate_dataset_paths,
     write_retrieval_eval_report,
     _results_match_filters,
@@ -31,7 +36,6 @@ from retrieval.retrieval_index import RetrievalIndexStore
 from archive.archive_service import ArchiveService
 from wiki.knowledge_compiler import filesystem_path
 from retrieval.vector_provider import DeterministicFakeProvider
-from runtime.runtime_config import ConfigRegistry, write_global_config
 from wiki.wiki_io import write_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
@@ -49,6 +53,7 @@ def _copy_vault(tmp_path: Path) -> Path:
 
 
 def _copy_dataset(tmp_path: Path) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     dataset = tmp_path / "fixture.jsonl"
     shutil.copy2(_FIXTURE_ROOT / "fixture.jsonl", dataset)
     shutil.copy2(_FIXTURE_ROOT / "fixture.manifest.json", tmp_path / "fixture.manifest.json")
@@ -80,6 +85,34 @@ def test_v2_report_fields_mark_missing_frozen_comparison_unproven(tmp_path: Path
     assert report["metadata"]["query_v2"]["cold_start_latency_ms"] is None
     assert "warm_p95_latency_ms" in report["metrics"]
     assert "fallback_reason_distribution" in report["metrics"]
+
+
+def test_public_evaluation_contract_normalizes_filter_aliases_and_redacts_identity() -> None:
+    assert parse_evaluation_filters(
+        {"project": "Alpha", "type": "concept", "filter_tags": ["runbook"], "pathPrefix": "wiki/concepts/"},
+        "aliases",
+    ) == {
+        "project": "Alpha",
+        "filter_type": "concept",
+        "filter_tags": ["runbook"],
+        "path_prefix": "wiki/concepts/",
+    }
+    assert safe_report_identity(
+        {
+            "metadata": {
+                "dataset_id": "fixture",
+                "dataset_revision": "rev-1",
+                "vault_fingerprint": {"algorithm": "sha256", "value": "abc", "file_count": 4, "path": "secret"},
+                "ranking": {"version": "policy-v2", "absolute_path": "secret"},
+                "absolute_path": "secret",
+            }
+        }
+    ) == {
+        "dataset_id": "fixture",
+        "dataset_revision": "rev-1",
+        "vault_fingerprint": {"algorithm": "sha256", "value": "abc", "file_count": 4},
+        "ranking_version": "policy-v2",
+    }
 
 
 def test_v2_evaluator_reads_existing_passage_store_without_telemetry_write(tmp_path: Path) -> None:
@@ -418,12 +451,10 @@ def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tm
     assert "legacy-unversioned" in Path(legacy_output["markdown"]).read_text(encoding="utf-8")
 
 
-def test_mcp_entrypoint_uses_public_lexical_contract_without_vector_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_entrypoint_uses_public_lexical_contract_without_vector_hits(tmp_path: Path) -> None:
     vault = _copy_vault(tmp_path)
     _build_passage_store(vault)
-    config_path = tmp_path / "config" / "config.yaml"
-    write_global_config(config_path, vault_name="eval", vault_root=vault)
-    monkeypatch.setattr(server_module, "CONFIG_REGISTRY", ConfigRegistry.from_file(config_path))
+    registry_before = server_module.CONFIG_REGISTRY
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
 
     report = run_retrieval_evaluation(
@@ -439,7 +470,37 @@ def test_mcp_entrypoint_uses_public_lexical_contract_without_vector_hits(tmp_pat
     assert all(case["pipeline"]["retrieval_mode"] == "lexical" for case in report["cases"])
     assert all(case["pipeline"]["counters"]["vector_hits"] == 0 for case in report["cases"])
     assert report["metrics"]["filter_correctness"] == 1.0
+    assert server_module.CONFIG_REGISTRY is registry_before
     assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
+
+
+def test_mcp_evaluation_services_are_isolated_without_registry_exchange(tmp_path: Path) -> None:
+    first_vault = _copy_vault(tmp_path / "first")
+    second_vault = _copy_vault(tmp_path / "second")
+    _build_passage_store(first_vault)
+    _build_passage_store(second_vault)
+    dataset = load_retrieval_dataset(_copy_dataset(tmp_path / "dataset"))
+    case = dataset.cases[0]
+    registry_before = server_module.CONFIG_REGISTRY
+
+    def run_case(vault: Path) -> list[str]:
+        result = EvaluationQueryService(EvaluationRuntimeSnapshot.from_mcp_vault(vault)).run(
+            case,
+            top_k=10,
+            include_context_pack=False,
+            retrieval_mode="lexical",
+            vector_config=None,
+            query_version="v2",
+            scope="knowledge",
+            entrypoint="mcp",
+        )
+        return [str(item["path"]) for item in result["results"]]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        paths = list(executor.map(run_case, (first_vault, second_vault)))
+
+    assert paths[0] == paths[1]
+    assert server_module.CONFIG_REGISTRY is registry_before
 
 
 def test_mcp_lexical_contract_requires_explicit_mode_and_zero_vector_hits() -> None:
