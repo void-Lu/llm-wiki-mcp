@@ -1,7 +1,0 @@
-{"file":".trellis/spec/backend/index.md","reason":"确认 backend 层目录、规范入口和质量门。"}
-{"file":".trellis/spec/backend/directory-structure.md","reason":"检索、应用与 Wiki 模块的归属及跨包导入约定。"}
-{"file":".trellis/spec/backend/runtime-configuration.md","reason":"MCP 工具注册、vault resolver、别名和 warning 契约。"}
-{"file":".trellis/spec/backend/retrieval-evaluation.md","reason":"Query V2、DEFAULT_TOP_K、过滤语义和评估器只读契约。"}
-{"file":".trellis/spec/backend/local-vector-retrieval.md","reason":"检索索引符号迁移及 active/raw/archive 隔离契约。"}
-{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"落实注册器、过滤谓词和检索符号的单一来源。"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"核对 MCP→服务→投影的数据流和返回契约。"}

@@ -1,9 +1,0 @@
-{"file":".trellis/spec/backend/index.md","reason":"本地后端规格索引与事实优先级。"}
-{"file":".trellis/spec/backend/runtime-configuration.md","reason":"MCP 工具面、vault 解析与状态脱敏合同。"}
-{"file":".trellis/spec/backend/runtime-provenance.md","reason":"本地版本与运行身份基线。"}
-{"file":".trellis/spec/backend/knowledge-compilation.md","reason":"正式笔记、raw 来源、依赖与生命周期合同。"}
-{"file":".trellis/spec/backend/local-vector-retrieval.md","reason":"本地检索模式、离线向量和索引生命周期。"}
-{"file":".trellis/spec/backend/archive-lifecycle.md","reason":"归档、恢复、journal 与 admin 边界。"}
-{"file":".trellis/spec/backend/codegraph-sync.md","reason":"CodeGraph 导入、页面所有权和项目隔离。"}
-{"file":".trellis/tasks/08-10-weknora-note-tools-comparison/research/weknora-knowledge-note-scripts.md","reason":"WeKnora 官方源码、接口、调用链与 commit-pinned 证据清单。"}
-{"file":".trellis/tasks/08-10-weknora-note-tools-comparison/research/local-mcp-knowledge-note-tools.md","reason":"本地 8 个 MCP 工具、实现链、契约与候选优化项清单；引用前需按当前工作树复核。"}
