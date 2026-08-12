@@ -16,6 +16,7 @@ from retrieval.retrieval_eval import (
     run_retrieval_evaluation,
     write_retrieval_eval_report,
 )
+from retrieval.retrieval_gold import RetrievalGoldError, finalize_retrieval_gold, sample_retrieval_gold
 from runtime.runtime_config import ConfigRegistry, RuntimeConfig, RuntimeConfigError, resolve_runtime_config, write_global_config
 from retrieval.query_pipeline import DEFAULT_TOP_K
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, parse_vector_settings, vector_index_records
@@ -114,10 +115,23 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluation_parser.add_argument("--retrieval-mode", choices=("lexical", "vector", "hybrid"), default="lexical", help="Evaluation path (default: lexical).")
     evaluation_parser.add_argument("--entrypoint", choices=("engine", "mcp"), default="engine", help="Evaluation boundary (default: engine; mcp is lexical-only).")
     evaluation_parser.add_argument("--query-version", choices=("v2",), default="v2", help="Query contract to evaluate (only v2 is supported).")
-    evaluation_parser.add_argument("--scope", choices=("auto", "knowledge", "history", "all", "archive"), default="knowledge", help="Query V2 corpus scope (default: knowledge).")
+    evaluation_parser.add_argument("--scope", choices=("auto", "knowledge", "history", "all", "archive", "raw"), default=None, help="Optional fixed Query V2 corpus scope; omitted uses each case scope.")
     evaluation_parser.add_argument("--baseline-report", help="Optional frozen retrieval-eval.json used for the regression gate.")
     evaluation_parser.add_argument("--vector-model-path", help="Required local BGE-M3 directory for vector or hybrid evaluation.")
     evaluation_parser.add_argument("--vector-index-path", help="Optional vault-relative vector index directory for vector or hybrid evaluation.")
+
+    gold_sample_parser = subparsers.add_parser("retrieval-gold-sample", help="Create a redacted read-only telemetry annotation template.")
+    gold_sample_parser.add_argument("--vault", required=True, help="Path to the vault whose telemetry is sampled read-only.")
+    gold_sample_parser.add_argument("--output-dir", required=True, help="Directory for gold-template.jsonl and its manifest.")
+    gold_sample_parser.add_argument("--count", type=int, default=50, help="Number of deduplicated cases to sample (default: 50).")
+    gold_sample_parser.add_argument("--seed", default="wiki-query-real-vault-v1", help="Stable sampling seed.")
+    gold_sample_parser.add_argument("--dataset-id", default="codingwork-wiki-query-gold", help="Dataset identifier written to the manifest.")
+
+    gold_finalize_parser = subparsers.add_parser("retrieval-gold-finalize", help="Validate annotations and materialize retrieval gold JSONL.")
+    gold_finalize_parser.add_argument("--vault", required=True, help="Path to the vault used to validate relevant paths.")
+    gold_finalize_parser.add_argument("--template", required=True, help="Completed gold-template.jsonl path.")
+    gold_finalize_parser.add_argument("--manifest", required=True, help="gold-template.manifest.json path.")
+    gold_finalize_parser.add_argument("--output-dir", required=True, help="Directory for gold.jsonl and gold.manifest.json.")
 
     vector_parser = subparsers.add_parser("vector", help="Manage the explicit local vector index lifecycle.")
     vector_actions = vector_parser.add_subparsers(dest="vector_action", required=True)
@@ -298,6 +312,24 @@ def _run_retrieval_eval(args: argparse.Namespace) -> int:
     return 0 if not args.baseline_report or report["gate"]["passed"] else 2
 
 
+def _run_retrieval_gold_sample(args: argparse.Namespace) -> int:
+    result = sample_retrieval_gold(
+        args.vault,
+        args.output_dir,
+        count=args.count,
+        seed=args.seed,
+        dataset_id=args.dataset_id,
+    )
+    _print_json(result)
+    return 0
+
+
+def _run_retrieval_gold_finalize(args: argparse.Namespace) -> int:
+    result = finalize_retrieval_gold(args.template, args.manifest, args.vault, args.output_dir)
+    _print_json(result)
+    return 0
+
+
 def _vector_config_from_args(args: argparse.Namespace) -> dict[str, object]:
     return {
         "provider": "local_bge_m3",
@@ -433,6 +465,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_config(args)
         if args.command == "retrieval-eval":
             return _run_retrieval_eval(args)
+        if args.command == "retrieval-gold-sample":
+            return _run_retrieval_gold_sample(args)
+        if args.command == "retrieval-gold-finalize":
+            return _run_retrieval_gold_finalize(args)
         if args.command == "vector":
             return _run_vector(args)
         if args.command == "index":
@@ -445,6 +481,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_json(_error_payload(exc.code, str(exc), config_path=exc.config_path))
         return 2
     except RetrievalEvalError as exc:
+        _print_json(_error_payload(exc.code, str(exc)))
+        return 2
+    except RetrievalGoldError as exc:
         _print_json(_error_payload(exc.code, str(exc)))
         return 2
     except (VectorIndexError, VectorProviderError) as exc:

@@ -5,23 +5,32 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 import statistics
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_filter_aliases, normalize_metadata_filters, page_matches_filters, path_matches_prefix
+from retrieval.metadata_filters import (
+    QUERY_METADATA_FILTERS,
+    normalize_filter_aliases,
+    normalize_metadata_filters,
+    page_matches_filters,
+    path_matches_prefix,
+)
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, RANKING_POLICY_VERSION, run_query_v2
+from retrieval.retrieval_index import RetrievalIndexStore
 from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
 from retrieval.vector_index import parse_vector_settings
 from wiki.knowledge_compiler import filesystem_path
 
 
 RETRIEVAL_EVAL_SCHEMA_VERSION = 1
+_SUPPORTED_DATASET_SCHEMA_VERSIONS = {1, 2}
 _ALLOWED_FILTERS = {"project", "filter_type", "filter_tags", "type", "tags", "path_prefix", "pathPrefix"}
 _EVALUATION_KS = (1, 3, 5, 10)
 
@@ -50,6 +59,7 @@ class RetrievalEvalCase:
     language: str
     tags: tuple[str, ...]
     notes: str
+    scope: str = "knowledge"
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,8 @@ class RetrievalEvalManifest:
     dataset_id: str
     revision: str
     abstention_threshold: float
+    status: str = "reviewed"
+    schema_version: int = RETRIEVAL_EVAL_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -197,7 +209,7 @@ def run_retrieval_evaluation(
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "lexical",
     vector_config: Mapping[str, Any] | None = None,
     query_version: str = "v2",
-    scope: Literal["auto", "knowledge", "history", "all", "archive"] = "knowledge",
+    scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"] | None = None,
     entrypoint: Literal["engine", "mcp"] = "engine",
 ) -> dict[str, Any]:
     """Run a read-only retrieval evaluation through the engine or MCP boundary."""
@@ -217,10 +229,13 @@ def run_retrieval_evaluation(
         raise RetrievalEvalError("vector_config_missing", "vector and hybrid evaluation require a local vector configuration")
     if query_version != "v2":
         raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
-    if scope not in {"auto", "knowledge", "history", "all", "archive"}:
+    if scope is not None and scope not in {"auto", "knowledge", "history", "all", "archive", "raw"}:
         raise RetrievalEvalError("invalid_scope", "scope must be auto, knowledge, history, all, or archive")
     root = filesystem_path(vault_root)
     validate_dataset_paths(dataset, root)
+    vault_fingerprint_before = vault_fingerprint(root)
+    telemetry_before = _telemetry_event_count(root)
+    index_before = RetrievalIndexStore(root).status()
 
     # Warm the interpreter and parser without treating it as a latency sample.
     first = dataset.cases[0]
@@ -232,7 +247,7 @@ def run_retrieval_evaluation(
         retrieval_mode=retrieval_mode,
         vector_config=vector_config,
         query_version=query_version,
-        scope=scope,
+        scope=_case_scope(first, scope),
         entrypoint=entrypoint,
     )
 
@@ -253,10 +268,12 @@ def run_retrieval_evaluation(
     fallback_reasons: dict[str, int] = {}
     packed_token_samples: list[int] = []
     scope_contracts: list[dict[str, object]] = []
+    diagnosis_distribution: dict[str, int] = {}
 
     for case_index, case in enumerate(dataset.cases):
         query_runs: list[dict[str, Any]] = []
         rankings: list[list[str]] = []
+        case_scope = _case_scope(case, scope)
         for _ in range(repeats):
             started = time.perf_counter()
             result = _run_case(
@@ -267,7 +284,7 @@ def run_retrieval_evaluation(
                 retrieval_mode=retrieval_mode,
                 vector_config=vector_config,
                 query_version=query_version,
-                scope=scope,
+                scope=case_scope,
                 entrypoint=entrypoint,
             )
             elapsed_ms = (time.perf_counter() - started) * 1_000
@@ -319,7 +336,7 @@ def run_retrieval_evaluation(
                 retrieval_mode=retrieval_mode,
                 vector_config=vector_config,
                 query_version=query_version,
-                scope=scope,
+                scope=case_scope,
                 entrypoint=entrypoint,
             )
             raw_budget = context_result.get("budget") or context_result.get("context_pack", {}).get("budget", {})
@@ -340,6 +357,20 @@ def run_retrieval_evaluation(
         if isinstance(fallback, Mapping):
             for reason in fallback.get("reasons", []):
                 fallback_reasons[str(reason)] = fallback_reasons.get(str(reason), 0) + 1
+        diagnosis = _diagnose_case(
+            root,
+            case,
+            ranked_paths,
+            top_k=top_k,
+            scope=case_scope,
+            retrieval_mode=retrieval_mode,
+            vector_config=vector_config,
+            query_version=query_version,
+            entrypoint=entrypoint,
+        )
+        for item in diagnosis:
+            category = str(item.get("category", "unknown"))
+            diagnosis_distribution[category] = diagnosis_distribution.get(category, 0) + 1
         scope_contracts.append({
             "id": case.id,
             "scope": pipeline.get("scope", "legacy") if isinstance(pipeline, Mapping) else "legacy",
@@ -356,6 +387,7 @@ def run_retrieval_evaluation(
                 "language": case.language,
                 "tags": list(case.tags),
                 "filters": case.filters,
+                "scope": case_scope,
                 "ranked_paths": ranked_paths,
                 "ranking_runs": rankings,
                 "latency_ms": [item["latency_ms"] for item in query_runs],
@@ -368,14 +400,29 @@ def run_retrieval_evaluation(
                 "pipeline": result["pipeline"],
                 "warnings": result["pipeline"].get("stage_1_5_vector_warnings", result["pipeline"].get("warnings", [])),
                 "result_summary": [_result_summary(item) for item in result["results"]],
+                "diagnosis": diagnosis,
             }
         )
+
+    vault_fingerprint_after = vault_fingerprint(root)
+    telemetry_after = _telemetry_event_count(root)
+    index_after = RetrievalIndexStore(root).status()
+    side_effects = _evaluation_side_effects(
+        vault_fingerprint_before,
+        vault_fingerprint_after,
+        telemetry_before,
+        telemetry_after,
+        index_before,
+        index_after,
+    )
 
     return {
         "schema_version": RETRIEVAL_EVAL_SCHEMA_VERSION,
         "metadata": {
             "dataset_id": dataset.manifest.dataset_id,
             "dataset_revision": dataset.manifest.revision,
+            "dataset_status": dataset.manifest.status,
+            "dataset_schema_version": dataset.manifest.schema_version,
             "abstention_threshold": dataset.manifest.abstention_threshold,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "runtime_provenance": RUNTIME_PROVENANCE.to_public_dict(),
@@ -391,7 +438,7 @@ def run_retrieval_evaluation(
                 "retrieval_mode": retrieval_mode,
                 "vector_enabled": retrieval_mode != "lexical",
                 "query_version": query_version,
-                "scope": scope,
+                "scope": scope or "per_case",
                 "entrypoint": entrypoint,
                 "telemetry_enabled": False,
                 "context_budget_mode": "engine_context_pack" if entrypoint == "engine" else "mcp_public_budget_not_exposed",
@@ -400,8 +447,10 @@ def run_retrieval_evaluation(
                 "scope_authority_lifecycle": scope_contracts,
                 "cold_start_latency_ms": None,
                 "comparison_status": "unproven_without_frozen_v2_baseline",
+                "evaluation_status": "baseline_unproven",
             },
-            "vault_fingerprint": vault_fingerprint(root),
+            "vault_fingerprint": vault_fingerprint_after,
+            "side_effects": side_effects,
         },
         "metrics": {
             "recall_at_k_macro": _mean_or_none(recall_values),
@@ -429,6 +478,7 @@ def run_retrieval_evaluation(
             "cold_start_latency_ms": None,
             "fallback_rate": fallback_cases / len(cases),
             "fallback_reason_distribution": fallback_reasons,
+            "diagnosis_distribution": diagnosis_distribution,
             "packed_token_median": _median(packed_token_samples),
             "latency_sample_count": len(latency_samples),
             "context_budget": {
@@ -496,6 +546,15 @@ def evaluate_retrieval_gate(
         actual={"retrieval_mode": candidate_parameters.get("retrieval_mode"), "vector_enabled": candidate_parameters.get("vector_enabled")},
         expected={"retrieval_mode": "lexical", "vector_enabled": False},
     )
+    if "side_effects" in candidate_metadata or "side_effects" in baseline_metadata:
+        side_effects = candidate_metadata.get("side_effects")
+        add_check(
+            "read_only_evaluation",
+            isinstance(side_effects, Mapping) and side_effects.get("clean") is True,
+            actual=side_effects.get("clean") if isinstance(side_effects, Mapping) else None,
+            expected=True,
+            reason="evaluation_side_effect_detected" if not isinstance(side_effects, Mapping) or side_effects.get("clean") is not True else None,
+        )
 
     for metric_name in ("recall_at_k_macro", "ndcg_at_k_macro"):
         candidate_value = _finite_number(candidate_metrics.get(metric_name))
@@ -575,6 +634,7 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         "# 检索评测报告",
         "",
         f"- 数据集：`{metadata['dataset_id']}`（revision `{metadata['dataset_revision']}`）",
+        f"- 评测状态：`{metadata.get('query_v2', {}).get('evaluation_status', 'unknown')}`",
         f"- `top_k`：{metadata['parameters']['top_k']}",
         f"- 语料指纹：`{metadata['vault_fingerprint']['value']}`（{metadata['vault_fingerprint']['file_count']} 个 wiki 文件）",
         f"- 运行版本：`{metadata['runtime_provenance']['package_version']}` / `{metadata['runtime_provenance']['revision']}`",
@@ -592,6 +652,8 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         f"- 过滤器正确性：{_format_metric(metrics['filter_correctness'])}",
         f"- P95 延迟：{metrics['p95_latency_ms']:.3f} ms",
         f"- Context budget：{'通过' if metrics['context_budget']['within_budget'] else '失败'}",
+        f"- 只读副作用检查：{'通过' if metadata.get('side_effects', {}).get('clean') else '失败/未证明'}",
+        f"- 低召回诊断：{metrics.get('diagnosis_distribution', {})}",
         "",
         "## Case 摘要",
         "",
@@ -621,7 +683,17 @@ def _parse_manifest(raw: object) -> RetrievalEvalManifest:
     threshold = data.get("abstention_threshold")
     if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or threshold < 0:
         raise RetrievalEvalError("manifest_invalid", "manifest.abstention_threshold must be a non-negative number")
-    return RetrievalEvalManifest(dataset_id=dataset_id, revision=revision, abstention_threshold=float(threshold))
+    schema_version = int(data.get("schema_version", RETRIEVAL_EVAL_SCHEMA_VERSION))
+    status = data.get("status", "reviewed")
+    if not isinstance(status, str) or not status.strip():
+        raise RetrievalEvalError("manifest_invalid", "manifest.status must be a string")
+    return RetrievalEvalManifest(
+        dataset_id=dataset_id,
+        revision=revision,
+        abstention_threshold=float(threshold),
+        status=status.strip(),
+        schema_version=schema_version,
+    )
 
 
 def _parse_case(raw: object, line_number: int) -> RetrievalEvalCase:
@@ -653,13 +725,16 @@ def _parse_case(raw: object, line_number: int) -> RetrievalEvalCase:
     if answerable and not relevance:
         raise RetrievalEvalError("missing_relevant_path", f"case {case_id}: answerable=true requires at least one relevant path")
     language = _nonempty_string(data.get("language"), "case_invalid", f"case {case_id}: language must be a string")
+    scope = data.get("scope", "knowledge")
+    if not isinstance(scope, str) or scope not in {"auto", "knowledge", "history", "all", "archive", "raw"}:
+        raise RetrievalEvalError("invalid_scope", f"case {case_id}: scope must be a supported query scope")
     tags_raw = data.get("tags", [])
     if not isinstance(tags_raw, list) or any(not isinstance(tag, str) or not tag.strip() for tag in tags_raw):
         raise RetrievalEvalError("case_invalid", f"case {case_id}: tags must be strings")
     notes = data.get("notes", "")
     if not isinstance(notes, str):
         raise RetrievalEvalError("case_invalid", f"case {case_id}: notes must be a string")
-    return RetrievalEvalCase(case_id, query, tuple(relevance), filters, answerable, language, tuple(tags_raw), notes)
+    return RetrievalEvalCase(case_id, query, tuple(relevance), filters, answerable, language, tuple(tags_raw), notes, scope)
 
 
 def _parse_filters(raw: object, case_id: str) -> dict[str, Any]:
@@ -758,6 +833,83 @@ def _build_slice_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[s
     return result
 
 
+def _diagnose_case(
+    root: Path,
+    case: RetrievalEvalCase,
+    ranked_paths: Sequence[str],
+    *,
+    top_k: int,
+    scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
+    retrieval_mode: Literal["lexical", "vector", "hybrid"],
+    vector_config: Mapping[str, Any] | None,
+    query_version: str,
+    entrypoint: Literal["engine", "mcp"],
+) -> list[dict[str, Any]]:
+    """Explain misses with a bounded read-only top-40 query."""
+
+    missing = [item for item in case.relevant if item.path not in ranked_paths]
+    if not missing:
+        return []
+    try:
+        diagnostic_result = _run_case(
+            root,
+            case,
+            top_k=min(40, max(40, top_k)),
+            include_context_pack=False,
+            retrieval_mode=retrieval_mode,
+            vector_config=vector_config,
+            query_version=query_version,
+            scope=scope,
+            entrypoint=entrypoint,
+        )
+        diagnostic_paths = [str(item["path"]) for item in diagnostic_result.get("results", [])]
+    except RetrievalEvalError as exc:
+        return [{"path": item.path, "category": "diagnosis_unavailable", "reason": exc.code} for item in missing]
+    index_status = RetrievalIndexStore(root).status()
+    output: list[dict[str, Any]] = []
+    for item in missing:
+        if item.path in diagnostic_paths:
+            output.append(
+                {
+                    "path": item.path,
+                    "category": "ranking_position_late",
+                    "rank": diagnostic_paths.index(item.path) + 1,
+                }
+            )
+        elif not index_status.get("ok"):
+            output.append({"path": item.path, "category": "index_missing", "index_code": index_status.get("code")})
+        elif not _path_scope_filter_compatible(item.path, scope, case.filters):
+            output.append({"path": item.path, "category": "scope_filter_boundary"})
+        elif any("needs_review" in tag for tag in case.tags):
+            output.append({"path": item.path, "category": "label_issue_or_vault_drift"})
+        else:
+            output.append({"path": item.path, "category": "lexical_coverage_or_query_mismatch"})
+    return output
+
+
+def _path_scope_filter_compatible(path: str, scope: str, filters: Mapping[str, Any]) -> bool:
+    normalized = path.replace("\\", "/").lstrip("/")
+    if scope == "archive" and not normalized.startswith("archives/bundles/"):
+        return False
+    if scope == "raw" and not normalized.startswith("raw/"):
+        return False
+    if scope == "history" and not normalized.startswith("raw/sources/chat/"):
+        return False
+    if filters.get("path_prefix") and not path_matches_prefix(normalized, str(filters["path_prefix"])):
+        return False
+    return True
+
+
+def _case_scope(
+    case: RetrievalEvalCase,
+    override: Literal["auto", "knowledge", "history", "all", "archive", "raw"] | None,
+) -> Literal["auto", "knowledge", "history", "all", "archive", "raw"]:
+    selected = override or case.scope or "knowledge"
+    if selected not in {"auto", "knowledge", "history", "all", "archive", "raw"}:
+        raise RetrievalEvalError("invalid_scope", f"case {case.id}: unsupported query scope")
+    return cast(Literal["auto", "knowledge", "history", "all", "archive", "raw"], selected)
+
+
 def _run_case(
     root: Path,
     case: RetrievalEvalCase,
@@ -767,7 +919,7 @@ def _run_case(
     retrieval_mode: Literal["lexical", "vector", "hybrid"],
     vector_config: Mapping[str, Any] | None,
     query_version: str,
-    scope: Literal["auto", "knowledge", "history", "all", "archive"],
+    scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
     entrypoint: Literal["engine", "mcp"],
 ) -> dict[str, Any]:
     if entrypoint == "mcp":
@@ -790,7 +942,7 @@ def _mcp_query_case(
     *,
     top_k: int,
     query_version: str,
-    scope: Literal["auto", "knowledge", "history", "all", "archive"],
+    scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
 ) -> dict[str, Any]:
     """Call the registered public tool while proving its runtime is lexical-only."""
     if query_version != "v2":
@@ -872,7 +1024,7 @@ def _query_case(
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "lexical",
     vector_config: Mapping[str, Any] | None = None,
     query_version: str = "v2",
-    scope: Literal["auto", "knowledge", "history", "all", "archive"] = "knowledge",
+    scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"] = "knowledge",
 ) -> dict[str, Any]:
     if query_version != "v2":
         raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
@@ -887,6 +1039,7 @@ def _query_case(
         query_filter_values["tags"] = case.filters.get("tags", case.filters.get("filter_tags"))
     if "path_prefix" in case.filters or "pathPrefix" in case.filters:
         query_filter_values["path_prefix"] = case.filters.get("path_prefix", case.filters.get("pathPrefix"))
+
     return run_query_v2(
         root,
         case.query,
@@ -941,8 +1094,6 @@ def _results_match_filters(results: Sequence[Mapping[str, Any]], filters: Mappin
     return True
 
 
-
-
 def _result_summary(item: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "path": item.get("path", ""),
@@ -959,8 +1110,9 @@ def _mapping(raw: object, code: str, message: str) -> Mapping[str, Any]:
 
 
 def _require_schema_version(data: Mapping[str, Any], subject: str) -> None:
-    if data.get("schema_version") != RETRIEVAL_EVAL_SCHEMA_VERSION:
-        raise RetrievalEvalError("unsupported_schema", f"{subject} must use schema_version={RETRIEVAL_EVAL_SCHEMA_VERSION}")
+    if data.get("schema_version") not in _SUPPORTED_DATASET_SCHEMA_VERSIONS:
+        versions = ", ".join(str(value) for value in sorted(_SUPPORTED_DATASET_SCHEMA_VERSIONS))
+        raise RetrievalEvalError("unsupported_schema", f"{subject} must use schema_version in {{{versions}}}")
 
 
 def _nonempty_string(value: object, code: str, message: str) -> str:
@@ -979,6 +1131,46 @@ def _normalise_relative_path(value: object, case_id: str) -> str:
 
 def _mean_or_none(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
+
+
+def _telemetry_event_count(root: Path) -> int | None:
+    database = root / ".llm-wiki" / "state.sqlite3"
+    if not database.is_file():
+        return None
+    try:
+        with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
+            return int(connection.execute("SELECT count(*) FROM query_telemetry").fetchone()[0])
+    except (OSError, sqlite3.Error):
+        return None
+
+
+def _evaluation_side_effects(
+    vault_before: Mapping[str, Any],
+    vault_after: Mapping[str, Any],
+    telemetry_before: int | None,
+    telemetry_after: int | None,
+    index_before: Mapping[str, Any],
+    index_after: Mapping[str, Any],
+) -> dict[str, Any]:
+    vault_unchanged = vault_before.get("value") == vault_after.get("value")
+    telemetry_created = telemetry_before is None and telemetry_after is not None
+    telemetry_unchanged = not telemetry_created and (telemetry_before is None or telemetry_before == telemetry_after)
+    index_unchanged = (
+        index_before.get("code") == index_after.get("code")
+        and index_before.get("fingerprint") == index_after.get("fingerprint")
+        and index_before.get("state") == index_after.get("state")
+    )
+    return {
+        "vault_unchanged": vault_unchanged,
+        "telemetry_unchanged": telemetry_unchanged,
+        "telemetry_created": telemetry_created,
+        "telemetry_before": telemetry_before,
+        "telemetry_after": telemetry_after,
+        "index_unchanged": index_unchanged,
+        "index_before": {key: index_before.get(key) for key in ("code", "state", "fingerprint", "schema_version")},
+        "index_after": {key: index_after.get(key) for key in ("code", "state", "fingerprint", "schema_version")},
+        "clean": vault_unchanged and telemetry_unchanged and index_unchanged,
+    }
 
 
 def _finite_number(value: object) -> float | None:

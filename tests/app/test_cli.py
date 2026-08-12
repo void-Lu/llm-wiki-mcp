@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import shutil
 from pathlib import Path
 
@@ -210,6 +211,36 @@ def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys:
     assert output["gate"] is None
     assert Path(output["reports"]["json"]).is_file()
     assert Path(output["reports"]["markdown"]).is_file()
+
+
+def test_retrieval_gold_sample_cli_writes_redacted_template(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    vault = _make_vault(tmp_path / "vault")
+    database = vault / ".llm-wiki" / "state.sqlite3"
+    database.parent.mkdir()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE query_telemetry("
+            "query_hash TEXT NOT NULL, normalized_query_redacted TEXT NOT NULL, at TEXT NOT NULL, "
+            "expires_at TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, passage_ids TEXT NOT NULL, "
+            "fallback_level TEXT NOT NULL, token_count INTEGER NOT NULL, latency_ms REAL NOT NULL, "
+            "outcome TEXT NOT NULL DEFAULT 'completed')"
+        )
+        for index in range(4):
+            connection.execute(
+                "INSERT INTO query_telemetry VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f"hash-{index}", f"query {index}", "2026-08-11", "2026-12-31", "knowledge", "", "", "none", 0, 1.0, "completed"),
+            )
+        connection.commit()
+    output_dir = tmp_path / "gold"
+
+    exit_code = main(["retrieval-gold-sample", "--vault", str(vault), "--output-dir", str(output_dir), "--count", "4"])
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["count"] == 4
+    assert (output_dir / "gold-template.jsonl").is_file()
+    assert (output_dir / "gold-template.manifest.json").is_file()
 
 
 def test_vector_status_is_read_only_and_reports_missing_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
