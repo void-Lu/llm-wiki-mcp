@@ -22,7 +22,7 @@ PAGE_WEAK_HIT_LIMIT = 3
 class RecoveryCondition:
     """The branch-specific evidence decision supplied by the pipeline."""
 
-    level: Literal["none", "capsule", "raw"] = "none"
+    level: Literal["none", "raw"] = "none"
     reasons: tuple[str, ...] = ()
     stats_score: Literal["hit", "item"] = "hit"
 

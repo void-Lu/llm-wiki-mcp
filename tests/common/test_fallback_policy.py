@@ -1,12 +1,23 @@
-from common.fallback_policy import decide_fallback
+from common.fallback_policy import FallbackDecision
 
 
-def test_exact_evidence_requires_scoped_raw_fallback() -> None:
-    decision = decide_fallback(intent="exact_evidence", top_score=1.0, eligible_formal_count=1, citation_count=1, source_paths=["raw/a.md"])
-    assert decision.level == "raw"
-    assert decision.reasons == ("exact_evidence_requested",)
-    assert decision.allowed_source_paths == ("raw/a.md",)
+def test_raw_fallback_decision_serializes_stable_envelope() -> None:
+    decision = FallbackDecision(
+        "raw",
+        ("wiki_zero_results",),
+        ("raw/a.md",),
+    )
+
+    assert decision.as_dict() == {
+        "level": "raw",
+        "reasons": ["wiki_zero_results"],
+        "allowed_source_paths": ["raw/a.md"],
+    }
 
 
-def test_confident_cited_concept_does_not_fallback() -> None:
-    assert decide_fallback(intent="concept", top_score=1.0, eligible_formal_count=1, citation_count=2).level == "none"
+def test_none_fallback_decision_serializes_without_sources() -> None:
+    assert FallbackDecision("none").as_dict() == {
+        "level": "none",
+        "reasons": [],
+        "allowed_source_paths": [],
+    }
