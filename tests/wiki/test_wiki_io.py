@@ -166,6 +166,33 @@ def test_write_wiki_page_rejects_path_escape(tmp_path: Path):
     assert exc_info.value.code == "path_escape"
 
 
+def test_write_wiki_page_rejects_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    outside = tmp_path / "outside"
+    create_wiki_root(root)
+    outside.mkdir()
+    link = root / "wiki/concepts/linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(WikiWriteError) as exc_info:
+        write_wiki_page(
+            root,
+            WikiPage(
+                relative_path=Path("wiki/concepts/linked/escape.md"),
+                frontmatter={"generated": True},
+                title="Escape",
+                body="bad",
+            ),
+        )
+
+    assert exc_info.value.code == "path_escape"
+    assert str(exc_info.value) == "resolved page path escapes wiki root"
+    assert not (outside / "escape.md").exists()
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [

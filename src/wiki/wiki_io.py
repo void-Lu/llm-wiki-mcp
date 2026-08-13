@@ -10,7 +10,7 @@ from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy
 from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.wiki_models import WikiPage
-from wiki.wiki_paths import WikiPathError, translate_path_error, validate_wiki_page_path
+from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
 
 
 class WikiWriteError(ValueError):
@@ -87,9 +87,10 @@ def prepare_wiki_page(
 
     root = Path(vault_root).expanduser().resolve()
     relative_path = _validate_relative_path(Path(page.relative_path), allow_navigation_index=allow_navigation_index)
-    target = (root / relative_path).resolve()
-    if not target.is_relative_to(root):
-        raise WikiWriteError("path_escape", "resolved page path escapes wiki root")
+    try:
+        target = resolve_within_root(root, relative_path)
+    except WikiPathError as exc:
+        raise WikiWriteError(translate_path_error(exc.code, "io"), "resolved page path escapes wiki root") from exc
     if target.exists() and overwrite_generated_only:
         existing_frontmatter, _ = split_frontmatter(target.read_text(encoding="utf-8"))
         if existing_frontmatter.get("generated") is not True:
