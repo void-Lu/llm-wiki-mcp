@@ -18,6 +18,7 @@ from wiki.wiki_io import read_markdown_page, refresh_page_retrieval
 from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
+from wiki.wiki_paths import WikiPathError, validate_wiki_page_path
 
 
 Projection = Callable[[], Mapping[str, object] | None]
@@ -93,7 +94,7 @@ class PageMutationCoordinator:
         operation = self.store.get_operation(operation_id)
         if operation is None:
             return {"ok": False, "code": "operation_not_found"}
-        target = self._target(operation.page_path)
+        target = self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source")
         current_hash = _hash_if_exists(target)
         expected_base = operation.base_hash if expected_hash is None else expected_hash
         if current_hash != expected_base:
@@ -188,7 +189,10 @@ class PageMutationCoordinator:
             return {"ok": False, "code": "operation_not_found"}
         if operation.state == "completed":
             return {"ok": True, "state": "completed", "operation_id": operation_id}
-        classification = self._classify_disk(operation, self._target(operation.page_path))
+        classification = self._classify_disk(
+            operation,
+            self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source"),
+        )
         if classification == "intended":
             try:
                 self.store.set_operation_state(operation_id, "page_committed")
@@ -246,7 +250,7 @@ class PageMutationCoordinator:
     ) -> dict[str, Projection]:
         """Build the projection set selected by the operation's source profile."""
 
-        target = self._target(operation.page_path)
+        target = self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source")
         if not target.is_file():
             return {
                 stage: (lambda: {"ok": False, "code": "page_not_found"})
@@ -502,9 +506,16 @@ class PageMutationCoordinator:
         except Exception:
             pass
 
-    def _target(self, page_path: str) -> Path:
-        relative = normalize_vault_relative(page_path)
-        target = (self.root / Path(*relative.split("/"))).resolve()
+    def _target(self, page_path: str, *, allow_raw_source: bool = False) -> Path:
+        if allow_raw_source:
+            normalized = normalize_vault_relative(page_path)
+            relative = Path(*normalized.split("/"))
+        else:
+            try:
+                relative = validate_wiki_page_path(page_path, allow_navigation_index=False)
+            except WikiPathError as exc:
+                raise PageMutationError(exc.code) from exc
+        target = (self.root / relative).resolve()
         if not target.is_relative_to(self.root):
             raise PageMutationError("path_escape")
         return target

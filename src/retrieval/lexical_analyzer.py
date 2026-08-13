@@ -8,12 +8,6 @@ from dataclasses import dataclass
 
 _LATIN_OR_CODE = re.compile(r"[a-z0-9_]+")
 _CJK_RUN = re.compile(r"[一-鿿]+")
-_QUALIFIED_CODE = re.compile(
-    r"(?<![a-z0-9_])([a-z][a-z0-9_]*)/"
-    r"([a-z][a-z0-9_-]*(?:/[a-z][a-z0-9_-]*)*)"
-    r"(?![a-z0-9_/])",
-    re.I,
-)
 _QUALIFIED_IDENTIFIER = re.compile(
     r"(?<![a-z0-9_])(?P<prefix>[a-z][a-z0-9.]*)"
     r"(?P<separator>/)"
@@ -393,18 +387,6 @@ def has_qualified_identifier(text: str) -> bool:
     if extract_qualified_identifiers(text):
         return True
     return is_safe_compact_qualified_identifier(text)
-
-
-def module_qualified(text: str) -> bool:
-    """True when every slash-qualified prefix is a single-letter namespace.
-
-    ``N/record`` is a SuiteScript module identifier and deserves the dedicated
-    qualified-code recovery path; ``List/Record`` is a NetSuite field-type
-    label and must fall back to ordinary multilingual recovery instead.
-    """
-
-    matches = _QUALIFIED_CODE.findall(text)
-    return bool(matches) and all(len(prefix.casefold()) == 1 for prefix, _ in matches)
 
 
 def identifier_phrases(text: str) -> list[str]:

@@ -120,7 +120,6 @@ def save_obsidian_note(
     status: str | None = None,
     filename: str | None = None,
     overwrite: bool = False,
-    auto_index: bool = True,
     vault_root: str | Path | None = None,
     chat_metadata: dict[str, Any] | None = None,
     chat_derived: bool = False,

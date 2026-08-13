@@ -117,7 +117,12 @@ def test_plan_is_consumed_before_projection_failure_and_replay_is_already_applie
 
     replay = apply_update(tmp_path, "wiki/concepts/general/a.md", "new", plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
     assert replay["ok"] is True and replay["state"] == "already_applied"
+    assert replay["repair_action"] == "repair_page_operation"
     assert page.read_bytes() == committed
+
+    drift = apply_update(tmp_path, "wiki/concepts/general/a.md", "changed", plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
+    assert drift["ok"] is False
+    assert drift["code"] == "plan_intent_drift"
 
 
 def test_preview_and_apply_reject_invalid_sources_before_writes(tmp_path) -> None:

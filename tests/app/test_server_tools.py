@@ -674,7 +674,7 @@ def test_write_note_forwards_related_pages_and_sources(monkeypatch: pytest.Monke
         calls.update(kwargs)
         return {"ok": True}
 
-    monkeypatch.setattr("app.server.wiki_write_note_tool", fake_writer)
+    monkeypatch.setattr("app.server.run_write_note", fake_writer)
     related_pages = [{"path": "wiki/concepts/related.md", "title": "Related"}]
     sources = ["raw/sources/reference.txt"]
 
@@ -692,7 +692,6 @@ def test_write_note_forwards_related_pages_and_sources(monkeypatch: pytest.Monke
     assert calls["related_pages"] == related_pages
     assert calls["sources"] == sources
     assert calls["vault_root"] == str(root)
-    assert "auto_index" not in calls
 
 
 def test_write_note_canonical_alias_wins_and_legacy_alias_is_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -704,7 +703,7 @@ def test_write_note_canonical_alias_wins_and_legacy_alias_is_fallback(monkeypatc
         calls.update(kwargs)
         return {"ok": True}
 
-    monkeypatch.setattr("app.server.wiki_write_note_tool", fake_writer)
+    monkeypatch.setattr("app.server.run_write_note", fake_writer)
 
     result = wiki_write_note(
         title="Title",
@@ -717,7 +716,6 @@ def test_write_note_canonical_alias_wins_and_legacy_alias_is_fallback(monkeypatc
     assert result == {"ok": True}
     assert calls["note_type"] == "knowledge"
     assert calls["vault_root"] == str(root)
-    assert "auto_index" not in calls
 
 
 def test_update_forwards_related_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

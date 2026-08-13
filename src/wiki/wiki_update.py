@@ -15,7 +15,7 @@ from wiki.page_mutation import PageMutationCoordinator
 from wiki.atomic_file import sha256_file
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
-from wiki.update_plan_store import UpdatePlanError, UpdatePlanStore
+from wiki.update_plan_store import UpdatePlan, UpdatePlanError, UpdatePlanStore
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
@@ -119,16 +119,15 @@ def apply_update(
     plan_store = UpdatePlanStore(str(root)) if plan_id else None
     preflight_plan = plan_store.get(plan_id) if plan_store is not None and plan_id else None
     if preflight_plan is not None and preflight_plan.state == "consumed":
-        replay_intent = _plan_id(page_path, preflight_plan.base_hash, incoming_body, incoming)
-        if replay_intent == preflight_plan.intent_hash:
-            replay: dict[str, Any] = {"ok": True, "state": "already_applied", "already_applied": True, "operation_id": preflight_plan.operation_id, "page_path": page_path}
-            if preflight_plan.operation_id:
-                assert plan_store is not None
-                operation = plan_store.store.get_operation(preflight_plan.operation_id)
-                if operation is not None and operation.state != "completed":
-                    replay["repair_action"] = "repair_page_operation"
-            return _attach_related_page_skips(replay, related_pages, related_pages_skipped)
-        return _attach_related_page_skips({"ok": False, "code": "plan_intent_drift"}, related_pages, related_pages_skipped)
+        replay = _replay_consumed_plan(
+            plan_store,
+            preflight_plan,
+            page_path=page_path,
+            incoming_body=incoming_body,
+            incoming=incoming,
+            preflight_base_hash=preflight_plan.base_hash,
+        )
+        return _attach_related_page_skips(replay, related_pages, related_pages_skipped)
     structural_change = bool(incoming) or related_pages is not None
     if structural_change and not plan_id:
         return _attach_related_page_skips({"ok": False, "code": "update_plan_required"}, related_pages, related_pages_skipped)
@@ -174,11 +173,13 @@ def apply_update(
         if existing_plan is None:
             return _attach_related_page_skips({"ok": False, "code": "plan_unknown"}, related_pages, related_pages_skipped)
         if existing_plan.state == "consumed":
-            replay: dict[str, Any] = {"ok": True, "state": "already_applied", "already_applied": True, "operation_id": existing_plan.operation_id, "page_path": page_path}
-            if existing_plan.operation_id:
-                operation = plan_store.store.get_operation(existing_plan.operation_id)
-                if operation is not None and operation.state != "completed":
-                    replay["repair_action"] = "repair_page_operation"
+            replay = _replay_consumed_plan(
+                plan_store,
+                existing_plan,
+                page_path=page_path,
+                incoming_body=incoming_body,
+                incoming=incoming,
+            )
             return _attach_related_page_skips(replay, related_pages, related_pages_skipped)
         if existing_plan.state == "expired":
             return _attach_related_page_skips({"ok": False, "code": "plan_expired"}, related_pages, related_pages_skipped)
@@ -257,6 +258,40 @@ def apply_update(
     if resolved_sources is not None:
         result["source_hashes"] = source_hash_map(resolved_sources)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
+
+
+def _replay_consumed_plan(
+    plan_store: UpdatePlanStore,
+    consumed_plan: UpdatePlan,
+    *,
+    page_path: str,
+    incoming_body: str,
+    incoming: Mapping[str, Any],
+    preflight_base_hash: str | None = None,
+) -> dict[str, Any]:
+    """生成 consumed plan 重放的稳定响应。
+
+    首次查找发生在 operation prepare 之前，必须重算本地 intent；第二次查找
+    发生在 claim/operation 已确认 intent 之后，因此有意省略这一步 preflight 检查。
+    """
+
+    if preflight_base_hash is not None:
+        replay_intent = _plan_id(page_path, preflight_base_hash, incoming_body, incoming)
+        if replay_intent != consumed_plan.intent_hash:
+            return {"ok": False, "code": "plan_intent_drift"}
+
+    replay: dict[str, Any] = {
+        "ok": True,
+        "state": "already_applied",
+        "already_applied": True,
+        "operation_id": consumed_plan.operation_id,
+        "page_path": page_path,
+    }
+    if consumed_plan.operation_id:
+        operation = plan_store.store.get_operation(consumed_plan.operation_id)
+        if operation is not None and operation.state != "completed":
+            replay["repair_action"] = "repair_page_operation"
+    return replay
 
 
 def _target(root: Path, page_path: str) -> Path | dict[str, Any]:

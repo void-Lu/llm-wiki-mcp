@@ -1490,10 +1490,13 @@ def _store_metadata(
     store: RetrievalIndexStore,
     *,
     snapshot: QueryCorpusSnapshot | None = None,
+    cancellation: QueryCancellationContext | None = None,
 ) -> dict[str, dict[str, Any]]:
     metadata: dict[str, dict[str, Any]] = {}
     pages = snapshot.pages if snapshot is not None else store.page_candidates()
-    for page in pages:
+    for index, page in enumerate(pages):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=16, stage="metadata")
         frontmatter = page.get("frontmatter")
         metadata[str(page["path"])] = dict(frontmatter) if isinstance(frontmatter, Mapping) else {}
     return metadata
@@ -2489,7 +2492,11 @@ def run_query_v2(
         raw_status = candidate_raw_store.status()
         if raw_status.get("ok") and raw_status.get("state") == "fresh":
             raw_snapshot = raw_snapshot or capture_raw_snapshot()
-            raw_metadata = _store_metadata(candidate_raw_store, snapshot=raw_snapshot)
+            raw_metadata = _store_metadata(
+                candidate_raw_store,
+                snapshot=raw_snapshot,
+                cancellation=cancellation,
+            )
             raw_discovery_items = _discovery_source_items(
                 candidate_raw_store,
                 raw_metadata,

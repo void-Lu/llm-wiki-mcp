@@ -7,11 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from common.privacy_policy import LocatorError, normalize_vault_relative
-from wiki.wiki_paths import WikiPathError, safe_segment
+from wiki.source_provenance import SourceProvenanceError, SourceProvenanceResolver
+from wiki.wiki_paths import WikiPathError, validate_wiki_page_path
 from wiki.wikilinks import format_wikilink, iter_wikilinks
 
-_WIKI_PREFIX = "wiki/"
-_RAW_SOURCES_PREFIX = "raw/sources/"
 _REFERENCE_HEADING = "## 参考来源"
 
 
@@ -45,14 +44,10 @@ def build_reference_section(
             continue
         raw_path = item.get("path")
         path_value = raw_path if isinstance(raw_path, str) else str(raw_path or "")
-        normalized, reason = _validated_relative_path(
-            vault_root,
-            path_value,
-            prefix=_WIKI_PREFIX,
-            require_markdown=True,
-        )
+        normalized_path = path_value.replace("\\", "/")
+        normalized, reason = _validated_wiki_page_path(vault_root, path_value)
         if normalized is None:
-            if reason == "path_not_allowed" and _normalize_path(path_value).startswith(_RAW_SOURCES_PREFIX):
+            if normalized_path.startswith("raw/sources/"):
                 reason = "raw_source_use_sources"
             skipped.append({"path": path_value, "reason": reason or "invalid_path"})
             continue
@@ -95,12 +90,7 @@ def validate_raw_sources(
     skipped: list[dict[str, str]] = []
     for item in values:
         path_value = item if isinstance(item, str) else str(item or "")
-        normalized, reason = _validated_relative_path(
-            vault_root,
-            path_value,
-            prefix=_RAW_SOURCES_PREFIX,
-            require_markdown=False,
-        )
+        normalized, reason = _validated_raw_source_path(vault_root, path_value)
         if normalized is None:
             skipped.append({"path": path_value, "reason": reason or "invalid_path"})
             continue
@@ -122,50 +112,34 @@ def skipped_warnings(field: str, skipped: Sequence[Mapping[str, str]]) -> list[s
     return values
 
 
-def _validated_relative_path(
-    root: Path,
-    value: str,
-    *,
-    prefix: str,
-    require_markdown: bool,
-) -> tuple[str | None, str | None]:
-    normalized = _normalize_path(value)
-    if _is_absolute_or_traversal(normalized):
-        return None, "path_escape"
-    if not normalized.startswith(prefix):
-        return None, "path_not_allowed"
-    try:
-        normalized = normalize_vault_relative(normalized)
-    except LocatorError as exc:
-        return None, exc.code
-
-    parts = normalized.split("/")
-    if any(not part or part in {".", ".."} for part in parts):
-        return None, "path_escape"
-    try:
-        for part in parts:
-            safe_segment(part)
-    except WikiPathError as exc:
-        return None, exc.code
-
-    relative = Path(*parts)
-    if require_markdown and relative.suffix != ".md":
+def _validated_wiki_page_path(root: Path, value: str) -> tuple[str | None, str | None]:
+    normalized = value.replace("\\", "/")
+    if not normalized.casefold().endswith(".md"):
         return None, "not_markdown"
-
+    try:
+        relative = validate_wiki_page_path(normalized, allow_navigation_index=False)
+    except WikiPathError as exc:
+        if exc.code in {"path_escape", "invalid_path_component", "empty_segment"}:
+            return None, exc.code
+        return None, "path_not_allowed"
     target = (root / relative).resolve()
     if not target.is_relative_to(root):
         return None, "path_escape"
     if not target.is_file():
         return None, "not_found"
-    return normalized, None
+    return relative.as_posix(), None
 
 
-def _normalize_path(value: str) -> str:
-    return value.replace("\\", "/")
-
-
-def _is_absolute_or_traversal(value: str) -> bool:
-    return value.startswith("/") or (len(value) >= 2 and value[1] == ":") or any(part in {".", ".."} for part in value.split("/"))
+def _validated_raw_source_path(root: Path, value: str) -> tuple[str | None, str | None]:
+    try:
+        resolved = SourceProvenanceResolver(root).resolve(value)
+    except SourceProvenanceError as exc:
+        return None, {
+            "source_not_found": "not_found",
+            "source_not_file": "not_found",
+            "source_path_not_allowed": "path_not_allowed",
+        }.get(exc.code, exc.code)
+    return resolved.relative_path, None
 
 
 def _target_key(target: str) -> str:

@@ -21,12 +21,10 @@ def vault(tmp_path: Path) -> Path:
 
 
 def _save(vault: Path, **kwargs: Any) -> dict[str, object]:
-    auto_index = bool(kwargs.pop("auto_index", False))
     return save_obsidian_note(
         title="测试 Title: RESTlet/同步",
         content="正文内容",
         vault_root=str(vault),
-        auto_index=auto_index,
         **kwargs,
     )
 
@@ -134,7 +132,6 @@ def test_chat_note_does_not_consume_wiki_or_raw_reference_arguments(vault: Path)
         title="Chat note",
         content="## User\n\n问题\n\n## Assistant\n\n回答",
         vault_root=str(vault),
-        auto_index=False,
         chat_metadata={
             "session_id": "chat-writer",
             "summary": "记录结论",
@@ -234,13 +231,8 @@ def test_path_traversal_returns_path_escape(vault: Path, kwargs: dict[str, str])
     assert result["code"] == "path_escape"
 
 
-def test_auto_index_is_ignored_and_returns_null_indexed(vault: Path, monkeypatch: pytest.MonkeyPatch):
-    def fail_index(*args: object, **kwargs: object) -> None:
-        raise AssertionError("RAG index must not run")
-
-    monkeypatch.setattr("wiki.note_writer.run_index_sources", fail_index, raising=False)
-
-    result = _save(vault, note_type="spec", project="project-a", auto_index=True)
+def test_note_write_returns_null_indexed(vault: Path):
+    result = _save(vault, note_type="spec", project="project-a")
 
     assert result["ok"] is True
     assert result["indexed"] is None
@@ -252,7 +244,7 @@ def test_existing_target_overwrite_false_returns_file_exists_and_preserves_bytes
     original = b"original bytes\xff\n"
     target.write_bytes(original)
 
-    result = save_obsidian_note(note_type="spec", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", vault_root=str(vault))
 
     assert result["ok"] is False
     assert result["code"] == "file_exists"
@@ -264,7 +256,7 @@ def test_existing_target_overwrite_true_replaces_content(vault: Path):
     target.parent.mkdir(parents=True)
     target.write_text("Original body", encoding="utf-8")
 
-    result = save_obsidian_note(note_type="spec", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", overwrite=True, vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", overwrite=True, vault_root=str(vault))
 
     assert result["ok"] is True
     assert target.read_text(encoding="utf-8") != "Original body"
@@ -272,7 +264,7 @@ def test_existing_target_overwrite_true_replaces_content(vault: Path):
 
 
 def test_frontmatter_fixed_fields_and_old_fields_absent(vault: Path):
-    result = save_obsidian_note(note_type="spec", title="Spec fields", content="Body", project="project-a", tags=["custom"], related_objects=["salesorder"], related_scripts=["customscript_sync"], status="accepted", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="Spec fields", content="Body", project="project-a", tags=["custom"], related_objects=["salesorder"], related_scripts=["customscript_sync"], status="accepted", vault_root=str(vault))
 
     path = _written_path(vault, result)
     text = path.read_text(encoding="utf-8")
@@ -295,21 +287,21 @@ def test_frontmatter_fixed_fields_and_old_fields_absent(vault: Path):
 
 
 def test_slug_keeps_chinese_and_cleans_punctuation(vault: Path):
-    result = save_obsidian_note(note_type="spec", title="  修复 RESTlet: 订单/同步!!!  ", content="Body", project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="  修复 RESTlet: 订单/同步!!!  ", content="Body", project="project-a", vault_root=str(vault))
 
     assert result["ok"] is True
     assert result["path"] == "wiki/projects/project-a/specs/修复-RESTlet-订单-同步.md"
 
 
 def test_slug_truncates_to_80_characters(vault: Path):
-    result = save_obsidian_note(note_type="spec", title="a" * 100, content="Body", project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="a" * 100, content="Body", project="project-a", vault_root=str(vault))
 
     assert result["ok"] is True
     assert len(Path(str(result["path"])).stem) == 80
 
 
 def test_empty_slug_returns_code(vault: Path):
-    result = save_obsidian_note(note_type="spec", title="/\\:*?\"<>| !!!", content="Body", project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="spec", title="/\\:*?\"<>| !!!", content="Body", project="project-a", vault_root=str(vault))
 
     assert result["ok"] is False
     assert result["code"] == "empty_slug"
@@ -327,7 +319,6 @@ def test_new_note_does_not_migrate_existing_legacy_filename(vault: Path):
         project="project-a",
         filename="New-Title",
         vault_root=str(vault),
-        auto_index=False,
     )
 
     assert result["ok"] is True
@@ -339,7 +330,7 @@ def test_yaml_injection_values_stay_parseable(vault: Path):
     injected_title = "Title with colon: value\n---\n- list item\n&anchor value"
     injected_values = ["plain: colon", "--- marker", "- list syntax", "&anchor-like", "line one\nline two"]
 
-    result = save_obsidian_note(note_type="knowledge", title=injected_title, content="Body", domain="common-errors", tags=injected_values, related_objects=injected_values, related_script_types=injected_values, filename="yaml-injection", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="knowledge", title=injected_title, content="Body", domain="common-errors", tags=injected_values, related_objects=injected_values, related_script_types=injected_values, filename="yaml-injection", vault_root=str(vault))
 
     path = _written_path(vault, result)
     frontmatter, body = _frontmatter_and_body(path)
@@ -355,7 +346,7 @@ def test_yaml_injection_values_stay_parseable(vault: Path):
 def test_redacts_sensitive_body_without_corrupting_frontmatter(vault: Path):
     content = "\n".join(["phone 13800138000", "email person@example.com", "token=secret-token-value", "password: SuperSecret123"])
 
-    result = save_obsidian_note(note_type="troubleshooting", title="Redaction check", content=content, project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="troubleshooting", title="Redaction check", content=content, project="project-a", vault_root=str(vault))
 
     path = _written_path(vault, result)
     frontmatter, body = _frontmatter_and_body(path)
@@ -371,7 +362,7 @@ def test_redacts_sensitive_body_without_corrupting_frontmatter(vault: Path):
 
 
 def test_no_sensitive_body_returns_zero_redactions(vault: Path):
-    result = save_obsidian_note(note_type="researches", title="No redaction", content="普通需求说明，不包含敏感信息。", project="project-a", vault_root=str(vault), auto_index=False)
+    result = save_obsidian_note(note_type="researches", title="No redaction", content="普通需求说明，不包含敏感信息。", project="project-a", vault_root=str(vault))
 
     path = _written_path(vault, result)
     frontmatter, body = _frontmatter_and_body(path)
@@ -399,7 +390,6 @@ def test_related_pages_and_raw_sources_are_written_with_verified_provenance(vaul
         ],
         sources=["raw/sources/reference.txt"],
         vault_root=str(vault),
-        auto_index=False,
     )
 
     path = _written_path(vault, result)
@@ -436,7 +426,7 @@ def test_save_note_requires_explicit_vault_root(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.chdir(cwd_vault)
     monkeypatch.delenv("LLM_WIKI_VAULT_ROOT", raising=False)
 
-    result = save_obsidian_note(note_type="knowledge", title="Runtime Config Note", content="Body", domain="common-errors", auto_index=False)
+    result = save_obsidian_note(note_type="knowledge", title="Runtime Config Note", content="Body", domain="common-errors")
 
     assert result["ok"] is False
     assert result["code"] == "missing_vault_root"
@@ -450,7 +440,6 @@ def test_save_note_strips_duplicate_leading_h1(vault: Path):
         content="# 去重标题\n\n正文内容",
         domain="common-errors",
         vault_root=str(vault),
-        auto_index=False,
     )
 
     path = _written_path(vault, result)
@@ -472,7 +461,6 @@ def test_write_note_returns_wikilink_target_and_normalizes_wikilinks(vault: Path
         content="See [[Target Page]] and [[Nonexistent]] for details.",
         domain="common-errors",
         vault_root=str(vault),
-        auto_index=False,
     )
 
     assert result["ok"] is True

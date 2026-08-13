@@ -6,7 +6,6 @@ from retrieval.lexical_analyzer import (
     identifier_phrase_fts_query,
     identifier_phrase_tokens,
     identifier_phrases,
-    module_qualified,
     parse_qualified_identifier,
     parse_namespace_wildcard,
     qualified_code_fts_query,
@@ -30,14 +29,6 @@ def test_qualified_code_fts_query_or_combines_multiple_matches() -> None:
     assert '"n" AND "record"' in query
     assert '"n record"' in query
     assert '"n search"' in query
-
-
-def test_module_qualified_requires_single_letter_namespace_prefixes() -> None:
-    assert module_qualified("N/record模块有哪些方法？") is True
-    assert module_qualified("N/record module methods") is True
-    assert module_qualified("List/Record字段") is False
-    assert module_qualified("自定义 List/Record 字段关联 Subsidiary") is False
-    assert module_qualified("没有斜杠标识") is False
 
 
 def test_identifier_phrase_fts_query_strict_and_over_latin_tokens() -> None:
@@ -101,7 +92,6 @@ def test_qualified_identifier_supports_nested_slash_segments() -> None:
 
     assert parsed.canonical_id == "n/crypto/certificate"
     assert parsed.name_segments == ("crypto", "certificate")
-    assert module_qualified("N/crypto/certificate") is True
     assert [item.canonical_id for item in extract_qualified_identifiers("N/ui/serverWidget") ] == [
         "n/ui/serverwidget"
     ]

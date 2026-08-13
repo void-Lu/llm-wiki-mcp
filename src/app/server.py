@@ -189,10 +189,6 @@ def wiki_status_tool(vault_root: str) -> dict[str, Any]:
     return run_wiki_status(vault_root)
 
 
-def wiki_write_note_tool(*, note_type: str, title: str, content: str, vault_root: str, **kwargs: Any) -> dict[str, Any]:
-    return run_write_note(note_type=note_type, title=title, content=content, vault_root=vault_root, **kwargs)
-
-
 _TOOL_ANNOTATIONS = {
     "wiki_status": ToolAnnotations(title="Read wiki status", read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
     "wiki_query": ToolAnnotations(title="Query wiki", read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
@@ -300,7 +296,6 @@ def _register(
     content_ref_param: str | None = None,
     filter_param: str | None = None,
     filter_allowed: frozenset[str] | None = None,
-    fallback_aliases: frozenset[str] | None = None,
     budget_param: str | None = None,
 ) -> Any:
     """Register a tool and centralize its boundary normalization pipeline."""
@@ -312,20 +307,16 @@ def _register(
             content_ref_param=content_ref_param,
             filter_param=filter_param,
             filter_allowed=filter_allowed,
-            fallback_aliases=fallback_aliases,
             budget_param=budget_param,
         )
 
     alias_map = dict(aliases or {})
-    fallback_aliases = frozenset(fallback_aliases or ())
 
     @wraps(function)
     def registered(*args: object, **kwargs: object) -> object:
         normalized = dict(kwargs)
         for alias, canonical in alias_map.items():
             if alias not in normalized or normalized[alias] is None:
-                continue
-            if alias in fallback_aliases and normalized.get(canonical):
                 continue
             normalized[canonical] = normalized[alias]
         for alias in alias_map:
@@ -584,7 +575,7 @@ def _run_wiki_query(
     question: str,
     scope: QueryScope,
     project: str | None,
-    filters: dict[str, Any] | None,
+    filters: QueryFilters,
     top_k: int,
     expansion_terms: dict[str, list[str]] | None,
     vault: str | None,
@@ -616,11 +607,7 @@ def _run_wiki_query(
             )
 
         cancellation.set_cancel_handler(record_cancellation)
-    try:
-        typed_filters = QueryFilters.from_mapping(filters)
-    except ValueError as exc:
-        return {"ok": False, "code": "invalid_filters", "error": str(exc)}
-    if typed_filters.type and typed_filters.type.casefold() == "code_fact" and not project:
+    if filters.type and filters.type.casefold() == "code_fact" and not project:
         return {"ok": False, "code": "project_required_for_codegraph", "error": "project is required to query CodeGraph pages"}
     retrieval_mode = "vector" if not settings.lexical_enabled else "hybrid" if settings.embedding.enabled else "lexical"
     try:
@@ -629,7 +616,7 @@ def _run_wiki_query(
             question,
             scope=scope,
             project=project,
-            filters=typed_filters,
+            filters=filters,
             top_k=top_k,
             hard_budget_tokens=settings.context.hard_budget_tokens,
             embedding=settings.embedding,
@@ -696,6 +683,14 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     normalized_expansion, expansion_error = _validate_expansion_terms(expansion_terms)
     if expansion_error:
         return {"ok": False, "code": "invalid_expansion_terms", "error": expansion_error}
+    try:
+        typed_filters = QueryFilters(
+            type=filters.get("type") if filters is not None else None,
+            tags=tuple(filters.get("tags", ())) if filters is not None else (),
+            path_prefix=filters.get("path_prefix") if filters is not None else None,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return {"ok": False, "code": "invalid_filters", "error": "the query filters are invalid"}
     resolution = _registered_resolution()
     execution = resolution.resolved.settings.retrieval.execution
     return _with_timeout(
@@ -703,7 +698,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
             question,
             scope,
             project,
-            filters,
+            typed_filters,
             top_k,
             normalized_expansion,
             vault,
@@ -719,7 +714,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     )
 
 
-@_register(aliases={"noteType": "note_type"}, fallback_aliases=frozenset({"noteType"}))
+@_register()
 def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None, sources: list[str] | None = None) -> dict[str, Any]:
     """Create a manual page, optionally linking adopted Wiki pages and raw sources.
 
@@ -730,10 +725,27 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
     """
     selected_type = note_type
     if not selected_type:
+        selected_type = noteType
+    if not selected_type:
         return {"ok": False, "code": "missing_note_type", "error": "note_type is required"}
     resolution = _registered_resolution()
-    result = wiki_write_note_tool(note_type=selected_type, title=title, content=content, project=project, domain=domain, tags=tags, filename=filename, chat_metadata=chat_metadata, chat_derived=chat_derived, chat_sources=chat_sources, related_pages=related_pages, related_pages_heading=related_pages_heading, sources=sources, overwrite=False, vault_root=str(resolution.root))
-    return result
+    return run_write_note(
+        note_type=selected_type,
+        title=title,
+        content=content,
+        project=project,
+        domain=domain,
+        tags=tags,
+        filename=filename,
+        chat_metadata=chat_metadata,
+        chat_derived=chat_derived,
+        chat_sources=chat_sources,
+        related_pages=related_pages,
+        related_pages_heading=related_pages_heading,
+        sources=sources,
+        overwrite=False,
+        vault_root=str(resolution.root),
+    )
 
 
 @_register()
