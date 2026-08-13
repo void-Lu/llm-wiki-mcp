@@ -689,6 +689,10 @@ def test_v2_reuses_bounded_graph_expansion_without_filter_escape(tmp_path: Path)
     assert "wiki/entities/other.md" not in paths
     neighbor = next(item for item in result["results"] if item["path"] == "wiki/concepts/neighbor.md")
     assert neighbor["scores"]["graph"] > 0
+    debug_item = next(item for item in result["pipeline"]["debug"] if item["path"] == "wiki/concepts/neighbor.md")
+    assert debug_item["fts_rank"] is None
+    assert debug_item["rrf"] == 0.0
+    assert debug_item["graph_reasons"]
 
 
 def test_v2_graph_expansion_requires_every_requested_tag(tmp_path: Path) -> None:

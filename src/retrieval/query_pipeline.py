@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
+from retrieval.candidate_items import candidate_item, with_fusion
 from retrieval.context_packer import ContextPassage, pack_context
 from retrieval.lexical_analyzer import (
     QualifiedIdentifier,
@@ -744,18 +745,7 @@ def _discovery_source_items(
 
     passages = store.passages_for_pages(page_paths, limit_per_page=PAGE_FILL_LIMIT)
     return [
-        {
-            "hit": hit,
-            "fts_rank": None,
-            "title_rank": None,
-            "vector_rank": None,
-            "vector_score": 0.0,
-            "rrf": 0.0,
-            "exact": False,
-            "graph_score": 0.0,
-            "graph_reasons": [],
-            "score": hit.score,
-        }
+        candidate_item(hit, score=hit.score)
         for hit in passages
     ]
 
@@ -1029,20 +1019,7 @@ def _relaxed_recovery_items(
             cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
         if not _eligible(hit, metadata, scope=scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
-        items.append(
-            {
-                "hit": hit,
-                "fts_rank": rank,
-                "title_rank": None,
-                "vector_rank": None,
-                "vector_score": 0.0,
-                "rrf": 0.0,
-                "exact": False,
-                "graph_score": 0.0,
-                "graph_reasons": [],
-                "score": round(hit.score, 12),
-            }
-        )
+        items.append(candidate_item(hit, score=round(hit.score, 12), fts_rank=rank))
     return items, len(hits), ""
 
 
@@ -1173,20 +1150,7 @@ def _raw_recovery_candidates(
                 score += IDENTIFIER_PHRASE_BONUS
             elif any(variant in compact for variants in term_variants.values() for variant in variants):
                 score += IDENTIFIER_PHRASE_BONUS * 0.5
-        raw_items.append(
-            {
-                "hit": hit,
-                "fts_rank": rank,
-                "title_rank": None,
-                "vector_rank": None,
-                "vector_score": 0.0,
-                "rrf": 0.0,
-                "exact": False,
-                "graph_score": 0.0,
-                "graph_reasons": [],
-                "score": score,
-            }
-        )
+        raw_items.append(candidate_item(hit, score=score, fts_rank=rank))
     raw_candidate_items = select_best_per_page(raw_items)
     if raw_candidate_items and raw_lexical_mode != "qualified_code":
         step_counts = _step_counts_for_pages(
@@ -1262,17 +1226,16 @@ def _merge_coverage_items(
         authority = 0.0 if is_raw else min(max(float(item.get("score", 0.0)) / 100.0, 0.0), 0.35)
         fused_score = round(coverage_ratio + source_rrf + authority, 12)
         ranked.append(
-            {
-                **item,
-                "score": fused_score,
-                "coverage_terms": sorted(covered),
-                "coverage_ratio": coverage_ratio,
-                "source_local_rank": source_rank,
-                "source_local_rrf": source_rrf,
-                "fusion_score": fused_score,
-                "fusion_source": "raw" if is_raw else "active",
-                "fusion_local_position": local_rank,
-            }
+            with_fusion(
+                {**item, "score": fused_score},
+                coverage_terms=sorted(covered),
+                coverage_ratio=coverage_ratio,
+                source_local_rank=source_rank,
+                source_local_rrf=source_rrf,
+                fusion_score=fused_score,
+                fusion_source="raw" if is_raw else "active",
+                fusion_local_position=local_rank,
+            )
         )
     ranked.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     return ranked
@@ -2462,7 +2425,7 @@ def run_query_v2(
         cancellation.checkpoint_batch(rank - 1, every=16, stage="fts")
         if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
-        item = ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": rank, "title_rank": None, "vector_rank": None, "vector_score": 0.0})
+        item = ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0, fts_rank=rank))
         item["fts_rank"] = rank
     # A vector hit is identified by passage ID.  Load its existing retrieval
     # projection rather than scanning Markdown, so vector-only recall remains
@@ -2471,7 +2434,7 @@ def run_query_v2(
         cancellation.checkpoint_batch(index, every=16, stage="vector")
         if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
             continue
-        ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0})
+        ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0))
     # A title-only match is deliberately not primary retrieval.  A generic
     # title overlap (such as "script") must not prevent a natural-language
     # question, in any language, from using relaxed lexical recovery.
@@ -2479,7 +2442,7 @@ def run_query_v2(
     expansion_suggestions: list[str] = []
     for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters, snapshot=snapshot, cancellation=cancellation), 1):
         cancellation.checkpoint_batch(rank - 1, every=16, stage="vector")
-        ranked.setdefault(hit.passage_id, {"hit": hit, "fts_rank": None, "title_rank": rank, "vector_rank": None, "vector_score": 0.0})
+        ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0, title_rank=rank))
         ranked[hit.passage_id]["title_rank"] = rank
     for index, item in enumerate(ranked.values()):
         cancellation.checkpoint_batch(index, every=16, stage="vector")
@@ -2525,7 +2488,14 @@ def run_query_v2(
     for index, hit in enumerate(graph_passages):
         cancellation.checkpoint_batch(index, every=16, stage="graph")
         candidate = graph_candidates[hit.page_path]
-        scored.append({"hit": hit, "fts_rank": None, "title_rank": None, "vector_rank": None, "vector_score": 0.0, "rrf": 0.0, "exact": False, "graph_score": candidate.graph_score, "graph_reasons": list(candidate.rank_breakdown.graph_reasons), "score": candidate.total_score})
+        scored.append(
+            candidate_item(
+                hit,
+                score=candidate.total_score,
+                graph_score=candidate.graph_score,
+                graph_reasons=list(candidate.rank_breakdown.graph_reasons),
+            )
+        )
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     # Retrieval is page-first: the public result list keeps one best passage
     # per page, while the internal pack is assembled page-by-page in reading
