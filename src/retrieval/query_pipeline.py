@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
 from retrieval.candidate_items import candidate_item, with_fusion
+from retrieval.body_budget import PAGE_FILL_LIMIT, result_floor_budget
 from retrieval.context_packer import ContextPassage, pack_context
 from retrieval.lexical_analyzer import (
     QualifiedIdentifier,
@@ -54,7 +55,6 @@ RAW_FALLBACK_LIMIT = 20
 RAW_FALLBACK_CANDIDATE_LIMIT = 160
 IDENTIFIER_PHRASE_BONUS = 20.0
 IDENTIFIER_PHRASE_CANDIDATES = 200
-PAGE_FILL_LIMIT = 500
 ADAPTIVE_EXPAND_MAX = 40
 ADAPTIVE_SCORE_RATIO = 0.9
 MAX_ADAPTIVE_SCORE_RATIO = 0.7
@@ -2357,7 +2357,7 @@ def run_query_v2(
     status = store.status()
     index_warnings = ["index_stale"] if status.get("ok") and status.get("state") == "stale" else []
     if not status.get("ok"):
-        k_budget = min(hard_budget_tokens, 400 * top_k)
+        k_budget = result_floor_budget(top_k, hard_budget_tokens)
         return {
             "ok": True,
             "code": str(status.get("code") or "index_unavailable"),
@@ -2618,26 +2618,18 @@ def run_query_v2(
         )
         for item in public_context_items
     ]
-    k_budget = min(hard_budget_tokens, 400 * top_k)
+    k_budget = result_floor_budget(top_k, hard_budget_tokens)
     cancellation.checkpoint("context")
     packed: dict[str, Any] = (
         pack_context(passages, hard_limit=hard_budget_tokens, intent=intent, budget_scale=k_budget)
         if include_context_pack
         else {"passages": [], "citations": [], "budget": {"total": k_budget, "used": 0, "omitted": 0}}
     )
-    packed_by_path: dict[str, dict[str, Any]] = {}
-    for item in packed.get("passages", []):
-        if not isinstance(item, dict):
-            continue
-        path = str(item.get("path") or "")
-        if not path:
-            continue
-        previous = packed_by_path.get(path)
-        if previous is None:
-            packed_by_path[path] = dict(item)
-            continue
-        previous["content"] = f"{previous.get('content', '')}\n\n{item.get('content', '')}".strip()
-        previous["tokens"] = int(previous.get("tokens") or 0) + int(item.get("tokens") or 0)
+    packed_passages = [
+        item
+        for item in packed.get("passages", [])
+        if isinstance(item, dict)
+    ]
     contains_raw = any(item["hit"].source_kind == "raw" for item in selected)
     # Recovery owns the final fallback envelope as well as the intermediate
     # context state.  Keep the public payload projection here, but do not
@@ -2663,7 +2655,14 @@ def run_query_v2(
             "metadata": result_metadata,
         }
         if include_content:
-            context = packed_by_path.get(hit.page_path)
+            context = next(
+                (
+                    packed_item
+                    for packed_item in packed_passages
+                    if str(packed_item.get("path") or "") == hit.page_path
+                ),
+                None,
+            )
             if context:
                 result["content"] = context.get("content", "")
                 result["tokens"] = context.get("tokens", 0)

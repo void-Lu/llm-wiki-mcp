@@ -10,14 +10,16 @@ from typing import Any, Literal
 
 from retrieval.context_packer import estimate_response_tokens
 from retrieval.candidate_items import candidate_item
+from retrieval.body_budget import (
+    PAGE_FILL_LIMIT,
+    PAGE_FULL_FILL_MIN_RATIO,
+    PAGE_TOKEN_BUDGET,
+    PAGE_WEAK_HIT_LIMIT,
+)
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 
 
-PAGE_FILL_LIMIT = 500
-PAGE_TOKEN_BUDGET = 2_400
-PAGE_FULL_FILL_MIN_RATIO = 0.6
-PAGE_WEAK_HIT_LIMIT = 3
 FRESHNESS_BONUS_MAX = 12.0
 FRESHNESS_DECAY_DAYS = 90
 STEP_BONUS_MAX = 4.0
