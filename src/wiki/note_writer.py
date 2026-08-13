@@ -10,7 +10,7 @@ from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_r
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page
 from wiki.wiki_models import WikiPage
-from wiki.wiki_paths import WikiPathError, create_wiki_root, safe_segment, slug
+from wiki.wiki_paths import WikiPathError, create_wiki_root, resolve_within_root, safe_segment, slug, translate_path_error
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 from wiki.reference_section import build_reference_section, skipped_warnings
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
@@ -34,7 +34,7 @@ def _filename(title: str, filename: str | None) -> tuple[str | None, dict[str, A
     try:
         safe_segment(value)
     except WikiPathError as exc:
-        code = "path_escape" if exc.code == "path_escape" else "invalid_filename"
+        code = translate_path_error(exc.code, "note_filename")
         return None, _error(code, "filename must stay inside the target directory" if code == "path_escape" else "filename contains a Windows-invalid path component")
     if not value.lower().endswith(".md"):
         value = f"{value}.md"
@@ -49,9 +49,10 @@ def _required_segment(value: str | None, missing_code: str, label: str) -> tuple
     try:
         return safe_segment(value), None
     except WikiPathError as exc:
-        if exc.code == "path_escape":
+        code = translate_path_error(exc.code, "note_segment")
+        if code == "path_escape":
             return None, _error("path_escape", f"{label} must be a single path segment")
-        return None, _error("invalid_path_component", f"{label} contains a Windows-invalid path component")
+        return None, _error(code, f"{label} contains a Windows-invalid path component")
 
 
 def _known_or_existing(value: str, known_values: set[str], directory: Path) -> dict[str, Any] | None:
@@ -222,9 +223,10 @@ def save_obsidian_note(
         relative_path = Path("wiki") / ("entities" if note_type == "entity" else "concepts") / domain_value / name
         domain = domain_value
 
-    target = (root / relative_path).resolve()
-    if not target.is_relative_to(root):
-        return _error("path_escape", "resolved note path escapes vault_root")
+    try:
+        target = resolve_within_root(root, relative_path)
+    except WikiPathError as exc:
+        return _error(translate_path_error(exc.code, "note_segment"), "resolved note path escapes vault_root")
     if target.exists() and not overwrite:
         return _error("file_exists", "target note already exists")
 

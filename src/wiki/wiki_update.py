@@ -18,7 +18,7 @@ from wiki.update_plan_store import UpdatePlanError, UpdatePlanStore
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
-from wiki.wiki_paths import WikiPathError, validate_wiki_page_path
+from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
 
 LOCKED_FIELDS = {"type", "concept_id", "entity_id", "entity_type", "created", "source_path", "source_hash"}
 REMOVED_FIELDS = {"source_capsules", "source_capsule"}
@@ -193,12 +193,9 @@ def apply_update(
 def _target(root: Path, page_path: str) -> Path | dict[str, Any]:
     try:
         relative = validate_wiki_page_path(page_path, allow_navigation_index=False)
+        path = resolve_within_root(root, relative)
     except WikiPathError as exc:
-        code = "update_path_not_allowed" if exc.code in {"navigation_index_forbidden", "invalid_wiki_path"} else exc.code
-        return {"ok": False, "code": code}
-    path = (root / relative).resolve()
-    if not path.is_relative_to(root):
-        return {"ok": False, "code": "path_escape"}
+        return {"ok": False, "code": translate_path_error(exc.code, "update")}
     return path
 
 

@@ -10,7 +10,7 @@ from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy
 from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.wiki_models import WikiPage
-from wiki.wiki_paths import WikiPathError, validate_wiki_page_path
+from wiki.wiki_paths import WikiPathError, translate_path_error, validate_wiki_page_path
 
 
 class WikiWriteError(ValueError):
@@ -179,8 +179,7 @@ def _validate_relative_path(path: Path, *, allow_navigation_index: bool = False)
     try:
         return validate_wiki_page_path(path, allow_navigation_index=allow_navigation_index)
     except WikiPathError as exc:
-        code = "invalid_wiki_path" if exc.code == "navigation_index_forbidden" else exc.code
-        raise WikiWriteError(code, str(exc)) from exc
+        raise WikiWriteError(translate_path_error(exc.code, "io"), str(exc)) from exc
 
 
 def _extract_title(body: str) -> str:

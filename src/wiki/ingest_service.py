@@ -11,7 +11,7 @@ from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter, TEXT_SO
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
 from wiki.source_provenance import source_path_key
-from wiki.wiki_paths import safe_segment
+from wiki.wiki_paths import WikiPathError, safe_segment, translate_path_error
 
 def sync_retrieval_index(vault_root: str | Path, *, full_build: bool = False) -> dict[str, object]:
     """Shared post-write projection boundary for MCP, batch, and adapters."""
@@ -44,12 +44,16 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
         type_value = safe_segment(source_type)
         name_value = safe_segment(source_name)
         project_value = safe_segment(project) if project else "default"
-    except ValueError as exc:
-        return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": str(exc)}
+    except WikiPathError as exc:
+        return {"ok": False, "code": translate_path_error(exc.code, "ingest"), "error": str(exc)}
     try:
         target_name = safe_segment(source.name)
-    except ValueError as exc:
-        return {"ok": False, "code": getattr(exc, "code", "invalid_path_component"), "error": "source filename is not a safe target component"}
+    except WikiPathError as exc:
+        return {
+            "ok": False,
+            "code": translate_path_error(exc.code, "ingest"),
+            "error": "source filename is not a safe target component",
+        }
     try:
         snapshot = IngestSnapshotter().snapshot(source)
     except IngestSnapshotError as exc:

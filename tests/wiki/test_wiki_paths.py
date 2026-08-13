@@ -4,7 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from wiki.wiki_paths import WikiPathError, WikiPaths, create_wiki_root, safe_segment, slug
+from wiki.wiki_paths import (
+    WikiPathError,
+    WikiPaths,
+    create_wiki_root,
+    resolve_within_root,
+    safe_segment,
+    slug,
+    translate_path_error,
+)
 
 
 EXPECTED_DIRS = [
@@ -34,6 +42,104 @@ EXPECTED_FILES = [
     "wiki/entities/index.md",
     "archives/log.md",
 ]
+
+PATH_ERROR_CODES = (
+    "path_escape",
+    "invalid_wiki_path",
+    "navigation_index_forbidden",
+    "invalid_path_component",
+    "empty_segment",
+)
+EXPECTED_SURFACE_CODES = {
+    "update": (
+        "path_escape",
+        "update_path_not_allowed",
+        "update_path_not_allowed",
+        "invalid_path_component",
+        "empty_segment",
+    ),
+    "note_filename": (
+        "path_escape",
+        "invalid_wiki_path",
+        "navigation_index_forbidden",
+        "invalid_filename",
+        "invalid_filename",
+    ),
+    "note_segment": (
+        "path_escape",
+        "invalid_wiki_path",
+        "navigation_index_forbidden",
+        "invalid_path_component",
+        "invalid_path_component",
+    ),
+    "reference": (
+        "path_escape",
+        "path_not_allowed",
+        "path_not_allowed",
+        "invalid_path_component",
+        "empty_segment",
+    ),
+    "io": (
+        "path_escape",
+        "invalid_wiki_path",
+        "invalid_wiki_path",
+        "invalid_path_component",
+        "empty_segment",
+    ),
+    "ingest": PATH_ERROR_CODES,
+    "mutation": PATH_ERROR_CODES,
+    "provenance": PATH_ERROR_CODES,
+}
+
+
+@pytest.mark.parametrize(
+    ("surface", "code", "expected"),
+    [
+        (surface, code, expected)
+        for surface, expected_codes in EXPECTED_SURFACE_CODES.items()
+        for code, expected in zip(PATH_ERROR_CODES, expected_codes, strict=True)
+    ],
+)
+def test_translate_path_error_preserves_each_surface_contract(surface: str, code: str, expected: str) -> None:
+    assert translate_path_error(code, surface) == expected
+
+
+def test_translate_path_error_passes_through_unknown_surface_and_code() -> None:
+    assert translate_path_error("future_code", "update") == "future_code"
+    assert translate_path_error("path_escape", "future_surface") == "path_escape"
+
+
+def test_resolve_within_root_returns_resolved_child(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+
+    assert resolve_within_root(root, Path("wiki/page.md")) == root / "wiki/page.md"
+
+
+def test_resolve_within_root_rejects_logical_escape(tmp_path: Path) -> None:
+    root = (tmp_path / "vault").resolve()
+    root.mkdir()
+
+    with pytest.raises(WikiPathError, match="resolved path escapes vault root") as raised:
+        resolve_within_root(root, Path("../outside.md"))
+
+    assert raised.value.code == "path_escape"
+
+
+def test_resolve_within_root_rejects_symlink_escape(tmp_path: Path) -> None:
+    root = (tmp_path / "vault").resolve()
+    outside = (tmp_path / "outside").resolve()
+    root.mkdir()
+    outside.mkdir()
+    link = root / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(WikiPathError) as raised:
+        resolve_within_root(root, Path("linked/page.md"))
+
+    assert raised.value.code == "path_escape"
 
 
 def test_create_wiki_root_creates_confirmed_directory_structure(tmp_path: Path):

@@ -9,7 +9,7 @@ from typing import Iterable, Mapping
 
 from common.privacy_policy import LocatorError, normalize_vault_relative
 from wiki.ingest_snapshot import FileIdentity, IngestSnapshotError, IngestSnapshotter
-from wiki.wiki_paths import WikiPathError, safe_segment
+from wiki.wiki_paths import WikiPathError, safe_segment, translate_path_error
 
 
 class SourceProvenanceError(ValueError):
@@ -198,7 +198,7 @@ def _normalize_source_locator(value: object) -> str:
         for part in normalized_parts:
             safe_segment(part)
     except WikiPathError as exc:
-        raise SourceProvenanceError(exc.code) from exc
+        raise SourceProvenanceError(translate_path_error(exc.code, "provenance")) from exc
     return normalized
 
 

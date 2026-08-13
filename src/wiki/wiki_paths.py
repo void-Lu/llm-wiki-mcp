@@ -1,3 +1,11 @@
+"""Own Wiki path policy and the templates used to initialize a vault.
+
+This module centralizes logical path validation, per-surface path-error
+translation, and physical vault-escape checks.  ``DEFAULT_SCHEMA_TEXT``,
+``DEFAULT_FILES``, and ``create_wiki_root`` remain here as the owner of the
+vault initialization template.
+"""
+
 from __future__ import annotations
 
 import os
@@ -244,6 +252,49 @@ class WikiPathError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+_SURFACE_CODE_MAPS: dict[str, dict[str, str]] = {
+    "update": {
+        "navigation_index_forbidden": "update_path_not_allowed",
+        "invalid_wiki_path": "update_path_not_allowed",
+    },
+    "note_filename": {
+        "invalid_path_component": "invalid_filename",
+        "empty_segment": "invalid_filename",
+    },
+    "note_segment": {
+        "invalid_path_component": "invalid_path_component",
+        "empty_segment": "invalid_path_component",
+    },
+    "reference": {
+        "invalid_wiki_path": "path_not_allowed",
+        "navigation_index_forbidden": "path_not_allowed",
+    },
+    "io": {"navigation_index_forbidden": "invalid_wiki_path"},
+    "ingest": {},
+    "mutation": {},
+    "provenance": {},
+}
+
+
+def translate_path_error(code: str, surface: str) -> str:
+    """Translate a path code for one public surface.
+
+    Unknown surfaces and codes pass through unchanged, as do surfaces with an
+    explicitly empty mapping.
+    """
+
+    return _SURFACE_CODE_MAPS.get(surface, {}).get(code, code)
+
+
+def resolve_within_root(root: Path, relative: Path) -> Path:
+    """Resolve *relative* below *root* or raise ``path_escape``."""
+
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root):
+        raise WikiPathError("path_escape", f"resolved path escapes vault root: {relative}")
+    return path
 
 
 def is_navigation_index_path(value: str | Path) -> bool:

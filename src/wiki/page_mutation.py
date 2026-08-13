@@ -20,7 +20,7 @@ from wiki.wiki_io import read_markdown_page, refresh_page_retrieval
 from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
-from wiki.wiki_paths import WikiPathError, validate_wiki_page_path
+from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
 
 
 Projection = Callable[[], Mapping[str, object] | None]
@@ -694,11 +694,11 @@ class PageMutationCoordinator:
             try:
                 relative = validate_wiki_page_path(page_path, allow_navigation_index=False)
             except WikiPathError as exc:
-                raise PageMutationError(exc.code) from exc
-        target = (self.root / relative).resolve()
-        if not target.is_relative_to(self.root):
-            raise PageMutationError("path_escape")
-        return target
+                raise PageMutationError(translate_path_error(exc.code, "mutation")) from exc
+        try:
+            return resolve_within_root(self.root, relative)
+        except WikiPathError as exc:
+            raise PageMutationError(translate_path_error(exc.code, "mutation")) from exc
 
     def _invoke(self, stage: str, fault: FaultBarrier | None) -> None:
         (fault or self.fault or fault_barrier)(stage)

@@ -8,7 +8,7 @@ from typing import Any
 
 from common.privacy_policy import LocatorError, normalize_vault_relative
 from wiki.source_provenance import SourceProvenanceError, SourceProvenanceResolver
-from wiki.wiki_paths import WikiPathError, validate_wiki_page_path
+from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
 from wiki.wikilinks import format_wikilink, iter_wikilinks
 
 _REFERENCE_HEADING = "## 参考来源"
@@ -118,13 +118,9 @@ def _validated_wiki_page_path(root: Path, value: str) -> tuple[str | None, str |
         return None, "not_markdown"
     try:
         relative = validate_wiki_page_path(normalized, allow_navigation_index=False)
+        target = resolve_within_root(root, relative)
     except WikiPathError as exc:
-        if exc.code in {"path_escape", "invalid_path_component", "empty_segment"}:
-            return None, exc.code
-        return None, "path_not_allowed"
-    target = (root / relative).resolve()
-    if not target.is_relative_to(root):
-        return None, "path_escape"
+        return None, translate_path_error(exc.code, "reference")
     if not target.is_file():
         return None, "not_found"
     return relative.as_posix(), None
