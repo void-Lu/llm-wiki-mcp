@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from retrieval.retrieval_eval import load_retrieval_dataset
+from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_gold import RetrievalGoldError, finalize_retrieval_gold, sample_retrieval_gold
 
 
@@ -14,35 +15,18 @@ def _telemetry_vault(tmp_path: Path, count: int = 12) -> Path:
     root = tmp_path / "vault"
     (root / "wiki" / "concepts").mkdir(parents=True)
     (root / "wiki" / "concepts" / "invoice.md").write_text("# Invoice\n", encoding="utf-8")
-    database = root / ".llm-wiki" / "state.sqlite3"
-    database.parent.mkdir(parents=True)
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE query_telemetry("
-            "query_hash TEXT NOT NULL, normalized_query_redacted TEXT NOT NULL, at TEXT NOT NULL, "
-            "expires_at TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, passage_ids TEXT NOT NULL, "
-            "fallback_level TEXT NOT NULL, token_count INTEGER NOT NULL, latency_ms REAL NOT NULL, "
-            "outcome TEXT NOT NULL DEFAULT 'completed')"
+    telemetry = QueryTelemetry(root)
+    for index in range(count):
+        query = f"问题 {index}" if index % 2 else f"API N/record {index}"
+        telemetry.record(
+            question=query,
+            scope="knowledge" if index < count - 2 else "auto",
+            project="alpha" if index < count // 2 else None,
+            passage_ids=[] if index % 3 == 0 else ["p1"],
+            fallback_level="none",
+            token_count=0,
+            latency_ms=1.0,
         )
-        for index in range(count):
-            query = f"问题 {index}" if index % 2 else f"API N/record {index}"
-            connection.execute(
-                "INSERT INTO query_telemetry VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    f"hash-{index}",
-                    query,
-                    f"2026-08-11T00:00:{index:02d}Z",
-                    "2026-12-31T00:00:00Z",
-                    "knowledge" if index < count - 2 else "auto",
-                    "alpha" if index < count // 2 else "",
-                    "" if index % 3 == 0 else "p1",
-                    "none",
-                    0,
-                    1.0,
-                    "completed",
-                ),
-            )
-        connection.commit()
     return root
 
 
@@ -69,6 +53,29 @@ def test_sampling_reports_coverage_gap_without_faking_it(tmp_path: Path) -> None
     assert result["coverage"]["gaps"]
     manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
     assert manifest["sampling"]["coverage_gaps"]
+
+
+def test_sampling_supports_legacy_telemetry_without_outcome(tmp_path: Path) -> None:
+    root = tmp_path / "legacy-vault"
+    (root / "wiki").mkdir(parents=True)
+    database = root / ".llm-wiki" / "state.sqlite3"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE query_telemetry("
+            "query_hash TEXT NOT NULL, normalized_query_redacted TEXT NOT NULL, at TEXT NOT NULL, "
+            "expires_at TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, passage_ids TEXT NOT NULL, "
+            "fallback_level TEXT NOT NULL, token_count INTEGER NOT NULL, latency_ms REAL NOT NULL)"
+        )
+        for index in range(4):
+            connection.execute(
+                "INSERT INTO query_telemetry VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (f"hash-{index}", f"query {index}", "2026-08-11", "2026-12-31", "knowledge", "", "", "none", 0, 1.0),
+            )
+        connection.commit()
+
+    result = sample_retrieval_gold(root, tmp_path / "gold", count=4)
+    assert result["count"] == 4
 
 
 def test_finalize_rejects_incomplete_or_review_required_annotations(tmp_path: Path) -> None:

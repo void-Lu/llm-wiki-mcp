@@ -5,12 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
-from retrieval.query_telemetry import redact_query
+from retrieval.query_telemetry import TelemetryReadError, read_completed_candidates, redact_query
 from retrieval.retrieval_eval import RetrievalEvalError, parse_evaluation_filters, vault_fingerprint
 from wiki.wiki_paths import filesystem_path
 
@@ -178,35 +177,18 @@ def finalize_retrieval_gold(
 
 
 def _read_candidates(root: Path) -> list[TelemetryCandidate]:
-    database = root / ".llm-wiki" / "state.sqlite3"
-    if not database.is_file():
-        raise RetrievalGoldError("telemetry_missing", "query telemetry database does not exist")
     try:
-        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
-    except sqlite3.Error as exc:
-        raise RetrievalGoldError("telemetry_unreadable", "query telemetry database could not be opened read-only") from exc
-    try:
-        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(query_telemetry)")}
-        required = {"query_hash", "normalized_query_redacted", "scope", "project", "passage_ids"}
-        if not required.issubset(columns):
-            raise RetrievalGoldError("telemetry_schema_invalid", "query telemetry schema is missing required fields")
-        outcome_expression = "outcome" if "outcome" in columns else "'completed'"
-        rows = connection.execute(
-            "SELECT query_hash, normalized_query_redacted, scope, project, passage_ids, at "
-            f"FROM query_telemetry WHERE {outcome_expression} = 'completed' "
-            "AND normalized_query_redacted IS NOT NULL AND normalized_query_redacted <> ''"
-        ).fetchall()
-    except sqlite3.Error as exc:
-        raise RetrievalGoldError("telemetry_unreadable", "query telemetry could not be read") from exc
-    finally:
-        connection.close()
+        rows = read_completed_candidates(root)
+    except TelemetryReadError as exc:
+        raise RetrievalGoldError(exc.code, str(exc)) from exc
 
     candidates: dict[str, TelemetryCandidate] = {}
     for row in rows:
-        query_hash = str(row[0] or "").strip()
-        query = redact_query(str(row[1] or "")).strip()
-        scope = str(row[2] or "auto").strip() or "auto"
-        project = str(row[3] or "").strip()
+        query_hash = row["query_hash"].strip()
+        query = redact_query(row["normalized_query_redacted"]).strip()
+        scope = row["scope"].strip() or "auto"
+        project = row["project"].strip()
+        passage_ids = row["passage_ids"]
         if not query or scope not in _SCOPE_VALUES:
             continue
         candidate = TelemetryCandidate(
@@ -214,9 +196,9 @@ def _read_candidates(root: Path) -> list[TelemetryCandidate]:
             query=query,
             scope=scope,
             project=project,
-            has_passages=bool(str(row[4] or "").strip()),
-            occurred_at=str(row[5] or ""),
-            candidate_tags=_candidate_tags(query, scope, project, bool(str(row[4] or "").strip())),
+            has_passages=bool(passage_ids.strip()),
+            occurred_at=row["at"],
+            candidate_tags=_candidate_tags(query, scope, project, bool(passage_ids.strip())),
             language=_language(query),
         )
         # Keep one record per query hash/scope/project. Prefer the most recent

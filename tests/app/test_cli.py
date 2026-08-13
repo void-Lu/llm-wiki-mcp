@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import shutil
 from pathlib import Path
 
@@ -9,6 +8,7 @@ import pytest
 import yaml
 
 from app.cli import main
+from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import RetrievalIndexStore
 
 
@@ -215,22 +215,17 @@ def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys:
 
 def test_retrieval_gold_sample_cli_writes_redacted_template(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     vault = _make_vault(tmp_path / "vault")
-    database = vault / ".llm-wiki" / "state.sqlite3"
-    database.parent.mkdir()
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE query_telemetry("
-            "query_hash TEXT NOT NULL, normalized_query_redacted TEXT NOT NULL, at TEXT NOT NULL, "
-            "expires_at TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, passage_ids TEXT NOT NULL, "
-            "fallback_level TEXT NOT NULL, token_count INTEGER NOT NULL, latency_ms REAL NOT NULL, "
-            "outcome TEXT NOT NULL DEFAULT 'completed')"
+    telemetry = QueryTelemetry(vault)
+    for index in range(4):
+        telemetry.record(
+            question=f"query {index}",
+            scope="knowledge",
+            project=None,
+            passage_ids=[],
+            fallback_level="none",
+            token_count=0,
+            latency_ms=1.0,
         )
-        for index in range(4):
-            connection.execute(
-                "INSERT INTO query_telemetry VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (f"hash-{index}", f"query {index}", "2026-08-11", "2026-12-31", "knowledge", "", "", "none", 0, 1.0, "completed"),
-            )
-        connection.commit()
     output_dir = tmp_path / "gold"
 
     exit_code = main(["retrieval-gold-sample", "--vault", str(vault), "--output-dir", str(output_dir), "--count", "4"])

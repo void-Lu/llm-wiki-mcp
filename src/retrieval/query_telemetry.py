@@ -12,10 +12,99 @@ from typing import Iterable
 
 
 _SECRET = re.compile(r"(?i)(?:api[_-]?key|token|password|secret|authorization|cookie)\s*[:=]\s*[^\s]+")
+REQUIRED_CANDIDATE_COLUMNS = frozenset(
+    {
+        "query_hash",
+        "normalized_query_redacted",
+        "scope",
+        "project",
+        "passage_ids",
+    }
+)
+
+
+class TelemetryReadError(ValueError):
+    """A stable error raised by the read-only telemetry projection."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def redact_query(query: str) -> str:
     return _SECRET.sub("[REDACTED]", " ".join(query.split()))
+
+
+def _database_path(root: str | Path) -> Path:
+    return Path(root).expanduser().resolve() / ".llm-wiki" / "state.sqlite3"
+
+
+def read_event_count(root: str | Path) -> int | None:
+    """Read the telemetry event count without creating or migrating storage."""
+
+    database = _database_path(root)
+    if not database.is_file():
+        return None
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+        row = connection.execute("SELECT count(*) FROM query_telemetry").fetchone()
+        return int(row[0]) if row is not None else None
+    except (OSError, sqlite3.Error):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def read_completed_candidates(root: str | Path) -> list[dict[str, str]]:
+    """Read completed, redacted telemetry candidates through the read-only seam."""
+
+    database = _database_path(root)
+    if not database.is_file():
+        raise TelemetryReadError("telemetry_missing", "query telemetry database does not exist")
+
+    connection: sqlite3.Connection | None = None
+    try:
+        try:
+            connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+        except (OSError, sqlite3.Error) as exc:
+            raise TelemetryReadError(
+                "telemetry_unreadable",
+                "query telemetry database could not be opened read-only",
+            ) from exc
+
+        try:
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(query_telemetry)")}
+        except sqlite3.Error as exc:
+            raise TelemetryReadError("telemetry_unreadable", "query telemetry schema could not be read") from exc
+        if not REQUIRED_CANDIDATE_COLUMNS.issubset(columns):
+            raise TelemetryReadError("telemetry_schema_invalid", "query telemetry schema is missing required fields")
+
+        outcome_expression = "outcome" if "outcome" in columns else "'completed'"
+        try:
+            rows = connection.execute(
+                "SELECT query_hash, normalized_query_redacted, scope, project, passage_ids, at "
+                f"FROM query_telemetry WHERE {outcome_expression} = 'completed' "
+                "AND normalized_query_redacted IS NOT NULL AND normalized_query_redacted <> ''"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise TelemetryReadError("telemetry_unreadable", "query telemetry could not be read") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    return [
+        {
+            "query_hash": str(row[0] or ""),
+            "normalized_query_redacted": str(row[1] or ""),
+            "scope": str(row[2] or ""),
+            "project": str(row[3] or ""),
+            "passage_ids": str(row[4] or ""),
+            "at": str(row[5] or ""),
+        }
+        for row in rows
+    ]
 
 
 class QueryTelemetry:
