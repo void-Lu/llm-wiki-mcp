@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from retrieval.context_packer import estimate_response_tokens
+from retrieval.candidate_items import candidate_item
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 
@@ -365,13 +366,13 @@ def _build_page_ordered_context(
     store: RetrievalIndexStore,
     *,
     raw_store: RetrievalIndexStore | None,
-    hit_stats: Mapping[str, Mapping[str, Any]],
-    pool_by_page: Mapping[str, Sequence[Mapping[str, Any]]],
+    page_stats: Mapping[str, Mapping[str, Any]],
+    page_candidates: Mapping[str, Sequence[Mapping[str, Any]]],
     cancellation: QueryCancellationContext,
 ) -> list[dict[str, Any]]:
     """Build the bounded, page-ordered context pack without changing ranking."""
 
-    top_score = max((float(stats.get("max", 0.0)) for stats in hit_stats.values()), default=0.0)
+    top_score = max((float(stats.get("max", 0.0)) for stats in page_stats.values()), default=0.0)
     guaranteed: list[dict[str, Any]] = []
     deep_fill: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -379,7 +380,7 @@ def _build_page_ordered_context(
         cancellation.checkpoint_batch(index, every=1, stage="context")
         hit = sel["hit"]
         page_path = hit.page_path
-        pool = pool_by_page.get(page_path, ())
+        pool = page_candidates.get(page_path, ())
         if not pool:
             continue
         best_items = select_best_per_page(pool)
@@ -393,14 +394,14 @@ def _build_page_ordered_context(
         cancellation.checkpoint_batch(index, every=1, stage="context")
         hit = sel["hit"]
         page_path = hit.page_path
-        stats = hit_stats.get(page_path)
+        stats = page_stats.get(page_path)
         strong_page = (
             stats is None
             or top_score <= 0
             or float(stats.get("max", 0.0)) >= top_score * PAGE_FULL_FILL_MIN_RATIO
         )
         if not strong_page:
-            for item in list(pool_by_page.get(page_path, ()))[:PAGE_WEAK_HIT_LIMIT]:
+            for item in list(page_candidates.get(page_path, ()))[:PAGE_WEAK_HIT_LIMIT]:
                 if item["hit"].passage_id not in seen_ids:
                     seen_ids.add(item["hit"].passage_id)
                     deep_fill.append(dict(item))
@@ -419,18 +420,11 @@ def _build_page_ordered_context(
             page_tokens += item_tokens
             seen_ids.add(page_hit.passage_id)
             deep_fill.append(
-                {
-                    "hit": page_hit,
-                    "fts_rank": sel.get("fts_rank"),
-                    "title_rank": None,
-                    "vector_rank": None,
-                    "vector_score": 0.0,
-                    "rrf": 0.0,
-                    "exact": False,
-                    "graph_score": 0.0,
-                    "graph_reasons": [],
-                    "score": sel.get("score", 0.0),
-                }
+                candidate_item(
+                    page_hit,
+                    score=sel.get("score", 0.0),
+                    fts_rank=sel.get("fts_rank"),
+                )
             )
     cancellation.checkpoint("context")
     return guaranteed + deep_fill
@@ -442,48 +436,38 @@ def assemble_recovery(
     condition: RecoveryCondition,
     store: RetrievalIndexStore,
     cancellation: QueryCancellationContext,
-    candidates: Sequence[Mapping[str, Any]] | None = None,
+    candidates: Sequence[Mapping[str, Any]],
     raw_store: RetrievalIndexStore | None = None,
-    hit_stats: Mapping[str, Mapping[str, Any]] | None = None,
-    pool_by_page: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> RecoveryAssembly:
     """Assemble one recovery state from recall candidates.
 
-    ``candidates`` is the preferred input and makes page statistics/pools a
-    single owner.  The explicit maps remain accepted for callers that already
-    have a prepared projection and keep this seam useful for focused tests.
+    ``candidates`` is the only input for page statistics and candidate pools.
+    The assembler derives those internal projections so every recovery path
+    observes the same minimum candidate contract: ``hit`` (with page path,
+    score and source kind) and, when ``stats_score`` is ``"item"``, ``score``.
     """
 
     cancellation.checkpoint("fallback")
     normalized_selected = [dict(item) for item in selected]
-    if candidates is not None:
-        normalized_candidates = [dict(item) for item in candidates]
-        built_stats: dict[str, dict[str, Any]] = {}
-        built_pool: dict[str, list[dict[str, Any]]] = {}
-        for index, item in enumerate(normalized_candidates):
-            cancellation.checkpoint_batch(index, every=16, stage="fallback")
-            page_path = item["hit"].page_path
-            built_pool.setdefault(page_path, []).append(item)
-            stats = built_stats.setdefault(
-                page_path,
-                {"max": 0.0, "store": "raw" if page_path.startswith("raw/") else "active"},
-            )
-            value = item["score"] if condition.stats_score == "item" else item["hit"].score
-            stats["max"] = max(float(stats["max"]), float(value))
-        normalized_stats = built_stats
-        normalized_pool = built_pool
-    else:
-        normalized_stats = {path: dict(stats) for path, stats in (hit_stats or {}).items()}
-        normalized_pool = {
-            path: [dict(item) for item in items]
-            for path, items in (pool_by_page or {}).items()
-        }
+    normalized_candidates = [dict(item) for item in candidates]
+    page_stats: dict[str, dict[str, Any]] = {}
+    page_candidates: dict[str, list[dict[str, Any]]] = {}
+    for index, item in enumerate(normalized_candidates):
+        cancellation.checkpoint_batch(index, every=16, stage="fallback")
+        page_path = item["hit"].page_path
+        page_candidates.setdefault(page_path, []).append(item)
+        stats = page_stats.setdefault(
+            page_path,
+            {"max": 0.0, "store": "raw" if page_path.startswith("raw/") else "active"},
+        )
+        value = item["score"] if condition.stats_score == "item" else item["hit"].score
+        stats["max"] = max(float(stats["max"]), float(value))
     context_items = _build_page_ordered_context(
         normalized_selected,
         store,
         raw_store=raw_store,
-        hit_stats=normalized_stats,
-        pool_by_page=normalized_pool,
+        page_stats=page_stats,
+        page_candidates=page_candidates,
         cancellation=cancellation,
     )
     raw_paths = [
@@ -500,8 +484,8 @@ def assemble_recovery(
     cancellation.checkpoint("fallback")
     return RecoveryAssembly(
         selected=normalized_selected,
-        hit_stats=normalized_stats,
-        pool_by_page=normalized_pool,
+        hit_stats=page_stats,
+        pool_by_page=page_candidates,
         context_items=context_items,
         fallback=fallback,
     )

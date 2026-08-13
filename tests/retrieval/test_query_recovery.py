@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+from retrieval.candidate_items import CANDIDATE_CORE_KEYS, FUSION_KEYS, candidate_item, with_fusion
 from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext
 from retrieval.query_recovery import (
     FallbackDecision,
@@ -32,18 +34,60 @@ class FakeStore:
 
 
 def _item(path: str, passage_id: str, score: float, *, source_kind: str = "wiki") -> dict[str, object]:
-    return {
-        "hit": PassageHit(passage_id, path, Path(path).stem, (), f"evidence {passage_id}", score, "active", "high", source_kind),
-        "score": score,
-        "fts_rank": 1,
-        "title_rank": None,
-        "vector_rank": None,
-        "vector_score": 0.0,
-        "rrf": 0.0,
-        "exact": False,
-        "graph_score": 0.0,
-        "graph_reasons": [],
-    }
+    return candidate_item(
+        PassageHit(passage_id, path, Path(path).stem, (), f"evidence {passage_id}", score, "active", "high", source_kind),
+        score=score,
+        fts_rank=1,
+    )
+
+
+def test_candidate_item_has_the_canonical_core_shape_and_defaults() -> None:
+    hit = PassageHit("p-1", "wiki/concepts/item.md", "Item", (), "body", 1.0, "active", "high", "wiki")
+
+    item = candidate_item(hit, score=2.5)
+
+    assert set(item) == CANDIDATE_CORE_KEYS
+    assert item["hit"] is hit
+    assert item["score"] == 2.5
+    assert item["fts_rank"] is None
+    assert item["title_rank"] is None
+    assert item["vector_rank"] is None
+    assert item["vector_score"] == 0.0
+    assert item["rrf"] == 0.0
+    assert item["exact"] is False
+    assert item["graph_score"] == 0.0
+    assert item["graph_reasons"] == []
+
+
+def test_with_fusion_adds_only_the_canonical_fusion_keys() -> None:
+    item = _item("wiki/concepts/item.md", "p-1", 2.5)
+
+    fused = with_fusion(
+        item,
+        coverage_terms=["rag"],
+        coverage_ratio=1.0,
+        source_local_rank=1,
+        source_local_rrf=0.9,
+        fusion_score=1.9,
+        fusion_source="active",
+        fusion_local_position=1,
+    )
+
+    assert set(fused) == set(item) | FUSION_KEYS
+    assert fused["coverage_terms"] == ["rag"]
+    assert fused["fusion_score"] == 1.9
+
+    minimal = with_fusion(
+        {"hit": item["hit"], "score": item["score"]},
+        coverage_terms=[],
+        coverage_ratio=0.0,
+        source_local_rank=1,
+        source_local_rrf=0.5,
+        fusion_score=0.5,
+        fusion_source="active",
+        fusion_local_position=1,
+    )
+    assert set(minimal) == {"hit", "score", *FUSION_KEYS}
 
 
 def test_fallback_decision_and_envelope_share_one_shape() -> None:
@@ -238,12 +282,30 @@ def test_assembler_checks_cancellation_before_context_reads() -> None:
         assemble_recovery(
             [],
             condition=RecoveryCondition(),
+            candidates=[],
             store=store,  # type: ignore[arg-type]
             cancellation=context,
         )
 
     assert error.value.cancelled_stage == "fallback"
     assert store.calls == []
+
+
+def test_assembler_rejects_retired_explicit_maps_path() -> None:
+    parameters = inspect.signature(assemble_recovery).parameters
+    assert "candidates" in parameters
+    assert parameters["candidates"].default is inspect.Parameter.empty
+    assert "hit_stats" not in parameters
+    assert "pool_by_page" not in parameters
+
+    with pytest.raises(TypeError):
+        assemble_recovery(
+            [],
+            condition=RecoveryCondition(),
+            store=FakeStore([]),  # type: ignore[arg-type]
+            cancellation=QueryCancellationContext.unbounded(),
+            hit_stats={},  # type: ignore[call-arg]
+        )
 
 
 def test_snapshot_captures_metadata_once_and_is_immutable() -> None:
