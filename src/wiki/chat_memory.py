@@ -19,8 +19,7 @@ from common.redaction import (
 )
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
 from wiki.atomic_file import FaultBarrier, atomic_write_text, sha256_file
-from wiki.page_mutation import PageMutationCoordinator
-from wiki.page_operation_store import PageOperation, PageOperationError
+from wiki.page_mutation import MutationResult, PageMutationCoordinator
 from wiki.wiki_io import read_markdown_page
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -163,27 +162,22 @@ class ChatMemoryService:
         serialized = self._serialize(frontmatter, redacted_transcript)
         intended_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         request_key = self._request_key(str(redacted_metadata["session_id"]), redacted_hash)
-        existing_operation = self.coordinator.store.get_operation_by_request_key(request_key)
         try:
-            operation = self.coordinator.prepare(
+            result = self.coordinator.write_and_project(
                 request_key=request_key,
                 operation_kind="chat_source",
                 page_path=relative.as_posix(),
                 base_hash=None,
                 intended_hash=intended_hash,
+                text=serialized,
+                fault=self.fault,
             )
-        except PageOperationError as exc:
-            raise ChatMemoryError(exc.code, "chat source operation could not be prepared") from exc
-
-        if existing_operation is not None:
-            result = self.coordinator.project_existing(operation.operation_id, fault=self.fault)
-        else:
-            result = self.coordinator.commit_with_projections(operation.operation_id, serialized, fault=self.fault)
-        if not result.get("ok"):
-            raise ChatMemoryError(str(result.get("code") or "chat_source_commit_failed"), "chat source operation could not be completed")
-        current = self.coordinator.store.get_operation(operation.operation_id) or operation
-        response = self._response(self.root / relative, frontmatter, idempotent=existing_operation is not None)
-        return self._with_operation_result(response, current, result)
+        except ValueError as exc:
+            raise ChatMemoryError(str(getattr(exc, "code", "chat_source_commit_failed")), "chat source operation could not be completed") from exc
+        if not result.ok:
+            raise ChatMemoryError(result.code or "chat_source_commit_failed", "chat source operation could not be completed")
+        response = self._response(self.root / relative, frontmatter, idempotent=result.already_applied)
+        return self._with_operation_result(response, result)
 
     def _project_existing_revision(
         self,
@@ -196,37 +190,36 @@ class ChatMemoryService:
 
         current_hash = sha256_file(path)
         request_key = self._request_key(str(metadata["session_id"]), redacted_hash)
-        existing_operation = self.coordinator.store.get_operation_by_request_key(request_key)
         try:
-            operation = existing_operation or self.coordinator.prepare(
+            result = self.coordinator.write_and_project(
                 request_key=request_key,
                 operation_kind="chat_source",
                 page_path=path.relative_to(self.root).as_posix(),
                 base_hash=current_hash,
                 intended_hash=current_hash,
+                text=path.read_text(encoding="utf-8"),
+                expected_hash=current_hash,
+                fault=self.fault,
             )
-        except PageOperationError as exc:
-            raise ChatMemoryError(exc.code, "chat source operation could not be prepared") from exc
-        result = self.coordinator.project_existing(operation.operation_id, fault=self.fault)
-        if not result.get("ok"):
-            raise ChatMemoryError(str(result.get("code") or "chat_source_recovery_failed"), "chat source recovery could not be completed")
-        current = self.coordinator.store.get_operation(operation.operation_id) or operation
+        except ValueError as exc:
+            raise ChatMemoryError(str(getattr(exc, "code", "chat_source_recovery_failed")), "chat source recovery could not be completed") from exc
+        if not result.ok:
+            raise ChatMemoryError(result.code or "chat_source_recovery_failed", "chat source recovery could not be completed")
         response = self._response(path, frontmatter, idempotent=True)
-        return self._with_operation_result(response, current, result)
+        return self._with_operation_result(response, result)
 
     def _with_operation_result(
         self,
         response: dict[str, Any],
-        operation: PageOperation,
-        result: Mapping[str, Any],
+        result: MutationResult,
     ) -> dict[str, Any]:
-        response["operation_id"] = operation.operation_id
-        response["state"] = result.get("state") or operation.state
-        if result.get("repair_action"):
-            response["repair_action"] = result["repair_action"]
-        if result.get("failed_stage"):
-            response["failed_stage"] = result["failed_stage"]
-        response["index"] = self._index_response(operation)
+        response["operation_id"] = result.operation_id
+        response["state"] = result.state or "completed"
+        if result.repair_action:
+            response["repair_action"] = result.repair_action
+        if result.failed_stage:
+            response["failed_stage"] = result.failed_stage
+        response["index"] = self._index_response(result.stages)
         return response
 
     @staticmethod
@@ -234,8 +227,8 @@ class ChatMemoryService:
         return f"chat:{session_id}:{redacted_hash}"
 
     @staticmethod
-    def _index_response(operation: PageOperation) -> dict[str, Any]:
-        stage = operation.stages.get("retrieval", {})
+    def _index_response(stages: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+        stage = stages.get("retrieval", {})
         stage_result = stage.get("result", {})
         if not isinstance(stage_result, Mapping):
             stage_result = {}

@@ -4,6 +4,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_operation_store import PageOperationStore
 from wiki.page_repair import PageRepairService
 
 
@@ -15,7 +16,8 @@ def test_page_repair_rebuilds_only_projections_and_audits_once(tmp_path: Path) -
         encoding="utf-8",
     )
     before = page.read_bytes()
-    coordinator = PageMutationCoordinator(tmp_path)
+    store = PageOperationStore(tmp_path)
+    coordinator = PageMutationCoordinator(tmp_path, store=store)
     intended_hash = sha256(before).hexdigest()
     operation = coordinator.prepare(
         request_key="repair-request",
@@ -24,7 +26,7 @@ def test_page_repair_rebuilds_only_projections_and_audits_once(tmp_path: Path) -
         base_hash=intended_hash,
         intended_hash=intended_hash,
     )
-    coordinator.store.set_operation_state(operation.operation_id, "page_committed")
+    store.set_operation_state(operation.operation_id, "page_committed")
 
     service = PageRepairService(tmp_path)
     plan = service.plan(operation.operation_id)

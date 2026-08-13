@@ -298,20 +298,19 @@ def save_obsidian_note(
         text=prepared.text,
         expected_hash=base_hash,
     )
-    if not projection_result.get("ok"):
-        return dict(projection_result)
-    operation_id = str(projection_result.get("operation_id") or "")
-    completed_operation = coordinator.store.get_operation(operation_id) if operation_id else None
-    stages = completed_operation.stages if completed_operation is not None else {}
+    if not projection_result.ok:
+        return projection_result.to_dict()
+    operation_id = projection_result.operation_id or ""
+    stages = projection_result.stages
     dependency_projection = stages.get("dependencies", {}).get("result", {"ok": True, "state": "ready"})
     broken_wikilinks = validate_wikilinks(redacted_content, root)
     result: dict[str, Any] = {
         "ok": True,
-        "state": projection_result.get("state", "completed"),
+        "state": projection_result.state or "completed",
         "path": relative_path.as_posix(),
         "created": True,
         "operation_id": operation_id,
-        "page_hash": projection_result.get("page_hash", intended_hash),
+        "page_hash": projection_result.page_hash or intended_hash,
         "redacted_count": redacted_count,
         "indexed": None,
         "wikilink_target": name[:-3] if name.endswith(".md") else name,
@@ -321,9 +320,10 @@ def save_obsidian_note(
         "freshness": "fresh" if resolved_sources else "review_required",
         "dependency_projection": dependency_projection,
     }
-    if projection_result.get("state") == "repair_pending":
-        result["repair_action"] = projection_result.get("repair_action", "repair_page_operation")
-        result["failed_stage"] = projection_result.get("failed_stage")
+    if projection_result.repair_action:
+        result["repair_action"] = projection_result.repair_action
+    if projection_result.failed_stage:
+        result["failed_stage"] = projection_result.failed_stage
     if related_pages is not None:
         result["related_pages_skipped"] = related_pages_skipped
     if sources is not None and not chat_derived:
