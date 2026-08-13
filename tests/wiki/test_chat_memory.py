@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from wiki.atomic_file import AtomicFileError
+from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.chat_memory import ChatMemoryError, ChatMemoryService
 from wiki.supersede_registry import SupersedeRegistry
 from wiki.knowledge_dependencies import KnowledgeDependencies
@@ -178,7 +178,7 @@ def test_chat_atomic_write_fault_before_replace_keeps_old_bytes(tmp_path: Path, 
             raise RuntimeError("injected")
 
     with pytest.raises(AtomicFileError) as error:
-        ChatMemoryService._atomic_write(target, "new", fault=fault)
+        atomic_write_text(target, "new", fault=fault)
 
     assert error.value.code == "atomic_write_failed"
     assert target.read_text(encoding="utf-8") == "old"
@@ -195,7 +195,7 @@ def test_chat_atomic_write_post_replace_fault_keeps_complete_new_bytes(tmp_path:
             raise RuntimeError("injected")
 
     with pytest.raises(AtomicFileError):
-        ChatMemoryService._atomic_write(target, "new", fault=fault)
+        atomic_write_text(target, "new", fault=fault)
 
     assert target.read_text(encoding="utf-8") == "new"
     assert list(target.parent.glob(f".{target.name}.*.tmp")) == []

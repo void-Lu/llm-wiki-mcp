@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from wiki.ingest_service import ingest_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore
@@ -23,6 +25,28 @@ def test_single_file_ingest_handles_new_unchanged_and_modified_chat(tmp_path: Pa
 def test_single_file_ingest_rejects_a_directory(tmp_path: Path) -> None:
     result = ingest_file(vault_root=tmp_path / "vault", source_path=tmp_path, source_name="nope")
     assert result["code"] == "source_not_file"
+
+
+@pytest.mark.parametrize(
+    ("source_name", "expected_code"),
+    [
+        ("", "empty_segment"),
+        ("bad/name", "path_escape"),
+        ("bad:name", "invalid_path_component"),
+    ],
+)
+def test_single_file_ingest_passes_through_path_error_codes(
+    tmp_path: Path,
+    source_name: str,
+    expected_code: str,
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source", encoding="utf-8")
+
+    result = ingest_file(vault_root=tmp_path / "vault", source_path=source, source_name=source_name)
+
+    assert result["ok"] is False
+    assert result["code"] == expected_code
 
 
 def test_single_file_ingest_indexes_non_chat_sources_in_the_raw_store(tmp_path: Path) -> None:

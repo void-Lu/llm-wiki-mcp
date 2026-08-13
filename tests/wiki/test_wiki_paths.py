@@ -12,6 +12,7 @@ from wiki.wiki_paths import (
     safe_segment,
     slug,
     translate_path_error,
+    validate_wiki_page_path,
 )
 
 
@@ -206,39 +207,67 @@ def test_project_helpers_return_confirmed_project_substructure(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    "value",
+    ("value", "expected_code"),
     [
-        "",
-        ".",
-        "..",
-        "../escape",
-        "bad/name",
-        "bad\\name",
-        str(Path("/") / "absolute"),
-        "bad:name",
-        "bad<name",
-        "bad>name",
-        "bad\"name",
-        "bad|name",
-        "bad?name",
-        "bad*name",
-        "bad\x00name",
-        "bad\x1fname",
-        "CON",
-        "con.md",
-        "COM1",
-        "LPT9",
-        "trailing.",
-        "trailing ",
+        ("", "empty_segment"),
+        (".", "path_escape"),
+        ("..", "path_escape"),
+        ("../escape", "path_escape"),
+        ("bad/name", "path_escape"),
+        ("bad\\name", "path_escape"),
+        (str(Path("/") / "absolute"), "path_escape"),
+        ("bad:name", "invalid_path_component"),
+        ("bad<name", "invalid_path_component"),
+        ("bad>name", "invalid_path_component"),
+        ("bad\"name", "invalid_path_component"),
+        ("bad|name", "invalid_path_component"),
+        ("bad?name", "invalid_path_component"),
+        ("bad*name", "invalid_path_component"),
+        ("bad\x00name", "invalid_path_component"),
+        ("bad\x1fname", "invalid_path_component"),
+        ("CON", "invalid_path_component"),
+        ("con.md", "invalid_path_component"),
+        ("COM1", "invalid_path_component"),
+        ("LPT9", "invalid_path_component"),
+        ("trailing.", "invalid_path_component"),
+        ("trailing ", "invalid_path_component"),
     ],
 )
-def test_safe_segment_rejects_path_escape_and_windows_invalid_values(value: str):
-    with pytest.raises(WikiPathError):
+def test_safe_segment_rejects_path_escape_and_windows_invalid_values(value: str, expected_code: str) -> None:
+    with pytest.raises(WikiPathError) as raised:
         safe_segment(value)
+
+    assert raised.value.code == expected_code
 
 
 def test_safe_segment_returns_valid_single_segment():
     assert safe_segment("Project-A_01") == "Project-A_01"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_code"),
+    [
+        ("../outside.md", "path_escape"),
+        ("wiki/overview.md", "invalid_wiki_path"),
+        ("wiki/concepts/general/page.txt", "invalid_wiki_path"),
+        ("wiki/concepts/index.md", "navigation_index_forbidden"),
+        ("wiki/concepts/bad:name/page.md", "invalid_path_component"),
+    ],
+)
+def test_validate_wiki_page_path_exposes_stable_error_codes(value: str, expected_code: str) -> None:
+    with pytest.raises(WikiPathError) as raised:
+        validate_wiki_page_path(value)
+
+    assert raised.value.code == expected_code
+
+
+def test_validate_wiki_page_path_navigation_index_policy_has_both_outcomes() -> None:
+    with pytest.raises(WikiPathError) as raised:
+        validate_wiki_page_path("wiki/concepts/index.md", allow_navigation_index=False)
+
+    assert raised.value.code == "navigation_index_forbidden"
+    assert validate_wiki_page_path("wiki/concepts/index.md", allow_navigation_index=True) == Path("wiki/concepts/index.md")
+    assert validate_wiki_page_path("wiki/concepts/general/page.md") == Path("wiki/concepts/general/page.md")
 
 
 @pytest.mark.parametrize(

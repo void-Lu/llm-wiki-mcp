@@ -84,6 +84,17 @@ def test_build_reference_section_skips_unsafe_and_raw_paths(tmp_path: Path) -> N
     ]
 
 
+def test_build_reference_section_translates_disallowed_wiki_page_path(tmp_path: Path) -> None:
+    body, skipped = build_reference_section(
+        tmp_path,
+        "正文",
+        [{"path": "wiki/code/legacy.md", "title": "Legacy"}],
+    )
+
+    assert body == "正文"
+    assert skipped == [{"path": "wiki/code/legacy.md", "reason": "path_not_allowed"}]
+
+
 def test_validate_raw_sources_only_returns_existing_raw_files(tmp_path: Path) -> None:
     _touch(tmp_path, "raw/sources/reference.txt")
 

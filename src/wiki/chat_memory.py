@@ -18,7 +18,7 @@ from common.redaction import (
     redact_sensitive_text,
 )
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
-from wiki.atomic_file import FaultBarrier, atomic_write_text, sha256_file
+from wiki.atomic_file import FaultBarrier, sha256_file
 from wiki.page_mutation import MutationResult, PageMutationCoordinator
 from wiki.wiki_io import read_markdown_page
 
@@ -286,15 +286,6 @@ class ChatMemoryService:
     @staticmethod
     def _serialize(frontmatter: Mapping[str, Any], body: str) -> str:
         return f"---\n{yaml.safe_dump(dict(frontmatter), allow_unicode=True, sort_keys=False).strip()}\n---\n\n{body.strip()}\n"
-
-    @staticmethod
-    def _atomic_write(
-        target: Path,
-        text: str,
-        *,
-        fault: FaultBarrier | None = None,
-    ) -> None:
-        atomic_write_text(target, text, fault=fault)
 
     @staticmethod
     def _revisions(session_dir: Path) -> list[tuple[Path, Any]]:
