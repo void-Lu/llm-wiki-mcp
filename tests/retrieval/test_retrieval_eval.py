@@ -4,6 +4,7 @@ import json
 import math
 import os
 import shutil
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
@@ -15,6 +16,7 @@ from retrieval.retrieval_eval import (
     EvaluationQueryService,
     EvaluationFilterContract,
     EvaluationRuntimeSnapshot,
+    McpEntryAdapter,
     Relevance,
     RetrievalEvalCase,
     RetrievalEvalDataset,
@@ -528,6 +530,61 @@ def test_mcp_lexical_contract_requires_explicit_mode_and_zero_vector_hits() -> N
     with pytest.raises(RetrievalEvalError, match="lexical-only"):
         _require_mcp_lexical_pipeline({"retrieval_mode": "lexical", "counters": {"vector_hits": 1}})
     _require_mcp_lexical_pipeline({"retrieval_mode": "lexical", "counters": {"vector_hits": 0}})
+
+
+def test_mcp_evaluation_uses_injected_adapter_without_importing_server_in_eval_path(tmp_path: Path) -> None:
+    vault = _copy_vault(tmp_path)
+    _build_passage_store(vault)
+    dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
+    source_resolution = server_module.resolve_tool_vault(vault_root=str(vault))
+    calls: list[str] = []
+
+    def resolve(root: str):
+        calls.append(f"resolve:{root}")
+        return source_resolution
+
+    @contextmanager
+    def snapshot(resolution: object):
+        calls.append("snapshot-enter")
+        yield
+        calls.append("snapshot-exit")
+
+    def query(**kwargs: object) -> dict[str, object]:
+        calls.append("query")
+        return {
+            "ok": True,
+            "results": [],
+            "pipeline": {"retrieval_mode": "lexical", "counters": {"vector_hits": 0}},
+            "budget": {},
+        }
+
+    adapter = McpEntryAdapter(resolve=resolve, snapshot=snapshot, query=query)
+    runtime = EvaluationRuntimeSnapshot.from_mcp_vault(vault, adapter=adapter)
+    result = EvaluationQueryService(runtime).run(
+        dataset.cases[0],
+        top_k=10,
+        include_context_pack=False,
+        retrieval_mode="lexical",
+        vector_config=None,
+        query_version="v2",
+        scope="knowledge",
+        entrypoint="mcp",
+    )
+
+    assert result["pipeline"] == {"retrieval_mode": "lexical", "counters": {"vector_hits": 0}}
+    assert calls == [f"resolve:{vault}", "snapshot-enter", "query", "snapshot-exit"]
+
+
+def test_retrieval_eval_keeps_server_import_at_the_adapter_seam() -> None:
+    retrieval_eval_source = (
+        Path(__file__).parents[2] / "src" / "retrieval" / "retrieval_eval.py"
+    ).read_text(encoding="utf-8")
+    adapter_source = (
+        Path(__file__).parents[2] / "src" / "retrieval" / "mcp_entry_adapter.py"
+    ).read_text(encoding="utf-8")
+
+    assert "app.server" not in retrieval_eval_source
+    assert "app.server" in adapter_source
 
 
 def test_report_writer_sanitizes_legacy_pipeline_before_persisting(tmp_path: Path) -> None:

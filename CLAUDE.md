@@ -81,7 +81,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 
 [query_recovery.py](src/retrieval/query_recovery.py) 是回退决策、阶梯、每页选择、打分组合与 envelope 装配的唯一 owner；其中 `assemble_recovery` 统一拥有命中统计、按页候选池和 context pack。新增回退分支应扩展 `FallbackPlan`/`RecoveryCondition`/该装配边界，不要在 query pipeline、MCP wrapper 或 telemetry 中复制一套状态逻辑。
 
-[retrieval_eval.py](src/retrieval/retrieval_eval.py) 的 `EvaluationRuntimeSnapshot`/`EvaluationQueryService` 是 engine、MCP 与 gold 评测的共同服务 seam。MCP 入口只在请求局部 ContextVar 中注入不可变 tool resolution，不得修改 `server.CONFIG_REGISTRY`；`parse_evaluation_filters` 是公开过滤器解析 owner。评测必须保持只读，不创建/更新检索库，也不写入 telemetry。
+[retrieval_eval.py](src/retrieval/retrieval_eval.py) 的 `EvaluationRuntimeSnapshot`/`EvaluationQueryService` 是 engine、MCP 与 gold 评测的共同服务 seam。评测经 `query_telemetry` 只读接口取遥测、经注入 adapter 走 MCP 入口，不 import server 内部；MCP 入口只在请求局部 ContextVar 中注入不可变 tool resolution，不得修改 `server.CONFIG_REGISTRY`；`parse_evaluation_filters` 是公开过滤器解析 owner。评测必须保持只读，不创建/更新检索库，也不写入 telemetry。
 
 [chat_memory.py](src/wiki/chat_memory.py) 提供不可变、脱敏的 chat source 持久化；`wiki_write_note` 通过 `chat_metadata`/`chat_derived`/`chat_sources` 参数写入 chat source。
 

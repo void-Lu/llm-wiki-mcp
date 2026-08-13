@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import sqlite3
 import statistics
 import time
 from collections.abc import Mapping, Sequence
@@ -20,10 +19,12 @@ from retrieval.metadata_filters import (
     page_matches_filters,
     path_matches_prefix,
 )
+from retrieval.mcp_entry_adapter import McpEntryAdapter, default_mcp_entry_adapter
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, RANKING_POLICY_VERSION, run_query_v2
+from retrieval.query_telemetry import read_event_count
 from retrieval.retrieval_index import RetrievalIndexStore
-from runtime.runtime_config import EmbeddingSettings, ResolvedVault, TelemetrySettings, VaultSettings
+from runtime.runtime_config import EmbeddingSettings, TelemetrySettings, VaultSettings
 from retrieval.vector_index import parse_vector_settings
 from wiki.wiki_paths import filesystem_path
 
@@ -37,6 +38,8 @@ __all__ = [
     "EvaluationQueryService",
     "EvaluationFilterContract",
     "EvaluationRuntimeSnapshot",
+    "McpEntryAdapter",
+    "default_mcp_entry_adapter",
     "RetrievalEvalCase",
     "RetrievalEvalDataset",
     "RetrievalEvalError",
@@ -115,6 +118,8 @@ class EvaluationRuntimeSnapshot:
     root: Path
     logical_name: str
     settings: VaultSettings
+    adapter: McpEntryAdapter | None = None
+    mcp_resolution: Any | None = None
 
     @classmethod
     def lexical_only(cls, vault_root: str | Path) -> "EvaluationRuntimeSnapshot":
@@ -126,32 +131,52 @@ class EvaluationRuntimeSnapshot:
         return cls(root=root, logical_name=root.name, settings=settings)
 
     @classmethod
-    def from_mcp_vault(cls, vault_root: str | Path) -> "EvaluationRuntimeSnapshot":
+    def from_mcp_vault(
+        cls,
+        vault_root: str | Path,
+        *,
+        adapter: McpEntryAdapter | None = None,
+    ) -> "EvaluationRuntimeSnapshot":
         """Resolve MCP settings once, then freeze a telemetry-off copy locally."""
 
-        import app.server as server_module
-
-        resolution = server_module.resolve_tool_vault(vault_root=str(vault_root))
+        active_adapter = adapter or default_mcp_entry_adapter()
+        resolution = active_adapter.resolve(str(vault_root))
         settings = resolution.resolved.settings
         if not settings.retrieval.lexical_enabled or settings.retrieval.embedding.enabled:
             raise RetrievalEvalError(
                 "mcp_not_lexical",
                 "the selected vault MCP configuration is not lexical-only",
             )
+        frozen_settings = replace(settings, telemetry=TelemetrySettings(enabled=False))
+        frozen_resolution = replace(
+            resolution,
+            resolved=replace(resolution.resolved, settings=frozen_settings),
+        )
         return cls(
             root=resolution.root,
             logical_name=resolution.logical_name,
-            settings=replace(settings, telemetry=TelemetrySettings(enabled=False)),
+            settings=frozen_settings,
+            adapter=active_adapter,
+            mcp_resolution=frozen_resolution,
         )
 
-    def tool_resolution(self, server_module: Any) -> Any:
-        """Build the server's immutable resolution without touching its registry."""
+    def tool_resolution(self) -> Any:
+        """Build a telemetry-off resolution without touching the process registry."""
 
-        return server_module.ToolVaultResolution(
-            self.root,
-            self.logical_name,
-            ResolvedVault(self.logical_name, self.root, self.settings, "legacy"),
-        )
+        if self.adapter is None:
+            raise RetrievalEvalError("mcp_adapter_missing", "MCP evaluation requires an injected adapter")
+        resolution = self.mcp_resolution
+        if resolution is None:
+            raise RetrievalEvalError("mcp_resolution_missing", "MCP evaluation resolution is not available")
+        try:
+            return replace(
+                resolution,
+                resolved=replace(resolution.resolved, settings=self.settings),
+            )
+        except (AttributeError, TypeError):
+            # Small test adapters may use an opaque resolution token. Their
+            # snapshot owns the token and does not need a server-side clone.
+            return resolution
 
 
 @dataclass(frozen=True)
@@ -196,11 +221,12 @@ class EvaluationQueryService:
 
         if query_version != "v2":
             raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
+        adapter = self.runtime.adapter
+        if adapter is None or adapter.query is None:
+            raise RetrievalEvalError("mcp_adapter_missing", "MCP evaluation requires an injected adapter")
         try:
-            import app.server as server_module
-
-            with server_module.tool_runtime_snapshot(self.runtime.tool_resolution(server_module)):
-                response = server_module.wiki_query(
+            with adapter.snapshot(self.runtime.tool_resolution()):
+                response = adapter.query(
                     question=case.query,
                     scope=scope,
                     project=case.filters.get("project"),
@@ -228,7 +254,7 @@ class EvaluationQueryService:
         return {
             "ok": True,
             "results": results,
-            "pipeline": _pipeline_summary(pipeline),
+            "pipeline": pipeline,
             "budget": response.get("budget", {}),
         }
 
@@ -450,7 +476,7 @@ def run_retrieval_evaluation(
     root = filesystem_path(vault_root)
     validate_dataset_paths(dataset, root)
     vault_fingerprint_before = vault_fingerprint(root)
-    telemetry_before = _telemetry_event_count(root)
+    telemetry_before = read_event_count(root)
     index_before = RetrievalIndexStore(root).status()
 
     # Warm the interpreter and parser without treating it as a latency sample.
@@ -622,7 +648,7 @@ def run_retrieval_evaluation(
         )
 
     vault_fingerprint_after = vault_fingerprint(root)
-    telemetry_after = _telemetry_event_count(root)
+    telemetry_after = read_event_count(root)
     index_after = RetrievalIndexStore(root).status()
     side_effects = _evaluation_side_effects(
         vault_fingerprint_before,
@@ -907,7 +933,12 @@ def _sanitise_report_for_output(report: Mapping[str, Any]) -> dict[str, Any]:
         for case in cases:
             if not isinstance(case, dict):
                 continue
-            pipeline = _pipeline_summary(case.get("pipeline", {}))
+            pipeline_value = case.get("pipeline", {})
+            pipeline = (
+                dict(pipeline_value)
+                if _has_pipeline_summary_shape(pipeline_value)
+                else _project_pipeline(pipeline_value)
+            )
             case["pipeline"] = pipeline
             case["warnings"] = []
             case["warning_count"] = pipeline.get("warning_count", 0)
@@ -1252,8 +1283,17 @@ def _require_mcp_lexical_pipeline(pipeline: Mapping[str, Any]) -> None:
 
 
 def _pipeline_summary(pipeline: object) -> dict[str, Any]:
-    """Keep report provenance useful without persisting query/source evidence."""
+    """Project public pipeline data to the report view exactly once per case.
 
+    The overlap with ``run_query_v2``'s public pipeline dictionary is
+    intentional: evaluation reads the public response and creates a separate
+    safe report view rather than merging two competing pipeline contracts.
+    """
+
+    return _project_pipeline(pipeline)
+
+
+def _project_pipeline(pipeline: object) -> dict[str, Any]:
     if not isinstance(pipeline, Mapping):
         return {}
     summary: dict[str, Any] = {}
@@ -1355,6 +1395,107 @@ def _pipeline_summary(pipeline: object) -> dict[str, Any]:
         warning_count += len(vector_warnings)
     summary["warning_count"] = warning_count
     return summary
+
+
+_PIPELINE_SUMMARY_KEYS = frozenset(
+    {
+        "authority",
+        "corpus",
+        "scope",
+        "retrieval_mode",
+        "ranking_version",
+        "lexical_enabled",
+        "counters",
+        "fallback",
+        "coverage",
+        "batch",
+        "warning_count",
+    }
+)
+
+
+def _has_pipeline_summary_shape(value: object) -> bool:
+    if not isinstance(value, Mapping) or not set(value).issubset(_PIPELINE_SUMMARY_KEYS):
+        return False
+    for key in ("authority", "corpus", "scope", "retrieval_mode", "ranking_version"):
+        if key in value and not isinstance(value[key], str):
+            return False
+    if "lexical_enabled" in value and not isinstance(value["lexical_enabled"], bool):
+        return False
+    if "warning_count" in value and type(value["warning_count"]) is not int:
+        return False
+    counters = value.get("counters")
+    if counters is not None and (
+        not isinstance(counters, Mapping)
+        or not set(counters).issubset(
+            {
+                "additional",
+                "fts_hits",
+                "graph_hits",
+                "qualified_fts_hits",
+                "qualified_hits",
+                "queries",
+                "raw_fts_hits",
+                "raw_hits",
+                "relaxed_fts_hits",
+                "relaxed_hits",
+                "returned",
+                "selected",
+                "vector_hits",
+            }
+        )
+        or any(type(item) is not int and not (isinstance(item, float) and math.isfinite(item)) for item in counters.values())
+    ):
+        return False
+    fallback = value.get("fallback")
+    if fallback is not None:
+        if not isinstance(fallback, Mapping) or not set(fallback).issubset({"level", "reason_count", "reasons"}):
+            return False
+        if "level" in fallback and not isinstance(fallback["level"], str):
+            return False
+        if "reason_count" in fallback and type(fallback["reason_count"]) is not int:
+            return False
+        reasons = fallback.get("reasons")
+        if reasons is not None and (
+            not isinstance(reasons, list)
+            or any(not isinstance(item, str) or not _is_safe_reason_code(item) for item in reasons)
+        ):
+            return False
+    coverage = value.get("coverage")
+    if coverage is not None:
+        if not isinstance(coverage, Mapping) or not set(coverage).issubset({"triggered", "uncovered_latin_term_count"}):
+            return False
+        if "triggered" in coverage and not isinstance(coverage["triggered"], bool):
+            return False
+        if "uncovered_latin_term_count" in coverage and type(coverage["uncovered_latin_term_count"]) is not int:
+            return False
+    batch = value.get("batch")
+    if batch is not None:
+        batch_keys = {
+            "status",
+            "max_batch_items",
+            "entity_count",
+            "ambiguous_count",
+            "failed_entity_count",
+            "pending_entity_count",
+            "unresolved_count",
+            "counters",
+        }
+        if not isinstance(batch, Mapping) or not set(batch).issubset(batch_keys):
+            return False
+        for key in ("status", "max_batch_items"):
+            if key in batch and (not isinstance(batch[key], (str, int)) or isinstance(batch[key], bool)):
+                return False
+        for key in batch_keys - {"status", "max_batch_items", "counters"}:
+            if key in batch and type(batch[key]) is not int:
+                return False
+        batch_counters = batch.get("counters")
+        if batch_counters is not None and (
+            not isinstance(batch_counters, Mapping)
+            or any(type(item) is not int and not (isinstance(item, float) and math.isfinite(item)) for item in batch_counters.values())
+        ):
+            return False
+    return True
 
 
 def _is_safe_reason_code(value: str) -> bool:
@@ -1463,17 +1604,6 @@ def _normalise_relative_path(value: object, case_id: str) -> str:
 
 def _mean_or_none(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
-
-
-def _telemetry_event_count(root: Path) -> int | None:
-    database = root / ".llm-wiki" / "state.sqlite3"
-    if not database.is_file():
-        return None
-    try:
-        with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
-            return int(connection.execute("SELECT count(*) FROM query_telemetry").fetchone()[0])
-    except (OSError, sqlite3.Error):
-        return None
 
 
 def _evaluation_side_effects(
