@@ -99,6 +99,7 @@ def test_v2_returns_result_body_without_context_pack(tmp_path: Path) -> None:
     assert "context_pack" not in result
     assert result["pipeline"]["corpus"] == "active"
     assert result["pipeline"]["authority"] == "active:formal>project>raw_chat;fallback:wiki_relaxed>raw"
+    assert result["budget"]["used"] == sum(item["tokens"] for item in result["results"])
 
 
 def test_v2_uses_results_as_the_single_public_context_source(tmp_path: Path) -> None:
@@ -125,6 +126,7 @@ def test_v2_uses_results_as_the_single_public_context_source(tmp_path: Path) -> 
     assert len(result["additional_results"]) > 0
     assert result["additional_results"][0]["citation"] == "[3]"
     assert all("content" not in item for item in result["additional_results"])
+    assert result["budget"]["used"] == sum(item["tokens"] for item in result["results"])
     assert "discovery" not in result["pipeline"]
     assert "batch" not in result["pipeline"]
 

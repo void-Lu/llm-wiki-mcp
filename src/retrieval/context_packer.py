@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
+from retrieval.body_budget import DEFAULT_INTENT_TARGET, INTENT_TARGETS
 from retrieval.token_units import count_response_tokens
 
 
@@ -23,12 +24,6 @@ def estimate_response_tokens(value: str) -> int:
     """Count response-budget units; this scale is not a passage chunk limit."""
 
     return max(1, count_response_tokens(value)) if value else 0
-
-
-def estimate_tokens(value: str) -> int:
-    """Compatibility facade for callers of the former response estimator."""
-
-    return estimate_response_tokens(value)
 
 
 def _deduplicate_overlap(previous: str, current: str) -> str:
@@ -58,7 +53,7 @@ def pack_context(
     result count, while a wider result set scales the pack accordingly.
     """
 
-    target = {"exact_entity": 2_000, "concept": 4_000, "comparison": 8_000, "research": 16_000}.get(intent, 4_000)
+    target = INTENT_TARGETS.get(intent, DEFAULT_INTENT_TARGET)
     if budget_scale is not None:
         target = max(target, budget_scale)
     budget = min(max(1, hard_limit), target)
@@ -94,13 +89,42 @@ def pack_context(
         citation_metadata[citation] = dict(item.citation_metadata)
         previous_by_path[item.path] = f"{previous_by_path.get(item.path, '')} {content}".strip()
         used += tokens
+    aggregated: list[dict[str, object]] = []
+    aggregated_metadata: dict[str, dict[str, str]] = {}
+    for item in output:
+        path = str(item["path"])
+        citation = str(item["citation"])
+        existing = next((candidate for candidate in aggregated if candidate["path"] == path), None)
+        if existing is None:
+            aggregated.append(dict(item))
+            aggregated_metadata[citation] = dict(citation_metadata[citation])
+            continue
+        existing["content"] = f"{existing['content']}\n\n{item['content']}"
+        existing["tokens"] = int(existing["tokens"]) + int(item["tokens"])
+        aggregated_metadata[str(existing["citation"])].update(citation_metadata[citation])
+
+    retained_tokens = sum(int(item["tokens"]) for item in aggregated)
+    used = retained_tokens
     citations = [
         {
             "citation": item["citation"],
             "path": item["path"],
             "heading": item["heading"],
-            **({"metadata": citation_metadata[str(item["citation"])]} if citation_metadata[str(item["citation"])] else {}),
+            **({"metadata": aggregated_metadata[str(item["citation"])]} if aggregated_metadata[str(item["citation"])] else {}),
         }
-        for item in output
+        for item in aggregated
     ]
-    return {"passages": output, "citations": citations, "budget": {"target": target, "total": budget, "used": used, "omitted": max(0, sum(estimate_response_tokens(item.content) for item in candidates) - used)}}
+    return {
+        "passages": aggregated,
+        "citations": citations,
+        "budget": {
+            "target": target,
+            "total": budget,
+            "used": used,
+            "omitted": max(
+                0,
+                sum(estimate_response_tokens(item.content) for item in candidates)
+                - retained_tokens,
+            ),
+        },
+    }

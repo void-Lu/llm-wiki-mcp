@@ -30,12 +30,6 @@ class PassageChunk:
     chunk_schema_version: int = CHUNK_SCHEMA_VERSION
 
 
-def approximate_tokens(text: str) -> list[str]:
-    """Compatibility facade for the passage-unit tokenizer."""
-
-    return passage_token_units(text)
-
-
 def estimate_passage_tokens(text: str) -> int:
     """Count passage/chunk units used by chunk limits and index rows."""
 

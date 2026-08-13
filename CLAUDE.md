@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 本仓库是一个本地 MCP server：把明确文件、人工笔记和受控更新写入外部 Obsidian Markdown Wiki，并由 Query V2 通过 passage FTS、可选向量和 wikilink 图查询返回可引用结果。安装、MCP 客户端配置和工具清单以 [README.md](README.md) 为准；这里保留开发时最需要的命令和跨文件架构约定。
 
+查询侧正文预算政策的唯一 owner 是 `src/retrieval/body_budget.py`；`wiki_get` 的字节预算域归 `content_catalog`，不与查询词元预算共享常量。
+
 ## 常用命令
 
 - 安装/同步开发环境：`uv sync --extra dev`

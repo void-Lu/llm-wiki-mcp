@@ -7,6 +7,7 @@ from typing import cast
 import pytest
 
 from retrieval.candidate_items import CANDIDATE_CORE_KEYS, FUSION_KEYS, candidate_item, with_fusion
+from retrieval.body_budget import PAGE_TOKEN_BUDGET
 from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext
 from retrieval.query_recovery import (
     FallbackDecision,
@@ -18,6 +19,7 @@ from retrieval.query_recovery import (
     plan_fallback,
     search_ladder,
     select_best_per_page,
+    _build_page_ordered_context,
 )
 from retrieval.retrieval_index import PassageHit
 from retrieval.query_snapshot import QueryCorpusSnapshot
@@ -289,6 +291,51 @@ def test_assembler_checks_cancellation_before_context_reads() -> None:
 
     assert error.value.cancelled_stage == "fallback"
     assert store.calls == []
+
+
+def test_page_context_stops_at_the_page_token_budget() -> None:
+    selected_hit = PassageHit("selected", "wiki/a.md", "A", (), "selected", 1.0, "active", "high", "wiki")
+    fill_hit = PassageHit("fill", "wiki/a.md", "A", (), "word " * PAGE_TOKEN_BUDGET, 0.5, "active", "high", "wiki")
+    overflow_hit = PassageHit("overflow", "wiki/a.md", "A", (), "overflow", 0.4, "active", "high", "wiki")
+    store = FakeStore([selected_hit, fill_hit, overflow_hit])
+    selected = [candidate_item(selected_hit, score=1.0, fts_rank=1)]
+
+    context = _build_page_ordered_context(
+        selected,
+        store,  # type: ignore[arg-type]
+        raw_store=None,
+        page_stats={"wiki/a.md": {"max": 1.0}},
+        page_candidates={"wiki/a.md": selected},
+        cancellation=QueryCancellationContext.unbounded(),
+    )
+
+    assert [item["hit"].passage_id for item in context] == ["selected", "fill"]
+
+
+def test_page_context_uses_ratio_boundary_and_weak_hit_limit() -> None:
+    top_hit = PassageHit("top", "wiki/top.md", "Top", (), "top", 1.0, "active", "high", "wiki")
+    boundary_hit = PassageHit("boundary", "wiki/boundary.md", "Boundary", (), "boundary", 0.6, "active", "high", "wiki")
+    weak_hits = [
+        PassageHit(f"weak-{index}", "wiki/weak.md", "Weak", (), f"weak {index}", 0.599 - index / 100, "active", "high", "wiki")
+        for index in range(4)
+    ]
+    store = FakeStore([top_hit, boundary_hit, *weak_hits])
+    top = candidate_item(top_hit, score=1.0, fts_rank=1)
+    boundary = candidate_item(boundary_hit, score=0.6, fts_rank=1)
+    weak = [candidate_item(hit, score=0.599 - index / 100, fts_rank=index + 1) for index, hit in enumerate(weak_hits)]
+
+    context = _build_page_ordered_context(
+        [top, boundary, weak[0]],
+        store,  # type: ignore[arg-type]
+        raw_store=None,
+        page_stats={"wiki/top.md": {"max": 1.0}, "wiki/boundary.md": {"max": 0.6}, "wiki/weak.md": {"max": 0.599}},
+        page_candidates={"wiki/top.md": [top], "wiki/boundary.md": [boundary], "wiki/weak.md": weak},
+        cancellation=QueryCancellationContext.unbounded(),
+    )
+
+    assert [item["hit"].passage_id for item in context].count("weak-0") == 1
+    assert sum(item["hit"].page_path == "wiki/weak.md" for item in context) == 3
+    assert store.calls == [(["wiki/top.md"], 500), (["wiki/boundary.md"], 500)]
 
 
 def test_assembler_rejects_retired_explicit_maps_path() -> None:
