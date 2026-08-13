@@ -677,11 +677,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     if expansion_error:
         return {"ok": False, "code": "invalid_expansion_terms", "error": expansion_error}
     try:
-        typed_filters = QueryFilters(
-            type=filters.get("type") if filters is not None else None,
-            tags=tuple(filters.get("tags", ())) if filters is not None else (),
-            path_prefix=filters.get("path_prefix") if filters is not None else None,
-        )
+        typed_filters = QueryFilters.from_mapping(filters)
     except (AttributeError, TypeError, ValueError):
         return {"ok": False, "code": "invalid_filters", "error": "the query filters are invalid"}
     resolution = _registered_resolution()
@@ -716,6 +712,9 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
     Raw provenance belongs in ``sources``; chat-derived pages continue to use
     ``chat_sources``.
     """
+    # note_type is canonical: falsy values fall back to noteType, and two empty
+    # values must report missing_note_type. The aliases mechanism cannot express
+    # this because it lets aliases override canonical values and only checks None.
     selected_type = note_type
     if not selected_type:
         selected_type = noteType

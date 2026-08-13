@@ -7,6 +7,11 @@ import pytest
 
 from archive.archive_manifest import content_hash, write_manifest
 from archive.archive_models import ArchiveItem, ArchiveManifest
+from retrieval.metadata_filters import (
+    metadata_filter_fingerprint,
+    normalize_metadata_filters,
+    path_matches_prefix,
+)
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.catalog_cursor import ContentBodyCursor
 from wiki.content_catalog import MAX_BODY_BUDGET, ContentCatalogError, ContentCatalogService
@@ -118,6 +123,21 @@ def test_filters_page_size_and_snapshot_cursor_are_bound(tmp_path: Path) -> None
     with pytest.raises(ContentCatalogError) as error:
         service.list_items(page_size=1, cursor=cursor)
     assert error.value.code == "catalog_cursor_stale"
+
+
+def test_boundary_trailing_slash_changes_filter_fingerprint_but_not_matching() -> None:
+    with_trailing = normalize_metadata_filters(
+        {"path_prefix": "wiki/concepts/"},
+        preserve_path_trailing=True,
+    )
+    without_trailing = normalize_metadata_filters(
+        {"path_prefix": "wiki/concepts"},
+        preserve_path_trailing=True,
+    )
+
+    assert metadata_filter_fingerprint(with_trailing) != metadata_filter_fingerprint(without_trailing)
+    assert path_matches_prefix("wiki/concepts/page.md", str(with_trailing["path_prefix"]))
+    assert path_matches_prefix("wiki/concepts/page.md", str(without_trailing["path_prefix"]))
 
 
 def test_body_cursor_and_index_hash_detect_changes(tmp_path: Path) -> None:

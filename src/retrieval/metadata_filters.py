@@ -1,4 +1,13 @@
-"""Shared, schema-safe metadata filters for query and catalog reads."""
+"""Shared, schema-safe metadata filters for query and catalog reads.
+
+过滤器契约分为三个独立 seam：MCP 边界按白名单执行一次
+``preserve_path_trailing=True`` 投影；目录域服务使用默认
+``preserve_path_trailing=False`` 做防御性规范化；检索索引 store 再做幂等的
+防御性规范化。边界保留用户输入的尾斜杠供 pipeline 匹配，目录层则以去除尾
+斜杠的值作为 fingerprint 基准。``path_matches_prefix`` 会自行去除比较边界
+两端的斜杠，因此匹配语义不变；边界保留形式产生的不同 fingerprint 会继续
+参与 cursor 绑定，这是有意锁定的行为。
+"""
 
 from __future__ import annotations
 

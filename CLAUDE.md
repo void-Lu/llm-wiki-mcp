@@ -75,7 +75,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 
 [wiki_models.py](src/wiki/wiki_models.py) 定义核心数据结构 `WikiPage`、`WikiLogEntry`。
 
-[query_pipeline.py](src/retrieval/query_pipeline.py) 是查询引擎核心（V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack。支持 `expansion_terms` 模糊词扩展和 `filters` 元数据过滤（含 `path_prefix`，见 [metadata_filters.py](src/retrieval/metadata_filters.py)）；查询经 [query_cancellation.py](src/retrieval/query_cancellation.py) 协作式取消与有界并发。
+[query_pipeline.py](src/retrieval/query_pipeline.py) 是查询引擎核心（V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack。支持 `expansion_terms` 模糊词扩展和 `filters` 元数据过滤（含 `path_prefix`，见 [metadata_filters.py](src/retrieval/metadata_filters.py)）；查询经 [query_cancellation.py](src/retrieval/query_cancellation.py) 协作式取消与有界并发。`note_type`/`noteType` 合并保持 canonical 优先、falsy 回退和双空报错，不能抽象为 aliases；过滤器的 MCP 边界与目录层防御性规范化契约见 `metadata_filters.py` 模块文档。
 
 [query_snapshot.py](src/retrieval/query_snapshot.py) 的 `QueryCorpusSnapshot` 为每次查询捕获 active/raw store 的不可变页面 metadata、provenance 和 candidate 视图；discovery、过滤、向量、图扩展和回退必须复用该快照，不能在同一请求内重复读取漂移的 store 状态。
 
