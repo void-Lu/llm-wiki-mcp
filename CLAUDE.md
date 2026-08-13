@@ -75,7 +75,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 [query_snapshot.py](src/retrieval/query_snapshot.py) 的 `QueryCorpusSnapshot` 为每次查询捕获 active/raw store 的不可变页面 metadata、provenance 和 candidate 视图；discovery、过滤、向量、图扩展和回退必须复用该快照，不能在同一请求内重复读取漂移的 store 状态。
 
-[query_recovery.py](src/retrieval/query_recovery.py) 的 `assemble_recovery` 是回退策略、命中统计、按页候选池和 context pack 装配的唯一 owner；新增回退分支应扩展 `RecoveryCondition`/该装配边界，不要在 query pipeline、MCP wrapper 或 telemetry 中复制一套状态逻辑。
+[query_recovery.py](src/retrieval/query_recovery.py) 是回退决策、阶梯、每页选择、打分组合与 envelope 装配的唯一 owner；其中 `assemble_recovery` 统一拥有命中统计、按页候选池和 context pack。新增回退分支应扩展 `FallbackPlan`/`RecoveryCondition`/该装配边界，不要在 query pipeline、MCP wrapper 或 telemetry 中复制一套状态逻辑。
 
 [retrieval_eval.py](src/retrieval/retrieval_eval.py) 的 `EvaluationRuntimeSnapshot`/`EvaluationQueryService` 是 engine、MCP 与 gold 评测的共同服务 seam。MCP 入口只在请求局部 ContextVar 中注入不可变 tool resolution，不得修改 `server.CONFIG_REGISTRY`；`parse_evaluation_filters` 是公开过滤器解析 owner。评测必须保持只读，不创建/更新检索库，也不写入 telemetry。
 
@@ -115,7 +115,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_save_obsidian_note.py`、`test_ingest_service.py`
 - 查询/检索/向量/wikilink：`test_wiki_query.py`、`test_query_pipeline.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
 - supersede/归档/辅助：`test_supersede_registry.py`、`test_archive_lifecycle.py`、`test_archive_wiki_sources.py`、`test_git_utils.py`
-- 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_fallback_policy.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`
+- 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`
 - repair/privacy/契约/catalog：`test_cli_repair.py`、`test_cli_repair_admin.py`、`test_page_repair.py`、`test_privacy_audit.py`、`test_provenance_migration.py`、`test_public_contracts.py`、`test_content_catalog.py`、`test_query_cancellation.py`、`test_query_executor.py`、`test_spec_lint.py`（tests/tools/）
 
 ## Agent skills

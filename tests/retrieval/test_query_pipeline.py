@@ -152,7 +152,6 @@ def test_v2_raw_scope_includes_project_raw_pages(tmp_path: Path) -> None:
         "level": "none",
         "reasons": [],
         "allowed_source_paths": [],
-        "added_token_usage": 0,
     }
 
 
@@ -339,7 +338,6 @@ def test_v2_coverage_recovery_merges_raw_evidence_when_primary_misses_latin_term
         "level": "raw",
         "reasons": ["wiki_primary_missing_latin_coverage"],
         "allowed_source_paths": ["raw/sources/references/rag.md"],
-        "added_token_usage": 0,
     }
     assert result["pipeline"]["coverage"]["uncovered_latin_terms"] == ["rag"]
 
@@ -392,7 +390,6 @@ def test_v2_all_scope_coverage_extends_wiki_relaxed_results(tmp_path: Path) -> N
         "level": "raw",
         "reasons": ["wiki_primary_missing_latin_coverage"],
         "allowed_source_paths": ["raw/sources/references/llm.md"],
-        "added_token_usage": 0,
     }
 
 
@@ -449,7 +446,11 @@ def test_v2_raw_scope_index_unavailable_uses_structured_index_response(tmp_path:
     assert result["ok"] is True
     assert result["code"] == "index_missing"
     assert result["results"] == []
-    assert result["pipeline"]["fallback"]["level"] == "none"
+    assert result["pipeline"]["fallback"] == {
+        "level": "none",
+        "reasons": ["index_unavailable"],
+        "allowed_source_paths": [],
+    }
 
 
 def test_coverage_fusion_uses_raw_source_rank_not_bm25_absolute_value() -> None:
@@ -545,6 +546,30 @@ def test_v2_raw_fallback_uses_raw_documents_after_formal_miss(tmp_path: Path) ->
     assert result["results"]
     assert result["results"][0]["path"] == "raw/sources/file/default/help.md"
     assert result["results"][0]["source_kind"] == "raw"
+
+
+def test_v2_raw_fallback_creates_one_raw_store_per_query(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("---\ntitle: Reports Help\n---\n\nAccess reports from the Reports menu.", encoding="utf-8")
+    refresh_indexes(root)
+
+    original_init = RetrievalIndexStore.__init__
+    raw_store_inits = 0
+
+    def count_raw_store_init(self: RetrievalIndexStore, *args, **kwargs) -> None:
+        nonlocal raw_store_inits
+        if kwargs.get("scope") == "raw":
+            raw_store_inits += 1
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(RetrievalIndexStore, "__init__", count_raw_store_init)
+    result = run_query_v2(root, "access reports", retrieval_mode="lexical")
+
+    assert result["results"]
+    assert raw_store_inits == 1
 
 
 def test_v2_wiki_relaxed_recall_does_not_open_raw_store(tmp_path: Path, monkeypatch) -> None:

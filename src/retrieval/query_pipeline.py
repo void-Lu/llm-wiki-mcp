@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast
@@ -25,7 +24,19 @@ from retrieval.lexical_analyzer import (
 )
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.query_cancellation import QueryCancellationContext
-from retrieval.query_recovery import RecoveryCondition, assemble_recovery
+from retrieval.query_recovery import (
+    DEFAULT_RECOVERY_CONDITION,
+    LadderStep,
+    RecoveryAssembly,
+    assemble_recovery,
+    compose_score,
+    fallback_envelope,
+    plan_fallback,
+    resolve_fallback_lexical_mode,
+    search_ladder,
+    select_best_per_page,
+    _step_bonus,
+)
 from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.metadata_filters import QUERY_METADATA_FILTERS, normalize_metadata_filters, page_matches_filters
@@ -43,10 +54,6 @@ RAW_FALLBACK_CANDIDATE_LIMIT = 160
 IDENTIFIER_PHRASE_BONUS = 20.0
 IDENTIFIER_PHRASE_CANDIDATES = 200
 PAGE_FILL_LIMIT = 500
-FRESHNESS_BONUS_MAX = 12.0
-FRESHNESS_DECAY_DAYS = 90
-STEP_BONUS_MAX = 4.0
-STEP_COUNT_FULL = 5
 ADAPTIVE_EXPAND_MAX = 40
 ADAPTIVE_SCORE_RATIO = 0.9
 MAX_ADAPTIVE_SCORE_RATIO = 0.7
@@ -88,30 +95,6 @@ _DISCOVERY_CJK_ALIASES = {
     "列表": ("list", "listing"),
 }
 _STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
-def _freshness_bonus(hit: PassageHit, metadata: dict[str, dict[str, Any]]) -> float:
-    """Reward recently updated wiki pages so a newer fix patch outranks an
-    older note that happens to share the same vocabulary.
-
-    The signal decays linearly over ``FRESHNESS_DECAY_DAYS``.  Raw source pages
-    are absent from the active metadata map, so they never receive this bonus:
-    official documentation stays stable while project troubleshooting notes
-    compete on how current their fix is.
-    """
-
-    frontmatter = metadata.get(hit.page_path, {})
-    raw_date = str(frontmatter.get("updated_at") or frontmatter.get("created") or "")
-    if not raw_date:
-        return 0.0
-    try:
-        updated = datetime.date.fromisoformat(raw_date[:10])
-    except ValueError:
-        return 0.0
-    days = (datetime.date.today() - updated).days
-    if days < 0 or days > FRESHNESS_DECAY_DAYS:
-        return 0.0
-    return round(FRESHNESS_BONUS_MAX * (1 - days / FRESHNESS_DECAY_DAYS), 3)
-
-
 def _step_counts_for_pages(
     paths: list[str],
     store: RetrievalIndexStore,
@@ -957,42 +940,8 @@ def _constrain_discovery_entities(
     return constrained_discovery, constrained if len(constrained) >= 2 else []
 
 
-def _authority_bonus(hit: PassageHit, intent: str, scope: str, metadata: dict[str, dict[str, Any]]) -> float:
-    values = {"formal_knowledge": 0.35, "concept": 0.35, "entity": 0.35, "project": 0.23, "raw": 0.0, "raw_chat": -0.15}
-    if hit.corpus == "history" or hit.source_kind == "raw_chat":
-        authority = "raw_chat"
-    elif "/entities/" in hit.page_path:
-        authority = "entity"
-    elif "/projects/" in hit.page_path:
-        authority = "project"
-    elif "/concepts/" in hit.page_path:
-        authority = "concept"
-    else:
-        authority = "raw" if hit.source_kind.startswith("raw") else "formal_knowledge"
-    bonus = values.get(authority, 0.0)
-    if intent == "history" and hit.corpus == "history": bonus += 0.25
-    if scope == "history" and hit.corpus == "history": bonus += 0.15
-    if str(metadata.get(hit.page_path, {}).get("freshness") or "fresh") in {"stale", "review_required"}: bonus -= 0.20
-    return bonus
-
-
 def _heading(hit: PassageHit) -> str:
     return " / ".join(hit.heading_path) if hit.heading_path else hit.title
-
-
-def _title_overlap_bonus(hit: PassageHit, question: str) -> float:
-    """Reward a specific title match over a broad semantic project match."""
-    question_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", question) if len(term) > 1}
-    title_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", hit.title) if len(term) > 1}
-    if not question_terms or not title_terms:
-        overlap_bonus = 0.0
-    else:
-        overlap_bonus = 0.15 * len(question_terms & title_terms) / len(question_terms)
-    latin_terms = re.findall(r"[a-z0-9_]+", question.casefold())
-    compact_title = re.sub(r"[^a-z0-9_]+", "", hit.title.casefold())
-    if any(len(left + right) >= 5 and left + right in compact_title for left, right in zip(latin_terms, latin_terms[1:])):
-        return overlap_bonus + 2.0
-    return overlap_bonus
 
 
 def _citation_metadata(hit: PassageHit, provenance: dict[str, dict[str, str]]) -> dict[str, str]:
@@ -1115,20 +1064,6 @@ def _raw_recovery_bonus(hit: PassageHit, question: str, identifier_terms: list[s
     return min(title_overlap, 3) * 4.0 + min(heading_overlap, 3) * 2.0 + phrase_bonus + anchor_bonus + exact_phrase_bonus
 
 
-def _best_passage_per_page(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bound raw ranking to one deterministic representative per page."""
-
-    best: dict[str, dict[str, Any]] = {}
-    for item in items:
-        path = item["hit"].page_path
-        current = best.get(path)
-        if current is None or item["score"] > current["score"] or (
-            item["score"] == current["score"] and item["hit"].passage_id < current["hit"].passage_id
-        ):
-            best[path] = item
-    return list(best.values())
-
-
 def _raw_index_warning(status: Mapping[str, object]) -> str:
     """Expose raw-store failures without conflating them with the Wiki index."""
 
@@ -1142,7 +1077,7 @@ def _raw_index_warning(status: Mapping[str, object]) -> str:
 
 
 def _raw_recovery_candidates(
-    root: Path,
+    raw_store: RetrievalIndexStore,
     question: str,
     *,
     project: str | None,
@@ -1162,7 +1097,6 @@ def _raw_recovery_candidates(
     cross-corpus score.
     """
 
-    raw_store = RetrievalIndexStore(root, scope="raw")
     raw_fts_hits = 0
     raw_index_warning = ""
     raw_lexical_mode = "strict"
@@ -1186,75 +1120,46 @@ def _raw_recovery_candidates(
         frontmatter = page.get("frontmatter")
         raw_metadata[str(page["path"])] = dict(frontmatter) if isinstance(frontmatter, Mapping) else {}
 
-    raw_items: list[dict[str, Any]] = []
-    try:
-        raw_hits = raw_store.search_fts(
-            question,
-            limit=candidate_limit,
-            project=project,
-            page_type=filters.type,
-            tags=list(filters.tags),
-        )
-        qualified_code_hits = (
-            raw_store.search_fts(
+    common_kwargs = {
+        "project": project,
+        "page_type": filters.type,
+        "tags": list(filters.tags),
+    }
+    ladder_steps = [LadderStep("strict", "strict", question, common_kwargs)]
+    if has_qualified_identifier(question):
+        ladder_steps.append(LadderStep("qualified_code", "qualified_code", question, common_kwargs))
+    ladder_steps.extend(
+        [
+            LadderStep(
+                "identifier_phrase",
+                "identifier_phrase",
                 question,
-                limit=candidate_limit,
-                project=project,
-                page_type=filters.type,
-                tags=list(filters.tags),
-                mode="qualified_code",
-            )
-            if has_qualified_identifier(question)
-            else []
-        )
-        identifier_phrase_hits: list[PassageHit] = []
-        if not raw_hits and not qualified_code_hits:
-            try:
-                identifier_phrase_hits = raw_store.search_fts(
-                    question,
-                    limit=candidate_limit,
-                    project=project,
-                    page_type=filters.type,
-                    tags=list(filters.tags),
-                    mode="identifier_phrase",
-                    term_variants=term_variants,
-                )
-            except RetrievalIndexError:
-                identifier_phrase_hits = []
-        if qualified_code_hits:
-            raw_hits = qualified_code_hits
-            raw_lexical_mode = "qualified_code"
-        elif identifier_phrase_hits:
-            raw_hits = identifier_phrase_hits
-            raw_lexical_mode = "identifier_phrase"
-        elif not raw_hits:
-            prefix_hits = raw_store.search_fts(
+                {**common_kwargs, "term_variants": term_variants},
+                run_if_empty=True,
+                ignore_errors=True,
+            ),
+            LadderStep("raw_prefix", "raw_prefix", question, common_kwargs, run_if_empty=True),
+            LadderStep(
+                "relaxed",
+                "relaxed",
                 question,
-                limit=candidate_limit,
-                project=project,
-                page_type=filters.type,
-                tags=list(filters.tags),
-                mode="raw_prefix",
-            )
-            if prefix_hits:
-                raw_hits = prefix_hits
-                raw_lexical_mode = "raw_prefix"
-            else:
-                raw_hits = raw_store.search_fts(
-                    question,
-                    limit=candidate_limit,
-                    project=project,
-                    page_type=filters.type,
-                    tags=list(filters.tags),
-                    mode="relaxed",
-                    extra_terms=extra_terms,
-                )
-                if raw_hits:
-                    raw_lexical_mode = "relaxed"
-    except RetrievalIndexError as exc:
-        return raw_store, [], raw_fts_hits, _raw_index_warning({"code": exc.code}), raw_lexical_mode
+                {**common_kwargs, "extra_terms": extra_terms},
+                run_if_empty=True,
+            ),
+        ]
+    )
+    raw_hits, raw_lexical_mode = search_ladder(
+        raw_store,
+        steps=ladder_steps,
+        merge="replace_if_nonempty",
+        limit=candidate_limit,
+        swallow_index_errors=True,
+    )
+    if raw_lexical_mode.startswith("error:"):
+        return raw_store, [], raw_fts_hits, _raw_index_warning({"code": raw_lexical_mode[6:]}), "strict"
 
     raw_fts_hits = len(raw_hits)
+    raw_items: list[dict[str, Any]] = []
     query_identifier_phrases = identifier_phrases(question) if raw_lexical_mode == "identifier_phrase" else []
     for rank, hit in enumerate(raw_hits, 1):
         if cancellation is not None:
@@ -1282,7 +1187,7 @@ def _raw_recovery_candidates(
                 "score": score,
             }
         )
-    raw_candidate_items = _best_passage_per_page(raw_items)
+    raw_candidate_items = select_best_per_page(raw_items)
     if raw_candidate_items and raw_lexical_mode != "qualified_code":
         step_counts = _step_counts_for_pages(
             sorted({item["hit"].page_path for item in raw_candidate_items}),
@@ -1292,7 +1197,7 @@ def _raw_recovery_candidates(
         for item in raw_candidate_items:
             count = step_counts.get(item["hit"].page_path, 0)
             item["score"] = round(
-                item["score"] + STEP_BONUS_MAX * min(count, STEP_COUNT_FULL) / STEP_COUNT_FULL,
+                item["score"] + _step_bonus(count),
                 12,
             )
     raw_candidate_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
@@ -1337,8 +1242,8 @@ def _merge_coverage_items(
 ) -> list[dict[str, Any]]:
     """Fuse active and raw page ranks using normalized, source-local signals."""
 
-    active_pages = _best_passage_per_page(list(active_items))
-    raw_pages = _best_passage_per_page(list(raw_items))
+    active_pages = select_best_per_page(list(active_items))
+    raw_pages = select_best_per_page(list(raw_items))
     active_pages.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     raw_pages.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     ranked: list[dict[str, Any]] = []
@@ -1595,9 +1500,12 @@ def _entity_store_specs(
     raw_snapshot: QueryCorpusSnapshot | None,
     raw_store: RetrievalIndexStore | None,
 ) -> list[_EntityStoreSpec]:
+    del root
     specs = [_EntityStoreSpec(primary_store, effective_scope, snapshot)]
     if effective_scope in {"knowledge", "all"}:
-        entity_raw_store = raw_store or RetrievalIndexStore(root, scope="raw")
+        entity_raw_store = raw_store
+        if entity_raw_store is None:
+            return specs
         raw_status = entity_raw_store.status()
         if raw_status.get("ok") and raw_status.get("state") == "fresh":
             if raw_snapshot is None:
@@ -1617,43 +1525,52 @@ def _search_entity_store(
 ) -> tuple[list[PassageHit], dict[str, int]]:
     counters = {"fts_hits": 0, "qualified_hits": 0, "relaxed_hits": 0}
     identifier = entity.get("_identifier")
+    common_kwargs = {
+        "project": project,
+        "page_type": filters.type,
+        "tags": list(filters.tags),
+    }
     if isinstance(identifier, QualifiedIdentifier):
-        hits = store.search_qualified_identifier(
-            identifier,
-            limit=limit,
-            project=project,
-            page_type=filters.type,
-            tags=list(filters.tags),
+        def search_qualified(
+            current_store: RetrievalIndexStore,
+            _step: LadderStep,
+            current_limit: int,
+        ) -> list[PassageHit]:
+            return current_store.search_qualified_identifier(
+                identifier,
+                limit=current_limit,
+                project=project,
+                page_type=filters.type,
+                tags=list(filters.tags),
+            )
+
+        first_step = LadderStep(
+            "qualified_hits",
+            "qualified_code",
+            identifier.canonical_id,
+            common_kwargs,
+            searcher=search_qualified,
         )
-        counters["qualified_hits"] += len(hits)
     else:
-        hits = store.search_fts(
+        first_step = LadderStep(
+            "fts_hits",
+            "strict",
             str(entity["canonical_id"]),
-            limit=limit,
-            project=project,
-            page_type=filters.type,
-            tags=list(filters.tags),
+            common_kwargs,
         )
-        counters["fts_hits"] += len(hits)
-    if not hits:
-        hits = store.search_fts(
-            query_text,
-            limit=limit,
-            project=project,
-            page_type=filters.type,
-            tags=list(filters.tags),
-        )
-        counters["fts_hits"] += len(hits)
-    if not hits:
-        hits = store.search_fts(
-            query_text,
-            limit=limit,
-            project=project,
-            page_type=filters.type,
-            tags=list(filters.tags),
-            mode="relaxed",
-        )
-        counters["relaxed_hits"] += len(hits)
+    steps = [
+        first_step,
+        LadderStep("fts_hits", "strict", query_text, common_kwargs, run_if_empty=True),
+        LadderStep("relaxed_hits", "relaxed", query_text, common_kwargs, run_if_empty=True),
+    ]
+    hits, _mode = search_ladder(
+        store,
+        steps=steps,
+        merge="descend_if_empty",
+        limit=limit,
+        swallow_index_errors=False,
+        counts=counters,
+    )
     return hits, counters
 
 
@@ -2003,30 +1920,425 @@ def _stage_one_fts_hits(
 ) -> tuple[list[PassageHit], str, int]:
     """Run stage-one lexical recall, including raw qualified aliases directly."""
 
-    strict_hits = store.search_fts(
-        question,
+    common_kwargs = {
+        "project": project,
+        "page_type": filters.type,
+        "tags": list(filters.tags),
+    }
+    steps: list[LadderStep] = [LadderStep("strict", "strict", question, common_kwargs)]
+    if effective_scope == "raw" and has_qualified_identifier(question):
+        steps.append(LadderStep("qualified_code", "qualified_code", question, common_kwargs))
+    counts: dict[str, int] = {}
+    hits, mode = search_ladder(
+        store,
+        steps=steps,
+        merge="merge_by_passage",
         limit=50,
-        project=project,
-        page_type=filters.type,
-        tags=list(filters.tags),
+        swallow_index_errors=False,
+        counts=counts,
     )
-    if effective_scope != "raw" or not has_qualified_identifier(question):
-        return strict_hits, "strict", 0
-    qualified_hits = store.search_fts(
-        question,
-        limit=50,
-        project=project,
-        page_type=filters.type,
-        tags=list(filters.tags),
-        mode="qualified_code",
+    return hits, mode, counts.get("qualified_code", 0)
+
+
+@dataclass(frozen=True)
+class _FallbackRecoveryResult:
+    selected: list[dict[str, Any]]
+    context_items: list[dict[str, Any]]
+    recovery: RecoveryAssembly
+    raw_store: RetrievalIndexStore | None
+    raw_snapshot: QueryCorpusSnapshot | None
+    raw_fts_hits: int
+    relaxed_fts_hits: int
+    raw_index_warning: str
+    coverage_fallback: bool
+    lexical_mode: str
+    expansion_suggestions: list[str]
+    uncovered_latin_terms: list[str]
+    status: dict[str, Any]
+
+
+def _run_fallback_recovery(
+    *,
+    root: Path,
+    question: str,
+    effective_scope: str,
+    project: str | None,
+    filters: QueryFilters,
+    top_k: int,
+    store: RetrievalIndexStore,
+    metadata: dict[str, dict[str, Any]],
+    snapshot: QueryCorpusSnapshot,
+    expansion_terms: dict[str, list[str]] | None,
+    intent: str,
+    effective_rrf_k: int,
+    has_primary_recall: bool,
+    selected: list[dict[str, Any]],
+    scored: list[dict[str, Any]],
+    recovery: RecoveryAssembly,
+    stage_lexical_mode: str,
+    status: dict[str, Any],
+    cancellation: QueryCancellationContext,
+    get_raw_store: Callable[[], RetrievalIndexStore],
+    capture_raw_snapshot: Callable[[], QueryCorpusSnapshot],
+) -> _FallbackRecoveryResult:
+    """Run fallback branches after primary ranking has produced candidates."""
+
+    context_items = recovery.context_items
+    raw_fts_hits = 0
+    relaxed_fts_hits = 0
+    raw_index_warning = ""
+    coverage_fallback = False
+    lexical_mode = stage_lexical_mode
+    raw_store: RetrievalIndexStore | None = None
+    raw_snapshot: QueryCorpusSnapshot | None = None
+    expansion_suggestions: list[str] = []
+    query_extra_terms: list[str] = []
+    query_term_variants: dict[str, list[str]] = {}
+    wiki_relaxed_answered = False
+    uncovered_latin_terms = (
+        _uncovered_latin_terms(question, selected)
+        if has_primary_recall and effective_scope in {"knowledge", "all"}
+        else []
     )
-    by_passage = {hit.passage_id: hit for hit in strict_hits}
-    for hit in qualified_hits:
-        current = by_passage.get(hit.passage_id)
-        if current is None or hit.score > current.score:
-            by_passage[hit.passage_id] = hit
-    hits = sorted(by_passage.values(), key=lambda hit: (-hit.score, hit.page_path, hit.passage_id))
-    return hits, "qualified_code" if qualified_hits else "strict", len(qualified_hits)
+
+    cancellation.checkpoint("fallback")
+    coverage_plan = plan_fallback(
+        has_primary_recall=has_primary_recall,
+        effective_scope=effective_scope,
+        uncovered_latin_terms=uncovered_latin_terms,
+        wiki_relaxed_answered=wiki_relaxed_answered,
+        raw_available=True,
+        relaxed_available=False,
+    )
+    if coverage_plan is not None and coverage_plan.branch == "coverage":
+        cancellation.checkpoint("fallback")
+        raw_store = get_raw_store()
+        raw_snapshot = capture_raw_snapshot()
+        raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, _raw_lexical_mode = _raw_recovery_candidates(
+            raw_store,
+            question,
+            project=project,
+            filters=filters,
+            scope="raw",
+            extra_terms=[],
+            term_variants={},
+            top_k=top_k,
+            snapshot=raw_snapshot,
+            cancellation=cancellation,
+        )
+        raw_candidate_items = [
+            item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
+        ]
+        if raw_candidate_items:
+            merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms, rrf_k=effective_rrf_k)
+            selected = _adaptive_expand(merged, top_k)[:top_k]
+            combined_items = [*scored, *raw_candidate_items]
+            recovery = assemble_recovery(
+                selected,
+                condition=coverage_plan.condition,
+                candidates=combined_items,
+                store=store,
+                raw_store=raw_store,
+                cancellation=cancellation,
+            )
+            context_items = recovery.context_items
+            coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
+
+    relaxed_plan = plan_fallback(
+        has_primary_recall=has_primary_recall,
+        effective_scope=effective_scope,
+        uncovered_latin_terms=uncovered_latin_terms,
+        wiki_relaxed_answered=wiki_relaxed_answered,
+        raw_available=False,
+        relaxed_available=True,
+    )
+    if relaxed_plan is not None and relaxed_plan.branch == "wiki_relaxed":
+        cancellation.checkpoint("fallback")
+        query_extra_terms, query_term_variants, expansion_suggestions = _query_expansion(
+            question,
+            store,
+            None,
+            expansion_terms,
+            project,
+            snapshot=snapshot,
+            raw_snapshot=raw_snapshot,
+            cancellation=cancellation,
+        )
+        cancellation.checkpoint("fallback")
+        wiki_relaxed_items, relaxed_fts_hits, relaxed_warning = _relaxed_recovery_items(
+            store,
+            metadata,
+            question,
+            scope=effective_scope,
+            project=project,
+            filters=filters,
+            extra_terms=query_extra_terms,
+            cancellation=cancellation,
+        )
+        if relaxed_warning:
+            status = {**status, "code": relaxed_warning}
+        if wiki_relaxed_items:
+            step_counts = _step_counts_for_pages(
+                sorted({item["hit"].page_path for item in wiki_relaxed_items}),
+                store,
+                None,
+            )
+            for item in wiki_relaxed_items:
+                count = step_counts.get(item["hit"].page_path, 0)
+                item["score"] = compose_score(
+                    item["hit"],
+                    question,
+                    intent,
+                    effective_scope,
+                    metadata,
+                    base=item["hit"].score,
+                    freshness=True,
+                    step_bonus=_step_bonus(count),
+                )
+            wiki_relaxed_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
+            selected = select_best_per_page(wiki_relaxed_items)
+            selected = _adaptive_expand(selected, top_k)
+            recovery = assemble_recovery(
+                selected,
+                condition=relaxed_plan.condition,
+                candidates=wiki_relaxed_items,
+                store=store,
+                cancellation=cancellation,
+            )
+            context_items = recovery.context_items
+            lexical_mode = relaxed_plan.lexical_mode or lexical_mode
+            wiki_relaxed_answered = True
+            uncovered_latin_terms = _uncovered_latin_terms(question, selected)
+            all_coverage_plan = plan_fallback(
+                has_primary_recall=has_primary_recall,
+                effective_scope=effective_scope,
+                uncovered_latin_terms=uncovered_latin_terms,
+                wiki_relaxed_answered=wiki_relaxed_answered,
+                raw_available=True,
+                relaxed_available=True,
+            )
+            if all_coverage_plan is not None and all_coverage_plan.branch == "all_coverage":
+                cancellation.checkpoint("fallback")
+                raw_store = get_raw_store()
+                raw_snapshot = capture_raw_snapshot()
+                raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, _raw_lexical_mode = _raw_recovery_candidates(
+                    raw_store,
+                    question,
+                    project=project,
+                    filters=filters,
+                    scope="raw",
+                    extra_terms=query_extra_terms,
+                    term_variants=query_term_variants,
+                    top_k=top_k,
+                    snapshot=raw_snapshot,
+                    cancellation=cancellation,
+                )
+                raw_candidate_items = [
+                    item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
+                ]
+                if raw_candidate_items:
+                    merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms, rrf_k=effective_rrf_k)
+                    selected = _adaptive_expand(merged, top_k)[:top_k]
+                    combined_items = [*wiki_relaxed_items, *raw_candidate_items]
+                    recovery = assemble_recovery(
+                        selected,
+                        condition=all_coverage_plan.condition,
+                        candidates=combined_items,
+                        store=store,
+                        raw_store=raw_store,
+                        cancellation=cancellation,
+                    )
+                    context_items = recovery.context_items
+                    coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
+
+    raw_zero_plan = plan_fallback(
+        has_primary_recall=has_primary_recall,
+        effective_scope=effective_scope,
+        uncovered_latin_terms=uncovered_latin_terms,
+        wiki_relaxed_answered=wiki_relaxed_answered,
+        raw_available=True,
+        relaxed_available=wiki_relaxed_answered,
+    )
+    if raw_zero_plan is not None and raw_zero_plan.branch == "raw_zero":
+        cancellation.checkpoint("fallback")
+        raw_store = get_raw_store()
+        raw_snapshot = capture_raw_snapshot()
+        raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, raw_lexical_mode = _raw_recovery_candidates(
+            raw_store,
+            question,
+            project=project,
+            filters=filters,
+            scope="raw",
+            extra_terms=query_extra_terms,
+            term_variants=query_term_variants,
+            top_k=top_k,
+            snapshot=raw_snapshot,
+            cancellation=cancellation,
+        )
+        if raw_candidate_items:
+            selected = select_best_per_page(raw_candidate_items)
+            selected = _adaptive_expand(selected, top_k)[:top_k]
+            recovery = assemble_recovery(
+                selected,
+                condition=raw_zero_plan.condition,
+                candidates=raw_candidate_items,
+                store=store,
+                raw_store=raw_store,
+                cancellation=cancellation,
+            )
+            context_items = recovery.context_items
+            lexical_mode = resolve_fallback_lexical_mode(
+                raw_zero_plan,
+                raw_lexical_mode,
+                qualified_identifier=has_qualified_identifier(question),
+            ) or lexical_mode
+    return _FallbackRecoveryResult(
+        selected=selected,
+        context_items=context_items,
+        recovery=recovery,
+        raw_store=raw_store,
+        raw_snapshot=raw_snapshot,
+        raw_fts_hits=raw_fts_hits,
+        relaxed_fts_hits=relaxed_fts_hits,
+        raw_index_warning=raw_index_warning,
+        coverage_fallback=coverage_fallback,
+        lexical_mode=lexical_mode,
+        expansion_suggestions=expansion_suggestions,
+        uncovered_latin_terms=uncovered_latin_terms,
+        status=status,
+    )
+
+
+@dataclass(frozen=True)
+class _DiscoveryBatchResult:
+    discovery: dict[str, Any]
+    discovery_entities: list[dict[str, Any]]
+    discovery_source_items: list[dict[str, Any]]
+    batch_payload: dict[str, Any]
+    raw_store: RetrievalIndexStore | None
+    raw_snapshot: QueryCorpusSnapshot | None
+
+
+def _run_discovery_and_batch(
+    *,
+    root: Path,
+    question: str,
+    selected: list[dict[str, Any]],
+    context_items: list[dict[str, Any]],
+    store: RetrievalIndexStore,
+    metadata: dict[str, dict[str, Any]],
+    effective_scope: str,
+    project: str | None,
+    filters: QueryFilters,
+    snapshot: QueryCorpusSnapshot,
+    cancellation: QueryCancellationContext,
+    raw_store: RetrievalIndexStore | None,
+    raw_snapshot: QueryCorpusSnapshot | None,
+    retrieval_mode: Literal["lexical", "vector", "hybrid"],
+    hard_budget_tokens: int,
+    confirmation_token: str | None,
+    get_raw_store: Callable[[], RetrievalIndexStore],
+    capture_raw_snapshot: Callable[[], QueryCorpusSnapshot],
+) -> _DiscoveryBatchResult:
+    """Discover structured entities and run the optional batch query."""
+
+    discovery_requested = _discovery_requested(question)
+    discovery_source_items: list[dict[str, Any]] = []
+    discovery, discovery_entities = _discover_enumerated_entities(selected, context_items)
+    discovery, discovery_entities = _constrain_discovery_entities(
+        question, discovery, discovery_entities
+    )
+    if not discovery_entities and discovery_requested:
+        # Stage one may be dominated by a generic product passage (for
+        # example ``NetSuite``) or may have no FTS term at all for ``N/*``.
+        # Locate a bounded catalog candidate from the active projection, then
+        # validate same-page structure before exposing any entity.
+        discovery_source_items = _discovery_source_items(
+            store,
+            metadata,
+            question,
+            scope=effective_scope,
+            project=project,
+            filters=filters,
+            snapshot=snapshot,
+            cancellation=cancellation,
+        )
+        discovery, discovery_entities = _discover_enumerated_entities(
+            selected,
+            [*context_items, *discovery_source_items],
+        )
+        discovery, discovery_entities = _constrain_discovery_entities(
+            question, discovery, discovery_entities
+        )
+    if not discovery_entities and discovery_requested and effective_scope in {"knowledge", "all"}:
+        # Raw reference projections are a second discovery source, subject to
+        # the same active→raw boundary and request filters as entity queries.
+        candidate_raw_store = get_raw_store()
+        raw_status = candidate_raw_store.status()
+        if raw_status.get("ok") and raw_status.get("state") == "fresh":
+            raw_snapshot = raw_snapshot or capture_raw_snapshot()
+            raw_metadata = _store_metadata(
+                candidate_raw_store,
+                snapshot=raw_snapshot,
+                cancellation=cancellation,
+            )
+            raw_discovery_items = _discovery_source_items(
+                candidate_raw_store,
+                raw_metadata,
+                question,
+                scope="raw",
+                project=project,
+                filters=filters,
+                snapshot=raw_snapshot,
+                cancellation=cancellation,
+            )
+            discovery, discovery_entities = _discover_enumerated_entities(
+                selected,
+                [*context_items, *discovery_source_items, *raw_discovery_items],
+            )
+            discovery, discovery_entities = _constrain_discovery_entities(
+                question, discovery, discovery_entities
+            )
+            if discovery_entities:
+                raw_store = candidate_raw_store
+    discovery["requested"] = discovery_requested
+    if not discovery_entities:
+        discovery["reason"] = "structured_enumeration_evidence_insufficient"
+
+    batch_payload: dict[str, Any] = {
+        "status": "not_triggered",
+        "reason": "structured_enumeration_evidence_insufficient",
+        "entities": [],
+    }
+    if discovery_entities:
+        cancellation.checkpoint("fallback")
+        batch_raw_snapshot = raw_snapshot
+        if effective_scope in {"knowledge", "all"}:
+            batch_raw_snapshot = capture_raw_snapshot()
+        batch_payload = _run_entity_batch(
+            root,
+            discovery_entities,
+            question,
+            primary_store=store,
+            effective_scope=effective_scope,
+            project=project,
+            filters=filters,
+            retrieval_mode=retrieval_mode,
+            hard_budget_tokens=hard_budget_tokens,
+            confirmation_token=confirmation_token,
+            snapshot=snapshot,
+            raw_snapshot=batch_raw_snapshot,
+            raw_store=raw_store,
+            cancellation=cancellation,
+        )
+    return _DiscoveryBatchResult(
+        discovery=discovery,
+        discovery_entities=discovery_entities,
+        discovery_source_items=discovery_source_items,
+        batch_payload=batch_payload,
+        raw_store=raw_store,
+        raw_snapshot=raw_snapshot,
+    )
 
 
 def run_query_v2(
@@ -2092,7 +2404,7 @@ def run_query_v2(
             "results": [],
             "additional_results": [],
             "budget": {"total": k_budget, "used": 0},
-            "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [*index_warnings, str(status.get("code"))], "fallback": {"level": "none", "reasons": ["index_unavailable"], "allowed_source_paths": []}},
+            "pipeline": {"ranking_version": RANKING_POLICY_VERSION, "warnings": [*index_warnings, str(status.get("code"))], "fallback": fallback_envelope("none", ("index_unavailable",), ())},
         }
 
     snapshot = QueryCorpusSnapshot.capture(store, cancellation=cancellation)
@@ -2184,12 +2496,14 @@ def run_query_v2(
             + (1 / (effective_rrf_k + item["vector_rank"]) if item["vector_rank"] else 0.0)
         )
         exact = int(question.casefold() in {hit.title.casefold(), hit.page_path.casefold()})
-        total = round(
-            rrf * (effective_rrf_k + 1)
-            + _authority_bonus(hit, intent, effective_scope, metadata)
-            + _title_overlap_bonus(hit, question)
-            + exact * 0.5,
-            12,
+        total = compose_score(
+            hit,
+            question,
+            intent,
+            effective_scope,
+            metadata,
+            rrf=rrf * (effective_rrf_k + 1),
+            exact=exact * 0.5,
         )
         scored.append({**item, "score": total, "rrf": rrf, "exact": bool(exact), "graph_score": 0.0, "graph_reasons": []})
     cancellation.checkpoint("graph")
@@ -2217,331 +2531,105 @@ def run_query_v2(
     # per page, while the internal pack is assembled page-by-page in reading
     # order so multi-section answers (fix steps, install checklists) survive
     # regardless of which sections carried the highest BM25 scores.
-    selected: list[dict[str, Any]] = []
-    selected_paths: set[str] = set()
-    for index, item in enumerate(scored):
+    for index in range(0, len(scored), 16):
         cancellation.checkpoint_batch(index, every=16, stage="context")
-        page_path = item["hit"].page_path
-        if page_path not in selected_paths:
-            selected.append(item)
-            selected_paths.add(page_path)
+    selected = select_best_per_page(scored)
     selected = _adaptive_expand(selected, top_k)
-    selected_paths = {item["hit"].page_path for item in selected}
     recovery = assemble_recovery(
         selected,
-        condition=RecoveryCondition(),
+        condition=DEFAULT_RECOVERY_CONDITION,
         candidates=scored,
         store=store,
         cancellation=cancellation,
     )
     context_items = recovery.context_items
-    # A true Wiki zero-result query has two sequential recovery stages: active
-    # Wiki relaxed recovery, followed only when that stage is empty by the
-    # dedicated raw-source store.  That path keeps raw evidence isolated from
-    # Wiki ranking.  The narrow Latin-coverage path below is the explicit,
-    # observable exception: it normalizes source-local ranks before mixing
-    # selected active and raw evidence.  Both paths read SQLite projections
-    # only, never walk raw files or load an embedding model.
-    raw_fts_hits = 0
-    relaxed_fts_hits = 0
-    raw_index_warning = ""
-    coverage_fallback = False
-    lexical_mode = stage_lexical_mode
+    raw_store_holder: list[RetrievalIndexStore | None] = [None]
     raw_store: RetrievalIndexStore | None = None
     raw_snapshot: QueryCorpusSnapshot | None = None
-    raw_store_for_snapshot: RetrievalIndexStore | None = None
+
+    def get_raw_store() -> RetrievalIndexStore:
+        nonlocal raw_store
+        if raw_store_holder[0] is None:
+            raw_store_holder[0] = RetrievalIndexStore(root, scope="raw")
+        raw_store = raw_store_holder[0]
+        assert raw_store is not None
+        return raw_store
 
     def capture_raw_snapshot() -> QueryCorpusSnapshot:
-        nonlocal raw_snapshot, raw_store_for_snapshot
+        nonlocal raw_snapshot
         if raw_snapshot is None:
-            raw_store_for_snapshot = raw_store_for_snapshot or raw_store or RetrievalIndexStore(root, scope="raw")
-            raw_status = raw_store_for_snapshot.status()
+            snapshot_store = get_raw_store()
+            raw_status = snapshot_store.status()
             if not raw_status.get("ok") or raw_status.get("state") != "fresh":
                 raw_snapshot = QueryCorpusSnapshot.empty("raw")
             else:
-                raw_snapshot = QueryCorpusSnapshot.capture(raw_store_for_snapshot, cancellation=cancellation)
+                raw_snapshot = QueryCorpusSnapshot.capture(snapshot_store, cancellation=cancellation)
         return raw_snapshot
-    query_extra_terms: list[str] = []
-    query_term_variants: dict[str, list[str]] = {}
-    wiki_relaxed_answered = False
-    uncovered_latin_terms = (
-        _uncovered_latin_terms(question, selected)
-        if has_primary_recall and effective_scope in {"knowledge", "all"}
-        else []
+
+    fallback = _run_fallback_recovery(
+        root=root,
+        question=question,
+        effective_scope=effective_scope,
+        project=project,
+        filters=filters,
+        top_k=top_k,
+        store=store,
+        metadata=metadata,
+        snapshot=snapshot,
+        expansion_terms=expansion_terms,
+        intent=intent,
+        effective_rrf_k=effective_rrf_k,
+        has_primary_recall=has_primary_recall,
+        selected=selected,
+        scored=scored,
+        recovery=recovery,
+        stage_lexical_mode=stage_lexical_mode,
+        status=status,
+        cancellation=cancellation,
+        get_raw_store=get_raw_store,
+        capture_raw_snapshot=capture_raw_snapshot,
     )
-
-    cancellation.checkpoint("fallback")
-    if uncovered_latin_terms:
-        cancellation.checkpoint("fallback")
-        raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, _raw_lexical_mode = _raw_recovery_candidates(
-            root,
-            question,
-            project=project,
-            filters=filters,
-            scope="raw",
-            extra_terms=[],
-            term_variants={},
-            top_k=top_k,
-            snapshot=capture_raw_snapshot(),
-            cancellation=cancellation,
-        )
-        raw_candidate_items = [
-            item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
-        ]
-        if raw_candidate_items:
-            merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms, rrf_k=effective_rrf_k)
-            selected = _adaptive_expand(merged, top_k)[:top_k]
-            selected_paths = {item["hit"].page_path for item in selected}
-            combined_items = [*scored, *raw_candidate_items]
-            recovery = assemble_recovery(
-                selected,
-                condition=RecoveryCondition("raw", ("wiki_primary_missing_latin_coverage",), "item"),
-                candidates=combined_items,
-                store=store,
-                raw_store=raw_store,
-                cancellation=cancellation,
-            )
-            context_items = recovery.context_items
-            coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
-    if not has_primary_recall and effective_scope in {"knowledge", "all"}:
-        cancellation.checkpoint("fallback")
-        # Wiki is the primary corpus.  Try its bounded relaxed projection
-        # before opening the independent raw store; a successful Wiki answer
-        # must not be mixed with raw evidence or even query the raw DB.
-        query_extra_terms, query_term_variants, expansion_suggestions = _query_expansion(
-            question,
-            store,
-            None,
-            expansion_terms,
-            project,
-            snapshot=snapshot,
-            raw_snapshot=raw_snapshot,
-            cancellation=cancellation,
-        )
-        cancellation.checkpoint("fallback")
-        wiki_relaxed_items, relaxed_fts_hits, relaxed_warning = _relaxed_recovery_items(
-            store,
-            metadata,
-            question,
-            scope=effective_scope,
-            project=project,
-            filters=filters,
-            extra_terms=query_extra_terms,
-            cancellation=cancellation,
-        )
-        if relaxed_warning:
-            status = {**status, "code": relaxed_warning}
-        if wiki_relaxed_items:
-            for item in wiki_relaxed_items:
-                item["score"] = round(
-                    item["hit"].score
-                    + _authority_bonus(item["hit"], intent, effective_scope, metadata)
-                    + _title_overlap_bonus(item["hit"], question)
-                    + _freshness_bonus(item["hit"], metadata),
-                    12,
-                )
-            step_counts = _step_counts_for_pages(
-                sorted({item["hit"].page_path for item in wiki_relaxed_items}),
-                store,
-                None,
-            )
-            for item in wiki_relaxed_items:
-                count = step_counts.get(item["hit"].page_path, 0)
-                item["score"] = round(
-                    item["score"] + STEP_BONUS_MAX * min(count, STEP_COUNT_FULL) / STEP_COUNT_FULL,
-                    12,
-                )
-            wiki_relaxed_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
-            selected = []
-            selected_paths = set()
-            for item in wiki_relaxed_items:
-                page_path = item["hit"].page_path
-                if page_path not in selected_paths:
-                    selected.append(item)
-                    selected_paths.add(page_path)
-            selected = _adaptive_expand(selected, top_k)
-            selected_paths = {item["hit"].page_path for item in selected}
-            recovery = assemble_recovery(
-                selected,
-                condition=RecoveryCondition(),
-                candidates=wiki_relaxed_items,
-                store=store,
-                cancellation=cancellation,
-            )
-            context_items = recovery.context_items
-            lexical_mode = "relaxed"
-            wiki_relaxed_answered = True
-
-            # ``scope=all`` may use the relaxed Wiki result as the primary
-            # answer, but it can still leave an explicit Latin term uncovered.
-            # Extend the same bounded coverage path used after strict recall;
-            # the default knowledge scope keeps its Wiki-first isolation.
-            if effective_scope == "all":
-                uncovered_latin_terms = _uncovered_latin_terms(question, selected)
-                if uncovered_latin_terms:
-                    cancellation.checkpoint("fallback")
-                    raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, _raw_lexical_mode = _raw_recovery_candidates(
-                        root,
-                        question,
-                        project=project,
-                        filters=filters,
-                        scope="raw",
-                        extra_terms=query_extra_terms,
-                        term_variants=query_term_variants,
-                        top_k=top_k,
-                        snapshot=capture_raw_snapshot(),
-                        cancellation=cancellation,
-                    )
-                    raw_candidate_items = [
-                        item for item in raw_candidate_items if _coverage_terms(item, uncovered_latin_terms)
-                    ]
-                    if raw_candidate_items:
-                        merged = _merge_coverage_items(selected, raw_candidate_items, uncovered_latin_terms, rrf_k=effective_rrf_k)
-                        selected = _adaptive_expand(merged, top_k)[:top_k]
-                        selected_paths = {item["hit"].page_path for item in selected}
-                        combined_items = [*wiki_relaxed_items, *raw_candidate_items]
-                        recovery = assemble_recovery(
-                            selected,
-                            condition=RecoveryCondition("raw", ("wiki_primary_missing_latin_coverage",), "item"),
-                            candidates=combined_items,
-                            store=store,
-                            raw_store=raw_store,
-                            cancellation=cancellation,
-                        )
-                        context_items = recovery.context_items
-                        coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
-
-    if not has_primary_recall and not wiki_relaxed_answered and effective_scope in {"knowledge", "all"}:
-        cancellation.checkpoint("fallback")
-        raw_store, raw_candidate_items, raw_fts_hits, raw_index_warning, raw_lexical_mode = _raw_recovery_candidates(
-            root,
-            question,
-            project=project,
-            filters=filters,
-            scope="raw",
-            extra_terms=query_extra_terms,
-            term_variants=query_term_variants,
-            top_k=top_k,
-            snapshot=capture_raw_snapshot(),
-            cancellation=cancellation,
-        )
-        if raw_candidate_items:
-            selected = []
-            selected_paths = set()
-            for item in raw_candidate_items:
-                page_path = item["hit"].page_path
-                if page_path not in selected_paths:
-                    selected.append(item)
-                    selected_paths.add(page_path)
-            selected = _adaptive_expand(selected, top_k)[:top_k]
-            selected_paths = {item["hit"].page_path for item in selected}
-            recovery = assemble_recovery(
-                selected,
-                condition=RecoveryCondition("raw", ("wiki_zero_results",), "item"),
-                candidates=raw_candidate_items,
-                store=store,
-                raw_store=raw_store,
-                cancellation=cancellation,
-            )
-            context_items = recovery.context_items
-            if raw_lexical_mode == "qualified_code" and has_qualified_identifier(question):
-                lexical_mode = "qualified_code"
-            elif raw_lexical_mode == "identifier_phrase":
-                lexical_mode = "identifier_phrase"
-            elif raw_lexical_mode == "raw_prefix":
-                lexical_mode = "raw_prefix"
-            elif raw_lexical_mode == "relaxed":
-                lexical_mode = "relaxed"
+    selected = fallback.selected
+    context_items = fallback.context_items
+    recovery = fallback.recovery
+    raw_store = fallback.raw_store
+    raw_snapshot = fallback.raw_snapshot
+    raw_fts_hits = fallback.raw_fts_hits
+    relaxed_fts_hits = fallback.relaxed_fts_hits
+    raw_index_warning = fallback.raw_index_warning
+    coverage_fallback = fallback.coverage_fallback
+    lexical_mode = fallback.lexical_mode
+    expansion_suggestions = fallback.expansion_suggestions
+    uncovered_latin_terms = fallback.uncovered_latin_terms
+    status = fallback.status
     cancellation.checkpoint("graph")
-    discovery_requested = _discovery_requested(question)
-    discovery_source_items: list[dict[str, Any]] = []
-    discovery, discovery_entities = _discover_enumerated_entities(selected, context_items)
-    discovery, discovery_entities = _constrain_discovery_entities(
-        question, discovery, discovery_entities
+    discovery_batch = _run_discovery_and_batch(
+        root=root,
+        question=question,
+        selected=selected,
+        context_items=context_items,
+        store=store,
+        metadata=metadata,
+        effective_scope=effective_scope,
+        project=project,
+        filters=filters,
+        snapshot=snapshot,
+        cancellation=cancellation,
+        raw_store=raw_store,
+        raw_snapshot=raw_snapshot,
+        retrieval_mode=retrieval_mode,
+        hard_budget_tokens=hard_budget_tokens,
+        confirmation_token=confirmation_token,
+        get_raw_store=get_raw_store,
+        capture_raw_snapshot=capture_raw_snapshot,
     )
-    if not discovery_entities and discovery_requested:
-        # Stage one may be dominated by a generic product passage (for
-        # example ``NetSuite``) or may have no FTS term at all for ``N/*``.
-        # Locate a bounded catalog candidate from the active projection, then
-        # validate same-page structure before exposing any entity.
-        discovery_source_items = _discovery_source_items(
-            store,
-            metadata,
-            question,
-            scope=effective_scope,
-            project=project,
-            filters=filters,
-            snapshot=snapshot,
-            cancellation=cancellation,
-        )
-        discovery, discovery_entities = _discover_enumerated_entities(
-            selected,
-            [*context_items, *discovery_source_items],
-        )
-        discovery, discovery_entities = _constrain_discovery_entities(
-            question, discovery, discovery_entities
-        )
-    if not discovery_entities and discovery_requested and effective_scope in {"knowledge", "all"}:
-        # Raw reference projections are a second discovery source, subject to
-        # the same active→raw boundary and request filters as entity queries.
-        candidate_raw_store = raw_store or RetrievalIndexStore(root, scope="raw")
-        raw_status = candidate_raw_store.status()
-        if raw_status.get("ok") and raw_status.get("state") == "fresh":
-            raw_snapshot = raw_snapshot or capture_raw_snapshot()
-            raw_metadata = _store_metadata(
-                candidate_raw_store,
-                snapshot=raw_snapshot,
-                cancellation=cancellation,
-            )
-            raw_discovery_items = _discovery_source_items(
-                candidate_raw_store,
-                raw_metadata,
-                question,
-                scope="raw",
-                project=project,
-                filters=filters,
-                snapshot=raw_snapshot,
-                cancellation=cancellation,
-            )
-            discovery, discovery_entities = _discover_enumerated_entities(
-                selected,
-                [*context_items, *discovery_source_items, *raw_discovery_items],
-            )
-            discovery, discovery_entities = _constrain_discovery_entities(
-                question, discovery, discovery_entities
-            )
-            if discovery_entities:
-                raw_store = candidate_raw_store
-    discovery["requested"] = discovery_requested
-    if not discovery_entities:
-        discovery["reason"] = "structured_enumeration_evidence_insufficient"
-    batch_payload: dict[str, Any] = {
-        "status": "not_triggered",
-        "reason": "structured_enumeration_evidence_insufficient",
-        "entities": [],
-    }
-    if discovery_entities:
-        cancellation.checkpoint("fallback")
-        batch_raw_snapshot = raw_snapshot
-        if effective_scope in {"knowledge", "all"}:
-            batch_raw_snapshot = capture_raw_snapshot()
-        batch_raw_store = raw_store or raw_store_for_snapshot
-        batch_payload = _run_entity_batch(
-            root,
-            discovery_entities,
-            question,
-            primary_store=store,
-            effective_scope=effective_scope,
-            project=project,
-            filters=filters,
-            retrieval_mode=retrieval_mode,
-            hard_budget_tokens=hard_budget_tokens,
-            confirmation_token=confirmation_token,
-            snapshot=snapshot,
-            raw_snapshot=batch_raw_snapshot,
-            raw_store=batch_raw_store,
-            cancellation=cancellation,
-        )
+    discovery = discovery_batch.discovery
+    discovery_entities = discovery_batch.discovery_entities
+    discovery_source_items = discovery_batch.discovery_source_items
+    discovery_requested = bool(discovery.get("requested"))
+    batch_payload = discovery_batch.batch_payload
+    raw_store = discovery_batch.raw_store
+    raw_snapshot = discovery_batch.raw_snapshot
     public_selected = selected[:top_k]
     additional_selected = selected[top_k:]
     public_paths = {item["hit"].page_path for item in public_selected}
