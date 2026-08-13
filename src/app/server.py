@@ -46,7 +46,6 @@ from retrieval.metadata_filters import (
 )
 from archive.archive_models import ARCHIVE_REASONS, is_archive_reason
 from archive.archive_service import ArchiveService
-from codegraph.codegraph_sync import CodeGraphSyncError, sync_codegraph as run_codegraph_sync
 
 
 @dataclass(frozen=True)
@@ -195,7 +194,6 @@ _TOOL_ANNOTATIONS = {
     "wiki_list": ToolAnnotations(title="List wiki content", read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
     "wiki_get": ToolAnnotations(title="Read wiki content", read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
     "wiki_ingest": ToolAnnotations(title="Ingest a source", read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
-    "wiki_codegraph_import": ToolAnnotations(title="Import CodeGraph", read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
     "wiki_write_note": ToolAnnotations(title="Write a wiki note", read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False),
     "wiki_update": ToolAnnotations(title="Update a wiki page", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
     "wiki_archive": ToolAnnotations(title="Archive a wiki page", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
@@ -439,9 +437,6 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
     resolution = _registered_resolution()
     status = dict(wiki_status_tool(str(resolution.root)))
     status.pop("vault_root", None)
-    codegraph = status.get("codegraph")
-    if isinstance(codegraph, dict):
-        codegraph.pop("executable", None)
     status["vault"] = resolution.logical_name
     status["config"] = CONFIG_REGISTRY.public_status(resolution.resolved)
     archive_status = ArchiveStatusReader(resolution.root).status()
@@ -607,8 +602,6 @@ def _run_wiki_query(
             )
 
         cancellation.set_cancel_handler(record_cancellation)
-    if filters.type and filters.type.casefold() == "code_fact" and not project:
-        return {"ok": False, "code": "project_required_for_codegraph", "error": "project is required to query CodeGraph pages"}
     retrieval_mode = "vector" if not settings.lexical_enabled else "hybrid" if settings.embedding.enabled else "lexical"
     try:
         result = run_query_v2(
@@ -753,26 +746,6 @@ def wiki_ingest(source_path: str, source_name: str, project: str = "", source_ty
     """Ingest one explicit file; text is indexed and other files become raw assets."""
     resolution = _registered_resolution()
     result = run_ingest_file(vault_root=resolution.root, project=project, source_name=source_name, source_path=source_path, source_type=source_type)
-    return result
-
-
-@_register()
-def wiki_codegraph_import(sync: Literal["sync"] = "sync", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, workspace_root: str | None = None) -> dict[str, Any]:
-    """Synchronise the current workspace's CodeGraph snapshot into the Wiki.
-
-    workspace_root is required — pass it explicitly or set the
-    LLM_WIKI_WORKSPACE_ROOT environment variable (e.g. the client's
-    workspace folder); it never falls back to the server process cwd.
-    """
-    if sync != "sync":
-        return {"ok": False, "code": "invalid_codegraph_operation", "error": "only sync is supported"}
-    resolution = _registered_resolution()
-    try:
-        result = run_codegraph_sync(resolution.root, workspace_root=workspace_root)
-    except CodeGraphSyncError as exc:
-        result = {"ok": False, "code": exc.code, "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 - keep the MCP boundary structured
-        result = {"ok": False, "code": "codegraph_sync_failed", "error": str(exc)}
     return result
 
 

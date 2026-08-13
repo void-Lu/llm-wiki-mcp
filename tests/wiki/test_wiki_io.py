@@ -14,7 +14,7 @@ def test_write_and_read_markdown_page_with_frontmatter(tmp_path: Path):
     create_wiki_root(root)
     page = WikiPage(
         relative_path=Path("wiki/projects/alpha/architecture/script-a.md"),
-        frontmatter={"type": "architecture", "generated": True, "sources": ["raw/sources/projects/alpha/codegraph/status.json"]},
+        frontmatter={"type": "architecture", "generated": True, "sources": ["raw/sources/projects/alpha/requirements/status.json"]},
         title="Script A",
         body="Call 13800138000 before release.",
     )

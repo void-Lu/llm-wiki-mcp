@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,6 @@ def wiki_status(vault_root: str | Path) -> dict[str, Any]:
         "initialized": root.exists() and not missing,
         "missing_required_paths": missing,
         "queue": _queue_status(root),
-        "codegraph": _codegraph_status(),
         "vector": _vector_status(root),
         "retrieval": {
             "active": RetrievalIndexStore(root).status(),
@@ -51,11 +49,6 @@ def _queue_status(root: Path) -> dict[str, Any]:
         status = str(item.get("status", "unknown")) if isinstance(item, dict) else "unknown"
         counts[status] = counts.get(status, 0) + 1
     return {"path": queue_path.relative_to(root).as_posix(), "total": len(queue), "counts": counts}
-
-
-def _codegraph_status() -> dict[str, Any]:
-    executable = shutil.which("codegraph") or shutil.which("codegraph.cmd")
-    return {"available": executable is not None, "executable": executable or ""}
 
 
 def _vector_status(root: Path) -> dict[str, object]:

@@ -10,7 +10,6 @@ from typing import Any, Mapping
 
 import yaml
 
-from codegraph.codegraph_policy import is_codegraph_managed_path
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.atomic_file import sha256_file
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
@@ -48,8 +47,6 @@ def preview_update(
         return {"ok": False, "code": "page_not_found"}
     text = target.read_text(encoding="utf-8")
     fm, old_body = split_frontmatter(text)
-    if is_codegraph_managed_path(page_path, fm):
-        return {"ok": False, "code": "codegraph_managed_page", "error": "CodeGraph-managed pages can only be updated by wiki_codegraph_import"}
     if fm.get("lifecycle", "active") != "active":
         return {"ok": False, "code": "inactive_page"}
     incoming = dict(incoming_frontmatter or {})
@@ -95,8 +92,6 @@ def apply_update(
         return {"ok": False, "code": "page_not_found"}
     text = target.read_text(encoding="utf-8")
     existing, _ = split_frontmatter(text)
-    if is_codegraph_managed_path(page_path, existing):
-        return {"ok": False, "code": "codegraph_managed_page", "error": "CodeGraph-managed pages can only be updated by wiki_codegraph_import"}
     current_hash = sha256_file(target)
     incoming = dict(incoming_frontmatter or {})
     removed_fields = sorted(REMOVED_FIELDS & incoming.keys())

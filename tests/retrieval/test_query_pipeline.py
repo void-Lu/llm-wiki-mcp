@@ -129,21 +129,24 @@ def test_v2_uses_results_as_the_single_public_context_source(tmp_path: Path) -> 
     assert "batch" not in result["pipeline"]
 
 
-def test_v2_raw_scope_is_raw_only_and_excludes_codegraph_raw(tmp_path: Path) -> None:
+def test_v2_raw_scope_includes_project_raw_pages(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
     _write(root, "wiki/concepts/active.md", "Active", "raw scope sentinel", type="concept")
     raw = root / "raw/sources/references/raw-scope.md"
     raw.parent.mkdir(parents=True, exist_ok=True)
     raw.write_text("---\ntitle: Raw Scope\n---\n\nraw scope sentinel", encoding="utf-8")
-    codegraph = root / "raw/sources/projects/demo/codegraph/raw-scope.md"
-    codegraph.parent.mkdir(parents=True)
-    codegraph.write_text("---\ntitle: CodeGraph Raw\n---\n\nraw scope sentinel", encoding="utf-8")
+    project_raw = root / "raw/sources/projects/demo/requirements/raw-scope.md"
+    project_raw.parent.mkdir(parents=True)
+    project_raw.write_text("---\ntitle: Project Raw\n---\n\nraw scope sentinel", encoding="utf-8")
     refresh_indexes(root)
 
     result = run_query_v2(root, "raw scope sentinel", scope="raw", retrieval_mode="lexical", top_k=5)
 
-    assert [item["path"] for item in result["results"]] == ["raw/sources/references/raw-scope.md"]
+    assert {item["path"] for item in result["results"]} == {
+        "raw/sources/references/raw-scope.md",
+        "raw/sources/projects/demo/requirements/raw-scope.md",
+    }
     assert all(item["source_kind"] == "raw" for item in result["results"])
     assert result["pipeline"]["fallback"] == {
         "level": "none",

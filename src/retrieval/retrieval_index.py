@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from common.content_redaction import REDACTION_POLICY_VERSION
-from codegraph.codegraph_policy import is_codegraph_raw_path
 from common.privacy_policy import PrivacyPolicy, project_public_value
 from retrieval.lexical_analyzer import (
     expanded_identifier_phrase_fts_query,
@@ -272,22 +271,10 @@ class RetrievalIndexStore:
         if self.scope != "archive":
             clauses.append("pages.path NOT LIKE ?")
             params.append("wiki/sources/%")
-        # CodeGraph keeps its JSON provenance in raw, but those files are not
-        # knowledge pages and must never become raw FTS evidence.  The
-        # project-code boundary is applied before LIMIT so unrelated project
-        # pages cannot consume the bounded candidate set.
-        clauses.append("pages.path NOT LIKE ?")
-        params.append("raw/sources/projects/%/codegraph/%")
-        retrieval_scope = "json_extract(pages.frontmatter_json, '$.retrieval_scope')"
         page_project = "COALESCE(NULLIF(pages.project, ''), json_extract(pages.frontmatter_json, '$.project'), '')"
         if project:
             clauses.append(f"({page_project} = '' OR {page_project} = ?)")
             params.append(project)
-            clauses.append(f"({retrieval_scope} IS NULL OR {retrieval_scope} != ? OR {page_project} = ?)")
-            params.extend(("project_code", project))
-        else:
-            clauses.append(f"({retrieval_scope} IS NULL OR {retrieval_scope} != ?)")
-            params.append("project_code")
         params.append(limit)
         sql = """
             SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
@@ -699,7 +686,7 @@ def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:
     if scope == "archive":
         return path.startswith("archives/bundles/")
     if scope == "raw":
-        return path.startswith("raw/sources/") and not path.startswith("raw/sources/chat/") and not is_codegraph_raw_path(path)
+        return path.startswith("raw/sources/") and not path.startswith("raw/sources/chat/")
     # Legacy chatlogs have completed their retention period.  They are moved
     # into immutable archive bundles by the legacy migration and must never
     # re-enter the active retrieval projection while a pre-migration file is

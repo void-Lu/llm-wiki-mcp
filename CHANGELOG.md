@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-08-13 — 移除 CodeGraph 摄入
+
+- 删除 `wiki_codegraph_import`、CodeGraph 摄入包及其 retrieval/write policy 消费点；core MCP 工具从 10 个变为 9 个，`wiki_status` 不再返回 CodeGraph 字段。
+- 新增 `repair codegraph-removal plan|apply`，可清理带完整 CodeGraph 标记的 architecture/archive 页面和 `raw/sources/projects/*/codegraph/` 目录；`architecture/` 目录本身、手工页面和其他 raw 内容保留。
+- 升级后未清理的旧 CodeGraph 页面按普通 generated 页面处理，查询不再施加 `project_code` 专属隔离；旧 raw 文件按既有 raw scope 索引边界处理。清理后如有显式 vector index，需按返回的 `rebuild_required` 提示重建。
+
 ## 2026-08-12 — 架构整改与检索/写入管线收敛
 
 - 统一 durable Markdown 写入：`atomic_write_text`、CAS、`PageMutationCoordinator` 和 page-operation journal 现在共同负责页面事实提交、幂等重试和可恢复投影；页面已提交但派生投影失败时返回 `repair_pending`，不重复创建页面。

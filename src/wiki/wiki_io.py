@@ -6,7 +6,6 @@ from typing import Any
 
 import yaml
 
-from codegraph.codegraph_policy import is_codegraph_managed_path
 from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy
 from wiki.atomic_file import AtomicFileError, atomic_write_text
@@ -93,14 +92,8 @@ def prepare_wiki_page(
         raise WikiWriteError("path_escape", "resolved page path escapes wiki root")
     if target.exists() and overwrite_generated_only:
         existing_frontmatter, _ = split_frontmatter(target.read_text(encoding="utf-8"))
-        if is_codegraph_managed_path(relative_path, existing_frontmatter):
-            raise WikiWriteError("codegraph_managed_page", f"CodeGraph-managed page is tool-owned: {relative_path.as_posix()}")
         if existing_frontmatter.get("generated") is not True:
             raise WikiWriteError("manual_page_exists", f"refusing to overwrite non-generated wiki page: {relative_path.as_posix()}")
-    elif target.exists():
-        existing_frontmatter, _ = split_frontmatter(target.read_text(encoding="utf-8"))
-        if is_codegraph_managed_path(relative_path, existing_frontmatter):
-            raise WikiWriteError("codegraph_managed_page", f"CodeGraph-managed page is tool-owned: {relative_path.as_posix()}")
 
     policy = PrivacyPolicy()
     title = policy.redact_display_text(page.title)

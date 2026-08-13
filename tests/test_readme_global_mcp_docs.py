@@ -14,7 +14,7 @@ def test_readme_documents_llm_wiki_workflow():
     assert "sources/" in text
     assert "wiki/projects/" in text
     assert "wiki/concepts/" in text
-    assert "CodeGraph" in text
+    assert "codegraph-removal" in text
     assert "不引入 Chroma、sentence-transformers 或 embedding 模型" in text
     assert "不创建" in text
     assert "LLM_WIKI_VAULT_ROOT" in text

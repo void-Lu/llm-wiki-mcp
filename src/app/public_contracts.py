@@ -27,7 +27,6 @@ _ERROR_MESSAGES: dict[str, str] = {
     "internal_error": "the operation could not be completed",
     "invalid_action": "the requested action is invalid",
     "invalid_archive_reason": "the archive reason is invalid",
-    "invalid_codegraph_operation": "the CodeGraph operation is invalid",
     "invalid_expansion_terms": "the expansion terms are invalid",
     "invalid_filters": "the query filters are invalid",
     "invalid_content_ref": "the content reference is invalid",

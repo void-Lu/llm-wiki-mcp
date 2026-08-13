@@ -15,7 +15,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Iterable, Sequence
 
-from codegraph.codegraph_policy import is_codegraph_raw_path
 from retrieval.graph_retrieval import QueryCandidate
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from runtime.runtime_config import EmbeddingSettings
@@ -615,7 +614,7 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False, *, scope: st
             if scope == "archive":
                 allowed = True
             elif scope == "raw":
-                allowed = relative.startswith("raw/sources/") and not is_codegraph_raw_path(relative)
+                allowed = relative.startswith("raw/sources/")
             else:
                 allowed = not relative.startswith("wiki/sources/") and (
                     include_raw_sources or not relative.startswith("raw/")
@@ -656,7 +655,6 @@ def _candidate_pages(root: Path, include_raw_sources: bool = False, *, scope: st
             relative = path.relative_to(root).as_posix()
             if (
                 path.is_file()
-                and not is_codegraph_raw_path(relative)
                 and path.suffix.lower() in {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}
             ):
                 candidates.append(_raw_candidate(path, root))

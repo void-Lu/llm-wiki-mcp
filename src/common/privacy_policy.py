@@ -27,7 +27,6 @@ _INTERNAL_FIELDS = frozenset(
         "executable",
         "exception",
         "model_path",
-        "workspace_root",
         "index_path",
         "documents_path",
         "executable_path",

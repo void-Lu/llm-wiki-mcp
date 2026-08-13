@@ -27,6 +27,7 @@ def test_wiki_status_reports_structure_and_queue_counts(tmp_path: Path):
     assert result["initialized"] is True
     assert result["missing_required_paths"] == []
     assert result["queue"]["counts"] == {"pending": 1, "failed": 1, "done": 1}
+    assert "codegraph" not in result
     assert result["version"] == RUNTIME_PROVENANCE.package_version
     assert result["runtime"] == RUNTIME_PROVENANCE.to_public_dict()
     assert set(result["runtime"]) == {

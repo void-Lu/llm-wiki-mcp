@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
 from retrieval.context_packer import ContextPassage, pack_context
-from codegraph.codegraph_policy import is_codegraph_raw_path
 from retrieval.lexical_analyzer import (
     QualifiedIdentifier,
     edit_distance,
@@ -310,7 +309,6 @@ def _eligible(hit: PassageHit, metadata: Mapping[str, Mapping[str, Any]], *, sco
         if (
             not normalized_path.startswith("raw/sources/")
             or normalized_path.startswith("raw/sources/chat/")
-            or is_codegraph_raw_path(normalized_path)
         ):
             return False
     if scope != "archive" and _is_retired_source_namespace(hit.page_path):
@@ -2073,8 +2071,6 @@ def run_query_v2(
             "error": "retrieval_mode must be lexical, vector, or hybrid",
         }
     filters = filters or QueryFilters()
-    if filters.type and filters.type.casefold() == "code_fact" and not project:
-        return {"ok": False, "code": "project_required_for_codegraph", "error": "project is required to query CodeGraph pages"}
     if project:
         project = project.casefold()
     intent = classify_intent(question)

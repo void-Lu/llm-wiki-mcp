@@ -219,16 +219,19 @@ def test_raw_prefix_query_keeps_prefixes_anchored_and_short_tokens_exact() -> No
     assert "*ingest*" not in query
 
 
-def test_raw_prefix_search_recovers_morphology_but_excludes_codegraph(tmp_path: Path) -> None:
+def test_raw_prefix_search_includes_non_markdown_project_sources(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     _write(root, "raw/sources/file/default/ingestion.md", "# Ingestion\n\nThe ingestion pipeline is documented here.")
-    _write(root, "raw/sources/projects/demo/codegraph/graph.json", '{"ingest": "internal provenance"}')
+    _write(root, "raw/sources/projects/demo/requirements/graph.json", '{"ingest": "internal provenance"}')
     raw = RetrievalIndexStore(root, scope="raw")
     raw.build(raw.iter_vault_pages())
 
     hits = raw.search_fts("ingest", mode="raw_prefix")
 
-    assert [hit.page_path for hit in hits] == ["raw/sources/file/default/ingestion.md"]
+    assert {hit.page_path for hit in hits} == {
+        "raw/sources/file/default/ingestion.md",
+        "raw/sources/projects/demo/requirements/graph.json",
+    }
 
 
 def test_metadata_filter_alias_normalization_is_canonical_and_rejects_conflicts() -> None:

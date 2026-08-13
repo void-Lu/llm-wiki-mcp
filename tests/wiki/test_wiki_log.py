@@ -35,7 +35,7 @@ def test_append_log_entry_uses_parseable_heading_and_fields(tmp_path: Path):
             operation="ingest",
             title="CodeGraph alpha",
             paths=["wiki/projects/alpha/architecture/script.md"],
-            sources=["raw/sources/projects/alpha/codegraph/status.json"],
+            sources=["raw/sources/projects/alpha/requirements/status.json"],
             project="alpha",
             status="ok",
             timestamp="2026-05-26T10:20:30Z",
@@ -49,7 +49,7 @@ def test_append_log_entry_uses_parseable_heading_and_fields(tmp_path: Path):
     assert "- paths:" in text
     assert "  - wiki/projects/alpha/architecture/script.md" in text
     assert "- sources:" in text
-    assert "  - raw/sources/projects/alpha/codegraph/status.json" in text
+    assert "  - raw/sources/projects/alpha/requirements/status.json" in text
 
 
 def test_append_log_entry_redacts_persisted_strings(tmp_path: Path):

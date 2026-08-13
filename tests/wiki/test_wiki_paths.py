@@ -84,7 +84,6 @@ def test_project_helpers_return_confirmed_project_substructure(tmp_path: Path):
 
     assert paths.project_root("alpha") == paths.root / "wiki" / "projects" / "alpha"
     assert paths.raw_project_root("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha"
-    assert paths.raw_project_codegraph_dir("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha" / "codegraph"
     assert paths.raw_project_requirements_dir("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha" / "requirements"
     assert paths.raw_project_assets_dir("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha" / "assets"
     assert paths.project_specs_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "specs"

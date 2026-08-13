@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - CLI 初始化 vault：`uv run llm-wiki-mcp init --vault <name> --root <path> --default`
 - CLI 查看状态：`uv run llm-wiki-mcp status`
 - CLI 检查/构建/更新检索库：`uv run llm-wiki-mcp index status|build|update --vault <path> [--scope active|raw|archive]`
-- CLI 修复/审计（admin）：`uv run llm-wiki-mcp repair page-operation|provenance|privacy-audit <plan|apply> --vault <name>`
+- CLI 修复/审计（admin）：`uv run llm-wiki-mcp repair page-operation|provenance|privacy-audit|codegraph-removal <plan|apply> --vault <name>`
 - 本机 `uv run pytest` 若报 `uv trampoline failed to canonicalize script path`，改用 `uv run python -m pytest`（已验证可用）。
 
 项目使用 `uv.lock` 管理开发环境。Ruff 配置在 pyproject.toml（`select = ["E9", "F"]`），运行 `uv run ruff check src/`；完成前至少运行相关 `uv run pytest`，较大改动运行全量 `uv run pytest` 和 `uv run ruff check src/`。
@@ -32,7 +32,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 3. [README.md](README.md) 的工具说明（如果公开行为变化）。
 4. [tests/app/test_server_tools.py](tests/app/test_server_tools.py) 和对应业务测试。
 
-注册工具清单（10 个）：`wiki_status`、`wiki_list`（metadata-only catalog）、`wiki_get`（opaque `content_ref` 精确读取）、`wiki_ingest`、`wiki_codegraph_import`、`wiki_write_note`、`wiki_update`、`wiki_query`、`wiki_archive`、`wiki_restore`。`wiki_generation` worker 工具不再注册；init/config、retrieval-eval、vector/index 生命周期、archive admin、repair/privacy admin 和 migration 只保留在 CLI 边界。
+注册工具清单（9 个）：`wiki_status`、`wiki_list`（metadata-only catalog）、`wiki_get`（opaque `content_ref` 精确读取）、`wiki_ingest`、`wiki_write_note`、`wiki_update`、`wiki_query`、`wiki_archive`、`wiki_restore`。`wiki_generation` worker 工具不再注册；init/config、retrieval-eval、vector/index 生命周期、archive admin、repair/privacy admin 和 migration 只保留在 CLI 边界。
 
 [public_contracts.py](src/app/public_contracts.py) 定义稳定公开契约 `PublicResult`/`PublicError`（含 `correlation_id`）；[server.py](src/app/server.py) 所有工具经统一 `_register` 注册，入参 schema 为 `extra="forbid"` 严格模式。
 
@@ -65,7 +65,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 [wikilinks.py](src/wiki/wikilinks.py) 提供 wikilink 格式化和解析工具函数：`format_wikilink`（含表格内 `\| 转义）、`normalize_wikilink_targets`（小写化 + 表格别名处理）、`wikilink_targets`、`split_wikilink_inner`、`table_wikilink_alias_pipe_lines` 等。query、update 等模块统一使用此模块处理 wikilink，不内嵌正则。
 
-[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、generation queue、版本与运行身份，以及 CodeGraph executable 的只读可用性。MCP 工具为 `wiki_status`。
+[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、generation queue、版本与运行身份。MCP 工具为 `wiki_status`。
 
 [content_catalog.py](src/wiki/content_catalog.py)（含 [catalog_cursor.py](src/wiki/catalog_cursor.py)、[content_reference.py](src/wiki/content_reference.py)）是 `wiki_list`/`wiki_get` 的只读 catalog 后端：metadata 分页 + opaque `content_ref`，不读正文。
 
@@ -91,15 +91,11 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 归档相关模块：`archive_models.py` 定义 bundle/plan/tombstone 数据，`archive_manifest.py` 负责 manifest 哈希与校验，`archive_planner.py` 生成归档计划，`archive_migration.py` 处理 legacy migration，`archive_service.py` 是 MCP/CLI 的公开服务边界。
 
-### CodeGraph 同步
-
-[codegraph_sync.py](src/codegraph/codegraph_sync.py) 是 CodeGraph 快照导入器：读取工作目录 `.codegraph/codegraph.db`，将结构化代码事实投影为 `wiki/projects/<project>/architecture/` 下的 code-facts、pipelines 和 code-overview 页面，并同步 active retrieval projection。MCP 工具为 `wiki_codegraph_import`（固定 `sync="sync"`）。[codegraph_policy.py](src/codegraph/codegraph_policy.py) 提供所有权检查（`managed_by=codegraph`、`retrieval_scope=project_code`、`source_name=codegraph`），CodeGraph 管理页只能由 `wiki_codegraph_import` 更新，`wiki_update` 不覆盖。
-
-旧的 `context_budget.py`、`page_merge.py`、`wiki_dedup.py`、`wiki_delete.py`、`wiki_enrich.py`、`wiki_gap.py`、`wiki_ingest.py`、`wiki_insights.py`、`wiki_lint.py`、`wiki_repair.py`、`wiki_research.py`、`wiki_source_index.py`、`wiki_synthesis.py`、`wiki_verify.py`、`wiki_batch.py`、`pipeline_detector.py`、`louvain.py` 已删除；不要重新注册这些模块或 MCP 工具。旧 `codegraph_client.py` 已被 [codegraph_sync.py](src/codegraph/codegraph_sync.py) + [codegraph_policy.py](src/codegraph/codegraph_policy.py) 替代。
+旧的 `context_budget.py`、`page_merge.py`、`wiki_dedup.py`、`wiki_delete.py`、`wiki_enrich.py`、`wiki_gap.py`、`wiki_ingest.py`、`wiki_insights.py`、`wiki_lint.py`、`wiki_repair.py`、`wiki_research.py`、`wiki_source_index.py`、`wiki_synthesis.py`、`wiki_verify.py`、`wiki_batch.py`、`pipeline_detector.py`、`louvain.py` 已删除；不要重新注册这些模块或 MCP 工具。
 
 ## 必守约定
 
-- 不要重新引入已删除的 CodeGraph 摄入模块或旧 RAG 主路径；CodeGraph 只在 `wiki_status` 中作为只读可用性字段。
+- CodeGraph 摄入已移除；存量 CodeGraph 页面/raw 目录使用 `repair codegraph-removal plan|apply` 清理，项目 `architecture/` 目录本身保留。
 - 旧 RAG 工具和旧人工笔记入口 `save_obsidian_note` 不应注册；人工笔记公开入口统一为 `wiki_write_note`。
 - `knowledge` 写入 `wiki/concepts/<domain>/`，禁止 `project`。
 - 项目目录固定为 `wiki/projects/<project>/{index.md,specs/,plans/,architecture/,troubleshooting/,researches/}`；`wiki_write_note` 只写 spec/plan/troubleshooting/researches，架构页由 `wiki_update` 维护。
@@ -116,7 +112,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 测试文件按功能包分组，命令为 `uv run pytest tests/<package>/test_<module>.py`：
 - CLI/runtime/config/provenance：`test_cli.py`、`test_runtime_config.py`、`test_runtime_provenance.py`、`test_readme_global_mcp_docs.py`
 - Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_atomic_file.py`、`test_page_mutation.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
-- MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_save_obsidian_note.py`、`test_ingest_service.py`、`test_codegraph_sync.py`
+- MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_save_obsidian_note.py`、`test_ingest_service.py`
 - 查询/检索/向量/wikilink：`test_wiki_query.py`、`test_query_pipeline.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
 - worker/归档/辅助：`test_knowledge_compiler.py`、`test_generation_queue.py`、`test_archive_lifecycle.py`、`test_archive_wiki_sources.py`、`test_git_utils.py`
 - 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_fallback_policy.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`

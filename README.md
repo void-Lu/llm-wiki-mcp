@@ -1,6 +1,6 @@
 # LLM Wiki MCP
 
-一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。内容通过 MCP 工具摄入、查询、维护和归档；脚本代码事实由外部 CodeGraph 解析后通过专用同步入口导入。
+一个本地 MCP（Model Context Protocol）server，让 LLM 编码代理可以完整读写基于 Obsidian 的知识 Wiki。内容通过 MCP 工具摄入、查询、维护和归档。
 
 默认不使用 embedding 或向量数据库；关键词、图检索和 `[[wikilinks]]` 始终可独立运行。需要语义召回时可显式启用本地 BGE-M3 索引，绝不自动下载模型或向外部服务发送 vault 内容。
 
@@ -136,22 +136,29 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 #### Codex
 
-在 `~/.codex/config.toml` 里用 `$VAR` 语法从环境变量取值：
+在 `~/.codex/config.toml` 中使用 STDIO 配置。`env_vars` 会从本地环境读取变量并传给 MCP 子进程；启动命令由 PowerShell 展开 `$env:LLM_WIKI_MCP_DIR`，避免在 TOML 中写入安装目录或 vault 的绝对路径：
 
 ```toml
 [mcp_servers.llm-wiki]
-command = "uv"
-args = ["--directory", "$LLM_WIKI_MCP_DIR", "run", "llm-wiki-mcp-server"]
-
-[mcp_servers.llm-wiki.env]
-LLM_WIKI_VAULT_ROOT = "$LLM_WIKI_VAULT_ROOT"
+type = "stdio"
+command = "powershell.exe"
+args = [
+  "-NoLogo",
+  "-NoProfile",
+  "-NonInteractive",
+  "-Command",
+  "uv --directory $env:LLM_WIKI_MCP_DIR run llm-wiki-mcp-server",
+]
+env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 ```
 
-> 三种配置都只引用环境变量，不包含任何工作区相关路径或绝对路径，可以原样复制到任意工作区使用。
+启动 Codex 前，确保 `LLM_WIKI_MCP_DIR` 和 `LLM_WIKI_VAULT_ROOT` 已设置在 User 或 System 环境变量中；修改环境变量后需要重启 Codex 会话。
+
+> 三种配置都只引用环境变量，不包含任何工作区相关路径或具体绝对路径，可以原样复制到任意工作区使用。
 
 ## 工具
 
-默认 core profile 精确注册以下 10 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。`wiki_codegraph_import` 使用 `workspace_root` 指定 CodeGraph 工作区，未传时读取 `LLM_WIKI_WORKSPACE_ROOT`。
+默认 core profile 精确注册以下 9 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。
 
 | 工具                      | 说明                                                                                                               |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -159,7 +166,6 @@ LLM_WIKI_VAULT_ROOT = "$LLM_WIKI_VAULT_ROOT"
 | `wiki_list`             | 只读 metadata catalog；使用`store_scope=active\|raw\|archive`、page size 和 opaque cursor，不读取正文或 passages。 |
 | `wiki_get`              | 只读精确读取；required 输入是 opaque`content_ref`，正文默认关闭，显式 body budget 受硬上限约束。                 |
 | `wiki_ingest`           | UTF-8 Markdown/纯文本写入`raw/sources/` 并同步 raw FTS；二进制只保存字节/hash，不建立语义索引。                  |
-| `wiki_codegraph_import` | 固定执行`sync`：读取当前工作目录 `.codegraph/codegraph.db`，更新 CodeGraph raw 快照和 architecture 页面。      |
 | `wiki_write_note`       | 仅创建人工知识页，已有目标不会被覆盖。                                                                             |
 | `wiki_update`           | 对既有页面执行`preview/apply`，正文 hash、结构 plan 和 CAS 都由服务端校验。                                      |
 | `wiki_query`            | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；检索策略来自启动时配置快照。              |
@@ -169,6 +175,13 @@ LLM_WIKI_VAULT_ROOT = "$LLM_WIKI_VAULT_ROOT"
 `wiki_write_note` 成功写入后返回 `state`、`operation_id`、`page_hash`；若页面已提交但派生投影待修复，响应会额外给出 `repair_action` 与 `failed_stage`，调用方应执行指定 repair，而不是重复创建整页。
 
 不再注册 `wiki_generation` worker 工具。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
+
+旧版 CodeGraph 摄入留下的页面和 raw 目录可通过 CLI 清理；`plan` 只预览，`apply` 删除匹配的存量内容并保留项目的 `architecture/` 目录：
+
+```bash
+uv run llm-wiki-mcp repair codegraph-removal plan --vault <vault-path>
+uv run llm-wiki-mcp repair codegraph-removal apply --vault <vault-path>
+```
 
 `retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测检索契约，输出 JSON 与 Markdown 报告。当前查询契约是 V2，`--query-version` 仅接受 `v2`；默认 `--entrypoint engine --retrieval-mode lexical`，不创建、不更新也不调用 vector/Embedding。需要验证 MCP 公共边界时使用 `--entrypoint mcp`，该入口会拒绝非词法配置，并覆盖 `project`、`type`、`tags`、`path_prefix`、空结果和错误契约。`--scope` 控制 V2 corpus。报告包含 Recall、Precision、MRR、nDCG（@1/@3/@5/@10）、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。传入 `--baseline-report <retrieval-eval.json>` 可执行冻结基线 gate：Recall/nDCG 回退不超过 0.02、过滤器 100%、无答案误命中率不超过 0.05、P95 增长不超过 10%，且词法-only 与 context budget 检查通过。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
@@ -227,10 +240,7 @@ vault_root/
 │   │       ├── index.md
 │   │       ├── specs/
 │   │       ├── plans/
-│   │       ├── architecture/
-│   │       │   ├── code-facts/<source-relative-path>.md
-│   │       │   ├── pipelines/<pipeline>.md
-│   │       │   └── code-overview.md
+│   │       ├── architecture/       # 项目级代码分析笔记目录，保留供后续使用
 │   │       ├── troubleshooting/
 │   │       └── researches/
 │   ├── entities/
@@ -254,11 +264,10 @@ vault_root/
 
 1. 用 CLI 注册 vault：`llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
 2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
-3. 对脚本项目在对应工作目录调用 `wiki_codegraph_import(sync="sync", workspace_root="<workspace-root>")`。它只接受外部 CodeGraph 已生成的数据库，不复制源码或数据库；生成页位于 `wiki/projects/<project-lowercase>/architecture/`。
-4. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。项目代码页默认隔离；Agent 需要先向用户确认项目，再原样保留自然语言问题并传入小写 `project`。
-5. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
-6. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑；CodeGraph 管理页只能由 `wiki_codegraph_import` 同步更新。
-7. 用 `wiki_archive`/`wiki_restore` 管理归档生命周期；purge 只保留在 CLI/admin 边界。
+3. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。
+4. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
+5. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑。
+6. 用 `wiki_archive`/`wiki_restore` 管理归档生命周期；purge 只保留在 CLI/admin 边界。
 
 当 `wiki_query` 返回的 citations 中有被当前结论采纳的 Wiki 页面时，将其显式
 映射为 `related_pages=[{"path": "wiki/...md", "title": "..."}]` 传给

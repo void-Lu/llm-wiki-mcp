@@ -336,9 +336,6 @@ class WikiPaths:
     def raw_project_requirements_dir(self, project: str) -> Path:
         return self.raw_project_root(project) / "requirements"
 
-    def raw_project_codegraph_dir(self, project: str) -> Path:
-        return self.raw_project_root(project) / "codegraph"
-
     def raw_project_chat_dir(self, project: str) -> Path:
         return self.root / "raw" / "sources" / "chat"
 

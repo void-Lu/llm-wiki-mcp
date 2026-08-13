@@ -36,7 +36,6 @@ from app.server import (
 CORE_TOOLS = {
     "wiki_status",
     "wiki_ingest",
-    "wiki_codegraph_import",
     "wiki_write_note",
     "wiki_update",
     "wiki_query",
@@ -243,17 +242,6 @@ def test_public_query_schema_has_logical_vault_and_no_runtime_overrides() -> Non
     assert {"enable_vector", "context_window_tokens", "include_raw_sources", "max_graph_hops"}.isdisjoint(parameters)
 
 
-def test_codegraph_import_schema_uses_snake_case_workspace_root() -> None:
-    async def assert_schema() -> None:
-        async with Client(mcp) as client:
-            tool = next(item for item in (await client.list_tools()).tools if item.name == "wiki_codegraph_import")
-            properties = tool.input_schema.get("properties", {})
-            assert "workspace_root" in properties
-            assert "workspaceRoot" not in properties
-
-    anyio.run(assert_schema)
-
-
 def test_resolver_uses_default_logical_vault(tmp_path: Path) -> None:
     registry, root = _registry(tmp_path)
     result = resolve_tool_vault(registry=registry)
@@ -287,12 +275,11 @@ def test_attach_warnings_preserves_existing_warnings() -> None:
 def test_status_hides_absolute_vault_and_model_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     registry, root = _registry(tmp_path)
     monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
-    monkeypatch.setattr("app.server.wiki_status_tool", lambda _: {"ok": True, "vault_root": str(root), "codegraph": {"available": True, "executable": str(root / "bin" / "codegraph")}, "vector": {"state": "missing"}})
+    monkeypatch.setattr("app.server.wiki_status_tool", lambda _: {"ok": True, "vault_root": str(root), "vector": {"state": "missing"}})
     result = wiki_status()
     assert result["vault"] == "primary"
     assert "vault_root" not in result
     assert "model_path" not in result["config"]["retrieval"]["embedding"]
-    assert "executable" not in result["codegraph"]
 
 
 @pytest.mark.parametrize("tool", [wiki_archive, wiki_restore])

@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from codegraph.codegraph_policy import is_project_code_page
-
 SUPPORTED_METADATA_FILTERS = frozenset(
     {"type", "tags", "path_prefix", "project", "freshness", "lifecycle", "corpus"}
 )
@@ -35,17 +33,13 @@ def page_matches_filters(
 ) -> bool:
     """Apply the production metadata boundary to one retrieved page.
 
-    Project matching follows the query boundary: CodeGraph pages must carry
-    the requested project, while ordinary pages with no project metadata stay
-    eligible.  Type falls back to ``source_kind`` and requested tags must be
-    a subset of list-like page metadata; scalar tag metadata never matches.
+    Ordinary pages with no project metadata stay eligible. Type falls back to
+    ``source_kind`` and requested tags must be a subset of list-like page
+    metadata; scalar tag metadata never matches.
     """
 
     page_project = str(frontmatter.get("project") or "").casefold()
-    if is_project_code_page(frontmatter):
-        if project is None or page_project != project.casefold():
-            return False
-    elif project and page_project and page_project != project.casefold():
+    if project and page_project and page_project != project.casefold():
         return False
 
     if page_type and str(frontmatter.get("type") or source_kind) != page_type:

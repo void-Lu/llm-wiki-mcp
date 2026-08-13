@@ -24,6 +24,7 @@ from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError, l
 from archive.archive_migration import apply_legacy_migration, plan_legacy_migration
 from archive.archive_service import ArchiveService
 from wiki.page_repair import PageRepairService
+from wiki.codegraph_removal import apply_codegraph_removal, plan_codegraph_removal
 from wiki.privacy_audit import PrivacyAuditError, PrivacyAuditService
 from wiki.provenance_migration import ProvenanceMigrationError, ProvenanceMigrationService
 
@@ -188,6 +189,13 @@ def _build_parser() -> argparse.ArgumentParser:
     privacy_apply.add_argument("--vault", required=True)
     privacy_apply.add_argument("--plan-id", required=True)
     privacy_apply.add_argument("--allow-locator-changes", action="store_true", help="Explicitly allow filename/wikilink changes.")
+
+    codegraph_removal = repair_actions.add_parser("codegraph-removal", help="Plan or apply removal of legacy CodeGraph artifacts.")
+    codegraph_removal_actions = codegraph_removal.add_subparsers(dest="codegraph_removal_action", required=True)
+    codegraph_removal_plan = codegraph_removal_actions.add_parser("plan", help="Preview legacy CodeGraph pages and raw directories without changing them.")
+    codegraph_removal_plan.add_argument("--vault", required=True)
+    codegraph_removal_apply = codegraph_removal_actions.add_parser("apply", help="Delete the planned legacy CodeGraph pages and raw directories.")
+    codegraph_removal_apply.add_argument("--vault", required=True)
 
     subparsers.add_parser("server", help="Run the MCP server.")
     return parser
@@ -452,6 +460,13 @@ def _run_repair(args: argparse.Namespace) -> int:
             payload = service.apply(args.plan_id, allow_locator_changes=bool(args.allow_locator_changes))
         else:
             raise ValueError(f"unknown privacy-audit action: {args.privacy_audit_action}")
+    elif args.repair_action == "codegraph-removal":
+        if args.codegraph_removal_action == "plan":
+            payload = plan_codegraph_removal(args.vault)
+        elif args.codegraph_removal_action == "apply":
+            payload = apply_codegraph_removal(args.vault)
+        else:
+            raise ValueError(f"unknown codegraph-removal action: {args.codegraph_removal_action}")
     else:
         raise ValueError(f"unknown repair action: {args.repair_action}")
     _print_json(payload)
