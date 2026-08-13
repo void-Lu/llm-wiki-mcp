@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.vector_index import VectorIndexStore
+from wiki.supersede_registry import SupersedeRegistry
 from wiki.wiki_paths import DEFAULT_FILES, TOP_LEVEL_DIRS
 
 
@@ -36,19 +36,7 @@ def _missing_required_paths(root: Path) -> list[str]:
 
 
 def _queue_status(root: Path) -> dict[str, Any]:
-    queue_path = root / ".llm-wiki" / "ingest-queue.json"
-    if not queue_path.exists():
-        return {"path": queue_path.relative_to(root).as_posix(), "total": 0, "counts": {}}
-    try:
-        data = json.loads(queue_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"path": queue_path.relative_to(root).as_posix(), "total": 0, "counts": {}, "error": str(exc)}
-    queue = data if isinstance(data, list) else []
-    counts: dict[str, int] = {}
-    for item in queue:
-        status = str(item.get("status", "unknown")) if isinstance(item, dict) else "unknown"
-        counts[status] = counts.get(status, 0) + 1
-    return {"path": queue_path.relative_to(root).as_posix(), "total": len(queue), "counts": counts}
+    return SupersedeRegistry.read_status(root)
 
 
 def _vector_status(root: Path) -> dict[str, object]:

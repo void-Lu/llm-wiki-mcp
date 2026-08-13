@@ -6,7 +6,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from wiki.generation_queue import GenerationQueue
+from wiki.supersede_registry import SupersedeRegistry
 from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter, TEXT_SOURCE_SUFFIXES
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
@@ -113,7 +113,7 @@ def _invalidate_raw_provenance(root: Path, relative_path: Path, source_hash: str
 
     relative = relative_path.as_posix()
     stale = KnowledgeDependencies(root).source_changed(source_path_key(relative), source_hash)
-    superseded = GenerationQueue(root).supersede_sources({relative})
+    superseded = SupersedeRegistry(root).supersede_sources({relative})
     return {
         "stale": stale,
         "superseded": superseded,

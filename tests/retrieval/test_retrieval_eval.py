@@ -36,7 +36,7 @@ from retrieval.retrieval_eval import (
 from retrieval.vector_index import VectorIndexStore, vector_index_records
 from retrieval.retrieval_index import RetrievalIndexStore
 from archive.archive_service import ArchiveService
-from wiki.knowledge_compiler import filesystem_path
+from wiki.wiki_paths import filesystem_path
 from retrieval.vector_provider import DeterministicFakeProvider
 from wiki.wiki_io import write_wiki_page
 from wiki.wiki_models import WikiPage

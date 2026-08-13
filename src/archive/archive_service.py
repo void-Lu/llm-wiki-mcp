@@ -24,6 +24,21 @@ from archive.archive_planner import ArchivePlanner
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
 
 
+ARCHIVE_REQUIRED_TABLES = frozenset(
+    {
+        "archive_plans",
+        "archive_operations",
+        "archive_operation_items",
+        "archive_events",
+        "tombstones",
+    }
+)
+ARCHIVE_REQUIRED_COLUMNS = {
+    "archive_operations": frozenset({"operation_id", "archive_id", "operation_type", "state", "updated_at", "error_code"}),
+    "tombstones": frozenset({"archive_id", "purged_at", "reason", "payload"}),
+}
+
+
 _TRANSITIONS = {
     "planned": {"staged", "rolling_back", "failed_recoverable"},
     "staged": {"pending", "rolling_back", "failed_recoverable"},

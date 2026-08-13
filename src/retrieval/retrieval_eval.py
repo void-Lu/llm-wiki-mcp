@@ -25,7 +25,7 @@ from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, RANKING_POLICY
 from retrieval.retrieval_index import RetrievalIndexStore
 from runtime.runtime_config import EmbeddingSettings, ResolvedVault, TelemetrySettings, VaultSettings
 from retrieval.vector_index import parse_vector_settings
-from wiki.knowledge_compiler import filesystem_path
+from wiki.wiki_paths import filesystem_path
 
 
 RETRIEVAL_EVAL_SCHEMA_VERSION = 1

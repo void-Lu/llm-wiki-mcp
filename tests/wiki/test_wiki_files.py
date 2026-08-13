@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
+from wiki.supersede_registry import SupersedeRegistry
 from wiki.wiki_files import wiki_status
 from wiki.wiki_paths import create_wiki_root
 
@@ -11,22 +11,28 @@ from wiki.wiki_paths import create_wiki_root
 def test_wiki_status_reports_structure_and_queue_counts(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    queue = root / ".llm-wiki" / "ingest-queue.json"
-    queue.write_text(
-        json.dumps([
-            {"id": "a", "status": "pending"},
-            {"id": "b", "status": "failed"},
-            {"id": "c", "status": "done"},
-        ]),
-        encoding="utf-8",
-    )
+    registry = SupersedeRegistry(root)
+    with registry._connection() as connection:  # noqa: SLF001 - seed registry rows
+        connection.executemany(
+            "INSERT INTO generation_jobs(job_id,job_type,target_path,state,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            [
+                ("a", "legacy", "wiki/a.md", "pending", "2026-08-03T00:00:00+00:00", "2026-08-03T00:00:00+00:00"),
+                ("b", "legacy", "wiki/b.md", "failed", "2026-08-03T00:00:01+00:00", "2026-08-03T00:00:01+00:00"),
+                ("c", "legacy", "wiki/c.md", "superseded", "2026-08-03T00:00:02+00:00", "2026-08-03T00:00:02+00:00"),
+            ],
+        )
 
     result = wiki_status(root)
 
     assert result["ok"] is True
     assert result["initialized"] is True
     assert result["missing_required_paths"] == []
-    assert result["queue"]["counts"] == {"pending": 1, "failed": 1, "done": 1}
+    assert result["queue"] == {
+        "path": ".llm-wiki/supersede-state.sqlite3",
+        "total": 3,
+        "counts": {"failed": 1, "pending": 1, "superseded": 1},
+    }
     assert "codegraph" not in result
     assert result["version"] == RUNTIME_PROVENANCE.package_version
     assert result["runtime"] == RUNTIME_PROVENANCE.to_public_dict()

@@ -12,7 +12,7 @@ from typing import Any, Iterable, Mapping
 
 from retrieval.query_telemetry import redact_query
 from retrieval.retrieval_eval import RetrievalEvalError, parse_evaluation_filters, vault_fingerprint
-from wiki.knowledge_compiler import filesystem_path
+from wiki.wiki_paths import filesystem_path
 
 
 GOLD_SCHEMA_VERSION = 2

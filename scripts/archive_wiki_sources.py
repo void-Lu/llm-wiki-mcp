@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """一次性归档 wiki/sources，并清理活动 Wiki 页面的旧溯源字段。
 
-默认只做预检和生成计划；只有显式传入 ``--apply`` 才会写页面、取消旧
-队列任务并提交 archive bundle。脚本不会写入、移动或删除 raw 文件。
+默认只做预检和生成计划；只有显式传入 ``--apply`` 才会写页面并提交
+archive bundle。脚本不会写入、移动或删除 raw 文件。
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import json
 import os
 from pathlib import Path
 import re
-import sqlite3
 import sys
 import tempfile
 from typing import Any, Iterable
@@ -32,7 +31,6 @@ if str(REPOSITORY_ROOT / "src") not in sys.path:
 
 from archive.archive_planner import ArchivePlanner  # noqa: E402
 from archive.archive_service import ArchiveService  # noqa: E402
-from wiki.generation_queue import DISABLED_JOB_TYPES, GenerationQueue  # noqa: E402
 from wiki.knowledge_dependencies import KnowledgeDependencies  # noqa: E402
 from retrieval.retrieval_index import RetrievalIndexStore  # noqa: E402
 from retrieval.vector_index import VectorIndexStore  # noqa: E402
@@ -406,18 +404,6 @@ def _refresh_dependencies(root: Path, updates: list[dict[str, Any]]) -> None:
         )
 
 
-def _readonly_queue_status(root: Path) -> dict[str, Any]:
-    path = root / ".llm-wiki" / "state.sqlite3"
-    if not path.exists():
-        return {"ok": True, "counts": {}, "state": "not_initialized"}
-    try:
-        with sqlite3.connect(path) as connection:
-            rows = connection.execute("SELECT state, COUNT(*) FROM generation_jobs GROUP BY state").fetchall()
-        return {"ok": True, "counts": {str(state): int(count) for state, count in rows}}
-    except sqlite3.Error as exc:
-        return {"ok": False, "code": "queue_status_unavailable", "error": str(exc)}
-
-
 def _rebuild_active_index(root: Path) -> dict[str, Any]:
     store = RetrievalIndexStore(root)
     return store.build(store.iter_vault_pages())
@@ -452,7 +438,6 @@ def _preflight(root: Path) -> dict[str, Any]:
         restorable=False,
         attachments={"source-remap.json": audit_text},
     ) if should_commit else None
-    pending = _readonly_queue_status(root)
     payload: dict[str, Any] = {
         "ok": plan is None or not plan.blockers,
         "mode": "dry-run",
@@ -461,8 +446,6 @@ def _preflight(root: Path) -> dict[str, Any]:
         "page_updates": len(updates),
         "page_mappings": page_audits,
         "raw_hash_tree_before": raw_before,
-        "pending_queue": pending,
-        "disabled_job_types": sorted(DISABLED_JOB_TYPES),
     }
     if plan is not None:
         payload["archive_plan"] = _public_plan(plan)
@@ -489,7 +472,6 @@ def run(root: Path, *, apply: bool) -> dict[str, Any]:
     updates: list[dict[str, Any]] = preflight["_updates"]
     page_updates_applied = False
     archive_committed = False
-    canceled_jobs: list[str] = []
     warnings: list[dict[str, Any]] = []
     try:
         _apply_page_updates(updates)
@@ -515,10 +497,6 @@ def run(root: Path, *, apply: bool) -> dict[str, Any]:
             _refresh_dependencies(root, updates)
         except Exception as exc:  # noqa: BLE001 - projection is rebuildable and must not block archive
             warnings.append({"code": "knowledge_dependency_projection_failed", "error": str(exc)})
-        try:
-            canceled_jobs = GenerationQueue(root).supersede_job_types(set(DISABLED_JOB_TYPES), reason="wiki_sources_archived")
-        except Exception as exc:  # noqa: BLE001 - legacy cleanup is non-blocking
-            warnings.append({"code": "legacy_job_cleanup_failed", "error": str(exc)})
         active_index = _rebuild_active_index(root)
         raw_after = _raw_hash_tree(root)
         raw_unchanged = raw_after == preflight["_raw_before"]
@@ -532,7 +510,6 @@ def run(root: Path, *, apply: bool) -> dict[str, Any]:
             "archive": archived,
             "archive_index": archive_index,
             "page_updates": len(updates),
-            "canceled_jobs": canceled_jobs,
             "active_index": active_index,
             "vector": vector,
             "raw_unchanged": raw_unchanged,
@@ -556,7 +533,7 @@ def run(root: Path, *, apply: bool) -> dict[str, Any]:
                 _rollback_page_updates(updates)
             except BaseException as rollback_exc:
                 rollback_error = str(rollback_exc)
-        result = {"ok": False, "code": "archive_wiki_sources_failed", "error": str(exc), "canceled_jobs": canceled_jobs}
+        result = {"ok": False, "code": "archive_wiki_sources_failed", "error": str(exc)}
         if rollback_error:
             result["rollback_error"] = rollback_error
         return result

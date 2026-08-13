@@ -1,7 +1,9 @@
 from pathlib import Path
 
 from wiki.ingest_service import ingest_file
+from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore
+from wiki.supersede_registry import SupersedeRegistry
 
 
 def test_single_file_ingest_handles_new_unchanged_and_modified_chat(tmp_path: Path) -> None:
@@ -33,6 +35,48 @@ def test_single_file_ingest_indexes_non_chat_sources_in_the_raw_store(tmp_path: 
     assert result["index_scope"] == "raw"
     assert RetrievalIndexStore(root, scope="raw").search_fts("raw-only invoice")
     assert not RetrievalIndexStore(root).search_fts("raw-only invoice")
+
+
+def test_modified_source_reports_stale_pages_and_superseded_jobs(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    source = tmp_path / "manual.txt"
+    source.write_text("old source", encoding="utf-8")
+
+    first = ingest_file(vault_root=root, source_path=source, source_name="manual", project="finance")
+    source_path = str(first["source"])
+    source_hash = str(first["content_hash"])
+    KnowledgeDependencies(root).update_page(
+        "wiki/concepts/manual.md",
+        "page-hash",
+        {source_path: source_hash},
+        generated=True,
+    )
+    registry = SupersedeRegistry(root)
+    with registry._connection() as connection:  # noqa: SLF001 - seed a migrated legacy job
+        connection.execute(
+            "INSERT INTO generation_jobs(job_id,job_type,target_path,state,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                "legacy-job",
+                "source_capsule",
+                "wiki/sources/file/finance/capsules/manual.md",
+                "pending",
+                "2026-08-03T00:00:00+00:00",
+                "2026-08-03T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO job_sources(job_id,source_path,source_hash) VALUES(?,?,?)",
+            ("legacy-job", source_path, source_hash),
+        )
+
+    source.write_text("new source", encoding="utf-8")
+    result = ingest_file(vault_root=root, source_path=source, source_name="manual", project="finance")
+
+    assert result["operation"] == "modified"
+    assert result["stale_pages"] == ["wiki/concepts/manual.md"]
+    assert result["superseded_jobs"] == ["legacy-job"]
+    assert result["generation"] == {"enabled": False, "reason": "raw_only"}
 
 
 def test_single_file_ingest_stores_binary_office_and_script_sources_as_assets(tmp_path: Path) -> None:

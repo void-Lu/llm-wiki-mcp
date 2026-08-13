@@ -251,7 +251,7 @@ vault_root/
 │   └── .staging/
 └── .llm-wiki/
     ├── ingest-cache/
-    ├── ingest-queue.json
+    ├── supersede-state.sqlite3
     ├── graph-index/
     └── relation-candidates/
 ```
@@ -285,7 +285,7 @@ vault_root/
 
 ### Raw provenance 与退役 capsule
 
-`wiki_ingest` 只负责 raw snapshot、hash 和索引投影，不调用 LLM，也不生成 `wiki/sources` 页面。`knowledge_compiler.py` 仅保留兼容边界：旧的 `source_capsule` / `chat_source_capsule` job 会被拒绝或 supersede，不再 claim/apply；活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes`。一次性归档由 `scripts/archive_wiki_sources.py` 完成，不注册为 MCP 常态工具。
+`wiki_ingest` 只负责 raw snapshot、hash 和索引投影，不调用 LLM，也不生成 `wiki/sources` 页面。非 chat 来源变化时，`SupersedeRegistry` 只登记并失效仍依赖该 raw 文件的遗留 generation job；不再提供 capsule 生成、claim 或 apply worker。活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes`。一次性归档由 `scripts/archive_wiki_sources.py` 完成，不注册为 MCP 常态工具。
 
 执行一次性归档时先预检，再显式提交：
 

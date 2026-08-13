@@ -6,7 +6,7 @@ import pytest
 
 from wiki.atomic_file import AtomicFileError
 from wiki.chat_memory import ChatMemoryError, ChatMemoryService
-from wiki.generation_queue import GenerationQueue
+from wiki.supersede_registry import SupersedeRegistry
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.query_pipeline import run_query_v2
@@ -60,7 +60,7 @@ def test_idempotent_save_rechecks_index_and_queue(tmp_path: Path) -> None:
     retried = service.save(_transcript(), _metadata())
     assert retried["idempotent"] is True
     assert retried["index"]["generation"] == {"enabled": False, "reason": "raw_only"}
-    assert GenerationQueue(tmp_path).status()["counts"] == {}
+    assert SupersedeRegistry(tmp_path).status()["counts"] == {}
 
 
 def test_chat_save_reports_rebuild_required_without_creating_a_formal_page(tmp_path: Path) -> None:

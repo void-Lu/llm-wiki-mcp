@@ -6,22 +6,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from archive.archive_service import ARCHIVE_REQUIRED_COLUMNS, ARCHIVE_REQUIRED_TABLES
 from retrieval.retrieval_index import RetrievalIndexStore
-
-
-_REQUIRED_TABLES = frozenset(
-    {
-        "archive_plans",
-        "archive_operations",
-        "archive_operation_items",
-        "archive_events",
-        "tombstones",
-    }
-)
-_REQUIRED_COLUMNS = {
-    "archive_operations": frozenset({"operation_id", "archive_id", "operation_type", "state", "updated_at", "error_code"}),
-    "tombstones": frozenset({"archive_id", "purged_at", "reason", "payload"}),
-}
 
 
 class ArchiveStatusReader:
@@ -57,7 +43,7 @@ class ArchiveStatusReader:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
-            missing = sorted(_REQUIRED_TABLES - tables)
+            missing = sorted(ARCHIVE_REQUIRED_TABLES - tables)
             if missing:
                 return {
                     "ok": False,
@@ -67,7 +53,7 @@ class ArchiveStatusReader:
                     **base,
                 }
             missing_columns: dict[str, list[str]] = {}
-            for table, required in _REQUIRED_COLUMNS.items():
+            for table, required in ARCHIVE_REQUIRED_COLUMNS.items():
                 columns = {
                     str(row[1])
                     for row in connection.execute(f"PRAGMA table_info({table})").fetchall()

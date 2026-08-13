@@ -42,13 +42,13 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 跨平台配置/数据目录在 [platform_paths.py](src/runtime/platform_paths.py)，测试通过 [tests/conftest.py](tests/conftest.py) 自动隔离这些环境变量。
 - Wiki 目录创建、path segment 校验和 slug 规则在 [wiki_paths.py](src/wiki/wiki_paths.py) 的 `safe_segment`/`slug`。外部 Obsidian root 固定包含 `purpose.md`、`schema.md`、`raw/sources/{projects,file,references,chat}/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/entities/`、`archives/log.md`、`archives/bundles/`、`.obsidian/`、`.llm-wiki/state.sqlite3`；`wiki/archives/` 是已退役的历史路径，不由新运行时创建。`note_writer` 通过 `lowercase=False`、`fallback=""`、`ascii_punctuation=True` 的显式参数保持旧人工笔记文件名兼容；现有文件不自动迁移。
 - `raw/sources/` 是来源事实层；`wiki_ingest` 只复制明确文件并同步检索投影。`wiki/` 是可读 Markdown 层；`wiki/sources/` 命名空间已退役（一次性归档由 `scripts/archive_wiki_sources.py` 完成），活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes` 溯源。
-- Durable generation 状态在 `.llm-wiki/state.sqlite3`；`wiki_files.wiki_status` 兼容读取旧 `.llm-wiki/ingest-queue.json` 队列摘要。
+- Raw 变更失效登记由 [supersede_registry.py](src/wiki/supersede_registry.py) 独占 `.llm-wiki/supersede-state.sqlite3`；`wiki_files.wiki_status` 读取其 `{path,total,counts}` 队列形状。首次使用时只读惰性迁移旧 `.llm-wiki/state.sqlite3` 中的遗留 generation 表，旧库不修改。
 - Markdown/frontmatter 读写、覆盖保护和脱敏在 [wiki_io.py](src/wiki/wiki_io.py)。生成页只能覆盖 `generated: true` 页面；人工页不能被静默覆盖。
 
 ### 写入与维护流水线
 
-- 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时，[knowledge_compiler.py](src/wiki/knowledge_compiler.py) 只做 raw-only provenance 失效（supersede 相关 generation job）；知识编译/generation 已停用（`generation: enabled: false`）。MCP 工具名为 `wiki_ingest`。
-- [generation_queue.py](src/wiki/generation_queue.py) 仍是 durable job 存储（`create/claim/apply/fail/release/status`），但没有 worker 工具或 CLI 管理入口——仅用于 supersede 已停用 job 类型。
+- 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时通过 [supersede_registry.py](src/wiki/supersede_registry.py) 失效遗留 generation job 的 raw 依赖；知识编译/generation 已停用（`generation: enabled: false`）。MCP 工具名为 `wiki_ingest`。
+- `SupersedeRegistry` 只保留 `supersede_sources` 与状态读取，不提供 claim/release/lease/apply worker；登记表与 archive、telemetry、评测共用的 `.llm-wiki/state.sqlite3` 分离。
 - 人工笔记写入在 [note_writer.py](src/wiki/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
 - 页面事实提交统一在 [page_mutation.py](src/wiki/page_mutation.py) 的 `PageMutationCoordinator`：CAS 原子写入后按 durable operation journal 执行 dependencies、retrieval、navigation、overview 和 audit log 投影；任一派生阶段失败都保留已提交页面并返回 `repair_pending`，由同一个 operation 走 `repair_page_operation` 恢复。
 - `wiki_write_note`、[wiki_update.py](src/wiki/wiki_update.py) 和 chat source 共用页面变更协调器。`preview_update` 返回 hash、plan_id、locked fields、removed sources 和 diff；`apply_update` 在校验 hash/plan、锁定字段、来源与 active lifecycle 后提交页面事实，再更新依赖、增量检索 projection 和导航/log。MCP 工具为 `wiki_update`。
@@ -65,7 +65,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 [wikilinks.py](src/wiki/wikilinks.py) 提供 wikilink 格式化和解析工具函数：`format_wikilink`（含表格内 `\| 转义）、`normalize_wikilink_targets`（小写化 + 表格别名处理）、`wikilink_targets`、`split_wikilink_inner`、`table_wikilink_alias_pipe_lines` 等。query、update 等模块统一使用此模块处理 wikilink，不内嵌正则。
 
-[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、generation queue、版本与运行身份。MCP 工具为 `wiki_status`。
+[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、supersede registry、版本与运行身份。MCP 工具为 `wiki_status`。
 
 [content_catalog.py](src/wiki/content_catalog.py)（含 [catalog_cursor.py](src/wiki/catalog_cursor.py)、[content_reference.py](src/wiki/content_reference.py)）是 `wiki_list`/`wiki_get` 的只读 catalog 后端：metadata 分页 + opaque `content_ref`，不读正文。
 
@@ -114,7 +114,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_atomic_file.py`、`test_page_mutation.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
 - MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_save_obsidian_note.py`、`test_ingest_service.py`
 - 查询/检索/向量/wikilink：`test_wiki_query.py`、`test_query_pipeline.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
-- worker/归档/辅助：`test_knowledge_compiler.py`、`test_generation_queue.py`、`test_archive_lifecycle.py`、`test_archive_wiki_sources.py`、`test_git_utils.py`
+- supersede/归档/辅助：`test_supersede_registry.py`、`test_archive_lifecycle.py`、`test_archive_wiki_sources.py`、`test_git_utils.py`
 - 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_fallback_policy.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`
 - repair/privacy/契约/catalog：`test_cli_repair.py`、`test_cli_repair_admin.py`、`test_page_repair.py`、`test_privacy_audit.py`、`test_provenance_migration.py`、`test_public_contracts.py`、`test_content_catalog.py`、`test_query_cancellation.py`、`test_query_executor.py`、`test_spec_lint.py`（tests/tools/）
 
