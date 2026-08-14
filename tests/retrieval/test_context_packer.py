@@ -15,7 +15,7 @@ def test_context_pack_contains_each_body_once_and_honours_limit() -> None:
     assert budget["used"] <= budget["total"]
 
 
-def test_context_pack_keeps_trace_metadata_on_citations_only() -> None:
+def test_context_pack_keeps_trace_metadata_out_of_passages() -> None:
     packed = pack_context([
         ContextPassage(
             "history-1", "raw/sources/chat/session.md", "Session", "historical decision",
@@ -25,14 +25,10 @@ def test_context_pack_keeps_trace_metadata_on_citations_only() -> None:
     ], hard_limit=10, intent="history")
 
     passage = cast(list[dict[str, object]], packed["passages"])[0]
-    citation = cast(list[dict[str, object]], packed["citations"])[0]
+    assert set(packed) == {"passages", "budget"}
     assert "citation_metadata" not in passage
-    assert citation["metadata"] == {
-        "session_id": "session",
-        "occurred_at": "2026-07-31T08:30:00+00:00",
-        "project": "billing",
-        "content_hash": "a" * 64,
-    }
+    assert "metadata" not in passage
+    assert "session_id" not in passage
 
 
 def test_context_pack_aggregates_each_path_and_budget_matches_result_tokens() -> None:
@@ -58,7 +54,7 @@ def test_context_pack_aggregates_non_adjacent_paths_in_first_seen_order() -> Non
 
     passages = cast(list[dict[str, object]], packed["passages"])
     assert [item["path"] for item in passages] == ["wiki/a.md", "wiki/b.md"]
-    assert [item["citation"] for item in passages] == ["[1]", "[2]"]
+    assert all("citation" not in item for item in passages)
     assert passages[0]["heading"] == "A"
     assert passages[0]["content"] == "alpha beta\n\nepsilon zeta"
     assert passages[0]["tokens"] == 4

@@ -62,7 +62,6 @@ def pack_context(
         target = max(target, budget_scale)
     budget = min(max(1, hard_limit), target)
     candidates = list(passages)
-    citation_metadata: dict[str, dict[str, str]] = {}
     aggregated: dict[str, dict[str, object]] = {}
     order: list[str] = []
     used = 0
@@ -82,38 +81,24 @@ def pack_context(
         path = str(item.path)
         entry = aggregated.get(path)
         if entry is None:
-            citation = f"[{len(aggregated) + 1}]"
             aggregated[path] = {
-                "citation": citation,
                 "path": path,
                 "heading": item.heading,
                 "evidence_kind": item.evidence_kind,
                 "content": content,
                 "tokens": tokens,
             }
-            citation_metadata[citation] = dict(item.citation_metadata)
             order.append(path)
         else:
             entry["content"] = f"{entry['content']}\n\n{content}"
             entry["tokens"] = int(entry["tokens"]) + tokens
-            citation_metadata[str(entry["citation"])].update(item.citation_metadata)
         previous_by_path[item.path] = f"{previous_by_path.get(item.path, '')} {content}".strip()
         used += tokens
 
     retained_tokens = sum(int(aggregated[path]["tokens"]) for path in order)
     used = retained_tokens
-    citations = [
-        {
-            "citation": aggregated[path]["citation"],
-            "path": aggregated[path]["path"],
-            "heading": aggregated[path]["heading"],
-            **({"metadata": citation_metadata[str(aggregated[path]["citation"])]} if citation_metadata[str(aggregated[path]["citation"])] else {}),
-        }
-        for path in order
-    ]
     return {
         "passages": [aggregated[path] for path in order],
-        "citations": citations,
         "budget": {
             "target": target,
             "total": budget,

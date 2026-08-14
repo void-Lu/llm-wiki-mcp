@@ -2641,7 +2641,6 @@ def run_query_v2(
             item["hit"].text,
             item["score"],
             "raw_evidence" if item["hit"].source_kind == "raw" else "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge",
-            _citation_metadata(item["hit"], provenance),
         )
         for item in public_context_items
     ]
@@ -2650,7 +2649,7 @@ def run_query_v2(
     packed: dict[str, Any] = (
         pack_context(passages, hard_limit=hard_budget_tokens, intent=intent, budget_scale=k_budget)
         if include_context_pack
-        else {"passages": [], "citations": [], "budget": {"total": k_budget, "used": 0, "omitted": 0}}
+        else {"passages": [], "budget": {"total": k_budget, "used": 0, "omitted": 0}}
     )
     packed_passages = [
         item
