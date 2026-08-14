@@ -6,7 +6,11 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from archive.archive_service import ARCHIVE_REQUIRED_COLUMNS, ARCHIVE_REQUIRED_TABLES
+from archive.archive_schema import (
+    ARCHIVE_OPERATIONS_STATUS_COLUMNS,
+    ARCHIVE_REQUIRED_COLUMNS,
+    ARCHIVE_REQUIRED_TABLES,
+)
 from retrieval.retrieval_index import RetrievalIndexStore
 
 
@@ -72,7 +76,7 @@ class ArchiveStatusReader:
             operations = [
                 dict(row)
                 for row in connection.execute(
-                    "SELECT operation_id,archive_id,operation_type,state,updated_at,error_code "
+                    f"SELECT {','.join(ARCHIVE_OPERATIONS_STATUS_COLUMNS)} "
                     "FROM archive_operations ORDER BY updated_at DESC"
                 ).fetchall()
             ]

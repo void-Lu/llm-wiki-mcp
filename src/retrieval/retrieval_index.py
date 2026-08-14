@@ -148,7 +148,7 @@ class RetrievalIndexStore:
                 connection.commit()
             return {**self.status(), "operation": "update"}
         except (sqlite3.Error, RetrievalIndexError) as exc:
-            self._mark_stale()
+            self.mark_stale()
             code = exc.code if isinstance(exc, RetrievalIndexError) else "index_update_failed"
             return {"ok": False, "code": code, "state": "stale", "error": str(exc)}
 
@@ -168,7 +168,7 @@ class RetrievalIndexStore:
                 connection.commit()
             return {**self.status(), "operation": "delete"}
         except sqlite3.Error as exc:
-            self._mark_stale(); return {"ok": False, "code": "index_update_failed", "state": "stale", "error": str(exc)}
+            self.mark_stale(); return {"ok": False, "code": "index_update_failed", "state": "stale", "error": str(exc)}
 
     def rename_page(self, old_page_path: str, page: IndexedPage) -> dict[str, object]:
         """Atomically replace one indexed path with its renamed projection."""
@@ -195,7 +195,7 @@ class RetrievalIndexStore:
                 connection.commit()
             return {**self.status(), "operation": "rename", "affected_count": 2}
         except (sqlite3.Error, RetrievalIndexError) as exc:
-            self._mark_stale()
+            self.mark_stale()
             code = exc.code if isinstance(exc, RetrievalIndexError) else "index_update_failed"
             return {"ok": False, "code": code, "state": "stale", "operation": "rename"}
 
@@ -621,7 +621,8 @@ class RetrievalIndexStore:
     def _set_meta(connection: sqlite3.Connection, values: dict[str, str]) -> None:
         connection.executemany("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", values.items())
 
-    def _mark_stale(self) -> None:
+    def mark_stale(self) -> None:
+        """Mark the index projection stale; queries keep working with an index_stale warning."""
         if not self.path.exists():
             return
         try:

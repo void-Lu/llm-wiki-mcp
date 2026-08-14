@@ -146,14 +146,6 @@ def test_mcp_client_protocol_calls_status_and_query(monkeypatch: pytest.MonkeyPa
         },
     )
 
-    class StubArchiveService:
-        def __init__(self, root: Path) -> None:
-            self.root = root
-
-        def status(self) -> dict[str, object]:
-            return {"archive_index": {"state": "ready"}, "operations": {"pending": 0}}
-
-    monkeypatch.setattr("app.server.ArchiveService", StubArchiveService)
     monkeypatch.setattr(
         "app.server.run_query_v2",
         lambda root, question, **_: {"ok": True, "question": question, "results": []},
@@ -280,6 +272,68 @@ def test_status_hides_absolute_vault_and_model_paths(monkeypatch: pytest.MonkeyP
     assert result["vault"] == "primary"
     assert "vault_root" not in result
     assert "model_path" not in result["config"]["retrieval"]["embedding"]
+
+
+def test_archive_status_detail_projects_ready_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    monkeypatch.setattr(
+        "app.server.wiki_status_tool",
+        lambda _: {
+            "ok": True,
+            "version": RUNTIME_PROVENANCE.package_version,
+            "runtime": RUNTIME_PROVENANCE.to_public_dict(),
+        },
+    )
+    monkeypatch.setattr(
+        "app.server.ArchiveStatusReader.status",
+        lambda _self: {
+            "ok": True,
+            "state": "ready",
+            "code": "ready",
+            "operations": [{"operation_id": "operation-1"}],
+            "tombstone_count": 0,
+            "archive_index": {"ok": True, "state": "ready", "scope": "archive"},
+        },
+    )
+
+    result = wiki_status(detail="archive")
+
+    assert set(result) == {"ok", "vault", "archive_index", "archive_operations", "archive_state", "config", "version", "runtime"}
+    assert result["archive_index"] == {"enabled": True, "ok": True, "state": "ready", "scope": "archive"}
+    assert result["archive_operations"] == [{"operation_id": "operation-1"}]
+    assert result["archive_state"] == {"state": "ready", "code": "ready"}
+    assert root.is_dir()
+
+
+def test_archive_status_detail_forwards_incompatible_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, _ = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    monkeypatch.setattr("app.server.wiki_status_tool", lambda _: {"ok": True})
+    monkeypatch.setattr(
+        "app.server.ArchiveStatusReader.status",
+        lambda _self: {
+            "ok": False,
+            "state": "incompatible",
+            "code": "archive_state_incompatible",
+            "missing_tables": ["archive_events"],
+            "missing_columns": {"archive_plans": ["payload"]},
+            "operations": [],
+            "tombstone_count": 0,
+            "archive_index": {"ok": False, "state": "missing", "scope": "archive"},
+        },
+    )
+
+    result = wiki_status(detail="archive")
+
+    assert result["archive_state"] == {
+        "state": "incompatible",
+        "code": "archive_state_incompatible",
+        "missing_tables": ["archive_events"],
+        "missing_columns": {"archive_plans": ["payload"]},
+    }
+    assert result["archive_operations"] == []
+    assert result["archive_index"]["enabled"] is True
 
 
 def test_generation_status_detail_excludes_retired_queue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

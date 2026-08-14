@@ -21,22 +21,8 @@ from uuid import uuid4
 from archive.archive_manifest import content_hash, verify_bundle, write_manifest
 from archive.archive_models import ArchiveAttachment, ArchiveError, ArchiveItem, ArchiveManifest, ArchivePlan, Tombstone
 from archive.archive_planner import ArchivePlanner
+from archive.archive_schema import ARCHIVE_TABLE_DDL
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
-
-
-ARCHIVE_REQUIRED_TABLES = frozenset(
-    {
-        "archive_plans",
-        "archive_operations",
-        "archive_operation_items",
-        "archive_events",
-        "tombstones",
-    }
-)
-ARCHIVE_REQUIRED_COLUMNS = {
-    "archive_operations": frozenset({"operation_id", "archive_id", "operation_type", "state", "updated_at", "error_code"}),
-    "tombstones": frozenset({"archive_id", "purged_at", "reason", "payload"}),
-}
 
 
 _TRANSITIONS = {
@@ -78,13 +64,7 @@ class ArchiveService:
 
     def _initialize(self) -> None:
         with self._connection() as conn:
-            conn.executescript("""
-            CREATE TABLE IF NOT EXISTS archive_plans(plan_id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS archive_operations(operation_id TEXT PRIMARY KEY, archive_id TEXT NOT NULL, operation_type TEXT NOT NULL, state TEXT NOT NULL, plan_hash TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error_code TEXT);
-            CREATE TABLE IF NOT EXISTS archive_operation_items(operation_id TEXT NOT NULL, original_path TEXT NOT NULL, original_hash TEXT NOT NULL, staged_path TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(operation_id, original_path));
-            CREATE TABLE IF NOT EXISTS archive_events(id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, archive_id TEXT NOT NULL, event_type TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS tombstones(archive_id TEXT PRIMARY KEY, purged_at TEXT NOT NULL, reason TEXT NOT NULL, payload TEXT NOT NULL);
-            """)
+            conn.executescript(ARCHIVE_TABLE_DDL)
 
     def plan_archive(
         self,
@@ -428,7 +408,7 @@ class ArchiveService:
             return store.build(pages)
         except Exception as exc:
             # Index is a projection: failure does not roll back a committed bundle.
-            try: store._mark_stale()  # noqa: SLF001 - explicit projection stale marker
+            try: store.mark_stale()
             except Exception: pass
             return {"ok": False, "code": "archive_index_stale", "state": "stale", "error": str(exc)}
 

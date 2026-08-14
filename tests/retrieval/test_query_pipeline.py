@@ -763,7 +763,7 @@ def test_v2_raw_fallback_reports_missing_corrupt_and_stale_raw_indexes(tmp_path:
         elif state == "corrupt":
             raw_store.path.write_bytes(b"not a sqlite database")
         else:
-            raw_store._mark_stale()
+            raw_store.mark_stale()
 
         result = run_query_v2(root, "raw lifecycle marker", retrieval_mode="lexical")
 
@@ -1563,7 +1563,7 @@ def test_v2_serves_stale_index_with_explicit_warning(tmp_path: Path) -> None:
     create_wiki_root(root)
     _write(root, "wiki/concepts/stale.md", "Stale", "stale index sentinel", type="concept")
     refresh_indexes(root)
-    RetrievalIndexStore(root)._mark_stale()
+    RetrievalIndexStore(root).mark_stale()
 
     result = run_query_v2(root, "stale index sentinel", retrieval_mode="lexical")
 

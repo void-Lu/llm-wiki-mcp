@@ -443,8 +443,8 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
     status["archive_index"] = {"enabled": resolution.resolved.settings.archive.archive_index_enabled, **archive_status["archive_index"]}
     status["archive_operations"] = archive_status["operations"]
     status["archive_state"] = {
-        "state": archive_status.get("state", "unknown"),
-        "code": archive_status.get("code", "archive_state_unavailable"),
+        "state": archive_status["state"],
+        "code": archive_status["code"],
     }
     if archive_status.get("missing_tables"):
         status["archive_state"]["missing_tables"] = archive_status["missing_tables"]
