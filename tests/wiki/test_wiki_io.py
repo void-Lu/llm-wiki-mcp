@@ -316,7 +316,7 @@ def test_write_test_page_marks_retrieval_failure_without_losing_page(tmp_path: P
     def fail_refresh(*_args: object, **_kwargs: object) -> dict[str, object]:
         raise RuntimeError("index unavailable")
 
-    monkeypatch.setattr("tests.helpers.refresh_page_retrieval", fail_refresh)
+    monkeypatch.setattr("tests.helpers.RetrievalIndexStore.update_page_from_file", fail_refresh)
 
     result = write_test_page(root, "wiki/concepts/general/page.md", {"title": "Page", "generated": True}, "body")
 

@@ -14,7 +14,7 @@ from wiki.atomic_file import AtomicFileError, FaultBarrier, atomic_write_text, f
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
 from wiki.wiki_index import refresh_navigation
-from wiki.wiki_io import read_markdown_page, refresh_page_retrieval
+from wiki.wiki_io import read_markdown_page
 from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
@@ -386,7 +386,9 @@ class PageMutationCoordinator:
             return {"ok": True, "state": "ready"}
 
         def retrieval() -> dict[str, object]:
-            return refresh_page_retrieval(self.root, target)
+            from retrieval.retrieval_index import RetrievalIndexStore
+
+            return RetrievalIndexStore(self.root, scope="active").update_page_from_file(target)
 
         def navigation() -> dict[str, object]:
             return refresh_navigation(self.root, fault=projection_fault)
@@ -446,23 +448,12 @@ class PageMutationCoordinator:
             # store intentionally excludes chat, so update the active store
             # incrementally. Missing/incompatible stores require an explicit
             # administrator rebuild and must not trigger a hidden full build.
-            from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
+            from retrieval.retrieval_index import RetrievalIndexStore
 
             store = RetrievalIndexStore(self.root, scope="active")
-            indexed = page_from_file(self.root, target, scope="active")
-            if indexed is None:
+            result = store.update_page_from_file(target)
+            if result.get("code") == "not_eligible":
                 return {"ok": True, "state": "not_applicable", "code": "not_eligible"}
-            status = store.status()
-            if not status.get("ok"):
-                result = {
-                    "ok": True,
-                    "state": "rebuild_required",
-                    "code": str(status.get("code") or "index_missing"),
-                    "operation": "update",
-                    "repair_action": "rebuild_retrieval_index",
-                }
-            else:
-                result = store.update_page(indexed)
             if not result.get("ok"):
                 return result
             return {

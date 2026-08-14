@@ -8,7 +8,7 @@ from typing import Any
 
 from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter
 from wiki.knowledge_dependencies import KnowledgeDependencies
-from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
+from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.source_provenance import source_path_key
 from wiki.wiki_paths import WikiPathError, safe_segment, translate_path_error
 
@@ -95,14 +95,7 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     if type_value != "chat" and operation != "unchanged":
         provenance_result = _invalidate_raw_provenance(root, target.relative_to(root), incoming_hash)
     index_scope = "active" if type_value == "chat" else "raw"
-    indexed = page_from_file(root, target, scope=index_scope)
-    if indexed is None:
-        index = {"ok": True, "state": "not_eligible", "code": "not_eligible"}
-    elif RetrievalIndexStore(root, scope=index_scope).path.exists():
-        index = RetrievalIndexStore(root, scope=index_scope).update_page(indexed)
-    else:
-        store = RetrievalIndexStore(root, scope=index_scope)
-        index = store.build(store.iter_vault_pages())
+    index = RetrievalIndexStore(root, scope=index_scope).update_page_from_file(target, allow_bootstrap=True)
     response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "storage_kind": "text_source", "semantic_indexed": bool(index.get("ok")), "index_scope": index_scope, "index": index}
     if provenance_result is not None:
         response["generation"] = provenance_result["generation"]

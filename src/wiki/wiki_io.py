@@ -94,29 +94,6 @@ def prepare_wiki_page(
     )
 
 
-def refresh_page_retrieval(vault_root: str | Path, target: str | Path) -> dict[str, object]:
-    """Refresh one existing active-page retrieval record without building a store."""
-
-    root = Path(vault_root).expanduser().resolve()
-    page_path = Path(target).resolve()
-    from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
-
-    store = RetrievalIndexStore(root)
-    indexed = page_from_file(root, page_path, scope="active")
-    if indexed is None:
-        return {"ok": True, "state": "not_indexed", "code": "not_eligible", "operation": "skip"}
-    status = store.status()
-    if not status.get("ok"):
-        return {
-            "ok": True,
-            "state": "rebuild_required",
-            "code": str(status.get("code") or "index_missing"),
-            "operation": "update",
-            "repair_action": "rebuild_retrieval_index",
-        }
-    return store.update_page(indexed)
-
-
 def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     cleaned = text.lstrip("﻿")
     lines = cleaned.splitlines()

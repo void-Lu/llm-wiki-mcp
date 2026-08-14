@@ -147,6 +147,45 @@ class RetrievalIndexStore:
             code = exc.code if isinstance(exc, RetrievalIndexError) else "index_update_failed"
             return {"ok": False, "code": code, "state": "stale", "error": str(exc)}
 
+    def update_page_from_file(
+        self,
+        page_path: str | Path,
+        *,
+        allow_bootstrap: bool = False,
+    ) -> dict[str, object]:
+        """Project one eligible file without implicitly building the store.
+
+        ``allow_bootstrap`` is reserved for first-ingest initialization.  A
+        missing index may be built only when that opt-in is explicit; an
+        incompatible or otherwise unavailable index remains an administrator
+        repair boundary for every caller.
+        """
+
+        target = Path(page_path).expanduser()
+        if not target.is_absolute():
+            target = self.root / target
+        indexed = page_from_file(filesystem_path(self.root), filesystem_path(target), scope=self.scope)
+        if indexed is None:
+            return {"ok": True, "state": "not_indexed", "code": "not_eligible", "operation": "skip"}
+
+        status = self.status()
+        if not status.get("ok"):
+            code = str(status.get("code") or "index_missing")
+            if allow_bootstrap and code == "index_missing":
+                return self.build(self.iter_vault_pages())
+            return {
+                "ok": True,
+                "state": "rebuild_required",
+                "code": code,
+                "operation": "update",
+                "repair_action": "rebuild_retrieval_index",
+            }
+
+        result = self.update_page(indexed)
+        if "operation" not in result:
+            result = {**result, "operation": "update"}
+        return result
+
     def delete_page(self, page_path: str) -> dict[str, object]:
         if not self.path.exists():
             return self.status()

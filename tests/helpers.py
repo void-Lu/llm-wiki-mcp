@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
+from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.atomic_file import atomic_write_text
-from wiki.wiki_io import prepare_wiki_page, refresh_page_retrieval
+from wiki.wiki_io import prepare_wiki_page
 from wiki.wiki_models import WikiPage
 
 
@@ -34,7 +35,7 @@ def write_test_page(
         "redacted_count": prepared.redacted_count,
     }
     try:
-        result["retrieval_index"] = refresh_page_retrieval(root, prepared.target)
+        result["retrieval_index"] = RetrievalIndexStore(root).update_page_from_file(prepared.target)
     except Exception as exc:
         result["retrieval_index"] = {
             "ok": False,

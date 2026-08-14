@@ -70,13 +70,42 @@ def test_incremental_rename_replaces_only_the_old_and_new_page_projection(tmp_pa
     assert store.search_fts("other marker")[0].page_path == "wiki/concepts/other.md"
 
 
-def test_incremental_projection_reports_rebuild_required_without_creating_store(tmp_path: Path) -> None:
+def test_update_page_from_file_updates_an_existing_store(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page = _write(root, "wiki/concepts/invoice.md", "# Invoice\n\nold invoice marker")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+
+    page.write_text("# Invoice\n\nnew invoice marker", encoding="utf-8")
+    result = store.update_page_from_file(page)
+
+    assert result["ok"] is True
+    assert result["state"] == "fresh"
+    assert result["code"] == "ready"
+    assert result["operation"] == "update"
+    assert store.search_fts("new invoice marker")[0].page_path == "wiki/concepts/invoice.md"
+
+
+def test_update_page_from_file_reports_not_eligible_without_creating_store(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page = _write(root, "wiki/index.md", "# Navigation\n\ninvoice marker")
+
+    result = RetrievalIndexStore(root).update_page_from_file(page)
+
+    assert result == {
+        "ok": True,
+        "state": "not_indexed",
+        "code": "not_eligible",
+        "operation": "skip",
+    }
+    assert not (root / ".llm-wiki" / "retrieval.sqlite3").exists()
+
+
+def test_update_page_from_file_reports_rebuild_required_without_creating_store(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     page = _write(root, "wiki/concepts/invoice.md", "# Invoice\n\ninvoice marker")
 
-    from wiki.wiki_io import refresh_page_retrieval
-
-    result = refresh_page_retrieval(root, page)
+    result = RetrievalIndexStore(root).update_page_from_file(page)
 
     assert result == {
         "ok": True,
@@ -98,14 +127,26 @@ def test_incremental_projection_reports_schema_repair_without_full_rebuild(tmp_p
     connection.commit()
     connection.close()
 
-    from wiki.wiki_io import refresh_page_retrieval
-
-    result = refresh_page_retrieval(root, page)
+    result = store.update_page_from_file(page)
 
     assert result["ok"] is True
     assert result["state"] == "rebuild_required"
     assert result["code"] == "index_incompatible"
     assert result["repair_action"] == "rebuild_retrieval_index"
+
+
+def test_update_page_from_file_bootstraps_only_when_explicitly_allowed(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page = _write(root, "wiki/concepts/invoice.md", "# Invoice\n\ninvoice marker")
+
+    result = RetrievalIndexStore(root).update_page_from_file(page, allow_bootstrap=True)
+
+    assert result["ok"] is True
+    assert result["state"] == "fresh"
+    assert result["code"] == "ready"
+    assert result["operation"] == "build"
+    assert (root / ".llm-wiki" / "retrieval.sqlite3").exists()
+    assert RetrievalIndexStore(root).search_fts("invoice marker")
 
 
 def test_reconcile_detects_content_changes_with_unchanged_file_stats(tmp_path: Path) -> None:

@@ -444,8 +444,6 @@ class ArchiveService:
 
     def _update_active_index(self, path: str) -> None:
         store = RetrievalIndexStore(self.root)
-        if not store.status().get("ok"): return
-        page = page_from_file(self.root, self.root / path, scope="active")
-        if page is not None:
-            result = store.update_page(page)
-            if not result.get("ok"): raise ArchiveError("active_index_update_failed", "could not restore active retrieval index")
+        result = store.update_page_from_file(self.root / path)
+        if result.get("state") == "rebuild_required" or result.get("code") == "not_eligible": return
+        if not result.get("ok"): raise ArchiveError("active_index_update_failed", "could not restore active retrieval index")
