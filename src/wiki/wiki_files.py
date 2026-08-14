@@ -6,7 +6,6 @@ from typing import Any
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.vector_index import VectorIndexStore
-from wiki.supersede_registry import SupersedeRegistry
 from wiki.wiki_paths import DEFAULT_FILES, TOP_LEVEL_DIRS
 
 
@@ -18,7 +17,6 @@ def wiki_status(vault_root: str | Path) -> dict[str, Any]:
         "vault_root": str(root),
         "initialized": root.exists() and not missing,
         "missing_required_paths": missing,
-        "queue": _queue_status(root),
         "vector": _vector_status(root),
         "retrieval": {
             "active": RetrievalIndexStore(root).status(),
@@ -33,10 +31,6 @@ def wiki_status(vault_root: str | Path) -> dict[str, Any]:
 def _missing_required_paths(root: Path) -> list[str]:
     required = list(TOP_LEVEL_DIRS) + list(DEFAULT_FILES)
     return [relative.as_posix() for relative in required if not (root / relative).exists()]
-
-
-def _queue_status(root: Path) -> dict[str, Any]:
-    return SupersedeRegistry.read_status(root)
 
 
 def _vector_status(root: Path) -> dict[str, object]:

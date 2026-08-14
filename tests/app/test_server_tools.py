@@ -282,6 +282,26 @@ def test_status_hides_absolute_vault_and_model_paths(monkeypatch: pytest.MonkeyP
     assert "model_path" not in result["config"]["retrieval"]["embedding"]
 
 
+def test_generation_status_detail_excludes_retired_queue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    monkeypatch.setattr(
+        "app.server.wiki_status_tool",
+        lambda _: {
+            "ok": True,
+            "vault_root": str(root),
+            "queue": {"total": 1},
+            "version": RUNTIME_PROVENANCE.package_version,
+            "runtime": RUNTIME_PROVENANCE.to_public_dict(),
+        },
+    )
+
+    result = wiki_status(detail="generation")
+
+    assert set(result) == {"ok", "vault", "query_execution", "config", "version", "runtime"}
+    assert "queue" not in result
+
+
 @pytest.mark.parametrize("tool", [wiki_archive, wiki_restore])
 def test_archive_tools_use_shared_vault_resolver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool: object) -> None:
     registry, root = _registry(tmp_path)

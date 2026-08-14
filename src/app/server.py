@@ -463,7 +463,7 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
     if detail == "indexes":
         status = {key: status[key] for key in ("ok", "vault", "vector", "retrieval", "query_execution", "config", "version", "runtime") if key in status}
     elif detail == "generation":
-        status = {key: status[key] for key in ("ok", "vault", "queue", "query_execution", "config", "version", "runtime") if key in status}
+        status = {key: status[key] for key in ("ok", "vault", "query_execution", "config", "version", "runtime") if key in status}
     elif detail == "archive":
         status = {key: status[key] for key in ("ok", "vault", "archive_index", "archive_operations", "archive_state", "config", "version", "runtime") if key in status}
     return status

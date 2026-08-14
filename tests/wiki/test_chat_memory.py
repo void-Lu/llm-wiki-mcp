@@ -6,7 +6,6 @@ import pytest
 
 from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.chat_memory import ChatMemoryError, ChatMemoryService
-from wiki.supersede_registry import SupersedeRegistry
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.query_pipeline import run_query_v2
@@ -54,13 +53,12 @@ def test_chat_transcript_requires_a_visible_role_at_the_start(tmp_path: Path) ->
     assert captured.value.code == "invalid_chat_content"
 
 
-def test_idempotent_save_rechecks_index_and_queue(tmp_path: Path) -> None:
+def test_idempotent_save_rechecks_index(tmp_path: Path) -> None:
     service = ChatMemoryService(tmp_path)
     service.save(_transcript(), _metadata())
     retried = service.save(_transcript(), _metadata())
     assert retried["idempotent"] is True
     assert retried["index"]["generation"] == {"enabled": False, "reason": "raw_only"}
-    assert SupersedeRegistry(tmp_path).status()["counts"] == {}
 
 
 def test_chat_save_reports_rebuild_required_without_creating_a_formal_page(tmp_path: Path) -> None:

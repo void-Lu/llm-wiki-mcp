@@ -6,7 +6,6 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from wiki.supersede_registry import SupersedeRegistry
 from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter, TEXT_SOURCE_SUFFIXES
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
@@ -108,7 +107,6 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     if provenance_result is not None:
         response["generation"] = provenance_result["generation"]
         response["stale_pages"] = provenance_result["stale"]
-        response["superseded_jobs"] = provenance_result["superseded"]
     return response
 
 
@@ -117,10 +115,8 @@ def _invalidate_raw_provenance(root: Path, relative_path: Path, source_hash: str
 
     relative = relative_path.as_posix()
     stale = KnowledgeDependencies(root).source_changed(source_path_key(relative), source_hash)
-    superseded = SupersedeRegistry(root).supersede_sources({relative})
     return {
         "stale": stale,
-        "superseded": superseded,
         "generation": {"enabled": False, "reason": "raw_only"},
     }
 

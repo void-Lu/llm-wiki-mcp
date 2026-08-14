@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-08-14 — 退役清理工具完成
+
+- `wiki_ingest` 删除 `superseded_jobs`，保留 `stale_pages` 与 `generation`；`wiki_status` 删除 `queue`。
+- 移除 `SupersedeRegistry`、`repair codegraph-removal` 清理命令、`wiki/sources` 一次性归档脚本及孤立 JS；真实 vault 已完成迁移，无需再次运行清理工具。
+- ADR-0012 记录删除前提、公共契约收缩和对 ADR-0011 清理条款/cleanup 任务 PRD 字段闸门的 supersede 关系。
+
 ## 2026-08-13 — 移除 CodeGraph 摄入
 
 - 删除 `wiki_codegraph_import`、CodeGraph 摄入包及其 retrieval/write policy 消费点；core MCP 工具从 10 个变为 9 个，`wiki_status` 不再返回 CodeGraph 字段。
