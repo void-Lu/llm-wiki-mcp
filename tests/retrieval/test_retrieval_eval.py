@@ -4,6 +4,8 @@ import json
 import math
 import os
 import shutil
+import subprocess
+import sys
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -42,7 +44,6 @@ from wiki.wiki_paths import filesystem_path
 from retrieval.vector_provider import DeterministicFakeProvider
 from tests.helpers import write_test_page
 from wiki.wiki_paths import create_wiki_root
-import app.server as server_module
 
 
 _FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "retrieval"
@@ -498,6 +499,8 @@ def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tm
 
 
 def test_mcp_entrypoint_uses_public_lexical_contract_without_vector_hits(tmp_path: Path) -> None:
+    from app import server as server_module
+
     vault = _copy_vault(tmp_path)
     _build_passage_store(vault)
     registry_before = server_module.CONFIG_REGISTRY
@@ -521,6 +524,8 @@ def test_mcp_entrypoint_uses_public_lexical_contract_without_vector_hits(tmp_pat
 
 
 def test_mcp_evaluation_services_are_isolated_without_registry_exchange(tmp_path: Path) -> None:
+    from app import server as server_module
+
     first_vault = _copy_vault(tmp_path / "first")
     second_vault = _copy_vault(tmp_path / "second")
     _build_passage_store(first_vault)
@@ -560,6 +565,8 @@ def test_mcp_lexical_contract_requires_explicit_mode_and_zero_vector_hits() -> N
 
 
 def test_mcp_evaluation_uses_injected_adapter_without_importing_server_in_eval_path(tmp_path: Path) -> None:
+    from app import server as server_module
+
     vault = _copy_vault(tmp_path)
     _build_passage_store(vault)
     dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
@@ -602,16 +609,29 @@ def test_mcp_evaluation_uses_injected_adapter_without_importing_server_in_eval_p
     assert calls == [f"resolve:{vault}", "snapshot-enter", "query", "snapshot-exit"]
 
 
-def test_retrieval_eval_keeps_server_import_at_the_adapter_seam() -> None:
-    retrieval_eval_source = (
-        Path(__file__).parents[2] / "src" / "retrieval" / "retrieval_eval.py"
-    ).read_text(encoding="utf-8")
-    adapter_source = (
-        Path(__file__).parents[2] / "src" / "retrieval" / "mcp_entry_adapter.py"
-    ).read_text(encoding="utf-8")
+def test_retrieval_eval_keeps_server_import_lazy_at_the_mcp_seam() -> None:
+    repository = Path(__file__).parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        item for item in (str(repository / "src"), environment.get("PYTHONPATH")) if item
+    )
+    probe = subprocess.run(
+        [sys.executable, "-c", "import sys; import retrieval.retrieval_eval; print('app.server' in sys.modules)"],
+        cwd=repository,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert probe.stdout.strip() == "False"
 
-    assert "app.server" not in retrieval_eval_source
-    assert "app.server" in adapter_source
+    import retrieval.retrieval_eval as retrieval_eval_module
+    from app import server as server_module
+
+    adapter = retrieval_eval_module.default_mcp_entry_adapter()
+    assert adapter.resolve.__module__ == server_module.__name__
+    assert adapter.query is server_module.wiki_query
+    assert not hasattr(retrieval_eval_module, "server_module")
 
 
 def test_report_writer_sanitizes_legacy_pipeline_before_persisting(tmp_path: Path) -> None:

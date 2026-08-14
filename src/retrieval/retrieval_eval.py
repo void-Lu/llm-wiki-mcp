@@ -7,9 +7,11 @@ import json
 import math
 import statistics
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import inspect
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -20,7 +22,6 @@ from retrieval.metadata_filters import (
     page_matches_filters,
     path_matches_prefix,
 )
-from retrieval.mcp_entry_adapter import McpEntryAdapter, default_mcp_entry_adapter
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, RANKING_POLICY_VERSION, run_query_v2
 from retrieval.query_telemetry import read_event_count
@@ -59,6 +60,39 @@ class RetrievalEvalError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class McpEntryAdapter:
+    """The minimal MCP entry-point surface required by retrieval evaluation."""
+
+    resolve: Callable[..., Any]
+    snapshot: Callable[[Any], AbstractContextManager[None]]
+    query: Callable[..., Any] | None = None
+
+
+def default_mcp_entry_adapter() -> McpEntryAdapter:
+    """Build the real adapter while keeping the server import at this seam."""
+
+    import app.server as server_module
+
+    return McpEntryAdapter(
+        resolve=server_module.resolve_tool_vault,
+        snapshot=server_module.tool_runtime_snapshot,
+        query=server_module.wiki_query,
+    )
+
+
+def _resolve_mcp_vault(adapter: McpEntryAdapter, vault_root: str | Path) -> Any:
+    """Call both the keyword-only production resolver and legacy test seams."""
+
+    try:
+        parameters = inspect.signature(adapter.resolve).parameters
+    except (TypeError, ValueError):
+        return adapter.resolve(str(vault_root))
+    if "vault_root" in parameters:
+        return adapter.resolve(vault_root=str(vault_root))
+    return adapter.resolve(str(vault_root))
 
 
 @dataclass(frozen=True)
@@ -141,7 +175,7 @@ class EvaluationRuntimeSnapshot:
         """Resolve MCP settings once, then freeze a telemetry-off copy locally."""
 
         active_adapter = adapter or default_mcp_entry_adapter()
-        resolution = active_adapter.resolve(str(vault_root))
+        resolution = _resolve_mcp_vault(active_adapter, vault_root)
         settings = resolution.resolved.settings
         if not settings.retrieval.lexical_enabled or settings.retrieval.embedding.enabled:
             raise RetrievalEvalError(
