@@ -113,6 +113,7 @@ def test_public_evaluation_contract_normalizes_filter_aliases_and_redacts_identi
         "filter_tags": ["runbook"],
         "path_prefix": "wiki/concepts/",
     }
+
     with pytest.raises(RetrievalEvalError, match="type and filter_type disagree"):
         normalize_evaluation_filter_contract({"type": "concept", "filter_type": "entity"}, "conflict")
     assert safe_report_identity(
@@ -131,6 +132,32 @@ def test_public_evaluation_contract_normalizes_filter_aliases_and_redacts_identi
         "vault_fingerprint": {"algorithm": "sha256", "value": "abc", "file_count": 4},
         "ranking_version": "policy-v2",
     }
+
+
+def test_dataset_relevant_path_rejection_uses_canonical_locator_error_translation(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "cases.jsonl"
+    manifest_path = tmp_path / "manifest.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "id": "colon-path",
+                "query": "query",
+                "answerable": True,
+                "relevant": [{"path": "wiki/page:stream.md", "grade": 3}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest_path.write_text(
+        json.dumps({"schema_version": 1, "dataset_id": "fixture", "revision": "1", "abstention_threshold": 0}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RetrievalEvalError) as error:
+        load_retrieval_dataset(dataset_path, manifest_path)
+    assert error.value.code == "invalid_relevant_path"
 
 
 def test_v2_evaluator_reads_existing_passage_store_without_telemetry_write(tmp_path: Path) -> None:

@@ -10,9 +10,10 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Literal, cast
 
+from common.privacy_policy import LocatorError, normalize_vault_relative
 from retrieval.metadata_filters import (
     QUERY_METADATA_FILTERS,
     normalize_metadata_filters,
@@ -1595,11 +1596,11 @@ def _nonempty_string(value: object, code: str, message: str) -> str:
 
 
 def _normalise_relative_path(value: object, case_id: str) -> str:
-    path = _nonempty_string(value, "case_invalid", f"case {case_id}: relevant path must be a string").replace("\\", "/")
-    pure = PurePosixPath(path)
-    if pure.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in pure.parts):
-        raise RetrievalEvalError("invalid_relevant_path", f"case {case_id}: relevant path must be vault-relative")
-    return pure.as_posix()
+    path = _nonempty_string(value, "case_invalid", f"case {case_id}: relevant path must be a string")
+    try:
+        return normalize_vault_relative(path, check_sensitive=False)
+    except LocatorError as exc:
+        raise RetrievalEvalError("invalid_relevant_path", f"case {case_id}: relevant path must be vault-relative") from exc
 
 
 def _mean_or_none(values: Sequence[float]) -> float | None:

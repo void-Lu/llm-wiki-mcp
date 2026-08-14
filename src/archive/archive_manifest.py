@@ -15,6 +15,13 @@ def content_hash(path: Path) -> str:
 
 
 def vault_relative(root: Path, path: Path) -> str:
+    """Return a resolved path relative to ``root``.
+
+    This helper intentionally performs true path trimming after resolution;
+    unlike ``normalize_vault_relative``, it is not a locator-validation policy
+    and must retain archive manifest semantics.
+    """
+
     resolved_root = root.resolve()
     resolved = path.resolve()
     if not resolved.is_relative_to(resolved_root):

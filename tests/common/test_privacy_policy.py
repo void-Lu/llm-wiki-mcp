@@ -44,6 +44,14 @@ def test_sensitive_or_absolute_locators_are_rejected_not_rewritten() -> None:
     assert absolute.value.code == "absolute_path_forbidden"
 
 
+def test_vault_relative_rejects_colon_segments_even_without_sensitive_checks() -> None:
+    with pytest.raises(LocatorError) as escaped:
+        normalize_vault_relative("wiki/page:stream.md", check_sensitive=False)
+    assert escaped.value.code == "path_escape"
+
+    assert normalize_vault_relative("raw/sources/token-api_abc1234567890.md", check_sensitive=False) == "raw/sources/token-api_abc1234567890.md"
+
+
 def test_public_projection_removes_internal_fields_and_preserves_integrity(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     page = root / "wiki" / "concepts" / "page.md"

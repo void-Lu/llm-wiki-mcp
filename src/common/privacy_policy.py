@@ -152,8 +152,13 @@ def field_class(field: str | None) -> FieldClass:
     return "display"
 
 
-def normalize_vault_relative(value: str | Path) -> str:
-    """Normalize a path-like locator to POSIX form without changing identity."""
+def normalize_vault_relative(value: str | Path, *, check_sensitive: bool = True) -> str:
+    """Normalize a path-like locator while keeping sensitivity checks explicit.
+
+    Evaluation and gold-annotation paths may opt out of sensitive-token checks,
+    but all callers still receive the same vault-relative and Windows-segment
+    validation.
+    """
 
     if isinstance(value, Path):
         if value.is_absolute():
@@ -164,9 +169,9 @@ def normalize_vault_relative(value: str | Path) -> str:
     if not text or "\x00" in text or _ABSOLUTE_PATH.search(text):
         raise LocatorError("absolute_path_forbidden")
     parts = text.split("/")
-    if any(not part or part in {".", ".."} for part in parts):
+    if any(not part or part in {".", ".."} or ":" in part for part in parts):
         raise LocatorError("path_escape")
-    if redact_sensitive_text(text) != text:
+    if check_sensitive and redact_sensitive_text(text) != text:
         raise LocatorError("sensitive_locator")
     return "/".join(parts)
 

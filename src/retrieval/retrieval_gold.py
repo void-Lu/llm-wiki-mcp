@@ -6,9 +6,10 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from common.privacy_policy import LocatorError, normalize_vault_relative
 from retrieval.query_telemetry import TelemetryReadError, read_completed_candidates, redact_query
 from retrieval.retrieval_eval import RetrievalEvalError, parse_evaluation_filters, vault_fingerprint
 from wiki.wiki_paths import filesystem_path
@@ -339,11 +340,10 @@ def _validate_draft_manifest(manifest: Mapping[str, Any]) -> None:
 def _safe_relative_path(value: object, case_id: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RetrievalGoldError("invalid_relevant_path", f"case {case_id}: path must be a string")
-    path = value.replace("\\", "/").strip()
-    pure = PurePosixPath(path)
-    if pure.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in pure.parts):
-        raise RetrievalGoldError("invalid_relevant_path", f"case {case_id}: path must be vault-relative")
-    return pure.as_posix()
+    try:
+        return normalize_vault_relative(value.strip(), check_sensitive=False)
+    except LocatorError as exc:
+        raise RetrievalGoldError("invalid_relevant_path", f"case {case_id}: path must be vault-relative") from exc
 
 
 def _candidate_tags(query: str, scope: str, project: str, has_passages: bool) -> tuple[str, ...]:
