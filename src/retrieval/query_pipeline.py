@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
 from retrieval.candidate_items import candidate_item, with_fusion
-from retrieval.body_budget import PAGE_FILL_LIMIT, result_floor_budget
+from retrieval.body_budget import result_floor_budget
 from retrieval.context_packer import ContextPassage, pack_context
 from retrieval.lexical_analyzer import (
     QualifiedIdentifier,
@@ -53,6 +53,8 @@ from retrieval.graph_retrieval import QueryCandidate, apply_graph_expansion, bui
 DEFAULT_TOP_K = 10
 RANKING_POLICY_VERSION = "query-v2-passage-rrf-10"
 RRF_K = 60
+PASSAGE_SCAN_LIMIT = 500
+PASSAGE_PROBE_LIMIT = 20
 RAW_FALLBACK_LIMIT = 20
 RAW_FALLBACK_CANDIDATE_LIMIT = 160
 IDENTIFIER_PHRASE_BONUS = 20.0
@@ -135,7 +137,7 @@ def _step_counts_for_pages(
     ):
         if not sub_paths or sub_store is None:
             continue
-        hits = sub_store.passages_for_pages(sub_paths, limit_per_page=PAGE_FILL_LIMIT)
+        hits = sub_store.passages_for_pages(sub_paths, limit_per_page=PASSAGE_SCAN_LIMIT)
         for hit in hits:
             counts[hit.page_path] = counts.get(hit.page_path, 0) + len(_STEP_ITEM_RE.findall(hit.text))
     return counts
@@ -697,7 +699,7 @@ def _discovery_source_items(
                 :DISCOVERY_CANDIDATE_LIMIT
             ]
         ]
-        for hit in store.passages_for_pages(probe_paths, limit_per_page=20):
+        for hit in store.passages_for_pages(probe_paths, limit_per_page=PASSAGE_PROBE_LIMIT):
             qualified_names_by_path.setdefault(hit.page_path, set()).update(
                 _wildcard_evidence_names(question, hit.text)
             )
@@ -756,7 +758,7 @@ def _discovery_source_items(
     else:
         page_paths = page_paths[:DISCOVERY_PAGE_LIMIT]
 
-    passages = store.passages_for_pages(page_paths, limit_per_page=PAGE_FILL_LIMIT)
+    passages = store.passages_for_pages(page_paths, limit_per_page=PASSAGE_SCAN_LIMIT)
     return [
         candidate_item(hit, score=hit.score)
         for hit in passages

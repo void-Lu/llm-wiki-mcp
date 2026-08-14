@@ -20,6 +20,11 @@ from wiki.wiki_paths import create_wiki_root
 from wiki.wiki_index import refresh_indexes
 
 
+def test_passage_scan_limits_are_separate_from_body_budget_policy() -> None:
+    assert query_pipeline_module.PASSAGE_SCAN_LIMIT == 500
+    assert query_pipeline_module.PASSAGE_PROBE_LIMIT == 20
+
+
 def test_classify_intent_treats_multiword_howto_questions_as_concepts() -> None:
     from retrieval.query_pipeline import classify_intent
 
