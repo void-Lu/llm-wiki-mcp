@@ -47,6 +47,10 @@ def pack_context(
 ) -> dict[str, object]:
     """Pack page-ordered bodies for the canonical query response.
 
+    Context is aggregated by path in one pass; ``seen`` and
+    ``previous_by_path`` record budget-gated and overlap-deduplicated content,
+    not grouping behavior.
+
     ``budget_scale`` lets callers grow the budget with the number of requested
     results (for example 400 tokens per result).  The intent target remains a
     floor: a ``research`` question keeps its deep budget even with a small
@@ -58,12 +62,12 @@ def pack_context(
         target = max(target, budget_scale)
     budget = min(max(1, hard_limit), target)
     candidates = list(passages)
-    output: list[dict[str, object]] = []
     citation_metadata: dict[str, dict[str, str]] = {}
+    aggregated: dict[str, dict[str, object]] = {}
+    order: list[str] = []
     used = 0
     previous_by_path: dict[str, str] = {}
     seen: set[tuple[str, str]] = set()
-    last_tokens = 0
     for item in candidates:
         key = (item.path, item.content)
         if key in seen:
@@ -75,47 +79,40 @@ def pack_context(
         tokens = estimate_response_tokens(content)
         if used + tokens > budget:
             continue
-        if output and output[-1]["path"] == item.path and output[-1]["heading"] == item.heading:
-            output[-1]["content"] = f"{output[-1]['content']}\n\n{content}"
-            output[-1]["tokens"] = last_tokens + tokens
-            citation_metadata[str(output[-1]["citation"])].update(item.citation_metadata)
-            previous_by_path[item.path] = f"{previous_by_path.get(item.path, '')} {content}".strip()
-            last_tokens += tokens
-            used += tokens
-            continue
-        citation = f"[{len(output) + 1}]"
-        output.append({"citation": citation, "path": item.path, "heading": item.heading, "evidence_kind": item.evidence_kind, "content": content, "tokens": tokens})
-        last_tokens = tokens
-        citation_metadata[citation] = dict(item.citation_metadata)
+        path = str(item.path)
+        entry = aggregated.get(path)
+        if entry is None:
+            citation = f"[{len(aggregated) + 1}]"
+            aggregated[path] = {
+                "citation": citation,
+                "path": path,
+                "heading": item.heading,
+                "evidence_kind": item.evidence_kind,
+                "content": content,
+                "tokens": tokens,
+            }
+            citation_metadata[citation] = dict(item.citation_metadata)
+            order.append(path)
+        else:
+            entry["content"] = f"{entry['content']}\n\n{content}"
+            entry["tokens"] = int(entry["tokens"]) + tokens
+            citation_metadata[str(entry["citation"])].update(item.citation_metadata)
         previous_by_path[item.path] = f"{previous_by_path.get(item.path, '')} {content}".strip()
         used += tokens
-    aggregated: list[dict[str, object]] = []
-    aggregated_metadata: dict[str, dict[str, str]] = {}
-    for item in output:
-        path = str(item["path"])
-        citation = str(item["citation"])
-        existing = next((candidate for candidate in aggregated if candidate["path"] == path), None)
-        if existing is None:
-            aggregated.append(dict(item))
-            aggregated_metadata[citation] = dict(citation_metadata[citation])
-            continue
-        existing["content"] = f"{existing['content']}\n\n{item['content']}"
-        existing["tokens"] = int(existing["tokens"]) + int(item["tokens"])
-        aggregated_metadata[str(existing["citation"])].update(citation_metadata[citation])
 
-    retained_tokens = sum(int(item["tokens"]) for item in aggregated)
+    retained_tokens = sum(int(aggregated[path]["tokens"]) for path in order)
     used = retained_tokens
     citations = [
         {
-            "citation": item["citation"],
-            "path": item["path"],
-            "heading": item["heading"],
-            **({"metadata": aggregated_metadata[str(item["citation"])]} if aggregated_metadata[str(item["citation"])] else {}),
+            "citation": aggregated[path]["citation"],
+            "path": aggregated[path]["path"],
+            "heading": aggregated[path]["heading"],
+            **({"metadata": citation_metadata[str(aggregated[path]["citation"])]} if citation_metadata[str(aggregated[path]["citation"])] else {}),
         }
-        for item in aggregated
+        for path in order
     ]
     return {
-        "passages": aggregated,
+        "passages": [aggregated[path] for path in order],
         "citations": citations,
         "budget": {
             "target": target,
