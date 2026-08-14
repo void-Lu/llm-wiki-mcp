@@ -18,7 +18,7 @@ from common.redaction import (
     redact_sensitive_text,
 )
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
-from wiki.atomic_file import FaultBarrier, sha256_file
+from wiki.atomic_file import sha256_file
 from wiki.page_mutation import MutationResult, PageMutationCoordinator
 from wiki.wiki_io import read_markdown_page
 
@@ -103,11 +103,9 @@ class ChatMemoryService:
         vault_root: str | Path,
         *,
         coordinator: PageMutationCoordinator | None = None,
-        fault: FaultBarrier | None = None,
     ):
         self.root = Path(vault_root).expanduser().resolve()
-        self.fault = fault
-        self.coordinator = coordinator or PageMutationCoordinator(self.root, fault=fault)
+        self.coordinator = coordinator or PageMutationCoordinator(self.root)
 
     def save(self, content: object, chat_metadata: object) -> dict[str, Any]:
         transcript = validate_visible_chat_markdown(content)
@@ -170,7 +168,6 @@ class ChatMemoryService:
                 base_hash=None,
                 intended_hash=intended_hash,
                 text=serialized,
-                fault=self.fault,
             )
         except ValueError as exc:
             raise ChatMemoryError(str(getattr(exc, "code", "chat_source_commit_failed")), "chat source operation could not be completed") from exc
@@ -199,7 +196,6 @@ class ChatMemoryService:
                 intended_hash=current_hash,
                 text=path.read_text(encoding="utf-8"),
                 expected_hash=current_hash,
-                fault=self.fault,
             )
         except ValueError as exc:
             raise ChatMemoryError(str(getattr(exc, "code", "chat_source_recovery_failed")), "chat source recovery could not be completed") from exc

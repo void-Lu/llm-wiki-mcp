@@ -9,6 +9,7 @@ from archive.archive_migration import apply_legacy_migration, plan_legacy_migrat
 from archive.archive_schema import ARCHIVE_REQUIRED_COLUMNS, ARCHIVE_REQUIRED_TABLES, ARCHIVE_TABLE_DDL
 from archive.archive_service import ArchiveService
 from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.atomic_file import fault_context
 
 
 def _page(root: Path, relative: str, lifecycle: str = "deprecated") -> Path:
@@ -122,9 +123,14 @@ def test_raw_active_dependency_blocks_unless_cascade(tmp_path: Path) -> None:
 
 def test_recovery_restores_active_file_after_detaching_fault(tmp_path: Path) -> None:
     root = tmp_path / "vault"; page = _page(root, "wiki/concepts/example.md")
-    service = ArchiveService(root, fault_at="detaching")
+    service = ArchiveService(root)
     planned = service.plan_archive("wiki/concepts/example.md", reason="deprecated")
-    failed = service.apply(planned["plan_id"])
+    def fault(stage: str) -> None:
+        if stage == "detaching":
+            raise RuntimeError("injected archive fault")
+
+    with fault_context(fault):
+        failed = service.apply(planned["plan_id"])
     assert failed["ok"] is False and page.exists()
     assert service.recover()["ok"]
 
@@ -156,9 +162,14 @@ def test_restore_failure_rolls_back_files_created_by_that_operation(tmp_path: Pa
     archive = service.apply(archive_plan["plan_id"])
     assert archive["ok"] and not page.exists()
 
-    failing = ArchiveService(root, fault_at="pending")
+    failing = ArchiveService(root)
     restore_plan = failing.plan_restore(archive["archive_id"])
-    result = failing.apply(restore_plan["plan_id"])
+    def fault(stage: str) -> None:
+        if stage == "pending":
+            raise RuntimeError("injected archive fault")
+
+    with fault_context(fault):
+        result = failing.apply(restore_plan["plan_id"])
     assert result["ok"] is False
     assert not page.exists()
     assert failing.recover()["recovered"] == []

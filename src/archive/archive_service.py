@@ -23,6 +23,7 @@ from archive.archive_models import ArchiveAttachment, ArchiveError, ArchiveItem,
 from archive.archive_planner import ArchivePlanner
 from archive.archive_schema import ARCHIVE_TABLE_DDL
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
+from wiki.atomic_file import current_fault
 from wiki.wiki_paths import STATE_DB
 
 
@@ -42,10 +43,9 @@ def _now() -> str:
 
 
 class ArchiveService:
-    def __init__(self, vault_root: str | Path, *, actor: str = "unknown", fault_at: str | None = None) -> None:
+    def __init__(self, vault_root: str | Path, *, actor: str = "unknown") -> None:
         self.root = Path(vault_root).expanduser().resolve()
         self.actor = actor
-        self.fault_at = fault_at
         self.archive_root = self.root / "archives"
         self.state_path = self.root / STATE_DB
         self._planner: ArchivePlanner | None = None
@@ -174,8 +174,7 @@ class ArchiveService:
             if row is None or new_state not in _TRANSITIONS.get(row["state"], set()):
                 raise ArchiveError("invalid_archive_transition", "archive operation cannot transition to requested state")
             conn.execute("UPDATE archive_operations SET state=?,updated_at=? WHERE operation_id=?", (new_state, _now(), operation_id))
-        if self.fault_at == new_state:
-            raise RuntimeError(f"injected archive fault at {new_state}")
+        current_fault()(new_state)
 
     def _apply_archive(self, plan: ArchivePlan) -> dict[str, Any]:
         # Re-plan before touching the filesystem: plan payload contains the CAS hashes.

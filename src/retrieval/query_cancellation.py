@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from contextvars import copy_context
 import queue
 import threading
 import time
@@ -179,7 +180,13 @@ class QueryExecutionRegistry:
             context = QueryCancellationContext.with_timeout(timeout_seconds, clock=self._clock)
             worker = _Worker(request_id, context, queue.Queue(maxsize=1))
             self._workers[request_id] = worker
-            thread = threading.Thread(target=self._worker_main, args=(worker, function), daemon=True, name=f"wiki-query-{request_id[:8]}")
+            execution_context = copy_context()
+            thread = threading.Thread(
+                target=execution_context.run,
+                args=(self._worker_main, worker, function),
+                daemon=True,
+                name=f"wiki-query-{request_id[:8]}",
+            )
             worker.thread = thread
             thread.start()
         return self._wait(worker)

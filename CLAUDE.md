@@ -51,6 +51,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时只标记 KnowledgeDependencies 的 stale 页面；知识编译/generation 已停用（`generation: enabled: false`）。MCP 工具名为 `wiki_ingest`。
 - 人工笔记写入在 [note_writer.py](src/wiki/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
 - 页面事实提交统一在 [page_mutation.py](src/wiki/page_mutation.py) 的 `PageMutationCoordinator`：CAS 原子写入后按 durable operation journal 执行 dependencies、retrieval、navigation、overview 和 audit log 投影；任一派生阶段失败都保留已提交页面并返回 `repair_pending`，由同一个 operation 走 `repair_page_operation` 恢复。
+- 故障注入由 [atomic_file.py](src/wiki/atomic_file.py) 的 `fault_context` 统一持有；原子写入、页面投影和归档状态转换从当前 contextvar 读取 barrier，生产签名不再穿透 `fault`/`fault_at`，嵌套 context 退出后必须恢复外层值，执行 registry 进入线程前复制调用方 context。
 - `wiki_write_note`、[wiki_update.py](src/wiki/wiki_update.py) 和 chat source 共用页面变更协调器。`preview_update` 返回 hash、plan_id、locked fields、removed sources 和 diff；`apply_update` 在校验 hash/plan、锁定字段、来源与 active lifecycle 后提交页面事实，再更新依赖、增量检索 projection 和导航/log。MCP 工具为 `wiki_update`。
 - [wiki_io.py](src/wiki/wiki_io.py) 的 `refresh_page_retrieval` 与 chat projection 只调用 RetrievalIndexStore 的单页 `update_page`；删除/改名使用对应增量操作。`refresh_navigation` 只维护导航页；[wiki_index.py](src/wiki/wiki_index.py) 的 `rebuild_retrieval_index`/`refresh_indexes` 只用于显式初始化、CLI/admin 或兼容测试，普通 MCP 写入不得隐式全量建库。索引缺失或不兼容时返回 `rebuild_required` 和 `rebuild_retrieval_index` repair action。
 - 归档在 [archive_service.py](src/archive/archive_service.py)：`wiki_archive`/`wiki_restore` 只公开 `plan|apply`；purge、recover、rebuild-index 和 migration 只保留在 CLI/admin 边界。
@@ -105,6 +106,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 - 不要在代码、测试或文档中硬编码个人 Vault 路径、API key、token、邮箱、手机号等敏感信息；脱敏逻辑在 [redaction.py](src/common/redaction.py)。
 - 所有 MCP 工具写入文件统一使用 `encoding="utf-8"`（无 BOM）；读取 Obsidian 文件时可用 `utf-8-sig` 以兼容 BOM，但写入绝不产生 BOM。禁止使用 PowerShell `Set-Content` 默认编码（UTF-16 LE）修改项目文件。
 - durable Markdown 写入必须经过 [atomic_file.py](src/wiki/atomic_file.py) 和 `PageMutationCoordinator`；投影失败时修复已有 operation，不通过重试创建页面来恢复。
+- fault 测试必须在顶层入口使用 `fault_context` 注入，不能恢复生产参数穿透或创建全局可变 fault/profile registry；未注入请求必须保持 no-op，归档 staged/pending/detaching/committed/rollback 阶段词汇和稳定错误码不变。
 - 普通页面变更只做 RetrievalIndexStore 增量投影；全量 `index build|update` 必须是显式 CLI/admin 操作，禁止藏在 MCP 查询或写入调用中。
 - Query V2 的所有消费者复用同一次 `QueryCorpusSnapshot`，回退和 context pack 统一走 `assemble_recovery`；不得在不同阶段重新扫描或复制 fallback 状态。
 - retrieval evaluation 不得 monkeypatch 或修改全局 runtime registry；使用 `EvaluationRuntimeSnapshot`/`EvaluationQueryService` 和公开 parser。

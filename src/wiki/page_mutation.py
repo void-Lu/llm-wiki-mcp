@@ -10,7 +10,7 @@ import threading
 from typing import Any, Callable, Mapping
 
 from common.privacy_policy import normalize_vault_relative
-from wiki.atomic_file import AtomicFileError, FaultBarrier, atomic_write_text, fault_barrier, sha256_file
+from wiki.atomic_file import AtomicFileError, atomic_write_text, current_fault, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
 from wiki.wiki_index import refresh_navigation
@@ -22,15 +22,6 @@ from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_e
 
 
 Projection = Callable[[], Mapping[str, object] | None]
-ProjectionBuilder = Callable[["PageMutationCoordinator", PageOperation, Path, FaultBarrier | None], dict[str, Projection]]
-
-
-@dataclass(frozen=True)
-class ProjectionProfile:
-    """Named projection policy selected by the durable operation kind."""
-
-    name: str
-    build: ProjectionBuilder
 
 
 @dataclass(frozen=True)
@@ -155,13 +146,9 @@ class PageMutationCoordinator:
         vault_root: str | Path,
         *,
         store: PageOperationStore | None = None,
-        fault: FaultBarrier | None = None,
-        profiles: Mapping[str, ProjectionProfile] | None = None,
     ):
         self.root = Path(vault_root).expanduser().resolve()
         self._store = store or PageOperationStore(self.root)
-        self.fault = fault
-        self.profiles = {**_DEFAULT_PROFILES, **dict(profiles or {})}
 
     def prepare(
         self,
@@ -186,7 +173,6 @@ class PageMutationCoordinator:
         text: str,
         *,
         expected_hash: str | None = None,
-        fault: FaultBarrier | None = None,
     ) -> dict[str, object]:
         operation = self._store.get_operation(operation_id)
         if operation is None:
@@ -208,11 +194,11 @@ class PageMutationCoordinator:
                 self._mark_precommit_failure(operation_id, "expected_hash_mismatch")
                 return {"ok": False, "code": "expected_hash_mismatch", "operation_id": operation_id, "state": "failed_precommit"}
             try:
-                atomic_write_text(target, text, fault=fault or self.fault)
+                atomic_write_text(target, text)
             except AtomicFileError:
                 return self._classify_commit_failure(operation, target)
             try:
-                self._invoke("journal_commit", fault)
+                self._invoke("journal_commit")
                 committed = self._store.set_operation_state(operation_id, "page_committed")
             except Exception:
                 classified = self._classify_disk(operation, target)
@@ -240,8 +226,6 @@ class PageMutationCoordinator:
         self,
         operation_id: str,
         projections: Mapping[str, Projection],
-        *,
-        fault: FaultBarrier | None = None,
     ) -> dict[str, object]:
         operation = self._store.get_operation(operation_id)
         if operation is None:
@@ -259,7 +243,7 @@ class PageMutationCoordinator:
                 continue
             try:
                 self._store.record_stage(operation_id, stage, "running")
-                self._invoke(f"projection:{stage}", fault)
+                self._invoke(f"projection:{stage}")
                 callback = projections.get(stage)
                 result = callback() if callback is not None else {"ok": True, "state": "not_configured"}
                 result_dict = dict(result or {})
@@ -305,20 +289,19 @@ class PageMutationCoordinator:
             pass
         return {"ok": False, "state": "conflict", "operation_id": operation_id, "code": "operation_conflict", "hash_classification": "third"}
 
-    def repair(self, operation_id: str, projections: Mapping[str, Projection], *, fault: FaultBarrier | None = None) -> dict[str, object]:
+    def repair(self, operation_id: str, projections: Mapping[str, Projection]) -> dict[str, object]:
         recovered = self.recover(operation_id)
         if recovered.get("state") == "completed":
             return recovered
         if recovered.get("state") != "repair_pending":
             return recovered
-        return self.run_projections(operation_id, projections, fault=fault)
+        return self.run_projections(operation_id, projections)
 
     def project_existing(
         self,
         operation_id: str,
         *,
         projections: Mapping[str, Projection] | None = None,
-        fault: FaultBarrier | None = None,
     ) -> dict[str, object]:
         """Project an already durable fact without rewriting its file.
 
@@ -333,19 +316,15 @@ class PageMutationCoordinator:
             return {"ok": False, "code": "operation_not_found"}
         if projections is not None:
             selected = projections
-        elif fault is None:
-            selected = self.projections_for(operation)
         else:
-            selected = self.projections_for(operation, fault=fault)
-        return self.repair(operation_id, selected, fault=fault)
+            selected = self.projections_for(operation)
+        return self.repair(operation_id, selected)
 
     def projections_for(
         self,
         operation: PageOperation,
-        *,
-        fault: FaultBarrier | None = None,
     ) -> dict[str, Projection]:
-        """Build the projection set selected by the operation's source profile."""
+        """Build the projection set selected by the operation's source kind."""
 
         target = self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source")
         if not target.is_file():
@@ -353,15 +332,14 @@ class PageMutationCoordinator:
                 stage: (lambda: {"ok": False, "code": "page_not_found"})
                 for stage in PAGE_STAGES
             }
-        projection_fault = fault or self.fault
-        profile = self.profiles.get(operation.operation_kind, self.profiles["formal_page"])
-        return profile.build(self, operation, target, projection_fault)
+        if operation.operation_kind == "chat_source":
+            return self._chat_source_projections(operation, target)
+        return self._formal_page_projections(operation, target)
 
     def _formal_page_projections(
         self,
         operation: PageOperation,
         target: Path,
-        projection_fault: FaultBarrier | None,
     ) -> dict[str, Projection]:
         page = read_markdown_page(target, self.root)
         source_hashes = _source_hashes(page.frontmatter)
@@ -391,10 +369,10 @@ class PageMutationCoordinator:
             return RetrievalIndexStore(self.root, scope="active").update_page_from_file(target)
 
         def navigation() -> dict[str, object]:
-            return refresh_navigation(self.root, fault=projection_fault)
+            return refresh_navigation(self.root)
 
         def overview() -> dict[str, object]:
-            return refresh_overview(self.root, fault=projection_fault)
+            return refresh_overview(self.root)
 
         def audit_log() -> dict[str, object]:
             return append_log_entry(
@@ -408,7 +386,6 @@ class PageMutationCoordinator:
                     status="ok",
                     operation_id=operation.operation_id,
                 ),
-                fault=projection_fault,
             )
 
         return {
@@ -423,7 +400,6 @@ class PageMutationCoordinator:
         self,
         operation: PageOperation,
         target: Path,
-        projection_fault: FaultBarrier | None,
     ) -> dict[str, Projection]:
         """Build raw-chat projections without treating the source as a page."""
 
@@ -479,7 +455,6 @@ class PageMutationCoordinator:
                     status="ok",
                     operation_id=operation.operation_id,
                 ),
-                fault=projection_fault,
             )
 
         return {
@@ -496,7 +471,6 @@ class PageMutationCoordinator:
         text: str,
         *,
         expected_hash: str | None = None,
-        fault: FaultBarrier | None = None,
     ) -> dict[str, object]:
         """Commit a prepared operation and run its standard projections."""
 
@@ -512,7 +486,7 @@ class PageMutationCoordinator:
                 "already_applied": True,
             }
         if operation.state == "prepared":
-            commit_result = self.commit(operation_id, text, expected_hash=expected_hash, fault=fault)
+            commit_result = self.commit(operation_id, text, expected_hash=expected_hash)
             if not commit_result.get("ok"):
                 return commit_result
         elif operation.state not in {"page_committed", "repair_pending"}:
@@ -522,13 +496,8 @@ class PageMutationCoordinator:
                 "state": operation.state,
                 "operation_id": operation.operation_id,
             }
-        # Keep the long-standing two-argument override contract usable for
-        # callers/tests that customize the projection set.  Only pass the
-        # optional fault keyword when the caller actually supplied one;
-        # otherwise an override written before fault propagation was added
-        # would fail before any projection runs.
-        projections = self.projections_for(operation) if fault is None else self.projections_for(operation, fault=fault)
-        result = self.run_projections(operation_id, projections, fault=fault)
+        projections = self.projections_for(operation)
+        result = self.run_projections(operation_id, projections)
         result.setdefault("page_hash", operation.intended_hash)
         return result
 
@@ -544,7 +513,6 @@ class PageMutationCoordinator:
         expected_hash: str | None = None,
         plan_id: str | None = None,
         intent_hash: str | None = None,
-        fault: FaultBarrier | None = None,
     ) -> MutationResult:
         """Prepare, commit, project, and optionally consume one mutation plan."""
 
@@ -592,7 +560,7 @@ class PageMutationCoordinator:
         if operation_kind == "chat_source" and operation is None:
             existing = self._store.get_operation_by_request_key(request_key)
             if existing is not None:
-                existing_result = self.project_existing(existing.operation_id, fault=fault)
+                existing_result = self.project_existing(existing.operation_id)
                 existing_result = {
                     **existing_result,
                     "already_applied": True,
@@ -638,7 +606,6 @@ class PageMutationCoordinator:
             operation.operation_id,
             text,
             expected_hash=expected_hash,
-            fault=fault,
         )
         if not projection.get("ok"):
             return self._mutation_result(projection, operation)
@@ -725,8 +692,8 @@ class PageMutationCoordinator:
         except WikiPathError as exc:
             raise PageMutationError(translate_path_error(exc.code, "mutation")) from exc
 
-    def _invoke(self, stage: str, fault: FaultBarrier | None) -> None:
-        (fault or self.fault or fault_barrier)(stage)
+    def _invoke(self, stage: str) -> None:
+        current_fault()(stage)
 
     @contextmanager
     def _page_lock(self, page_path: str):
@@ -735,32 +702,6 @@ class PageMutationCoordinator:
             lock = self._locks.setdefault(key, threading.RLock())
         with lock:
             yield
-
-
-def _formal_page_profile(
-    coordinator: PageMutationCoordinator,
-    operation: PageOperation,
-    target: Path,
-    fault: FaultBarrier | None,
-) -> dict[str, Projection]:
-    return coordinator._formal_page_projections(operation, target, fault)
-
-
-def _chat_source_profile(
-    coordinator: PageMutationCoordinator,
-    operation: PageOperation,
-    target: Path,
-    fault: FaultBarrier | None,
-) -> dict[str, Projection]:
-    return coordinator._chat_source_projections(operation, target, fault)
-
-
-_DEFAULT_PROFILES: dict[str, ProjectionProfile] = {
-    "formal_page": ProjectionProfile("formal_page", _formal_page_profile),
-    "create": ProjectionProfile("formal_page", _formal_page_profile),
-    "update": ProjectionProfile("formal_page", _formal_page_profile),
-    "chat_source": ProjectionProfile("chat_source", _chat_source_profile),
-}
 
 
 def _hash_if_exists(path: Path) -> str | None:
@@ -791,7 +732,6 @@ __all__ = [
     "PageMutationCoordinator",
     "PageMutationError",
     "Projection",
-    "ProjectionProfile",
     "dependency_projection_of",
     "retrieval_index_of",
     "safe_stages_of",

@@ -15,6 +15,7 @@ from wiki.page_mutation import (
     stage_result_of,
 )
 from wiki.page_operation_store import PageOperationStore, UpdatePlanError
+from wiki.atomic_file import fault_context
 
 
 def _operation(tmp_path: Path, old: str = "old", new: str = "new") -> tuple[PageMutationCoordinator, PageOperationStore, Path, str]:
@@ -41,7 +42,8 @@ def test_precommit_fault_keeps_old_page_and_is_not_repairable(stage: str, tmp_pa
         if current == stage:
             raise RuntimeError("injected")
 
-    result = coordinator.commit(operation_id, "new", fault=fault)
+    with fault_context(fault):
+        result = coordinator.commit(operation_id, "new")
     assert result["ok"] is False
     assert result["code"] == "write_failed_precommit"
     assert page.read_text(encoding="utf-8") == "old"
@@ -57,7 +59,8 @@ def test_post_replace_fault_is_repair_pending_and_keeps_new_page(tmp_path: Path)
         if stage == "post_replace":
             raise RuntimeError("crash after replace")
 
-    result = coordinator.commit(operation_id, "new", fault=fault)
+    with fault_context(fault):
+        result = coordinator.commit(operation_id, "new")
     assert result["ok"] is True
     assert result["state"] == "repair_pending"
     assert page.read_text(encoding="utf-8") == "new"
@@ -73,7 +76,8 @@ def test_journal_commit_fault_is_repair_pending_and_keeps_new_page(tmp_path: Pat
         if stage == "journal_commit":
             raise RuntimeError("journal unavailable")
 
-    result = coordinator.commit(operation_id, "new", fault=fault)
+    with fault_context(fault):
+        result = coordinator.commit(operation_id, "new")
     assert result["ok"] is True
     assert result["state"] == "repair_pending"
     assert page.read_text(encoding="utf-8") == "new"
@@ -93,7 +97,8 @@ def test_each_projection_fault_is_repairable_without_rewriting_page(tmp_path: Pa
         if current == f"projection:{stage}":
             raise RuntimeError("projection unavailable")
 
-    pending = coordinator.run_projections(operation_id, projections, fault=fault)
+    with fault_context(fault):
+        pending = coordinator.run_projections(operation_id, projections)
     assert pending["ok"] is True
     assert pending["state"] == "repair_pending"
     assert pending["failed_stage"] == stage
@@ -138,7 +143,8 @@ def test_projection_failure_is_repair_pending_and_retry_skips_succeeded_stages(t
             raise RuntimeError("navigation unavailable")
 
     projections = {name: projection(name) for name in ("dependencies", "retrieval", "navigation", "overview", "audit_log")}
-    pending = coordinator.run_projections(operation_id, projections, fault=fault)
+    with fault_context(fault):
+        pending = coordinator.run_projections(operation_id, projections)
     assert pending == {
         "ok": True,
         "state": "repair_pending",

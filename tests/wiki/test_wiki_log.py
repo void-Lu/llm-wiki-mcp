@@ -8,7 +8,7 @@ import pytest
 
 import wiki.wiki_log as wiki_log
 
-from wiki.atomic_file import AtomicFileError
+from wiki.atomic_file import AtomicFileError, fault_context
 from wiki.wiki_limits import HARD_PAGE_BYTES, TARGET_PAGE_BYTES, partition_rendered_units, utf8_size
 from wiki.wiki_limits import split_text_by_utf8
 from wiki.wiki_io import split_frontmatter
@@ -332,8 +332,9 @@ def test_log_multi_file_write_is_per_file_atomic_not_a_cross_file_transaction(tm
             if temp_write_count == 2:
                 raise RuntimeError("injected")
 
-    with pytest.raises(AtomicFileError):
-        wiki_log._atomic_write_many({first: "new first", second: "new second"}, fault=fault)
+    with fault_context(fault):
+        with pytest.raises(AtomicFileError):
+            wiki_log._atomic_write_many({first: "new first", second: "new second"})
 
     assert first.read_text(encoding="utf-8") == "new first"
     assert second.read_text(encoding="utf-8") == "old second"
@@ -412,10 +413,10 @@ def test_operation_index_manifest_failure_rebuilds_after_log_write(tmp_path: Pat
     wiki_log._write_operation_index(root, set())
     original_atomic_write_text = wiki_log.atomic_write_text
 
-    def fail_manifest(target: str | Path, text: str, *, fault=None):
+    def fail_manifest(target: str | Path, text: str):
         if Path(target).name == "log-operation-index.json":
             raise AtomicFileError("injected_manifest_failure")
-        return original_atomic_write_text(target, text, fault=fault)
+        return original_atomic_write_text(target, text)
 
     monkeypatch.setattr(wiki_log, "atomic_write_text", fail_manifest)
     entry = WikiLogEntry(operation="update", title="Manifest fault", operation_id="operation-005")

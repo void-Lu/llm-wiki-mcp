@@ -6,7 +6,7 @@ import pytest
 
 import wiki.wiki_overview as wiki_overview
 from tests.helpers import write_test_page
-from wiki.atomic_file import AtomicFileError
+from wiki.atomic_file import AtomicFileError, fault_context
 from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
@@ -87,8 +87,9 @@ def test_refresh_overview_atomic_fault_keeps_existing_overview(stage: str, tmp_p
         if current == stage:
             raise RuntimeError("injected")
 
-    with pytest.raises(AtomicFileError):
-        wiki_overview.refresh_overview(root, fault=fault)
+    with fault_context(fault):
+        with pytest.raises(AtomicFileError):
+            wiki_overview.refresh_overview(root)
 
     assert target.read_text(encoding="utf-8") == "---\ntype: overview\ngenerated: true\n---\n\nold overview\n"
     assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
@@ -104,8 +105,9 @@ def test_refresh_overview_post_replace_fault_keeps_complete_new_overview(tmp_pat
         if stage == "post_replace":
             raise RuntimeError("injected")
 
-    with pytest.raises(AtomicFileError):
-        wiki_overview.refresh_overview(root, fault=fault)
+    with fault_context(fault):
+        with pytest.raises(AtomicFileError):
+            wiki_overview.refresh_overview(root)
 
     rendered = target.read_text(encoding="utf-8")
     assert rendered != "---\ntype: overview\ngenerated: true\n---\n\nold overview\n"

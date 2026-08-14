@@ -9,7 +9,7 @@ from threading import RLock
 
 from common.redaction import redact_sensitive_text
 from common.privacy_policy import LocatorError, normalize_vault_relative
-from wiki.atomic_file import AtomicFileError, FaultBarrier, atomic_write_text
+from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_limits import (
     HARD_PAGE_BYTES,
@@ -39,8 +39,6 @@ _OPERATION_INDEX_LOCK = RLock()
 def append_log_entry(
     vault_root: str | Path,
     entry: WikiLogEntry,
-    *,
-    fault: FaultBarrier | None = None,
 ) -> dict[str, object]:
     """Append one complete log record while keeping every generated log bounded."""
 
@@ -63,7 +61,7 @@ def append_log_entry(
     try:
         if utf8_size(_join_log_blocks(preamble, [block])) > _archive_target_bytes():
             try:
-                detail_paths = _write_archive_document(root, timestamp, [block], prefix="log", fault=fault)
+                detail_paths = _write_archive_document(root, timestamp, [block], prefix="log")
             except AtomicFileError:
                 raise
             except ValueError:
@@ -79,17 +77,17 @@ def append_log_entry(
         next_blocks = [*blocks, block]
         keep, overflow = _rotate_blocks(preamble, next_blocks)
         if overflow:
-            archived_paths.extend(_write_archived_log_blocks(root, "wiki-log", overflow, fault=fault))
-        _atomic_write(log_path, _join_log_blocks(preamble, keep), fault=fault)
+            archived_paths.extend(_write_archived_log_blocks(root, "wiki-log", overflow))
+        _atomic_write(log_path, _join_log_blocks(preamble, keep))
 
         for archive_path in archived_paths:
-            _append_archive_log(root, archive_path, fault=fault)
+            _append_archive_log(root, archive_path)
         if archived_paths or not (root / ARCHIVES_LOG_DIR / "index.md").exists():
-            _write_archive_index(root, fault=fault)
+            _write_archive_index(root)
         if entry.operation_id:
             assert operation_index is not None
             operation_index = {*operation_index, entry.operation_id}
-            _write_operation_index(root, operation_index, fault=fault)
+            _write_operation_index(root, operation_index)
     except Exception:
         if entry.operation_id:
             _force_operation_index_rebuild(root)
@@ -210,15 +208,13 @@ def _scan_operation_ids(root: Path) -> set[str]:
 def _write_operation_index(
     root: Path,
     operation_ids: set[str],
-    *,
-    fault: FaultBarrier | None = None,
 ) -> None:
     path = root / LOG_OPERATION_INDEX
     payload = {
         "schema_version": _OPERATION_INDEX_SCHEMA_VERSION,
         "operation_ids": sorted(operation_ids),
     }
-    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", fault=fault)
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     with _OPERATION_INDEX_LOCK:
         _OPERATION_INDEX_CACHE[root.expanduser().resolve()] = operation_ids
         _OPERATION_INDEX_FORCE_REBUILD.discard(root.expanduser().resolve())
@@ -305,8 +301,6 @@ def _write_archived_log_blocks(
     root: Path,
     source_log_name: str,
     blocks: list[str],
-    *,
-    fault: FaultBarrier | None = None,
 ) -> list[Path]:
     grouped: dict[tuple[str, str], list[str]] = defaultdict(list)
     for block in blocks:
@@ -319,7 +313,6 @@ def _write_archived_log_blocks(
                 f"{year}-{month}-01T00:00:00Z",
                 group,
                 prefix=_archive_prefix(source_log_name),
-                fault=fault,
             )
         )
     return written
@@ -336,7 +329,6 @@ def _write_archive_document(
     *,
     prefix: str,
     header: str = _ARCHIVE_HEADER,
-    fault: FaultBarrier | None = None,
 ) -> list[Path]:
     year, month = _archive_month_parts_from_timestamp(timestamp)
     archive_dir = root / ARCHIVES_LOG_DIR / year / month
@@ -353,7 +345,7 @@ def _write_archive_document(
         if utf8_size(rendered) > target_bytes or utf8_size(rendered) > HARD_PAGE_BYTES:
             raise ValueError("archived Markdown page cannot fit into a bounded page")
         contents[path] = rendered
-    _atomic_write_many(contents, fault=fault)
+    _atomic_write_many(contents)
     return paths
 
 
@@ -444,7 +436,7 @@ def _archive_month_parts_from_timestamp(timestamp: str) -> tuple[str, str]:
     return f"{now.year:04d}", f"{now.month:02d}"
 
 
-def _append_archive_log(root: Path, archive_path: Path, *, fault: FaultBarrier | None = None) -> None:
+def _append_archive_log(root: Path, archive_path: Path) -> None:
     archive_log = root / ARCHIVES_LOG_PATH
     timestamp = _now()
     rel = archive_path.relative_to(root).as_posix()
@@ -460,11 +452,11 @@ def _append_archive_log(root: Path, archive_path: Path, *, fault: FaultBarrier |
     preamble, blocks = _read_log_blocks(archive_log, "# Archives Log")
     keep, overflow = _rotate_blocks(preamble, [*blocks, block])
     if overflow:
-        _write_archived_log_blocks(root, "archives-log", overflow, fault=fault)
-    _atomic_write(archive_log, _join_log_blocks(preamble, keep), fault=fault)
+        _write_archived_log_blocks(root, "archives-log", overflow)
+    _atomic_write(archive_log, _join_log_blocks(preamble, keep))
 
 
-def _write_archive_index(root: Path, *, fault: FaultBarrier | None = None) -> None:
+def _write_archive_index(root: Path) -> None:
     directory = root / ARCHIVES_LOG_DIR
     target = directory / "index.md"
     if target.exists() and not _is_generated_page(target):
@@ -496,7 +488,7 @@ def _write_archive_index(root: Path, *, fault: FaultBarrier | None = None) -> No
         contents[directory / filename] = rendered
     if any(path.exists() and not _is_generated_page(path) for path in contents):
         return
-    _atomic_write_many(contents, fault=fault)
+    _atomic_write_many(contents)
     for path in directory.glob("index-*.md"):
         if path not in contents and _is_generated_page(path):
             path.unlink()
@@ -531,17 +523,15 @@ def _is_generated_page(path: Path) -> bool:
 
 def _atomic_write_many(
     contents: dict[Path, str],
-    *,
-    fault: FaultBarrier | None = None,
 ) -> None:
     """Replace each log file atomically; this is not a cross-file transaction."""
 
     for target, text in contents.items():
-        atomic_write_text(target, text, fault=fault)
+        atomic_write_text(target, text)
 
 
-def _atomic_write(path: Path, text: str, *, fault: FaultBarrier | None = None) -> None:
-    _atomic_write_many({path: text}, fault=fault)
+def _atomic_write(path: Path, text: str) -> None:
+    _atomic_write_many({path: text})
 
 
 def _bounded_text(text: str, max_bytes: int) -> str:

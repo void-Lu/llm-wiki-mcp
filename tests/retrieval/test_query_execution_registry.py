@@ -5,6 +5,7 @@ import threading
 import time
 
 from retrieval.query_cancellation import QueryExecutionRegistry
+from wiki.atomic_file import current_fault, fault_barrier, fault_context
 
 
 def _wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> bool:
@@ -115,3 +116,21 @@ def test_explicit_cancel_is_cooperative_and_finish_is_not_reclassified_as_timeou
     assert result["code"] == "query_cancelled"
     assert result["cancelled_stage"] == "context"
     assert registry.active_count() == 0
+
+
+def test_registry_worker_inherits_fault_context_without_leaking_after_request() -> None:
+    registry = QueryExecutionRegistry(max_concurrency=1)
+    observed: list[str] = []
+
+    def fault(stage: str) -> None:
+        observed.append(stage)
+
+    def worker(_context):
+        current_fault()("registry")
+        return {"ok": True}
+
+    with fault_context(fault):
+        assert registry.run(worker, timeout_seconds=1.0, request_id="fault-context") == {"ok": True}
+
+    assert observed == ["registry"]
+    assert current_fault() is fault_barrier

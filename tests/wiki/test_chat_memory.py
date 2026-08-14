@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from wiki.atomic_file import AtomicFileError, atomic_write_text
+from wiki.atomic_file import AtomicFileError, atomic_write_text, fault_context
 from wiki.chat_memory import ChatMemoryError, ChatMemoryService
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_operation_store import PageOperationStore
@@ -119,7 +119,8 @@ def test_chat_projection_failure_is_repairable_without_a_second_revision(tmp_pat
         if stage == "projection:retrieval":
             raise RuntimeError("injected")
 
-    failed = ChatMemoryService(tmp_path, fault=fault).save(_transcript(), _metadata())
+    with fault_context(fault):
+        failed = ChatMemoryService(tmp_path).save(_transcript(), _metadata())
     assert failed["ok"] is True
     assert failed["state"] == "repair_pending"
     assert failed["failed_stage"] == "retrieval"
@@ -204,8 +205,9 @@ def test_chat_atomic_write_fault_before_replace_keeps_old_bytes(tmp_path: Path, 
         if current == stage:
             raise RuntimeError("injected")
 
-    with pytest.raises(AtomicFileError) as error:
-        atomic_write_text(target, "new", fault=fault)
+    with fault_context(fault):
+        with pytest.raises(AtomicFileError) as error:
+            atomic_write_text(target, "new")
 
     assert error.value.code == "atomic_write_failed"
     assert target.read_text(encoding="utf-8") == "old"
@@ -221,8 +223,9 @@ def test_chat_atomic_write_post_replace_fault_keeps_complete_new_bytes(tmp_path:
         if stage == "post_replace":
             raise RuntimeError("injected")
 
-    with pytest.raises(AtomicFileError):
-        atomic_write_text(target, "new", fault=fault)
+    with fault_context(fault):
+        with pytest.raises(AtomicFileError):
+            atomic_write_text(target, "new")
 
     assert target.read_text(encoding="utf-8") == "new"
     assert list(target.parent.glob(f".{target.name}.*.tmp")) == []

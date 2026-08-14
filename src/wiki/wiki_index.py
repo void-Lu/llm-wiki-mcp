@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from wiki.atomic_file import FaultBarrier, atomic_write_text
+from wiki.atomic_file import atomic_write_text
 from wiki.wiki_io import is_manual_page, split_frontmatter
 from wiki.wiki_paths import ARCHIVES_DIR, ARCHIVES_LOG_PATH, filesystem_path
 from wiki.wikilinks import format_wikilink
@@ -25,7 +25,7 @@ _PROJECT_GROUPS = (
     ("Troubleshooting", "troubleshooting"),
     ("Researches", "researches"),
 )
-def refresh_navigation(vault_root: str | Path, *, fault: FaultBarrier | None = None) -> dict[str, Any]:
+def refresh_navigation(vault_root: str | Path) -> dict[str, Any]:
     # Use the extended-length form so deep source trees over MAX_PATH are
     # walked and indexed instead of being skipped.
     root = filesystem_path(vault_root)
@@ -34,16 +34,16 @@ def refresh_navigation(vault_root: str | Path, *, fault: FaultBarrier | None = N
     projects_root = root / "wiki" / "projects"
     projects_root.mkdir(parents=True, exist_ok=True)
     for project_dir in sorted(path for path in projects_root.iterdir() if path.is_dir()):
-        result = _write_project_index(root, project_dir.name, fault=fault, changed=changed)
+        result = _write_project_index(root, project_dir.name, changed=changed)
         if result is not None:
             return result
         written.append((Path("wiki/projects") / project_dir.name / "index.md").as_posix())
     for writer in (_write_concepts_indexes, _write_entities_index):
-        result = writer(root, fault=fault, changed=changed)
+        result = writer(root, changed=changed)
         if isinstance(result, dict):
             return result
         written.extend(result)
-    result = _write_top_index(root, fault=fault, changed=changed)
+    result = _write_top_index(root, changed=changed)
     if result is not None:
         return result
     written.append("wiki/index.md")
@@ -63,7 +63,7 @@ def rebuild_retrieval_index(vault_root: str | Path) -> dict[str, object]:
     return sync_retrieval_index(filesystem_path(vault_root), full_build=True)
 
 
-def refresh_indexes(vault_root: str | Path, *, fault: FaultBarrier | None = None) -> dict[str, Any]:
+def refresh_indexes(vault_root: str | Path) -> dict[str, Any]:
     """Compatibility maintenance command: refresh navigation and rebuild indexes.
 
     Page mutation projections call :func:`refresh_navigation` directly. This
@@ -71,7 +71,7 @@ def refresh_indexes(vault_root: str | Path, *, fault: FaultBarrier | None = None
     callers that intentionally request a complete maintenance refresh.
     """
 
-    navigation = refresh_navigation(vault_root, fault=fault)
+    navigation = refresh_navigation(vault_root)
     if not navigation.get("ok"):
         return navigation
     retrieval = rebuild_retrieval_index(vault_root)
@@ -81,7 +81,6 @@ def refresh_indexes(vault_root: str | Path, *, fault: FaultBarrier | None = None
 def _write_top_index(
     root: Path,
     *,
-    fault: FaultBarrier | None = None,
     changed: list[str] | None = None,
 ) -> dict[str, Any] | None:
     target = root / "wiki" / "index.md"
@@ -93,7 +92,7 @@ def _write_top_index(
         entries = _top_level_entries(root, title, relative_dir)
         lines.extend(entries or ["- 无"])
         lines.append("")
-    _write_rendered_index(target, "\n".join(lines).rstrip() + "\n", root=root, fault=fault, changed=changed)
+    _write_rendered_index(target, "\n".join(lines).rstrip() + "\n", root=root, changed=changed)
     return None
 
 
@@ -101,7 +100,6 @@ def _write_project_index(
     root: Path,
     project: str,
     *,
-    fault: FaultBarrier | None = None,
     changed: list[str] | None = None,
 ) -> dict[str, Any] | None:
     project_dir = root / "wiki" / "projects" / project
@@ -114,7 +112,7 @@ def _write_project_index(
         entries = _page_entries(project_dir / subdir, base_dir=project_dir)
         lines.extend(entries or ["- 无"])
         lines.append("")
-    _write_rendered_index(target, "\n".join(lines).rstrip() + "\n", root=root, fault=fault, changed=changed)
+    _write_rendered_index(target, "\n".join(lines).rstrip() + "\n", root=root, changed=changed)
     return None
 
 
@@ -138,7 +136,6 @@ def _top_level_entries(root: Path, title: str, relative_dir: Path) -> list[str]:
 def _write_concepts_indexes(
     root: Path,
     *,
-    fault: FaultBarrier | None = None,
     changed: list[str] | None = None,
 ) -> list[str] | dict[str, Any]:
     concepts_root = root / "wiki" / "concepts"
@@ -152,7 +149,6 @@ def _write_concepts_indexes(
             title=domain_dir.name,
             entries=_page_entries(domain_dir, base_dir=domain_dir),
             frontmatter={"type": "index", "generated": True, "domain": domain_dir.name},
-            fault=fault,
             changed=changed,
         )
         if result is not None:
@@ -170,7 +166,6 @@ def _write_concepts_indexes(
         "Concepts",
         entries,
         {"type": "index", "generated": True},
-        fault=fault,
         changed=changed,
     )
     if result is not None:
@@ -183,10 +178,9 @@ def _write_concepts_indexes(
 def _write_entities_index(
     root: Path,
     *,
-    fault: FaultBarrier | None = None,
     changed: list[str] | None = None,
 ) -> list[str] | dict[str, Any]:
-    return _write_section_index(root, Path("wiki/entities"), "Entities", fault=fault, changed=changed)
+    return _write_section_index(root, Path("wiki/entities"), "Entities", changed=changed)
 
 
 def _write_section_index(
@@ -194,7 +188,6 @@ def _write_section_index(
     relative_dir: Path,
     title: str,
     *,
-    fault: FaultBarrier | None = None,
     changed: list[str] | None = None,
 ) -> list[str] | dict[str, Any]:
     directory = root / relative_dir
@@ -206,7 +199,6 @@ def _write_section_index(
         title,
         _page_entries(directory, base_dir=directory),
         {"type": "index", "generated": True},
-        fault=fault,
         changed=changed,
     )
     if result is not None:
@@ -221,7 +213,6 @@ def _write_listing_index(
     entries: list[str],
     frontmatter: dict[str, Any],
     *,
-    fault: FaultBarrier | None = None,
     changed: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if is_manual_page(target):
@@ -229,7 +220,7 @@ def _write_listing_index(
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
     lines = ["---", *yaml_text.splitlines(), "---", "", f"# {title}", "", *(entries or ["- 无"])]
     target.parent.mkdir(parents=True, exist_ok=True)
-    _write_rendered_index(target, "\n".join(lines).rstrip() + "\n", root=root, fault=fault, changed=changed)
+    _write_rendered_index(target, "\n".join(lines).rstrip() + "\n", root=root, changed=changed)
     return None
 
 
@@ -238,7 +229,6 @@ def _write_rendered_index(
     text: str,
     *,
     root: Path,
-    fault: FaultBarrier | None,
     changed: list[str] | None,
 ) -> None:
     """Atomically write a generated index only when its UTF-8 bytes change."""
@@ -246,7 +236,7 @@ def _write_rendered_index(
     encoded = text.encode("utf-8")
     if target.is_file() and target.read_bytes() == encoded:
         return
-    atomic_write_text(target, text, fault=fault)
+    atomic_write_text(target, text)
     if changed is not None:
         changed.append(target.relative_to(root).as_posix())
 

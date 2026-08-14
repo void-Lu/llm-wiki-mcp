@@ -7,10 +7,13 @@ import hashlib
 import os
 from pathlib import Path
 import tempfile
-from typing import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Callable, Iterator
 
 
 FaultBarrier = Callable[[str], None]
+_FAULT_CONTEXT: ContextVar[FaultBarrier | None] = ContextVar("fault_context", default=None)
 
 
 class AtomicFileError(ValueError):
@@ -35,21 +38,35 @@ def fault_barrier(stage: str) -> None:
     del stage
 
 
-def atomic_write_text(
-    target: str | Path,
-    text: str,
-    *,
-    fault: FaultBarrier | None = None,
-) -> AtomicWriteResult:
-    return atomic_write_bytes(target, text.encode("utf-8"), fault=fault)
+@contextmanager
+def fault_context(fault: FaultBarrier | None) -> Iterator[None]:
+    """Temporarily install the fault barrier for the current execution context.
+
+    The context-local value is restored with its token on exit, so nested
+    injections override only their inner scope and never leak into a later
+    request.  Production write/projection code reads the barrier through
+    :func:`current_fault` instead of carrying it through every signature.
+    """
+
+    token = _FAULT_CONTEXT.set(fault)
+    try:
+        yield
+    finally:
+        _FAULT_CONTEXT.reset(token)
 
 
-def atomic_write_bytes(
-    target: str | Path,
-    content: bytes,
-    *,
-    fault: FaultBarrier | None = None,
-) -> AtomicWriteResult:
+def current_fault() -> FaultBarrier:
+    """Return the active barrier, or the stable no-op default when unset."""
+
+    barrier = _FAULT_CONTEXT.get()
+    return fault_barrier if barrier is None else barrier
+
+
+def atomic_write_text(target: str | Path, text: str) -> AtomicWriteResult:
+    return atomic_write_bytes(target, text.encode("utf-8"))
+
+
+def atomic_write_bytes(target: str | Path, content: bytes) -> AtomicWriteResult:
     """Write bytes to a same-directory temp file and atomically replace target."""
 
     destination = Path(target)
@@ -61,14 +78,14 @@ def atomic_write_bytes(
         temporary = Path(temporary_name)
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
-            _invoke_fault("temp_write", fault)
+            _invoke_fault("temp_write")
             handle.flush()
-            _invoke_fault("flush", fault)
+            _invoke_fault("flush")
             os.fsync(handle.fileno())
-        _invoke_fault("replace", fault)
+        _invoke_fault("replace")
         os.replace(temporary, destination)
         temporary = None
-        _invoke_fault("post_replace", fault)
+        _invoke_fault("post_replace")
     except AtomicFileError:
         _unlink_quietly(temporary)
         raise
@@ -93,8 +110,8 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _invoke_fault(stage: str, fault: FaultBarrier | None) -> None:
-    (fault or fault_barrier)(stage)
+def _invoke_fault(stage: str) -> None:
+    current_fault()(stage)
 
 
 def _unlink_quietly(path: Path | None) -> None:
@@ -112,6 +129,8 @@ __all__ = [
     "FaultBarrier",
     "atomic_write_bytes",
     "atomic_write_text",
+    "current_fault",
     "fault_barrier",
+    "fault_context",
     "sha256_file",
 ]

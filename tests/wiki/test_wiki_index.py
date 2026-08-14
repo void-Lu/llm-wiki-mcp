@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 
 import wiki.wiki_index as wiki_index
-from wiki.atomic_file import AtomicFileError
+from wiki.atomic_file import AtomicFileError, fault_context
 from wiki.wiki_index import rebuild_retrieval_index, refresh_indexes, refresh_navigation
 from tests.helpers import write_test_page
 from wiki.wiki_paths import create_wiki_root
@@ -171,8 +171,9 @@ def test_top_index_atomic_fault_keeps_existing_index(stage: str, tmp_path: Path)
         if current == stage:
             raise RuntimeError("injected")
 
-    with pytest.raises(AtomicFileError):
-        wiki_index._write_top_index(root, fault=fault)
+    with fault_context(fault):
+        with pytest.raises(AtomicFileError):
+            wiki_index._write_top_index(root)
 
     assert target.read_text(encoding="utf-8") == "---\ntype: index\ngenerated: true\n---\n\nold index\n"
     assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
@@ -188,8 +189,9 @@ def test_top_index_post_replace_fault_keeps_complete_new_index(tmp_path: Path) -
         if current == "post_replace":
             raise RuntimeError("injected")
 
-    with pytest.raises(AtomicFileError):
-        wiki_index._write_top_index(root, fault=fault)
+    with fault_context(fault):
+        with pytest.raises(AtomicFileError):
+            wiki_index._write_top_index(root)
 
     assert target.read_text(encoding="utf-8") != "---\ntype: index\ngenerated: true\n---\n\nold index\n"
     assert target.read_text(encoding="utf-8").endswith("# Index\n\n") is False
