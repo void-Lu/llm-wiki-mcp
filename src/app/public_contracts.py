@@ -105,12 +105,6 @@ def new_correlation_id() -> str:
     return uuid4().hex
 
 
-def correlation_id() -> str:
-    """Compatibility alias used by adapters that treat IDs as factories."""
-
-    return new_correlation_id()
-
-
 def _safe_code(value: object, fallback: str = "internal_error") -> str:
     text = str(value) if value is not None else fallback
     return text if _SAFE_CODE.fullmatch(text) else fallback
@@ -223,19 +217,11 @@ def project_public_result(
     return _project_public_result(payload, logical_vault=logical_vault, vault_root=vault_root, policy=policy)
 
 
-# Names used by callers that prefer an adapter-oriented vocabulary.
-map_exception = public_error_from_exception
-publicize_result = project_public_result
-
-
 __all__ = [
     "PublicError",
     "PublicResult",
-    "correlation_id",
-    "map_exception",
     "new_correlation_id",
     "project_public_result",
     "public_error",
     "public_error_from_exception",
-    "publicize_result",
 ]

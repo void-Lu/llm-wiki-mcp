@@ -56,18 +56,6 @@ class ResolvedRawSource:
         }
 
 
-@dataclass(frozen=True)
-class SourceResolution:
-    """Result container useful to adapters that need accepted/rejected data."""
-
-    resolved: tuple[ResolvedRawSource, ...]
-    rejected: tuple[dict[str, str], ...] = ()
-
-    @property
-    def source_hashes(self) -> dict[str, str]:
-        return source_hash_map(self.resolved)
-
-
 class SourceProvenanceResolver:
     """Resolve only concrete files below ``raw/sources`` in one vault."""
 
@@ -146,25 +134,6 @@ class SourceProvenanceResolver:
                 raise SourceProvenanceError("source_changed")
         return current
 
-    # Adapters and tests can use the more descriptive spelling without
-    # creating a second source-resolution implementation.
-    resolve_sources = resolve_many
-
-    def resolve_with_rejections(self, values: object) -> SourceResolution:
-        try:
-            return SourceResolution(tuple(self.resolve_many(values)))
-        except SourceProvenanceError as exc:
-            return SourceResolution((), ({"code": exc.code},))
-
-
-def resolve_and_hash_sources(vault_root: str | Path, values: object, mode: str = "strict") -> SourceResolution:
-    """Resolve and hash source declarations for compatibility adapters."""
-
-    del mode  # The formal page boundary is intentionally fail-closed.
-    resolver = SourceProvenanceResolver(vault_root)
-    return resolver.resolve_with_rejections(values)
-
-
 def source_hash_map(sources: Iterable[ResolvedRawSource]) -> dict[str, str]:
     return {source.relative_path: source.sha256 for source in sources}
 
@@ -227,8 +196,6 @@ __all__ = [
     "ResolvedRawSource",
     "SourceProvenanceError",
     "SourceProvenanceResolver",
-    "SourceResolution",
-    "resolve_and_hash_sources",
     "source_hash_map",
     "source_path_key",
 ]

@@ -184,8 +184,6 @@ class QueryExecutionRegistry:
             thread.start()
         return self._wait(worker)
 
-    execute = run
-
     def cancel(self, request_id: str) -> bool:
         with self._lock:
             worker = self._workers.get(request_id)

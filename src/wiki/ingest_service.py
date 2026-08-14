@@ -6,7 +6,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter, TEXT_SOURCE_SUFFIXES
+from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
 from wiki.source_provenance import source_path_key
@@ -127,13 +127,3 @@ def _hash_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def _is_text_knowledge_source(source: Path) -> bool:
-    """Return the suffix-side text hint for compatibility callers.
-
-    ``ingest_file`` uses :class:`IngestSnapshotter` so the final decision is
-    made from the bytes read through its single source handle.
-    """
-
-    return source.suffix.casefold() in TEXT_SOURCE_SUFFIXES
