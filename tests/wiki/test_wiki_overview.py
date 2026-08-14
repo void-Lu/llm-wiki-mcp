@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 
 import wiki.wiki_overview as wiki_overview
+from tests.helpers import write_test_page
 from wiki.atomic_file import AtomicFileError
-from wiki.wiki_io import write_wiki_page
 from wiki.wiki_log import append_log_entry
-from wiki.wiki_models import WikiLogEntry, WikiPage
+from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
 from wiki.wiki_paths import create_wiki_root
 
@@ -16,24 +16,17 @@ from wiki.wiki_paths import create_wiki_root
 def test_refresh_overview_writes_deterministic_counts_and_recent_log(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    write_wiki_page(
+    write_test_page(
         root,
-        WikiPage(
-            relative_path=Path("wiki/projects/alpha/architecture/script.md"),
-            frontmatter={"title": "Script", "generated": True, "sources": ["raw/sources/a.md"]},
-            title="Script",
-            body="code",
-        ),
+        "wiki/projects/alpha/architecture/script.md",
+        {"title": "Script", "generated": True, "sources": ["raw/sources/a.md"]},
+        "code",
     )
-    write_wiki_page(
+    write_test_page(
         root,
-        WikiPage(
-            relative_path=Path("wiki/projects/alpha/specs/spec.md"),
-            frontmatter={"title": "Spec", "generated": False},
-            title="Spec",
-            body="manual",
-        ),
-        overwrite_generated_only=False,
+        "wiki/projects/alpha/specs/spec.md",
+        {"title": "Spec", "generated": False},
+        "manual",
     )
     append_log_entry(
         root,

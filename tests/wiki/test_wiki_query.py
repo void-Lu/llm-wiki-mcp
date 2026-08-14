@@ -7,15 +7,14 @@ import retrieval.query_pipeline as query_pipeline_module
 from retrieval.vector_index import VectorIndexStore, vector_index_records
 from retrieval.vector_provider import DeterministicFakeProvider
 from runtime.runtime_config import EmbeddingSettings
+from tests.helpers import write_test_page
 from wiki.wiki_index import refresh_indexes
-from wiki.wiki_io import write_wiki_page
-from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
 
 
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
     data = {"title": title, "generated": bool(frontmatter.pop("generated", True)), **frontmatter}
-    write_wiki_page(root, WikiPage(Path(path), data, title, body), overwrite_generated_only=False)
+    write_test_page(root, path, data, body)
 
 
 def test_wiki_query_finds_keyword_matches_and_returns_citations(tmp_path: Path):

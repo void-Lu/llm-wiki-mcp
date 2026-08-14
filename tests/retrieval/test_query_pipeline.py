@@ -14,8 +14,7 @@ from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
 from retrieval.vector_index import vector_index_records
 import retrieval.query_pipeline as query_pipeline_module
 from runtime.runtime_config import EmbeddingSettings
-from wiki.wiki_io import write_wiki_page
-from wiki.wiki_models import WikiPage
+from tests.helpers import write_test_page
 from wiki.wiki_paths import create_wiki_root
 from wiki.wiki_index import refresh_indexes
 
@@ -30,7 +29,7 @@ def test_classify_intent_treats_multiword_howto_questions_as_concepts() -> None:
 
 
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
-    write_wiki_page(root, WikiPage(Path(path), {"title": title, "generated": True, **frontmatter}, title, body), overwrite_generated_only=False)
+    write_test_page(root, path, {"title": title, "generated": True, **frontmatter}, body)
 
 
 def test_query_filters_from_empty_mapping_uses_empty_tags() -> None:

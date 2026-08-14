@@ -8,7 +8,6 @@ import yaml
 
 from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy
-from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
 
@@ -42,38 +41,6 @@ def read_markdown_page(path: str | Path, vault_root: str | Path | None = None) -
         title=title,
         body=body_without_title,
     )
-
-
-def write_wiki_page(
-    vault_root: str | Path,
-    page: WikiPage,
-    overwrite_generated_only: bool = True,
-    *,
-    allow_navigation_index: bool = False,
-) -> dict[str, Any]:
-    root = Path(vault_root).expanduser().resolve()
-    prepared = prepare_wiki_page(
-        root,
-        page,
-        overwrite_generated_only=overwrite_generated_only,
-        allow_navigation_index=allow_navigation_index,
-    )
-    try:
-        written = atomic_write_text(prepared.target, prepared.text)
-    except AtomicFileError as exc:
-        raise WikiWriteError(exc.code, "page could not be written") from exc
-
-    result: dict[str, Any] = {
-        "ok": True,
-        "path": prepared.relative_path.as_posix(),
-        "page_hash": written.content_hash,
-        "redacted_count": prepared.redacted_count,
-    }
-    try:
-        result["retrieval_index"] = refresh_page_retrieval(root, prepared.target)
-    except Exception as exc:
-        result["retrieval_index"] = {"ok": False, "state": "stale", "code": "index_update_failed", "error": str(exc)}
-    return result
 
 
 def prepare_wiki_page(

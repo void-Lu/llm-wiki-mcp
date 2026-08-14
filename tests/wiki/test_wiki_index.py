@@ -8,27 +8,26 @@ import pytest
 import wiki.wiki_index as wiki_index
 from wiki.atomic_file import AtomicFileError
 from wiki.wiki_index import rebuild_retrieval_index, refresh_indexes, refresh_navigation
-from wiki.wiki_io import write_wiki_page
-from wiki.wiki_models import WikiPage
+from tests.helpers import write_test_page
 from wiki.wiki_paths import create_wiki_root
 from retrieval.query_pipeline import run_query_v2
 
 
-def _page(path: str, title: str, summary: str = "") -> WikiPage:
-    return WikiPage(
-        relative_path=Path(path),
-        frontmatter={"title": title, "summary": summary, "generated": True, "sources": []},
-        title=title,
-        body=summary or title,
+def _write(root: Path, path: str, title: str, summary: str = "") -> None:
+    write_test_page(
+        root,
+        path,
+        {"title": title, "summary": summary, "generated": True, "sources": []},
+        summary or title,
     )
 
 
 def test_refresh_indexes_groups_only_active_wiki_categories(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    write_wiki_page(root, _page("wiki/projects/alpha/specs/spec.md", "Spec", "spec summary"))
-    write_wiki_page(root, _page("wiki/concepts/suitescript/module.md", "SuiteScript", "concept summary"))
-    write_wiki_page(root, _page("wiki/entities/customer/customer.md", "Customer", "entity summary"))
+    _write(root, "wiki/projects/alpha/specs/spec.md", "Spec", "spec summary")
+    _write(root, "wiki/concepts/suitescript/module.md", "SuiteScript", "concept summary")
+    _write(root, "wiki/entities/customer/customer.md", "Customer", "entity summary")
 
     result = refresh_indexes(root)
 
@@ -52,7 +51,7 @@ def test_refresh_indexes_groups_only_active_wiki_categories(tmp_path: Path):
 def test_navigation_projection_has_no_retrieval_rebuild_and_admin_path_is_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
-    write_wiki_page(root, _page("wiki/concepts/invoice.md", "Invoice", "invoice marker"))
+    _write(root, "wiki/concepts/invoice.md", "Invoice", "invoice marker")
     calls: list[str] = []
 
     from wiki import ingest_service
@@ -112,7 +111,7 @@ def test_refresh_indexes_creates_project_index_grouped_by_subdirectories(tmp_pat
         ("troubleshooting", "issue.md", "Issue"),
         ("researches", "investigation.md", "Investigation"),
     ):
-        write_wiki_page(root, _page(f"wiki/projects/alpha/{subdir}/{filename}", title, f"{subdir} summary"))
+        _write(root, f"wiki/projects/alpha/{subdir}/{filename}", title, f"{subdir} summary")
 
     refresh_indexes(root)
 

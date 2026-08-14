@@ -4,24 +4,26 @@ from pathlib import Path
 
 import pytest
 
-from wiki.wiki_io import WikiWriteError, read_markdown_page, strip_leading_h1, write_wiki_page
+from tests.helpers import write_test_page
+from wiki.wiki_io import WikiWriteError, prepare_wiki_page, read_markdown_page, strip_leading_h1
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
 
 
-def test_write_and_read_markdown_page_with_frontmatter(tmp_path: Path):
+def test_write_test_page_writes_and_reads_markdown_page_with_frontmatter(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
     page = WikiPage(
         relative_path=Path("wiki/projects/alpha/architecture/script-a.md"),
-        frontmatter={"type": "architecture", "generated": True, "sources": ["raw/sources/projects/alpha/requirements/status.json"]},
+        frontmatter={"title": "Script A", "type": "architecture", "generated": True, "sources": ["raw/sources/projects/alpha/requirements/status.json"]},
         title="Script A",
         body="Call 13800138000 before release.",
     )
 
-    result = write_wiki_page(root, page)
+    result = write_test_page(root, page.relative_path.as_posix(), page.frontmatter, page.body)
 
     assert result["ok"] is True
+    assert "retrieval_index" in result
     target = root / "wiki/projects/alpha/architecture/script-a.md"
     assert target.is_file()
     text = target.read_text(encoding="utf-8")
@@ -34,11 +36,11 @@ def test_write_and_read_markdown_page_with_frontmatter(tmp_path: Path):
     assert "[REDACTED_PHONE]" in parsed.body
 
 
-def test_write_wiki_page_redacts_title_and_frontmatter(tmp_path: Path):
+def test_prepare_wiki_page_redacts_title_and_frontmatter(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
-    write_wiki_page(
+    prepared = prepare_wiki_page(
         root,
         WikiPage(
             relative_path=Path("wiki/concepts/security/secret.md"),
@@ -48,7 +50,7 @@ def test_write_wiki_page_redacts_title_and_frontmatter(tmp_path: Path):
         ),
     )
 
-    text = (root / "wiki/concepts/security/secret.md").read_text(encoding="utf-8")
+    text = prepared.text
     assert "13800138000" not in text
     assert "a@example.com" not in text
     assert "raw/sources/reference.txt" in text
@@ -56,12 +58,12 @@ def test_write_wiki_page_redacts_title_and_frontmatter(tmp_path: Path):
     assert "[REDACTED_EMAIL]" in text
 
 
-def test_write_wiki_page_rejects_sensitive_locator_without_rewriting_it(tmp_path: Path):
+def test_prepare_wiki_page_rejects_sensitive_locator_without_rewriting_it(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
     with pytest.raises(WikiWriteError) as exc_info:
-        write_wiki_page(
+        prepare_wiki_page(
             root,
             WikiPage(
                 relative_path=Path("wiki/concepts/security/secret.md"),
@@ -75,7 +77,7 @@ def test_write_wiki_page_rejects_sensitive_locator_without_rewriting_it(tmp_path
     assert not (root / "wiki/concepts/security/secret.md").exists()
 
 
-def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
+def test_prepare_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
     target = root / "wiki/projects/alpha/specs/manual.md"
@@ -83,7 +85,7 @@ def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
     target.write_text("---\ngenerated: false\n---\n\n# Manual\n\nKeep me", encoding="utf-8")
 
     with pytest.raises(WikiWriteError) as exc_info:
-        write_wiki_page(
+        prepare_wiki_page(
             root,
             WikiPage(
                 relative_path=Path("wiki/projects/alpha/specs/manual.md"),
@@ -97,12 +99,12 @@ def test_write_wiki_page_refuses_to_overwrite_manual_page(tmp_path: Path):
     assert "Keep me" in target.read_text(encoding="utf-8")
 
 
-def test_write_wiki_page_rejects_retired_source_capsule_field(tmp_path: Path):
+def test_prepare_wiki_page_rejects_retired_source_capsule_field(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
     with pytest.raises(WikiWriteError) as exc_info:
-        write_wiki_page(
+        prepare_wiki_page(
             root,
             WikiPage(
                 relative_path=Path("wiki/concepts/general/page.md"),
@@ -130,12 +132,12 @@ def test_write_wiki_page_rejects_retired_source_capsule_field(tmp_path: Path):
         Path("projects/alpha/wiki/objects/object.md"),
     ],
 )
-def test_write_wiki_page_rejects_old_or_objects_paths(tmp_path: Path, relative_path: Path):
+def test_prepare_wiki_page_rejects_old_or_objects_paths(tmp_path: Path, relative_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
     with pytest.raises(WikiWriteError) as exc_info:
-        write_wiki_page(
+        prepare_wiki_page(
             root,
             WikiPage(
                 relative_path=relative_path,
@@ -148,12 +150,12 @@ def test_write_wiki_page_rejects_old_or_objects_paths(tmp_path: Path, relative_p
     assert exc_info.value.code == "invalid_wiki_path"
 
 
-def test_write_wiki_page_rejects_path_escape(tmp_path: Path):
+def test_prepare_wiki_page_rejects_path_escape(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
     with pytest.raises(WikiWriteError) as exc_info:
-        write_wiki_page(
+        prepare_wiki_page(
             root,
             WikiPage(
                 relative_path=Path("../escape.md"),
@@ -166,7 +168,7 @@ def test_write_wiki_page_rejects_path_escape(tmp_path: Path):
     assert exc_info.value.code == "path_escape"
 
 
-def test_write_wiki_page_rejects_symlink_escape(tmp_path: Path) -> None:
+def test_prepare_wiki_page_rejects_symlink_escape(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     outside = tmp_path / "outside"
     create_wiki_root(root)
@@ -178,7 +180,7 @@ def test_write_wiki_page_rejects_symlink_escape(tmp_path: Path) -> None:
         pytest.skip(f"symlink creation unavailable: {exc}")
 
     with pytest.raises(WikiWriteError) as exc_info:
-        write_wiki_page(
+        prepare_wiki_page(
             root,
             WikiPage(
                 relative_path=Path("wiki/concepts/linked/escape.md"),
@@ -202,12 +204,12 @@ def test_write_wiki_page_rejects_symlink_escape(tmp_path: Path) -> None:
         Path("wiki/entities/customer/index.md"),
     ],
 )
-def test_write_wiki_page_rejects_navigation_indexes_at_ordinary_boundary(tmp_path: Path, relative_path: Path):
+def test_prepare_wiki_page_rejects_navigation_indexes_at_ordinary_boundary(tmp_path: Path, relative_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
     with pytest.raises(WikiWriteError) as exc_info:
-        write_wiki_page(
+        prepare_wiki_page(
             root,
             WikiPage(relative_path=relative_path, frontmatter={"generated": True}, title="Index", body="body"),
             overwrite_generated_only=False,
@@ -216,19 +218,19 @@ def test_write_wiki_page_rejects_navigation_indexes_at_ordinary_boundary(tmp_pat
     assert exc_info.value.code == "invalid_wiki_path"
 
 
-def test_explicit_navigation_boundary_may_write_generated_index(tmp_path: Path) -> None:
+def test_prepare_wiki_page_allows_explicit_navigation_index(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
 
-    result = write_wiki_page(
+    prepared = prepare_wiki_page(
         root,
         WikiPage(relative_path=Path("wiki/concepts/general/index.md"), frontmatter={"generated": True}, title="General", body="body"),
         overwrite_generated_only=False,
         allow_navigation_index=True,
     )
 
-    assert result["ok"] is True
-    assert (root / "wiki/concepts/general/index.md").is_file()
+    assert prepared.relative_path == Path("wiki/concepts/general/index.md")
+    assert prepared.target == root / "wiki/concepts/general/index.md"
 
 
 @pytest.mark.parametrize(
@@ -240,12 +242,12 @@ def test_explicit_navigation_boundary_may_write_generated_index(tmp_path: Path) 
         Path("wiki/projects/alpha/specs/trailing .md"),
     ],
 )
-def test_write_wiki_page_rejects_windows_invalid_path_components(tmp_path: Path, relative_path: Path):
+def test_prepare_wiki_page_rejects_windows_invalid_path_components(tmp_path: Path, relative_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
     with pytest.raises(WikiWriteError) as exc_info:
-        write_wiki_page(
+        prepare_wiki_page(
             root,
             WikiPage(
                 relative_path=relative_path,
@@ -287,11 +289,11 @@ def test_strip_leading_h1_preserves_content_without_leading_h1():
     assert strip_leading_h1("引言\n\n# 中间标题\n\n正文") == "引言\n\n# 中间标题\n\n正文"
 
 
-def test_write_wiki_page_strips_duplicate_leading_h1(tmp_path: Path):
+def test_prepare_wiki_page_strips_duplicate_leading_h1(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
 
-    write_wiki_page(
+    prepared = prepare_wiki_page(
         root,
         WikiPage(
             relative_path=Path("wiki/concepts/general/dup.md"),
@@ -301,10 +303,27 @@ def test_write_wiki_page_strips_duplicate_leading_h1(tmp_path: Path):
         ),
     )
 
-    text = (root / "wiki/concepts/general/dup.md").read_text(encoding="utf-8")
+    text = prepared.text
     h1_lines = [line for line in text.splitlines() if line == "# 页面标题"]
     assert h1_lines == ["# 页面标题"]
     assert "正文内容" in text
-    parsed = read_markdown_page(root / "wiki/concepts/general/dup.md", root)
-    assert parsed.title == "页面标题"
-    assert "正文内容" in parsed.body
+
+
+def test_write_test_page_marks_retrieval_failure_without_losing_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("index unavailable")
+
+    monkeypatch.setattr("tests.helpers.refresh_page_retrieval", fail_refresh)
+
+    result = write_test_page(root, "wiki/concepts/general/page.md", {"title": "Page", "generated": True}, "body")
+
+    assert (root / "wiki/concepts/general/page.md").is_file()
+    assert result["retrieval_index"] == {
+        "ok": False,
+        "state": "stale",
+        "code": "index_update_failed",
+        "error": "index unavailable",
+    }

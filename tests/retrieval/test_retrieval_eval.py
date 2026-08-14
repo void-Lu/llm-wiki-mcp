@@ -40,8 +40,7 @@ from retrieval.retrieval_index import RetrievalIndexStore
 from archive.archive_service import ArchiveService
 from wiki.wiki_paths import filesystem_path
 from retrieval.vector_provider import DeterministicFakeProvider
-from wiki.wiki_io import write_wiki_page
-from wiki.wiki_models import WikiPage
+from tests.helpers import write_test_page
 from wiki.wiki_paths import create_wiki_root
 import app.server as server_module
 
@@ -138,7 +137,7 @@ def test_v2_evaluator_reads_existing_passage_store_without_telemetry_write(tmp_p
     vault = tmp_path / "vault"
     create_wiki_root(vault)
     page = Path("wiki/concepts/invoice.md")
-    write_wiki_page(vault, WikiPage(page, {"title": "Invoice", "generated": True, "type": "concept"}, "Invoice", "invoice approval workflow"), overwrite_generated_only=False)
+    write_test_page(vault, page.as_posix(), {"title": "Invoice", "generated": True, "type": "concept"}, "invoice approval workflow")
     RetrievalIndexStore(vault).build(RetrievalIndexStore(vault).iter_vault_pages())
     dataset = RetrievalEvalDataset(RetrievalEvalManifest("v2", "1", 0.0), (RetrievalEvalCase("invoice", "invoice approval", (Relevance(page.as_posix(), 3),), {}, True, "en", (), ""),))
     report = run_retrieval_evaluation(vault, dataset, measure_context_budget=False)
@@ -203,7 +202,7 @@ def test_v2_vector_evaluation_uses_the_requested_vault_relative_index(tmp_path: 
     vault = tmp_path / "vault"
     create_wiki_root(vault)
     path = Path("wiki/concepts/semantic.md")
-    write_wiki_page(vault, WikiPage(path, {"title": "Semantic", "generated": True, "type": "concept"}, "Semantic", "accounts payable operations"), overwrite_generated_only=False)
+    write_test_page(vault, path.as_posix(), {"title": "Semantic", "generated": True, "type": "concept"}, "accounts payable operations")
     RetrievalIndexStore(vault).build(RetrievalIndexStore(vault).iter_vault_pages())
     provider = DeterministicFakeProvider({"expense automation": [1, 0, 0, 0], "accounts payable operations": [1, 0, 0, 0]})
     index_path = vault / ".llm-wiki" / "v2-eval"
@@ -227,10 +226,11 @@ def test_vector_and_hybrid_evaluation_improve_zero_lexical_recall_without_metric
     vault = tmp_path / "vault"
     create_wiki_root(vault)
     path = Path("wiki/concepts/semantic.md")
-    write_wiki_page(
+    write_test_page(
         vault,
-        WikiPage(path, {"title": "Semantic result", "generated": True, "type": "concept"}, "Semantic result", "accounts payable operations"),
-        overwrite_generated_only=False,
+        path.as_posix(),
+        {"title": "Semantic result", "generated": True, "type": "concept"},
+        "accounts payable operations",
     )
     model = tmp_path / "local-bge-m3"
     model.mkdir()
