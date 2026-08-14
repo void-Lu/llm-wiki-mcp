@@ -18,9 +18,11 @@ from retrieval.query_recovery import (
     assemble_recovery,
     compose_score,
     fallback_envelope,
+    fusion_score,
     plan_fallback,
     search_ladder,
     select_best_per_page,
+    step_bonus,
     _build_page_ordered_context,
 )
 from retrieval.retrieval_index import PassageHit
@@ -494,6 +496,66 @@ def test_compose_score_matches_shared_formula() -> None:
         freshness=True,
         step_bonus=1.0,
     ) == round(hit.score + 0.35 + 1.0, 12)
+
+
+def test_fusion_score_matches_rrf_scaling_and_exact_formula() -> None:
+    hit = PassageHit("p-1", "wiki/concepts/target.md", "Target", (), "", 0.0, "active", "high", "wiki")
+    metadata: dict[str, dict[str, object]] = {}
+
+    exact_item = {"fts_rank": 1, "title_rank": 0, "vector_rank": None}
+    exact_rrf = 1 / 10
+    exact_result = fusion_score(
+        hit,
+        "target",
+        "concept",
+        "knowledge",
+        metadata,
+        exact_item,
+        effective_rrf_k=9,
+    )
+    assert exact_result == {
+        "score": compose_score(
+            hit,
+            "target",
+            "concept",
+            "knowledge",
+            metadata,
+            rrf=exact_rrf * 10,
+            exact=0.5,
+        ),
+        "rrf": exact_rrf,
+        "exact": True,
+    }
+
+    non_exact_item = {"fts_rank": 0, "title_rank": None, "vector_rank": 2}
+    non_exact_rrf = 1 / 11
+    non_exact_result = fusion_score(
+        hit,
+        "different",
+        "concept",
+        "knowledge",
+        metadata,
+        non_exact_item,
+        effective_rrf_k=9,
+    )
+    assert non_exact_result == {
+        "score": compose_score(
+            hit,
+            "different",
+            "concept",
+            "knowledge",
+            metadata,
+            rrf=non_exact_rrf * 10,
+            exact=0.0,
+        ),
+        "rrf": non_exact_rrf,
+        "exact": False,
+    }
+
+
+def test_stepbonus_is_public_for_pipeline_consumers() -> None:
+    assert step_bonus(0) == 0.0
+    assert step_bonus(5) == 4.0
 
 
 def test_assembler_owns_stats_context_and_fallback_envelope() -> None:

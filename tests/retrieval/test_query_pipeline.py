@@ -7,6 +7,7 @@ from retrieval.query_pipeline import (
     _adaptive_select_candidates,
     _merge_coverage_items,
     _uncovered_latin_terms,
+    probe_hit,
     run_query_v2,
 )
 from retrieval.query_snapshot import QueryCorpusSnapshot
@@ -30,6 +31,28 @@ def test_classify_intent_treats_multiword_howto_questions_as_concepts() -> None:
 
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
     write_test_page(root, path, {"title": title, "generated": True, **frontmatter}, body)
+
+
+def test_probe_hit_is_an_empty_eligibility_probe() -> None:
+    hit = probe_hit(
+        "wiki/concepts/target.md",
+        "Target",
+        corpus="history",
+        authority="project",
+        source_kind="raw_chat",
+    )
+
+    assert hit == PassageHit(
+        "",
+        "wiki/concepts/target.md",
+        "Target",
+        (),
+        "",
+        0.0,
+        "history",
+        "project",
+        "raw_chat",
+    )
 
 
 def test_query_filters_from_empty_mapping_uses_empty_tags() -> None:

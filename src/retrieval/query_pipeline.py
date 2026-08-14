@@ -34,11 +34,12 @@ from retrieval.query_recovery import (
     assemble_recovery,
     compose_score,
     fallback_envelope,
+    fusion_score,
     plan_fallback,
     resolve_fallback_lexical_mode,
     search_ladder,
     select_best_per_page,
-    _step_bonus,
+    step_bonus,
 )
 from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
@@ -97,6 +98,19 @@ _DISCOVERY_CJK_ALIASES = {
     "列表": ("list", "listing"),
 }
 _STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
+
+
+def probe_hit(
+    path: str,
+    title: str,
+    *,
+    corpus: str = "active",
+    authority: str = "",
+    source_kind: str = "",
+) -> PassageHit:
+    """Build a placeholder hit used only by eligibility/filter probes."""
+
+    return PassageHit("", path, title, (), "", 0.0, corpus, authority, source_kind)
 
 
 def _step_counts_for_pages(
@@ -617,16 +631,12 @@ def _discovery_source_items(
             cancellation.checkpoint_batch(index, every=16, stage="discovery")
         path = str(page["path"])
         title = str(page.get("title") or "")
-        probe = PassageHit(
-            "",
+        probe = probe_hit(
             path,
             title,
-            (),
-            "",
-            0.0,
-            str(page.get("corpus") or "active"),
-            str(page.get("authority") or ""),
-            str(page.get("source_kind") or ""),
+            corpus=str(page.get("corpus") or "active"),
+            authority=str(page.get("authority") or ""),
+            source_kind=str(page.get("source_kind") or ""),
         )
         if not _eligible(probe, metadata, scope=scope) or not _matches_request(probe, metadata, project=project, filters=filters):
             continue
@@ -984,7 +994,13 @@ def _title_candidates(
         overlap = len(terms & (title_terms | provenance_terms))
         if not overlap:
             continue
-        probe = PassageHit("", path, str(page["title"]), (), "", 0.0, str(page.get("corpus") or "active"), str(page.get("authority") or ""), str(page.get("source_kind") or ""))
+        probe = probe_hit(
+            path,
+            str(page["title"]),
+            corpus=str(page.get("corpus") or "active"),
+            authority=str(page.get("authority") or ""),
+            source_kind=str(page.get("source_kind") or ""),
+        )
         if _eligible(probe, metadata, scope=scope) and _matches_request(probe, metadata, project=project, filters=filters):
             candidates.append((overlap, path))
     paths = [path for _overlap, path in sorted(candidates, key=lambda item: (-item[0], item[1]))[:limit]]
@@ -1164,7 +1180,7 @@ def _raw_recovery_candidates(
         for item in raw_candidate_items:
             count = step_counts.get(item["hit"].page_path, 0)
             item["score"] = round(
-                item["score"] + _step_bonus(count),
+                item["score"] + step_bonus(count),
                 12,
             )
     raw_candidate_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
@@ -1313,7 +1329,13 @@ def _graph_expand(
             cancellation.checkpoint_batch(index, every=16, stage="graph")
         path = str(page["path"])
         frontmatter = metadata.get(path, {})
-        probe = PassageHit("", path, str(page["title"]), (), "", 0.0, str(page.get("corpus") or "active"), str(page.get("authority") or ""), str(page.get("source_kind") or ""))
+        probe = probe_hit(
+            path,
+            str(page["title"]),
+            corpus=str(page.get("corpus") or "active"),
+            authority=str(page.get("authority") or ""),
+            source_kind=str(page.get("source_kind") or ""),
+        )
         lifecycle = str(frontmatter.get("lifecycle") or frontmatter.get("lifecycle_status") or "active")
         if (
             not path.startswith("wiki/")
@@ -2051,7 +2073,7 @@ def _run_fallback_recovery(
                     metadata,
                     base=item["hit"].score,
                     freshness=True,
-                    step_bonus=_step_bonus(count),
+                    step_bonus=step_bonus(count),
                 )
             wiki_relaxed_items.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
             selected = select_best_per_page(wiki_relaxed_items)
@@ -2405,16 +2427,12 @@ def run_query_v2(
         ):
             continue
         if not _eligible(
-            PassageHit(
-                "",
+            probe_hit(
                 str(item["path"]),
                 str(item["title"]),
-                (),
-                "",
-                0.0,
-                str(item.get("corpus") or "active"),
-                str(item.get("authority") or ""),
-                str(item.get("source_kind") or ""),
+                corpus=str(item.get("corpus") or "active"),
+                authority=str(item.get("authority") or ""),
+                source_kind=str(item.get("source_kind") or ""),
             ),
             metadata,
             scope=effective_scope,
@@ -2460,22 +2478,22 @@ def run_query_v2(
     for index, item in enumerate(ranked.values()):
         cancellation.checkpoint_batch(index, every=16, stage="graph")
         hit = item["hit"]
-        rrf = (
-            (1 / (effective_rrf_k + item["fts_rank"]) if item["fts_rank"] else 0.0)
-            + (1 / (effective_rrf_k + item["title_rank"]) if item["title_rank"] else 0.0)
-            + (1 / (effective_rrf_k + item["vector_rank"]) if item["vector_rank"] else 0.0)
+        scored.append(
+            {
+                **item,
+                **fusion_score(
+                    hit,
+                    question,
+                    intent,
+                    effective_scope,
+                    metadata,
+                    item,
+                    effective_rrf_k=effective_rrf_k,
+                ),
+                "graph_score": 0.0,
+                "graph_reasons": [],
+            }
         )
-        exact = int(question.casefold() in {hit.title.casefold(), hit.page_path.casefold()})
-        total = compose_score(
-            hit,
-            question,
-            intent,
-            effective_scope,
-            metadata,
-            rrf=rrf * (effective_rrf_k + 1),
-            exact=exact * 0.5,
-        )
-        scored.append({**item, "score": total, "rrf": rrf, "exact": bool(exact), "graph_score": 0.0, "graph_reasons": []})
     cancellation.checkpoint("graph")
     graph_candidates, graph_passages = (
         _graph_expand(

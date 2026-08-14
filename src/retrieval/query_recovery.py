@@ -303,7 +303,7 @@ def _title_overlap_bonus(hit: PassageHit, question: str) -> float:
     return overlap_bonus
 
 
-def _step_bonus(count: int) -> float:
+def step_bonus(count: int) -> float:
     return STEP_BONUS_MAX * min(count, STEP_COUNT_FULL) / STEP_COUNT_FULL
 
 
@@ -332,6 +332,36 @@ def compose_score(
         + step_bonus,
         12,
     )
+
+
+def fusion_score(
+    hit: PassageHit,
+    question: str,
+    intent: str,
+    effective_scope: str,
+    metadata: Mapping[str, Mapping[str, Any]],
+    item: Mapping[str, Any],
+    *,
+    effective_rrf_k: int,
+) -> dict[str, Any]:
+    """Compose the primary RRF, exact-match, and total fusion signals."""
+
+    rrf = (
+        (1 / (effective_rrf_k + item["fts_rank"]) if item["fts_rank"] else 0.0)
+        + (1 / (effective_rrf_k + item["title_rank"]) if item["title_rank"] else 0.0)
+        + (1 / (effective_rrf_k + item["vector_rank"]) if item["vector_rank"] else 0.0)
+    )
+    exact = int(question.casefold() in {hit.title.casefold(), hit.page_path.casefold()})
+    total = compose_score(
+        hit,
+        question,
+        intent,
+        effective_scope,
+        metadata,
+        rrf=rrf * (effective_rrf_k + 1),
+        exact=exact * 0.5,
+    )
+    return {"score": total, "rrf": rrf, "exact": bool(exact)}
 
 
 @dataclass(frozen=True)
