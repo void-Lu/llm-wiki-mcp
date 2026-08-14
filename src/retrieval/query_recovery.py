@@ -6,7 +6,7 @@ import datetime
 import re
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from retrieval.context_packer import estimate_response_tokens
 from retrieval.candidate_items import candidate_item
@@ -177,8 +177,17 @@ def search_ladder(
                 hits = store.search_fts(
                     step.query,
                     limit=limit,
-                    mode=step.mode,
-                    **dict(step.kwargs),
+                    mode=cast(
+                        Literal[
+                            "strict",
+                            "relaxed",
+                            "qualified_code",
+                            "identifier_phrase",
+                            "raw_prefix",
+                        ],
+                        step.mode,
+                    ),
+                    **cast(dict[str, Any], dict(step.kwargs)),
                 )
         except RetrievalIndexError as exc:
             if step.ignore_errors:
