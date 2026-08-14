@@ -211,6 +211,56 @@ def test_stage_explanation_helpers_use_safe_persisted_views(tmp_path: Path) -> N
     assert stage_result_of(result, "navigation") is None
 
 
+def test_dependency_projection_exposes_failed_stage_without_result() -> None:
+    failed = MutationResult(
+        ok=True,
+        stages={"dependencies": {"state": "failed", "code": "dependency_unavailable"}},
+    )
+    pending = MutationResult(ok=True, stages={"dependencies": {"state": "pending"}})
+    succeeded = MutationResult(ok=True, stages={"dependencies": {"state": "succeeded"}})
+
+    assert dependency_projection_of(failed) == {
+        "ok": False,
+        "state": "failed",
+        "code": "dependency_unavailable",
+    }
+    assert dependency_projection_of(pending) == {
+        "ok": False,
+        "state": "pending",
+        "code": "dependencies_pending",
+    }
+    assert dependency_projection_of(succeeded) == {"ok": True, "state": "ready"}
+
+
+@pytest.mark.parametrize(
+    ("state", "already_applied", "expected"),
+    [
+        ("already_applied", True, {"ok": True, "state": "already_applied", "already_applied": True}),
+        ("completed", True, {"ok": True, "state": "completed", "already_applied": True}),
+        ("already_applied", False, {"ok": True, "state": "already_applied"}),
+    ],
+)
+def test_mutation_result_to_dict_keeps_already_applied_dual_representation(
+    state: str, already_applied: bool, expected: dict[str, object]
+) -> None:
+    result = MutationResult(ok=True, state=state, already_applied=already_applied)
+    assert result.to_dict() == expected
+
+
+def test_mutation_result_from_mapping_omits_none_fields_and_empty_stages() -> None:
+    replay = MutationResult.from_mapping(
+        {"ok": True, "state": "already_applied", "operation_id": "op-1", "already_applied": True},
+        stages={},
+    )
+    failed = MutationResult.from_mapping(
+        {"ok": False, "state": None, "code": "plan_unknown", "page_hash": None},
+        stages={},
+    )
+
+    assert replay.to_dict() == {"ok": True, "state": "already_applied", "operation_id": "op-1", "already_applied": True}
+    assert failed.to_dict() == {"ok": False, "code": "plan_unknown"}
+
+
 def test_write_and_project_claimed_prepared_plan_is_not_replayed(tmp_path: Path) -> None:
     coordinator, plans, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
     operation = plans.store.create_operation(

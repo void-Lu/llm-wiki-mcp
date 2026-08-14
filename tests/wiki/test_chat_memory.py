@@ -7,6 +7,7 @@ import pytest
 from wiki.atomic_file import AtomicFileError, atomic_write_text
 from wiki.chat_memory import ChatMemoryError, ChatMemoryService
 from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.page_operation_store import PageOperationStore
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.query_pipeline import run_query_v2
 from wiki.wiki_index import rebuild_retrieval_index
@@ -59,6 +60,34 @@ def test_idempotent_save_rechecks_index(tmp_path: Path) -> None:
     retried = service.save(_transcript(), _metadata())
     assert retried["idempotent"] is True
     assert retried["index"]["generation"] == {"enabled": False, "reason": "raw_only"}
+
+
+def test_chat_index_response_uses_flattened_success_and_synthesizes_failure() -> None:
+    safe_result = PageOperationStore.safe_stage_result(
+        {"ok": True, "state": "ready", "operation": "update", "retrieval_index": {"nested": "discarded"}}
+    )
+    success = ChatMemoryService._index_response(
+        {
+            "retrieval": {
+                "state": "succeeded",
+                "result": safe_result,
+            }
+        }
+    )
+    failure = ChatMemoryService._index_response(
+        {"retrieval": {"state": "failed", "code": "retrieval_unavailable"}}
+    )
+
+    assert success == {
+        "ok": True,
+        "generation": {"enabled": False, "reason": "raw_only"},
+        "retrieval_index": {"ok": True, "state": "ready", "operation": "update"},
+    }
+    assert failure == {
+        "ok": False,
+        "generation": {"enabled": False, "reason": "raw_only"},
+        "retrieval_index": {"ok": False, "state": "failed", "code": "retrieval_unavailable"},
+    }
 
 
 def test_chat_save_reports_rebuild_required_without_creating_a_formal_page(tmp_path: Path) -> None:

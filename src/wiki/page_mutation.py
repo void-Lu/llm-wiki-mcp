@@ -109,7 +109,8 @@ def dependency_projection_of(result: MutationResult) -> dict[str, object]:
     """解释 formal 页面响应中的 dependencies 阶段。
 
     阶段结果的解释 helper 与投影 builder 同居；嵌套键在持久化层被
-    ``_safe_stage_result`` 白名单削平。
+    ``_safe_stage_result`` 白名单削平。失败阶段没有 result 时如实暴露失败，
+    不伪装成 ready。
     """
 
     stage = result.stages.get("dependencies")
@@ -120,6 +121,14 @@ def dependency_projection_of(result: MutationResult) -> dict[str, object]:
         return dict(stage_result)
     if stage.get("state") == "succeeded":
         return {"ok": True, "state": "ready"}
+    state = stage.get("state")
+    if isinstance(state, str) and state:
+        code = stage.get("code")
+        return {
+            "ok": False,
+            "state": state,
+            "code": str(code) if isinstance(code, str) and code else f"dependencies_{state}",
+        }
     return {"ok": True, "state": "ready"}
 
 
