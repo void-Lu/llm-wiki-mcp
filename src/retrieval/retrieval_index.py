@@ -35,7 +35,7 @@ from retrieval.lexical_analyzer import (
 from retrieval.passage_chunker import CHUNK_SCHEMA_VERSION, PassageChunk, chunk_markdown
 from retrieval.metadata_filters import normalize_metadata_filters
 from wiki.wiki_io import split_frontmatter
-from wiki.wiki_paths import filesystem_path
+from wiki.wiki_paths import RETRIEVAL_DB_BY_SCOPE, filesystem_path
 
 RETRIEVAL_SCHEMA_VERSION = 2
 StoreScope = Literal["active", "archive", "raw"]
@@ -84,12 +84,7 @@ class RetrievalIndexStore:
             raise RetrievalIndexError("invalid_store_scope", "scope must be active, archive, or raw")
         self.root = Path(vault_root).expanduser().resolve()
         self.scope: StoreScope = scope
-        filenames = {
-            "active": "retrieval.sqlite3",
-            "archive": "archive-index.sqlite3",
-            "raw": "raw-retrieval.sqlite3",
-        }
-        default = self.root / ".llm-wiki" / filenames[scope]
+        default = self.root / RETRIEVAL_DB_BY_SCOPE[scope]
         self.path = Path(path).expanduser().resolve() if path is not None else default
         if not self.path.is_relative_to(self.root):
             raise RetrievalIndexError("invalid_index_path", "retrieval store must remain inside the vault")
@@ -542,7 +537,7 @@ class RetrievalIndexStore:
         target = path or self.path
         if readonly:
             # SQLite URI authorities do not accept Windows' ``\\?\\`` prefix.
-            # The database itself is under the short .llm-wiki path, so remove
+            # The database itself is under the short state path, so remove
             # only that transport prefix while retaining the compiler's
             # long-path-safe root for vault traversal.
             uri_target = str(target)

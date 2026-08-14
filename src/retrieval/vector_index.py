@@ -20,6 +20,7 @@ from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from runtime.runtime_config import EmbeddingSettings, VECTOR_SETTING_BOUNDS
 from retrieval.vector_provider import VectorProvider, VectorProviderIdentity
 from wiki.wiki_io import read_markdown_page, split_frontmatter
+from wiki.wiki_paths import VECTOR_INDEX_BY_CORPUS
 
 VECTOR_INDEX_SCHEMA_VERSION = 2
 _PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
@@ -67,8 +68,8 @@ class VectorSettings:
 
 
 def default_vector_index_path(vault_root: str | Path, *, corpus: str = "active") -> Path:
-    name = "vector-index" if corpus == "active" else "archive-vector-index"
-    return Path(vault_root).expanduser().resolve() / ".llm-wiki" / name
+    relative = VECTOR_INDEX_BY_CORPUS["active" if corpus == "active" else "archive"]
+    return Path(vault_root).expanduser().resolve() / relative
 
 
 def parse_vector_settings(vault_root: str | Path, config: dict[str, Any] | None) -> VectorSettings:

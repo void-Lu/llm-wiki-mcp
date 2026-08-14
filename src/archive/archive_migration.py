@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from archive.archive_service import ArchiveService
+from wiki.wiki_paths import LEGACY_ARCHIVE_MARKER
 
 
 _STRUCTURAL = {"index.md", "log.md", "overview.md"}
 _IGNORED_LEGACY_PLACEHOLDERS = {".gitkeep", ".DS_Store"}
-_LEGACY_ARCHIVE_MARKER = ".llm-wiki/legacy-archive-migration-v2.json"
 
 
 def _legacy_archive_targets(root: Path) -> list[Path]:
@@ -78,7 +78,7 @@ def apply_legacy_migration(vault_root: str | Path) -> dict[str, Any]:
     root = Path(vault_root).expanduser().resolve()
     plan = plan_legacy_migration(root)
     if not plan["ok"]: return plan
-    marker = root / _LEGACY_ARCHIVE_MARKER
+    marker = root / LEGACY_ARCHIVE_MARKER
     sources = [str(item["source"]) for item in plan["moves"]]
     if marker.exists() and not sources:
         return {"ok": True, "already_migrated": True, "migration_version": 2}

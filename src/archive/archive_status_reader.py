@@ -12,6 +12,7 @@ from archive.archive_schema import (
     ARCHIVE_REQUIRED_TABLES,
 )
 from retrieval.retrieval_index import RetrievalIndexStore
+from wiki.wiki_paths import STATE_DB
 
 
 class ArchiveStatusReader:
@@ -24,7 +25,7 @@ class ArchiveStatusReader:
 
     def __init__(self, vault_root: str | Path) -> None:
         self.root = Path(vault_root).expanduser().resolve()
-        self.state_path = self.root / ".llm-wiki" / "state.sqlite3"
+        self.state_path = self.root / STATE_DB
 
     def status(self) -> dict[str, Any]:
         archive_index = RetrievalIndexStore(self.root, scope="archive").status()

@@ -27,6 +27,7 @@ from archive.archive_service import ArchiveService
 from wiki.page_repair import PageRepairService
 from wiki.privacy_audit import PrivacyAuditError, PrivacyAuditService
 from wiki.provenance_migration import ProvenanceMigrationError, ProvenanceMigrationService
+from wiki.wiki_paths import PAGE_STATE_DB, STATE_DB
 
 
 def _status_resolution(runtime: RuntimeConfig) -> tuple[ConfigRegistry, ResolvedVault]:
@@ -53,8 +54,8 @@ def _runtime_payload(runtime: RuntimeConfig) -> dict[str, Any]:
     status = registry.public_status(resolution)
     root = resolution.root
     storage_paths = {
-        "state": _storage_relative(root, root / ".llm-wiki" / "state.sqlite3"),
-        "page_state": _storage_relative(root, root / ".llm-wiki" / "page-state.sqlite3"),
+        "state": _storage_relative(root, root / STATE_DB),
+        "page_state": _storage_relative(root, root / PAGE_STATE_DB),
         "retrieval_index": _storage_relative(root, RetrievalIndexStore(root).path),
         "vector_index": _storage_relative(root, default_vector_index_path(root)),
         "archives": f"{_storage_relative(root, root / 'archives')}/",

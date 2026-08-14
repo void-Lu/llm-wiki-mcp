@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from typing import Any, Iterator, Iterable
 
 from wiki.source_provenance import source_path_key
+from wiki.wiki_paths import KNOWLEDGE_DEPENDENCIES_DB
 
 
 VALID_LIFECYCLE = {"active", "stale", "review_required", "superseded", "deprecated", "archived"}
@@ -24,7 +25,7 @@ class KnowledgeDependencies:
 
     def __init__(self, vault_root: str | Path):
         self.root = Path(vault_root).expanduser().resolve()
-        self.path = self.root / ".llm-wiki" / "knowledge-dependencies.sqlite3"
+        self.path = self.root / KNOWLEDGE_DEPENDENCIES_DB
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -33,13 +34,13 @@ class KnowledgeDependencies:
         """Read one projection without creating or modifying the dependency DB.
 
         Repair and migration planning must be able to prove that a dry-run did
-        not create ``.llm-wiki`` state.  The normal constructor intentionally
+        not create state storage.  The normal constructor intentionally
         initializes the database, so read-only callers use this separate URI
         entry point instead.
         """
 
         root = Path(vault_root).expanduser().resolve()
-        database = root / ".llm-wiki" / "knowledge-dependencies.sqlite3"
+        database = root / KNOWLEDGE_DEPENDENCIES_DB
         if not database.is_file():
             return {"state": "missing", "edges": {}}
         try:

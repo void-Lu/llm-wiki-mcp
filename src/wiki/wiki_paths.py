@@ -42,6 +42,25 @@ ARCHIVES_DIR = Path("archives")
 ARCHIVES_LOG_DIR = ARCHIVES_DIR / "log"
 ARCHIVES_LOG_PATH = ARCHIVES_DIR / "log.md"
 
+STATE_DB = Path(".llm-wiki/state.sqlite3")
+PAGE_STATE_DB = Path(".llm-wiki/page-state.sqlite3")
+KNOWLEDGE_DEPENDENCIES_DB = Path(".llm-wiki/knowledge-dependencies.sqlite3")
+RETRIEVAL_DB_BY_SCOPE = {
+    "active": Path(".llm-wiki/retrieval.sqlite3"),
+    "archive": Path(".llm-wiki/archive-index.sqlite3"),
+    "raw": Path(".llm-wiki/raw-retrieval.sqlite3"),
+}
+VECTOR_INDEX = Path(".llm-wiki/vector-index")
+VECTOR_INDEX_BY_CORPUS = {
+    "active": VECTOR_INDEX,
+    "archive": VECTOR_INDEX.with_name("archive-vector-index"),
+}
+ADMIN_PLANS_DIR = Path(".llm-wiki/admin-plans")
+PRIVACY_AUDIT_DIR = Path(".llm-wiki/privacy-audit")
+MIGRATIONS_DIR = Path(".llm-wiki/migrations")
+LOG_OPERATION_INDEX = Path(".llm-wiki/log-operation-index.json")
+LEGACY_ARCHIVE_MARKER = Path(".llm-wiki/legacy-archive-migration-v2.json")
+
 
 TOP_LEVEL_DIRS = (
     Path("raw/sources"),

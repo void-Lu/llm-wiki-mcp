@@ -4,7 +4,15 @@ from pathlib import Path
 
 import pytest
 
+from retrieval.retrieval_index import RetrievalIndexStore
+from retrieval.vector_index import default_vector_index_path
 from wiki.wiki_paths import (
+    KNOWLEDGE_DEPENDENCIES_DB,
+    PAGE_STATE_DB,
+    RETRIEVAL_DB_BY_SCOPE,
+    STATE_DB,
+    VECTOR_INDEX,
+    VECTOR_INDEX_BY_CORPUS,
     WikiPathError,
     WikiPaths,
     create_wiki_root,
@@ -165,6 +173,37 @@ def test_create_wiki_root_preserves_existing_core_files(tmp_path: Path):
     create_wiki_root(root)
 
     assert (root / "purpose.md").read_text(encoding="utf-8") == "custom purpose"
+
+
+def test_state_path_constants_match_retrieval_and_vector_owners(tmp_path: Path) -> None:
+    root = (tmp_path / "vault").resolve()
+
+    assert root / STATE_DB == root / Path(".llm-wiki/state.sqlite3")
+    assert root / PAGE_STATE_DB == root / Path(".llm-wiki/page-state.sqlite3")
+    assert root / KNOWLEDGE_DEPENDENCIES_DB == root / Path(".llm-wiki/knowledge-dependencies.sqlite3")
+    for scope, relative_path in RETRIEVAL_DB_BY_SCOPE.items():
+        assert RetrievalIndexStore(root, scope=scope).path == root / relative_path
+    assert default_vector_index_path(root) == root / VECTOR_INDEX
+    assert default_vector_index_path(root, corpus="archive") == root / VECTOR_INDEX_BY_CORPUS["archive"]
+
+
+def test_llm_wiki_path_literals_have_one_source_owner() -> None:
+    source_root = Path(__file__).parents[2] / "src"
+    owner = source_root / "wiki" / "wiki_paths.py"
+    ingest_snapshot = source_root / "wiki" / "ingest_snapshot.py"
+    offenders: list[str] = []
+
+    for path in sorted(source_root.rglob("*.py")):
+        if path == owner:
+            continue
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if ".llm-wiki" not in line:
+                continue
+            if path == ingest_snapshot and "tempfile.mkstemp(prefix=" in line:
+                continue
+            offenders.append(f"{path.relative_to(source_root)}:{line_number}")
+
+    assert offenders == []
 
 
 def test_create_wiki_root_writes_actionable_schema_template(tmp_path: Path):

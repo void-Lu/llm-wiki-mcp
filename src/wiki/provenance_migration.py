@@ -23,6 +23,7 @@ from common.privacy_policy import normalize_vault_relative
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.source_provenance import SourceProvenanceError, SourceProvenanceResolver, source_path_key
 from wiki.wiki_io import split_frontmatter
+from wiki.wiki_paths import ADMIN_PLANS_DIR, MIGRATIONS_DIR
 
 
 class ProvenanceMigrationError(ValueError):
@@ -33,8 +34,6 @@ class ProvenanceMigrationError(ValueError):
         self.code = code
 
 
-_PLAN_DIR = Path(".llm-wiki/admin-plans")
-_AUDIT_DIR = Path(".llm-wiki/migrations")
 _PLAN_ID = re.compile(r"^[0-9a-f]{32}$")
 _STRUCTURAL = {"index.md", "log.md", "overview.md"}
 _LEGACY_SOURCE_PREFIXES = ("wiki/sources/", "wiki/chatlog/", "wiki/archives/")
@@ -86,7 +85,7 @@ class ProvenanceMigrationService:
 
     def apply(self, plan_id: str) -> dict[str, object]:
         plan = self._read_plan(plan_id)
-        audit_path = self.root / _AUDIT_DIR / f"{plan_id}.audit.json"
+        audit_path = self.root / MIGRATIONS_DIR / f"{plan_id}.audit.json"
         if audit_path.is_file():
             try:
                 previous = json.loads(audit_path.read_text(encoding="utf-8"))
@@ -305,12 +304,12 @@ class ProvenanceMigrationService:
         }
 
     def _write_plan(self, plan_id: str, plan: Mapping[str, object]) -> None:
-        target = self.root / _PLAN_DIR / f"provenance-migration-{plan_id}.json"
+        target = self.root / ADMIN_PLANS_DIR / f"provenance-migration-{plan_id}.json"
         atomic_write_text(target, json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
 
     def _read_plan(self, plan_id: str) -> dict[str, object]:
         _validate_plan_id(plan_id)
-        path = self.root / _PLAN_DIR / f"provenance-migration-{plan_id}.json"
+        path = self.root / ADMIN_PLANS_DIR / f"provenance-migration-{plan_id}.json"
         if not path.is_file():
             raise ProvenanceMigrationError("plan_not_found")
         try:

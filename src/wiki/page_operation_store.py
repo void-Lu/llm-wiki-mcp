@@ -12,6 +12,7 @@ import sqlite3
 from typing import Any, Iterator, Literal, Mapping, overload
 
 from common.privacy_policy import LocatorError, normalize_vault_relative
+from wiki.wiki_paths import PAGE_STATE_DB
 
 
 SCHEMA_VERSION = 1
@@ -102,11 +103,11 @@ def plan_is_expired(value: str) -> bool:
 
 
 class PageOperationStore:
-    """Own ``.llm-wiki/page-state.sqlite3`` and nothing from archive state."""
+    """Own the page-state database and nothing from archive state."""
 
     def __init__(self, vault_root: str | Path, *, busy_timeout_ms: int = 5000):
         self.root = Path(vault_root).expanduser().resolve()
-        self.path = self.root / ".llm-wiki" / "page-state.sqlite3"
+        self.path = self.root / PAGE_STATE_DB
         self.busy_timeout_ms = busy_timeout_ms
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()

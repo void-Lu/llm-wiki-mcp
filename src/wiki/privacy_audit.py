@@ -21,6 +21,7 @@ from common.redaction import count_redaction_categories, redact_sensitive_text
 from wiki.atomic_file import AtomicFileError, atomic_write_bytes, atomic_write_text, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.wiki_io import split_frontmatter
+from wiki.wiki_paths import ADMIN_PLANS_DIR, KNOWLEDGE_DEPENDENCIES_DB, PRIVACY_AUDIT_DIR
 
 
 class PrivacyAuditError(ValueError):
@@ -31,8 +32,6 @@ class PrivacyAuditError(ValueError):
         self.code = code
 
 
-_PLAN_DIR = Path(".llm-wiki/admin-plans")
-_AUDIT_DIR = Path(".llm-wiki/privacy-audit")
 _PLAN_ID = re.compile(r"^[0-9a-f]{32}$")
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(#[^\]|]*)?(\|[^\]]*)?\]\]")
 
@@ -137,7 +136,7 @@ class PrivacyAuditService:
 
     def apply(self, plan_id: str, *, allow_locator_changes: bool = False) -> dict[str, object]:
         plan = self._read_plan(plan_id)
-        audit_path = self.root / _AUDIT_DIR / f"{plan_id}.audit.json"
+        audit_path = self.root / PRIVACY_AUDIT_DIR / f"{plan_id}.audit.json"
         if audit_path.is_file():
             try:
                 previous = json.loads(audit_path.read_text(encoding="utf-8"))
@@ -175,7 +174,7 @@ class PrivacyAuditService:
         projections: dict[str, dict[str, object]] = {}
         written_targets: list[Path] = []
         dependency: KnowledgeDependencies | None = None
-        db_path = self.root / ".llm-wiki" / "knowledge-dependencies.sqlite3"
+        db_path = self.root / KNOWLEDGE_DEPENDENCIES_DB
         if db_path.is_file():
             dependency = KnowledgeDependencies(self.root)
         results: list[dict[str, object]] = []
@@ -304,13 +303,13 @@ class PrivacyAuditService:
         return candidate
 
     def _write_plan(self, plan_id: str, plan: Mapping[str, object]) -> None:
-        target = self.root / _PLAN_DIR / f"privacy-audit-{plan_id}.json"
+        target = self.root / ADMIN_PLANS_DIR / f"privacy-audit-{plan_id}.json"
         atomic_write_text(target, json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
 
     def _read_plan(self, plan_id: str) -> dict[str, object]:
         if not isinstance(plan_id, str) or _PLAN_ID.fullmatch(plan_id) is None:
             raise PrivacyAuditError("invalid_plan_id")
-        path = self.root / _PLAN_DIR / f"privacy-audit-{plan_id}.json"
+        path = self.root / ADMIN_PLANS_DIR / f"privacy-audit-{plan_id}.json"
         if not path.is_file():
             raise PrivacyAuditError("plan_not_found")
         try:

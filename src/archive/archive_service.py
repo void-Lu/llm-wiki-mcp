@@ -23,6 +23,7 @@ from archive.archive_models import ArchiveAttachment, ArchiveError, ArchiveItem,
 from archive.archive_planner import ArchivePlanner
 from archive.archive_schema import ARCHIVE_TABLE_DDL
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
+from wiki.wiki_paths import STATE_DB
 
 
 _TRANSITIONS = {
@@ -46,7 +47,7 @@ class ArchiveService:
         self.actor = actor
         self.fault_at = fault_at
         self.archive_root = self.root / "archives"
-        self.state_path = self.root / ".llm-wiki" / "state.sqlite3"
+        self.state_path = self.root / STATE_DB
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
         self.planner = ArchivePlanner(self.root)

@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
+from wiki.wiki_paths import STATE_DB
+
 
 _SECRET = re.compile(r"(?i)(?:api[_-]?key|token|password|secret|authorization|cookie)\s*[:=]\s*[^\s]+")
 REQUIRED_CANDIDATE_COLUMNS = frozenset(
@@ -36,7 +38,7 @@ def redact_query(query: str) -> str:
 
 
 def _database_path(root: str | Path) -> Path:
-    return Path(root).expanduser().resolve() / ".llm-wiki" / "state.sqlite3"
+    return Path(root).expanduser().resolve() / STATE_DB
 
 
 def read_event_count(root: str | Path) -> int | None:
@@ -110,7 +112,7 @@ def read_completed_candidates(root: str | Path) -> list[dict[str, str]]:
 class QueryTelemetry:
     def __init__(self, vault_root: str | Path) -> None:
         root = Path(vault_root).expanduser().resolve()
-        self.path = root / ".llm-wiki" / "state.sqlite3"
+        self.path = root / STATE_DB
         self._finish_lock = threading.Lock()
         self._finished = False
         self.path.parent.mkdir(parents=True, exist_ok=True)

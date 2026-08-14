@@ -22,7 +22,7 @@ from wiki.wiki_limits import (
     utf8_size,
 )
 from wiki.wiki_models import WikiLogEntry
-from wiki.wiki_paths import ARCHIVES_LOG_DIR, ARCHIVES_LOG_PATH
+from wiki.wiki_paths import ARCHIVES_LOG_DIR, ARCHIVES_LOG_PATH, LOG_OPERATION_INDEX
 from wiki.wikilinks import format_wikilink
 
 _LOG_HEADING_RE = re.compile(r"^## \[([^\]]+)\] (\S+) \| (.+)$")
@@ -30,7 +30,6 @@ _INDEX_PAGE_RE = re.compile(r"^index(?:-\d{2,})?\.md$")
 _ARCHIVE_HEADER = "---\ntype: log_archive\ngenerated: true\narchived: true\n---\n\n# Log archive"
 _ARCHIVE_NAVIGATION_INDEX = "archives/log/index.md"
 _OPERATION_INDEX_SCHEMA_VERSION = 1
-_OPERATION_INDEX_PATH = Path(".llm-wiki/log-operation-index.json")
 _OPERATION_ID_RE = re.compile(r"^- operation_id:\s*(\S+)\s*$")
 _OPERATION_INDEX_CACHE: dict[Path, set[str]] = {}
 _OPERATION_INDEX_FORCE_REBUILD: set[Path] = set()
@@ -168,7 +167,7 @@ def _load_operation_index(root: Path) -> tuple[set[str], bool]:
             return _OPERATION_INDEX_CACHE[root], False
         force_rebuild = root in _OPERATION_INDEX_FORCE_REBUILD
         _OPERATION_INDEX_FORCE_REBUILD.discard(root)
-        manifest = root / _OPERATION_INDEX_PATH
+        manifest = root / LOG_OPERATION_INDEX
         operation_ids = None if force_rebuild else _read_operation_index(manifest)
         rebuilt = operation_ids is None
         if rebuilt:
@@ -214,7 +213,7 @@ def _write_operation_index(
     *,
     fault: FaultBarrier | None = None,
 ) -> None:
-    path = root / _OPERATION_INDEX_PATH
+    path = root / LOG_OPERATION_INDEX
     payload = {
         "schema_version": _OPERATION_INDEX_SCHEMA_VERSION,
         "operation_ids": sorted(operation_ids),
