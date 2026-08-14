@@ -25,7 +25,7 @@ FRESHNESS_DECAY_DAYS = 90
 STEP_BONUS_MAX = 4.0
 STEP_COUNT_FULL = 5
 FallbackLevel = Literal["none", "raw"]
-FallbackBranch = Literal["main", "coverage", "wiki_relaxed", "all_coverage", "raw_zero"]
+FallbackBranch = Literal["coverage", "wiki_relaxed", "all_coverage", "raw_zero"]
 CandidatesKind = Literal["scored", "combined_active_raw", "wiki_relaxed", "raw_only"]
 
 
@@ -44,13 +44,15 @@ def fallback_envelope(
 
 
 @dataclass(frozen=True)
-class FallbackDecision:
-    level: FallbackLevel
-    reasons: tuple[str, ...] = ()
-    allowed_source_paths: tuple[str, ...] = ()
+class FallbackState:
+    """Complete evidence state consumed by the fallback decision table."""
 
-    def as_dict(self) -> dict[str, object]:
-        return fallback_envelope(self.level, self.reasons, self.allowed_source_paths)
+    has_primary_recall: bool
+    effective_scope: str
+    uncovered_latin_terms: tuple[str, ...]
+    wiki_relaxed_answered: bool
+    raw_available: Literal["unknown", "yes", "no"]
+    relaxed_available: bool
 
 
 @dataclass(frozen=True)
@@ -74,21 +76,13 @@ class LadderStep:
     searcher: Callable[[RetrievalIndexStore, "LadderStep", int], list[PassageHit]] | None = None
 
 
-def plan_fallback(
-    *,
-    has_primary_recall: bool,
-    effective_scope: str,
-    uncovered_latin_terms: list[str],
-    wiki_relaxed_answered: bool,
-    raw_available: bool,
-    relaxed_available: bool,
-) -> FallbackPlan | None:
+def plan_fallback(state: FallbackState) -> FallbackPlan | None:
     """Return the pure fallback branch selected by current evidence."""
 
     if (
-        has_primary_recall
-        and uncovered_latin_terms
-        and effective_scope in {"knowledge", "all"}
+        state.has_primary_recall
+        and state.uncovered_latin_terms
+        and state.effective_scope in {"knowledge", "all"}
     ):
         return FallbackPlan(
             "coverage",
@@ -97,11 +91,11 @@ def plan_fallback(
             "combined_active_raw",
         )
     if (
-        not has_primary_recall
-        and effective_scope == "all"
-        and wiki_relaxed_answered
-        and uncovered_latin_terms
-        and raw_available
+        not state.has_primary_recall
+        and state.effective_scope == "all"
+        and state.wiki_relaxed_answered
+        and state.uncovered_latin_terms
+        and state.raw_available in {"unknown", "yes"}
     ):
         return FallbackPlan(
             "all_coverage",
@@ -110,16 +104,16 @@ def plan_fallback(
             "combined_active_raw",
         )
     if (
-        not has_primary_recall
-        and effective_scope in {"knowledge", "all"}
-        and relaxed_available
+        not state.has_primary_recall
+        and state.effective_scope in {"knowledge", "all"}
+        and state.relaxed_available
     ):
         return FallbackPlan("wiki_relaxed", RecoveryCondition(), "relaxed", "wiki_relaxed")
     if (
-        not has_primary_recall
-        and not wiki_relaxed_answered
-        and effective_scope in {"knowledge", "all"}
-        and raw_available
+        not state.has_primary_recall
+        and not state.wiki_relaxed_answered
+        and state.effective_scope in {"knowledge", "all"}
+        and state.raw_available in {"unknown", "yes"}
     ):
         return FallbackPlan(
             "raw_zero",

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import FrozenInstanceError
+from itertools import product
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -10,7 +12,7 @@ from retrieval.candidate_items import CANDIDATE_CORE_KEYS, FUSION_KEYS, candidat
 from retrieval.body_budget import PAGE_TOKEN_BUDGET
 from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext
 from retrieval.query_recovery import (
-    FallbackDecision,
+    FallbackState,
     LadderStep,
     RecoveryCondition,
     assemble_recovery,
@@ -92,101 +94,343 @@ def test_with_fusion_adds_only_the_canonical_fusion_keys() -> None:
     assert set(minimal) == {"hit", "score", *FUSION_KEYS}
 
 
-def test_fallback_decision_and_envelope_share_one_shape() -> None:
+def test_fallback_envelope_has_stable_shape() -> None:
     expected = {
         "level": "raw",
         "reasons": ["wiki_zero_results"],
         "allowed_source_paths": ["raw/a.md"],
     }
 
-    assert FallbackDecision("raw", ("wiki_zero_results",), ("raw/a.md",)).as_dict() == expected
     assert fallback_envelope("raw", ("wiki_zero_results",), ("raw/a.md",)) == expected
-    assert FallbackDecision("none").as_dict() == {
+    assert fallback_envelope("none") == {
         "level": "none",
         "reasons": [],
         "allowed_source_paths": [],
     }
 
 
-def test_plan_fallback_covers_each_branch_and_main_path() -> None:
+def _state(
+    *,
+    has_primary_recall: bool,
+    effective_scope: str,
+    uncovered_latin_terms: tuple[str, ...],
+    wiki_relaxed_answered: bool,
+    raw_available: Literal["unknown", "yes", "no"],
+    relaxed_available: bool,
+) -> FallbackState:
+    return FallbackState(
+        has_primary_recall=has_primary_recall,
+        effective_scope=effective_scope,
+        uncovered_latin_terms=uncovered_latin_terms,
+        wiki_relaxed_answered=wiki_relaxed_answered,
+        raw_available=raw_available,
+        relaxed_available=relaxed_available,
+    )
+
+
+def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
+    state = _state(
+        has_primary_recall=False,
+        effective_scope="all",
+        uncovered_latin_terms=("rag",),
+        wiki_relaxed_answered=True,
+        raw_available="unknown",
+        relaxed_available=True,
+    )
+
+    assert state == FallbackState(
+        False,
+        "all",
+        ("rag",),
+        True,
+        "unknown",
+        True,
+    )
+    assert state.__dataclass_fields__.keys() == {
+        "has_primary_recall",
+        "effective_scope",
+        "uncovered_latin_terms",
+        "wiki_relaxed_answered",
+        "raw_available",
+        "relaxed_available",
+    }
+    with pytest.raises(FrozenInstanceError):
+        state.raw_available = "yes"  # type: ignore[misc]
+
+
+def test_plan_fallback_covers_each_branch_and_none_path() -> None:
     cases = [
         (
-            dict(has_primary_recall=True, effective_scope="knowledge", uncovered_latin_terms=["rag"], wiki_relaxed_answered=False, raw_available=True, relaxed_available=False),
+            _state(
+                has_primary_recall=True,
+                effective_scope="knowledge",
+                uncovered_latin_terms=("rag",),
+                wiki_relaxed_answered=False,
+                raw_available="unknown",
+                relaxed_available=False,
+            ),
             "coverage",
         ),
         (
-            dict(has_primary_recall=False, effective_scope="knowledge", uncovered_latin_terms=[], wiki_relaxed_answered=False, raw_available=False, relaxed_available=True),
+            _state(
+                has_primary_recall=False,
+                effective_scope="knowledge",
+                uncovered_latin_terms=(),
+                wiki_relaxed_answered=False,
+                raw_available="no",
+                relaxed_available=True,
+            ),
             "wiki_relaxed",
         ),
         (
-            dict(has_primary_recall=False, effective_scope="all", uncovered_latin_terms=["llm"], wiki_relaxed_answered=True, raw_available=True, relaxed_available=True),
+            _state(
+                has_primary_recall=False,
+                effective_scope="all",
+                uncovered_latin_terms=("llm",),
+                wiki_relaxed_answered=True,
+                raw_available="unknown",
+                relaxed_available=True,
+            ),
             "all_coverage",
         ),
         (
-            dict(has_primary_recall=False, effective_scope="all", uncovered_latin_terms=[], wiki_relaxed_answered=False, raw_available=True, relaxed_available=False),
+            _state(
+                has_primary_recall=False,
+                effective_scope="all",
+                uncovered_latin_terms=(),
+                wiki_relaxed_answered=False,
+                raw_available="yes",
+                relaxed_available=False,
+            ),
             "raw_zero",
         ),
     ]
 
-    for inputs, branch in cases:
-        plan = plan_fallback(**inputs)
+    for state, branch in cases:
+        plan = plan_fallback(state)
         assert plan is not None
         assert plan.branch == branch
     assert plan_fallback(
-        has_primary_recall=True,
-        effective_scope="knowledge",
-        uncovered_latin_terms=[],
-        wiki_relaxed_answered=False,
-        raw_available=False,
-        relaxed_available=False,
+        _state(
+            has_primary_recall=True,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            raw_available="no",
+            relaxed_available=False,
+        )
     ) is None
 
 
 def test_plan_fallback_exhausts_the_decision_matrix() -> None:
     scopes = ("knowledge", "all", "history", "raw", "archive")
-    for has_primary_recall in (False, True):
-        for effective_scope in scopes:
-            for uncovered in ([], ["rag"]):
-                for wiki_relaxed_answered in (False, True):
-                    for raw_available in (False, True):
-                        for relaxed_available in (False, True):
-                            plan = plan_fallback(
-                                has_primary_recall=has_primary_recall,
-                                effective_scope=effective_scope,
-                                uncovered_latin_terms=uncovered,
-                                wiki_relaxed_answered=wiki_relaxed_answered,
-                                raw_available=raw_available,
-                                relaxed_available=relaxed_available,
-                            )
-                            if (
-                                has_primary_recall
-                                and uncovered
-                                and effective_scope in {"knowledge", "all"}
-                            ):
-                                assert plan is not None and plan.branch == "coverage"
-                            elif (
-                                not has_primary_recall
-                                and effective_scope == "all"
-                                and wiki_relaxed_answered
-                                and uncovered
-                                and raw_available
-                            ):
-                                assert plan is not None and plan.branch == "all_coverage"
-                            elif (
-                                not has_primary_recall
-                                and effective_scope in {"knowledge", "all"}
-                                and relaxed_available
-                            ):
-                                assert plan is not None and plan.branch == "wiki_relaxed"
-                            elif (
-                                not has_primary_recall
-                                and not wiki_relaxed_answered
-                                and effective_scope in {"knowledge", "all"}
-                                and raw_available
-                            ):
-                                assert plan is not None and plan.branch == "raw_zero"
-                            else:
-                                assert plan is None
+    cases = list(
+        product(
+            (False, True),
+            scopes,
+            ((), ("rag",)),
+            (False, True),
+            ("unknown", "yes", "no"),
+            (False, True),
+        )
+    )
+    cases.extend(
+        product(
+            (False, True),
+            scopes,
+            (("rag", "llm"), ("N", "record")),
+            (False, True),
+            ("yes", "no"),
+            (False,),
+        )
+    )
+    assert len(cases) == 320
+
+    for (
+        has_primary_recall,
+        effective_scope,
+        uncovered,
+        wiki_relaxed_answered,
+        raw_available,
+        relaxed_available,
+    ) in cases:
+        state = _state(
+            has_primary_recall=has_primary_recall,
+            effective_scope=effective_scope,
+            uncovered_latin_terms=uncovered,
+            wiki_relaxed_answered=wiki_relaxed_answered,
+            raw_available=raw_available,
+            relaxed_available=relaxed_available,
+        )
+        plan = plan_fallback(state)
+        raw_ready = raw_available in {"unknown", "yes"}
+        if has_primary_recall and uncovered and effective_scope in {"knowledge", "all"}:
+            assert plan is not None and plan.branch == "coverage"
+        elif not has_primary_recall and effective_scope == "all" and wiki_relaxed_answered and uncovered and raw_ready:
+            assert plan is not None and plan.branch == "all_coverage"
+        elif not has_primary_recall and effective_scope in {"knowledge", "all"} and relaxed_available:
+            assert plan is not None and plan.branch == "wiki_relaxed"
+        elif not has_primary_recall and not wiki_relaxed_answered and effective_scope in {"knowledge", "all"} and raw_ready:
+            assert plan is not None and plan.branch == "raw_zero"
+        else:
+            assert plan is None
+
+
+def test_fallback_state_progression_primary_recall_track_keeps_rung_gate() -> None:
+    states = (
+        _state(
+            has_primary_recall=True,
+            effective_scope="all",
+            uncovered_latin_terms=("record",),
+            wiki_relaxed_answered=False,
+            raw_available="unknown",
+            relaxed_available=False,
+        ),
+        _state(
+            has_primary_recall=True,
+            effective_scope="all",
+            uncovered_latin_terms=("record",),
+            wiki_relaxed_answered=False,
+            raw_available="unknown",
+            relaxed_available=True,
+        ),
+        _state(
+            has_primary_recall=True,
+            effective_scope="all",
+            uncovered_latin_terms=("record",),
+            wiki_relaxed_answered=True,
+            raw_available="unknown",
+            relaxed_available=True,
+        ),
+        _state(
+            has_primary_recall=True,
+            effective_scope="all",
+            uncovered_latin_terms=("record",),
+            wiki_relaxed_answered=True,
+            raw_available="unknown",
+            relaxed_available=True,
+        ),
+    )
+
+    plans = [plan_fallback(state) for state in states]
+    assert [plan.branch if plan is not None else None for plan in plans] == [
+        "coverage",
+        "coverage",
+        "coverage",
+        "coverage",
+    ]
+    assert plans[0] is not None and plans[0].branch == "coverage"
+    assert plans[1] is not None and plans[1].branch != "wiki_relaxed"
+    assert plans[2] is not None and plans[2].branch != "all_coverage"
+    assert plans[3] is not None and plans[3].branch != "raw_zero"
+
+
+def test_fallback_state_progression_no_recall_track_keeps_rung_gate() -> None:
+    states = (
+        _state(
+            has_primary_recall=False,
+            effective_scope="all",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            raw_available="unknown",
+            relaxed_available=False,
+        ),
+        _state(
+            has_primary_recall=False,
+            effective_scope="all",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            raw_available="unknown",
+            relaxed_available=True,
+        ),
+        _state(
+            has_primary_recall=False,
+            effective_scope="all",
+            uncovered_latin_terms=("record",),
+            wiki_relaxed_answered=True,
+            raw_available="unknown",
+            relaxed_available=True,
+        ),
+        _state(
+            has_primary_recall=False,
+            effective_scope="all",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=True,
+            raw_available="unknown",
+            relaxed_available=True,
+        ),
+    )
+
+    plans = [plan_fallback(state) for state in states]
+    assert [plan.branch if plan is not None else None for plan in plans] == [
+        "raw_zero",
+        "wiki_relaxed",
+        "all_coverage",
+        "wiki_relaxed",
+    ]
+    assert plans[0] is not None and plans[0].branch != "coverage"
+    assert plans[1] is not None and plans[1].branch == "wiki_relaxed"
+    assert plans[2] is not None and plans[2].branch == "all_coverage"
+    assert plans[3] is not None and plans[3].branch != "raw_zero"
+
+
+def test_raw_availability_three_state_gate_is_explicit() -> None:
+    all_coverage_unknown = plan_fallback(
+        _state(
+            has_primary_recall=False,
+            effective_scope="all",
+            uncovered_latin_terms=("record",),
+            wiki_relaxed_answered=True,
+            raw_available="unknown",
+            relaxed_available=False,
+        )
+    )
+    all_coverage_yes = plan_fallback(
+        _state(
+            has_primary_recall=False,
+            effective_scope="all",
+            uncovered_latin_terms=("record",),
+            wiki_relaxed_answered=True,
+            raw_available="yes",
+            relaxed_available=False,
+        )
+    )
+    all_coverage_no = plan_fallback(
+        _state(
+            has_primary_recall=False,
+            effective_scope="all",
+            uncovered_latin_terms=("record",),
+            wiki_relaxed_answered=True,
+            raw_available="no",
+            relaxed_available=False,
+        )
+    )
+    assert all_coverage_unknown is not None and all_coverage_unknown.branch == "all_coverage"
+    assert all_coverage_yes is not None and all_coverage_yes.branch == "all_coverage"
+    assert all_coverage_no is None
+
+    raw_zero_unknown = plan_fallback(
+        _state(
+            has_primary_recall=False,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            raw_available="unknown",
+            relaxed_available=False,
+        )
+    )
+    raw_zero_no = plan_fallback(
+        _state(
+            has_primary_recall=False,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            raw_available="no",
+            relaxed_available=False,
+        )
+    )
+    assert raw_zero_unknown is not None and raw_zero_unknown.branch == "raw_zero"
+    assert raw_zero_no is None
 
 
 def test_search_ladder_supports_all_merge_strategies() -> None:

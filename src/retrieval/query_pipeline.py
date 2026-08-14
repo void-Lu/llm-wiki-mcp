@@ -28,6 +28,7 @@ from retrieval.query_telemetry import QueryTelemetry
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_recovery import (
     DEFAULT_RECOVERY_CONDITION,
+    FallbackState,
     LadderStep,
     RecoveryAssembly,
     assemble_recovery,
@@ -96,6 +97,8 @@ _DISCOVERY_CJK_ALIASES = {
     "列表": ("list", "listing"),
 }
 _STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
+
+
 def _step_counts_for_pages(
     paths: list[str],
     store: RetrievalIndexStore,
@@ -1310,17 +1313,7 @@ def _graph_expand(
             cancellation.checkpoint_batch(index, every=16, stage="graph")
         path = str(page["path"])
         frontmatter = metadata.get(path, {})
-        probe = PassageHit(
-            "",
-            path,
-            str(page["title"]),
-            (),
-            "",
-            0.0,
-            str(page.get("corpus") or "active"),
-            str(page.get("authority") or ""),
-            str(page.get("source_kind") or ""),
-        )
+        probe = PassageHit("", path, str(page["title"]), (), "", 0.0, str(page.get("corpus") or "active"), str(page.get("authority") or ""), str(page.get("source_kind") or ""))
         lifecycle = str(frontmatter.get("lifecycle") or frontmatter.get("lifecycle_status") or "active")
         if (
             not path.startswith("wiki/")
@@ -1965,14 +1958,15 @@ def _run_fallback_recovery(
     )
 
     cancellation.checkpoint("fallback")
-    coverage_plan = plan_fallback(
+    coverage_state = FallbackState(
         has_primary_recall=has_primary_recall,
         effective_scope=effective_scope,
-        uncovered_latin_terms=uncovered_latin_terms,
-        wiki_relaxed_answered=wiki_relaxed_answered,
-        raw_available=True,
+        uncovered_latin_terms=tuple(uncovered_latin_terms),
+        wiki_relaxed_answered=False,
+        raw_available="unknown",
         relaxed_available=False,
     )
+    coverage_plan = plan_fallback(coverage_state)
     if coverage_plan is not None and coverage_plan.branch == "coverage":
         cancellation.checkpoint("fallback")
         raw_store = get_raw_store()
@@ -2007,14 +2001,15 @@ def _run_fallback_recovery(
             context_items = recovery.context_items
             coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
 
-    relaxed_plan = plan_fallback(
+    relaxed_state = FallbackState(
         has_primary_recall=has_primary_recall,
         effective_scope=effective_scope,
-        uncovered_latin_terms=uncovered_latin_terms,
-        wiki_relaxed_answered=wiki_relaxed_answered,
-        raw_available=False,
+        uncovered_latin_terms=tuple(uncovered_latin_terms),
+        wiki_relaxed_answered=False,
+        raw_available="unknown",
         relaxed_available=True,
     )
+    relaxed_plan = plan_fallback(relaxed_state)
     if relaxed_plan is not None and relaxed_plan.branch == "wiki_relaxed":
         cancellation.checkpoint("fallback")
         query_extra_terms, query_term_variants, expansion_suggestions = _query_expansion(
@@ -2072,14 +2067,15 @@ def _run_fallback_recovery(
             lexical_mode = relaxed_plan.lexical_mode or lexical_mode
             wiki_relaxed_answered = True
             uncovered_latin_terms = _uncovered_latin_terms(question, selected)
-            all_coverage_plan = plan_fallback(
+            all_coverage_state = FallbackState(
                 has_primary_recall=has_primary_recall,
                 effective_scope=effective_scope,
-                uncovered_latin_terms=uncovered_latin_terms,
-                wiki_relaxed_answered=wiki_relaxed_answered,
-                raw_available=True,
+                uncovered_latin_terms=tuple(uncovered_latin_terms),
+                wiki_relaxed_answered=True,
+                raw_available="unknown",
                 relaxed_available=True,
             )
+            all_coverage_plan = plan_fallback(all_coverage_state)
             if all_coverage_plan is not None and all_coverage_plan.branch == "all_coverage":
                 cancellation.checkpoint("fallback")
                 raw_store = get_raw_store()
@@ -2114,14 +2110,15 @@ def _run_fallback_recovery(
                     context_items = recovery.context_items
                     coverage_fallback = any(item["hit"].source_kind == "raw" for item in selected)
 
-    raw_zero_plan = plan_fallback(
+    raw_zero_state = FallbackState(
         has_primary_recall=has_primary_recall,
         effective_scope=effective_scope,
-        uncovered_latin_terms=uncovered_latin_terms,
+        uncovered_latin_terms=tuple(uncovered_latin_terms),
         wiki_relaxed_answered=wiki_relaxed_answered,
-        raw_available=True,
+        raw_available="unknown",
         relaxed_available=wiki_relaxed_answered,
     )
+    raw_zero_plan = plan_fallback(raw_zero_state)
     if raw_zero_plan is not None and raw_zero_plan.branch == "raw_zero":
         cancellation.checkpoint("fallback")
         raw_store = get_raw_store()
@@ -2408,7 +2405,17 @@ def run_query_v2(
         ):
             continue
         if not _eligible(
-            PassageHit("", str(item["path"]), str(item["title"]), (), "", 0.0, str(item.get("corpus") or "active"), str(item.get("authority") or ""), str(item.get("source_kind") or "")),
+            PassageHit(
+                "",
+                str(item["path"]),
+                str(item["title"]),
+                (),
+                "",
+                0.0,
+                str(item.get("corpus") or "active"),
+                str(item.get("authority") or ""),
+                str(item.get("source_kind") or ""),
+            ),
             metadata,
             scope=effective_scope,
         ):
