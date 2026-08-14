@@ -66,6 +66,28 @@ CONFIG_REGISTRY = _load_registry()
 QUERY_TIMEOUT_SECONDS = 300
 _QUERY_REGISTRIES: dict[tuple[str, int, float], QueryExecutionRegistry] = {}
 _QUERY_REGISTRY_LOCK = threading.Lock()
+DETAIL_FIELDS: dict[str, frozenset[str]] = {
+    "summary": frozenset(
+        {
+            "ok",
+            "vault",
+            "initialized",
+            "missing_required_paths",
+            "vector",
+            "retrieval",
+            "archive_index",
+            "archive_operations",
+            "archive_state",
+            "query_execution",
+            "config",
+            "version",
+            "runtime",
+        }
+    ),
+    "indexes": frozenset({"ok", "vault", "vector", "retrieval", "query_execution", "config", "version", "runtime"}),
+    "generation": frozenset({"ok", "vault", "query_execution", "config", "version", "runtime"}),
+    "archive": frozenset({"ok", "vault", "archive_index", "archive_operations", "archive_state", "config", "version", "runtime"}),
+}
 
 
 class StrictMCPServer(MCPServer):
@@ -432,7 +454,7 @@ def _with_timeout(
 @_register()
 def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
     """Return read-only health, index and policy status for a logical vault."""
-    if detail not in {"summary", "indexes", "generation", "archive"}:
+    if detail not in DETAIL_FIELDS:
         return {"ok": False, "code": "invalid_status_detail", "error": "detail must be summary, indexes, generation, or archive"}
     resolution = _registered_resolution()
     status = dict(wiki_status_tool(str(resolution.root)))
@@ -460,13 +482,8 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
         "active": execution_status["active"],
         "pending": execution_status["pending"],
     }
-    if detail == "indexes":
-        status = {key: status[key] for key in ("ok", "vault", "vector", "retrieval", "query_execution", "config", "version", "runtime") if key in status}
-    elif detail == "generation":
-        status = {key: status[key] for key in ("ok", "vault", "query_execution", "config", "version", "runtime") if key in status}
-    elif detail == "archive":
-        status = {key: status[key] for key in ("ok", "vault", "archive_index", "archive_operations", "archive_state", "config", "version", "runtime") if key in status}
-    return status
+    fields = DETAIL_FIELDS[detail]
+    return {key: value for key, value in status.items() if key in fields}
 
 
 @_register(
@@ -582,23 +599,16 @@ def _run_wiki_query(
     resolution = _registered_resolution()
     settings = resolution.resolved.settings.retrieval
     telemetry_settings = resolution.resolved.settings.telemetry
-    telemetry_recorder = QueryTelemetry(resolution.root) if telemetry_settings.enabled else None
+    telemetry_recorder = QueryTelemetry(resolution.root, retention_days=telemetry_settings.retention_days) if telemetry_settings.enabled else None
     query_started = time.perf_counter()
     if cancellation is not None and telemetry_recorder is not None:
-        def record_cancellation(event: object) -> None:
-            cancellation_event = event
-            telemetry_recorder.finish_once(
+        def record_cancellation(event: QueryCancelled) -> None:
+            telemetry_recorder.finish_cancelled(
+                event,
                 question=question,
                 scope=scope,
                 project=project,
-                passage_ids=(),
-                fallback_level="",
-                token_count=0,
                 latency_ms=(time.perf_counter() - query_started) * 1_000,
-                retention_days=telemetry_settings.retention_days,
-                outcome="timeout" if getattr(cancellation_event, "code", "") == "query_timeout" else "cancelled",
-                cancelled_stage=str(getattr(cancellation_event, "cancelled_stage", "")),
-                worker_state="cancellation_pending" if getattr(cancellation_event, "code", "") == "query_timeout" else "cancelled",
             )
 
         cancellation.set_cancel_handler(record_cancellation)

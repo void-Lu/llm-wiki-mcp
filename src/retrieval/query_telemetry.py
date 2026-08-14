@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
+from retrieval.query_cancellation import QueryCancelled
 from wiki.wiki_paths import STATE_DB
 
 
@@ -110,9 +111,10 @@ def read_completed_candidates(root: str | Path) -> list[dict[str, str]]:
 
 
 class QueryTelemetry:
-    def __init__(self, vault_root: str | Path) -> None:
+    def __init__(self, vault_root: str | Path, *, retention_days: int = 90) -> None:
         root = Path(vault_root).expanduser().resolve()
         self.path = root / STATE_DB
+        self._retention_days = retention_days
         self._finish_lock = threading.Lock()
         self._finished = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,6 +190,31 @@ class QueryTelemetry:
             self._finished = True
             self.record(**kwargs)  # type: ignore[arg-type]
             return True
+
+    def finish_cancelled(
+        self,
+        exception: QueryCancelled,
+        *,
+        latency_ms: float,
+        question: str,
+        scope: str,
+        project: str | None,
+    ) -> bool:
+        """Persist one cancellation terminal event from the exception fields."""
+
+        return self.finish_once(
+            question=question,
+            scope=scope,
+            project=project,
+            passage_ids=(),
+            fallback_level="",
+            token_count=0,
+            latency_ms=latency_ms,
+            retention_days=self._retention_days,
+            outcome="timeout" if exception.code == "query_timeout" else "cancelled",
+            cancelled_stage=exception.cancelled_stage,
+            worker_state=exception.worker_state,
+        )
 
     def cleanup(self, *, now: datetime | None = None) -> int:
         current = now or datetime.now(UTC)

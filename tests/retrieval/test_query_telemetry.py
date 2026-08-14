@@ -3,6 +3,7 @@ from pathlib import Path
 import sqlite3
 import pytest
 
+from retrieval.query_cancellation import QueryCancelled
 from retrieval.query_telemetry import QueryTelemetry, TelemetryReadError, read_completed_candidates, read_event_count
 
 
@@ -39,6 +40,41 @@ def test_cancelled_telemetry_is_finish_once_and_has_no_query_or_passage_evidence
             "FROM query_telemetry"
         ).fetchone()
     assert row == ("", "", "timeout", "vector", "cancellation_pending")
+
+
+@pytest.mark.parametrize(
+    ("code", "outcome"),
+    [("query_timeout", "timeout"), ("query_cancelled", "cancelled")],
+)
+def test_finish_cancelled_maps_code_and_forwards_exception_fields(
+    tmp_path: Path,
+    code: str,
+    outcome: str,
+) -> None:
+    telemetry = QueryTelemetry(tmp_path)
+    exception = QueryCancelled(code, stage="vector", worker_state="worker_state_from_exception")
+
+    assert telemetry.finish_cancelled(
+        exception,
+        latency_ms=2,
+        question="token=super-secret what is approval",
+        scope="knowledge",
+        project="project-1",
+    ) is True
+    assert telemetry.finish_cancelled(
+        QueryCancelled("query_cancelled", stage="later", worker_state="later"),
+        latency_ms=3,
+        question="another question",
+        scope="raw",
+        project=None,
+    ) is False
+
+    with sqlite3.connect(telemetry.path) as conn:
+        row = conn.execute(
+            "SELECT normalized_query_redacted, passage_ids, outcome, cancelled_stage, worker_state, "
+            "scope, project, latency_ms FROM query_telemetry"
+        ).fetchone()
+    assert row == ("", "", outcome, "vector", "worker_state_from_exception", "knowledge", "project-1", 2.0)
 
 
 def test_read_event_count_is_missing_or_corrupt_database_safe(tmp_path: Path) -> None:

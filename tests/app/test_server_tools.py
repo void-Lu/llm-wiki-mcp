@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.server import (
     mcp,
     resolve_tool_vault,
     _validate_expansion_terms,
+    DETAIL_FIELDS,
     wiki_archive,
     wiki_restore,
     wiki_query,
@@ -356,6 +358,44 @@ def test_generation_status_detail_excludes_retired_queue(monkeypatch: pytest.Mon
     assert "queue" not in result
 
 
+@pytest.mark.parametrize("detail", sorted(DETAIL_FIELDS))
+def test_status_detail_output_matches_detail_fields_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    detail: str,
+) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    monkeypatch.setattr(
+        "app.server.wiki_status_tool",
+        lambda _: {
+            "ok": True,
+            "vault_root": str(root),
+            "initialized": True,
+            "missing_required_paths": [],
+            "vector": {"state": "ready"},
+            "retrieval": {"active": {}, "archive": {}, "raw": {}},
+            "version": RUNTIME_PROVENANCE.package_version,
+            "runtime": RUNTIME_PROVENANCE.to_public_dict(),
+        },
+    )
+    monkeypatch.setattr(
+        "app.server.ArchiveStatusReader.status",
+        lambda _self: {
+            "ok": True,
+            "state": "ready",
+            "code": "ready",
+            "operations": [],
+            "tombstone_count": 0,
+            "archive_index": {"ok": True, "state": "ready", "scope": "archive"},
+        },
+    )
+
+    result = wiki_status(detail=detail)
+
+    assert set(result) == DETAIL_FIELDS[detail]
+
+
 @pytest.mark.parametrize("tool", [wiki_archive, wiki_restore])
 def test_archive_tools_use_shared_vault_resolver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool: object) -> None:
     registry, root = _registry(tmp_path)
@@ -544,6 +584,9 @@ def test_query_enforces_wall_clock_timeout(monkeypatch: pytest.MonkeyPatch, tmp_
 
     assert result["ok"] is False
     assert result["code"] == "query_timeout"
+    with sqlite3.connect(vault_root / ".llm-wiki" / "state.sqlite3") as conn:
+        rows = conn.execute("SELECT outcome, worker_state FROM query_telemetry").fetchall()
+    assert rows == [("timeout", "running")]
 
 
 def test_write_note_requires_note_type() -> None:
