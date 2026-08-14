@@ -10,7 +10,7 @@ import threading
 from typing import Any, Callable, Mapping
 
 from common.privacy_policy import normalize_vault_relative
-from wiki.atomic_file import AtomicFileError, FaultBarrier, atomic_write_text, sha256_file
+from wiki.atomic_file import AtomicFileError, FaultBarrier, atomic_write_text, fault_barrier, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
 from wiki.wiki_index import refresh_navigation
@@ -142,12 +142,6 @@ class PageMutationError(ValueError):
     def __init__(self, code: str, message: str = "page mutation could not be completed") -> None:
         super().__init__(message)
         self.code = code
-
-
-def fault_barrier(stage: str) -> None:
-    """Default no-op barrier for deterministic commit/projection tests."""
-
-    del stage
 
 
 class PageMutationCoordinator:
@@ -808,7 +802,6 @@ __all__ = [
     "Projection",
     "ProjectionProfile",
     "dependency_projection_of",
-    "fault_barrier",
     "retrieval_index_of",
     "safe_stages_of",
     "stage_result_of",
