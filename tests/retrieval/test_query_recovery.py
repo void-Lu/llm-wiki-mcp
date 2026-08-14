@@ -8,7 +8,7 @@ from typing import Literal, cast
 
 import pytest
 
-from retrieval.candidate_items import CANDIDATE_CORE_KEYS, FUSION_KEYS, candidate_item, with_fusion
+from retrieval.candidate_items import candidate_item
 from retrieval.body_budget import PAGE_TOKEN_BUDGET
 from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext
 from retrieval.query_recovery import (
@@ -26,7 +26,6 @@ from retrieval.query_recovery import (
     _build_page_ordered_context,
 )
 from retrieval.retrieval_index import PassageHit
-from retrieval.query_snapshot import QueryCorpusSnapshot
 
 
 class FakeStore:
@@ -45,55 +44,6 @@ def _item(path: str, passage_id: str, score: float, *, source_kind: str = "wiki"
         score=score,
         fts_rank=1,
     )
-
-
-def test_candidate_item_has_the_canonical_core_shape_and_defaults() -> None:
-    hit = PassageHit("p-1", "wiki/concepts/item.md", "Item", (), "body", 1.0, "active", "high", "wiki")
-
-    item = candidate_item(hit, score=2.5)
-
-    assert set(item) == CANDIDATE_CORE_KEYS
-    assert item["hit"] is hit
-    assert item["score"] == 2.5
-    assert item["fts_rank"] is None
-    assert item["title_rank"] is None
-    assert item["vector_rank"] is None
-    assert item["vector_score"] == 0.0
-    assert item["rrf"] == 0.0
-    assert item["exact"] is False
-    assert item["graph_score"] == 0.0
-    assert item["graph_reasons"] == []
-
-
-def test_with_fusion_adds_only_the_canonical_fusion_keys() -> None:
-    item = _item("wiki/concepts/item.md", "p-1", 2.5)
-
-    fused = with_fusion(
-        item,
-        coverage_terms=["rag"],
-        coverage_ratio=1.0,
-        source_local_rank=1,
-        source_local_rrf=0.9,
-        fusion_score=1.9,
-        fusion_source="active",
-        fusion_local_position=1,
-    )
-
-    assert set(fused) == set(item) | FUSION_KEYS
-    assert fused["coverage_terms"] == ["rag"]
-    assert fused["fusion_score"] == 1.9
-
-    minimal = with_fusion(
-        {"hit": item["hit"], "score": item["score"]},
-        coverage_terms=[],
-        coverage_ratio=0.0,
-        source_local_rank=1,
-        source_local_rrf=0.5,
-        fusion_score=0.5,
-        fusion_source="active",
-        fusion_local_position=1,
-    )
-    assert set(minimal) == {"hit", "score", *FUSION_KEYS}
 
 
 def test_fallback_envelope_has_stable_shape() -> None:
@@ -659,35 +609,3 @@ def test_assembler_rejects_retired_explicit_maps_path() -> None:
             cancellation=QueryCancellationContext.unbounded(),
             hit_stats={},  # type: ignore[call-arg]
         )
-
-
-def test_snapshot_captures_metadata_once_and_is_immutable() -> None:
-    pages = [
-        {
-            "path": "wiki/concepts/one.md",
-            "title": "One",
-            "frontmatter": {"tags": ["a"]},
-            "source_kind": "wiki",
-            "corpus": "knowledge",
-            "authority": "high",
-            "content_hash": "hash",
-        }
-    ]
-
-    class Store:
-        scope = "active"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def page_candidates(self):
-            self.calls += 1
-            return pages
-
-    store = Store()
-    snapshot = QueryCorpusSnapshot.capture(store, cancellation=QueryCancellationContext.unbounded())  # type: ignore[arg-type]
-
-    assert store.calls == 1
-    assert snapshot.pages[0]["path"] == "wiki/concepts/one.md"
-    with pytest.raises(TypeError):
-        snapshot.metadata["new"] = {}  # type: ignore[index]

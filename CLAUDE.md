@@ -10,8 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - 安装/同步开发环境：`uv sync --extra dev`
 - 运行全部测试：`uv run pytest`
-- 运行单个测试文件：`uv run pytest tests/wiki/test_wiki_query.py`
-- 运行单个测试函数：`uv run pytest tests/wiki/test_wiki_query.py::test_function_name -v`
+- 运行单个测试文件：`uv run pytest tests/wiki/test_run_query_v2.py`
+- 运行单个测试函数：`uv run pytest tests/wiki/test_run_query_v2.py::test_function_name -v`
 - 启动 MCP server：`uv run llm-wiki-mcp-server`、`uv run llm-wiki-mcp server` 或 `uv run python -m app.server`
 - CLI 初始化 vault：`uv run llm-wiki-mcp init --vault <name> --root <path> --default`
 - CLI 查看状态：`uv run llm-wiki-mcp status`
@@ -114,11 +114,11 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 测试文件按功能包分组，命令为 `uv run pytest tests/<package>/test_<module>.py`：
 - CLI/runtime/config/provenance：`test_cli.py`、`test_runtime_config.py`、`test_runtime_provenance.py`、`test_readme_global_mcp_docs.py`
 - Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_atomic_file.py`、`test_page_mutation.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
-- MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_save_obsidian_note.py`、`test_ingest_service.py`
-- 查询/检索/向量/wikilink：`test_wiki_query.py`、`test_query_pipeline.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
+- MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_note_writer.py`、`test_ingest_service.py`
+- 查询/检索/向量/wikilink：`test_run_query_v2.py`、`test_query_pipeline.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
 - 归档/辅助：`test_archive_lifecycle.py`、`test_git_utils.py`
 - 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`
-- repair/privacy/契约/catalog：`test_cli_repair.py`、`test_cli_repair_admin.py`、`test_page_repair.py`、`test_privacy_audit.py`、`test_provenance_migration.py`、`test_public_contracts.py`、`test_content_catalog.py`、`test_query_cancellation.py`、`test_query_executor.py`、`test_spec_lint.py`（tests/tools/）
+- repair/privacy/契约/catalog：`test_cli_repair.py`、`test_cli_repair_admin.py`、`test_page_repair.py`、`test_privacy_audit.py`、`test_provenance_migration.py`、`test_public_contracts.py`、`test_content_catalog.py`、`test_query_cancellation.py`、`test_query_execution_registry.py`、`test_spec_lint.py`（tests/tools/）
 
 ## Agent skills
 
