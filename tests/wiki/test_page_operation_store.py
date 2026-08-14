@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from wiki.page_operation_store import PageOperationError, PageOperationStore, UpdatePlanError
+from wiki.page_operation_store import PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
 
 
 def test_page_state_is_separate_from_archive_state_and_does_not_store_body(tmp_path: Path) -> None:
@@ -40,6 +40,12 @@ def test_page_operation_store_exposes_public_path_and_connection_helpers(tmp_pat
     assert store.normalize_page_path(r"wiki\concepts\page.md") == "wiki/concepts/page.md"
     with store.connection() as connection:
         assert connection.execute("SELECT 1").fetchone()[0] == 1
+
+
+def test_plan_is_expired_handles_expired_future_and_invalid_values() -> None:
+    assert plan_is_expired(datetime(2000, 1, 1, tzinfo=UTC).isoformat()) is True
+    assert plan_is_expired(datetime(2999, 1, 1, tzinfo=UTC).isoformat()) is False
+    assert plan_is_expired("not-a-timestamp") is True
 
 
 def test_operation_state_and_stage_results_are_recoverable(tmp_path: Path) -> None:

@@ -3,11 +3,12 @@ from __future__ import annotations
 from hashlib import sha256
 
 import pytest
+import yaml
 
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.page_operation_store import PageOperationStore
-from wiki.wiki_update import apply_update, preview_update
+from wiki.wiki_update import _plan_id, apply_update, preview_update
 
 
 def test_preview_apply_cas_and_generated_becomes_manual(tmp_path) -> None:
@@ -23,6 +24,20 @@ def test_preview_apply_cas_and_generated_becomes_manual(tmp_path) -> None:
     assert "maintenance: manual" in page.read_text(encoding="utf-8")
     assert "source_hashes:" in page.read_text(encoding="utf-8")
     assert apply_update(tmp_path, "wiki/concepts/general/a.md", "bad", incoming_frontmatter={"concept_id": "other"})["code"] == "locked_field"
+
+
+def test_plan_id_locks_utf8_input_shape_and_sorted_frontmatter() -> None:
+    path = "wiki/concepts/shape.md"
+    current_hash = "base-hash"
+    body = "正文\n"
+    frontmatter = {"zeta": "值", "alpha": ["一", "two"], "nested": {"b": 2, "a": 1}}
+    dumped = yaml.safe_dump(dict(frontmatter), sort_keys=True, allow_unicode=True)
+    payload = "\0".join((path, current_hash, body, dumped))
+    expected = "0f2b8a9be8d087130fe5ef55f32de91a2c0ae233f89dad7dce1f773aad195e40"
+
+    assert sha256(payload.encode()).hexdigest() == expected
+    assert _plan_id(path, current_hash, body, frontmatter) == expected
+    assert _plan_id(path, current_hash, body, {"nested": {"a": 1, "b": 2}, "alpha": ["一", "two"], "zeta": "值"}) == expected
 
 
 def test_apply_update_uses_redacted_writer_and_refreshes_existing_retrieval_index(tmp_path, monkeypatch) -> None:
