@@ -412,12 +412,6 @@ class ArchiveService:
             except Exception: pass
             return {"ok": False, "code": "archive_index_stale", "state": "stale", "error": str(exc)}
 
-    def status(self) -> dict[str, Any]:
-        with self._connection() as conn:
-            operations = [dict(row) for row in conn.execute("SELECT operation_id,archive_id,operation_type,state,updated_at,error_code FROM archive_operations ORDER BY updated_at DESC")]
-            tombstones = conn.execute("SELECT count(*) FROM tombstones").fetchone()[0]
-        return {"ok": True, "operations": operations, "tombstone_count": tombstones, "archive_index": RetrievalIndexStore(self.root, scope="archive").status()}
-
     def _bundle(self, archive_id: str) -> Path:
         matches = list((self.archive_root / "bundles").glob(f"*/*/{archive_id}"))
         if len(matches) != 1: raise ArchiveError("archive_not_found", "archive id was not found")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import shutil
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 import yaml
 
 from app.cli import main
+from archive.archive_service import ArchiveService
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import RetrievalIndexStore
 
@@ -19,6 +21,14 @@ def _make_vault(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[int, int]]:
+    return {
+        path.relative_to(root).as_posix(): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 def test_init_writes_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -123,6 +133,62 @@ def test_status_returns_nonzero_with_actionable_message_when_config_missing(
     assert output["code"] == "missing_vault_root"
     assert "llm-wiki-mcp init --vault" in output["error"]
     assert "LLM_WIKI_VAULT_ROOT" in output["error"]
+
+
+def test_archive_status_missing_vault_is_read_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    before = _tree_snapshot(vault)
+
+    exit_code = main(["archive", "status", "--vault", str(vault)])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["ok"] is True
+    assert output["state"] == "missing"
+    assert output["code"] == "archive_state_missing"
+    assert _tree_snapshot(vault) == before
+    assert not (vault / ".llm-wiki").exists()
+
+
+def test_archive_status_existing_vault_reports_ready_operations(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    vault = tmp_path / "vault"
+    ArchiveService(vault)
+    state_path = vault / ".llm-wiki" / "state.sqlite3"
+    with sqlite3.connect(state_path) as connection:
+        connection.execute(
+            "INSERT INTO archive_operations "
+            "(operation_id, archive_id, operation_type, state, plan_hash, actor, created_at, updated_at, error_code) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "operation-1",
+                "archive-1",
+                "archive",
+                "committed",
+                "plan-hash",
+                "test",
+                "2026-08-14T00:00:00+00:00",
+                "2026-08-14T00:00:01+00:00",
+                None,
+            ),
+        )
+
+    exit_code = main(["archive", "status", "--vault", str(vault)])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["ok"] is True
+    assert output["state"] == "ready"
+    assert output["operations"] == [
+        {
+            "operation_id": "operation-1",
+            "archive_id": "archive-1",
+            "operation_type": "archive",
+            "state": "committed",
+            "updated_at": "2026-08-14T00:00:01+00:00",
+            "error_code": None,
+        }
+    ]
 
 
 def test_init_returns_nonzero_when_vault_root_is_missing(

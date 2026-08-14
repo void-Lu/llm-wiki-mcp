@@ -22,6 +22,7 @@ from retrieval.query_pipeline import DEFAULT_TOP_K
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, parse_vector_settings, vector_index_records
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError, local_provider_readiness
 from archive.archive_migration import apply_legacy_migration, plan_legacy_migration
+from archive.archive_status_reader import ArchiveStatusReader
 from archive.archive_service import ArchiveService
 from wiki.page_repair import PageRepairService
 from wiki.privacy_audit import PrivacyAuditError, PrivacyAuditService
@@ -416,10 +417,11 @@ def _run_index(args: argparse.Namespace) -> int:
 def _run_archive(args: argparse.Namespace) -> int:
     if args.archive_action == "migrate":
         payload = apply_legacy_migration(args.vault) if args.apply else plan_legacy_migration(args.vault)
+    elif args.archive_action == "status":
+        payload = ArchiveStatusReader(args.vault).status()
     else:
         service = ArchiveService(args.vault, actor="cli-admin")
-        if args.archive_action == "status": payload = service.status()
-        elif args.archive_action == "recover": payload = service.recover()
+        if args.archive_action == "recover": payload = service.recover()
         elif args.archive_action == "rebuild-index": payload = service.rebuild_archive_index()
         elif args.archive_action == "purge": payload = service.purge(args.archive_id, authorized=bool(args.authorize), forget=bool(args.forget))
         else: raise ValueError(f"unknown archive action: {args.archive_action}")
