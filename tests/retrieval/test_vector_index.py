@@ -97,3 +97,4 @@ def test_parse_vector_settings_applies_defaults_and_bounds(tmp_path: Path) -> No
     assert custom.candidate_limit == 20
     with pytest.raises(VectorIndexError, match="min_vector_score") as error:
         parse_vector_settings(tmp_path, {"min_vector_score": 2.0})
+    assert error.value.code == "invalid_config"

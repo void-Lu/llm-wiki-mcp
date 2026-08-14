@@ -75,11 +75,11 @@ def parse_vector_settings(vault_root: str | Path, config: dict[str, Any] | None)
     root = Path(vault_root).expanduser().resolve()
     values = config or {}
     if not isinstance(values, dict):
-        raise VectorIndexError("vector_config_invalid", "vector_config must be an object")
+        raise VectorIndexError("invalid_config", "vector_config must be an object")
     credential_keys = {"api_key", "token", "password", "secret", "authorization", "access_key"}
     forbidden = sorted(key for key in values if key.casefold() in credential_keys or key.casefold().endswith(("_token", "_secret", "_password")))
     if forbidden:
-        raise VectorIndexError("vector_config_invalid", "provider credentials are not accepted through vector_config")
+        raise VectorIndexError("invalid_config", "provider credentials are not accepted through vector_config")
     provider = str(values.get("provider") or "local_bge_m3")
     if provider != "local_bge_m3":
         raise VectorIndexError("vector_provider_unsupported", "only the local_bge_m3 provider is supported")
@@ -126,11 +126,11 @@ def _resolved_index_path(root: Path, value: object) -> Path:
     if value in (None, ""):
         return default_vector_index_path(root)
     if not isinstance(value, str):
-        raise VectorIndexError("vector_config_invalid", "index_path must be a string")
+        raise VectorIndexError("invalid_config", "index_path must be a string")
     proposed = Path(value).expanduser()
     path = (root / proposed).resolve() if not proposed.is_absolute() else proposed.resolve()
     if not path.is_relative_to(root):
-        raise VectorIndexError("vector_config_invalid", "index_path must remain inside the vault")
+        raise VectorIndexError("invalid_config", "index_path must remain inside the vault")
     return path
 
 
@@ -144,13 +144,13 @@ def _bounded_int(
     if value is None:
         return int(default)
     if isinstance(value, bool):
-        raise VectorIndexError("vector_config_invalid", f"{name} must be an integer")
+        raise VectorIndexError("invalid_config", f"{name} must be an integer")
     try:
         parsed = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
-        raise VectorIndexError("vector_config_invalid", f"{name} must be an integer") from exc
+        raise VectorIndexError("invalid_config", f"{name} must be an integer") from exc
     if not minimum <= parsed <= maximum:
-        raise VectorIndexError("vector_config_invalid", f"{name} must be between {minimum} and {maximum}")
+        raise VectorIndexError("invalid_config", f"{name} must be between {minimum} and {maximum}")
     return parsed
 
 
@@ -164,13 +164,13 @@ def _bounded_float(
     if value is None:
         return float(default)
     if isinstance(value, bool):
-        raise VectorIndexError("vector_config_invalid", f"{name} must be a number")
+        raise VectorIndexError("invalid_config", f"{name} must be a number")
     try:
         parsed = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
-        raise VectorIndexError("vector_config_invalid", f"{name} must be a number") from exc
+        raise VectorIndexError("invalid_config", f"{name} must be a number") from exc
     if not minimum <= parsed <= maximum:
-        raise VectorIndexError("vector_config_invalid", f"{name} must be between {minimum} and {maximum}")
+        raise VectorIndexError("invalid_config", f"{name} must be between {minimum} and {maximum}")
     return parsed
 
 
@@ -180,11 +180,11 @@ class VectorIndexStore:
     def __init__(self, vault_root: str | Path, index_path: str | Path | None = None, *, corpus: str = "active") -> None:
         self.root = Path(vault_root).expanduser().resolve()
         if corpus not in {"active", "archive"}:
-            raise VectorIndexError("vector_config_invalid", "corpus must be active or archive")
+            raise VectorIndexError("invalid_config", "corpus must be active or archive")
         self.corpus = corpus
         self.index_path = Path(index_path).expanduser().resolve() if index_path is not None else default_vector_index_path(self.root, corpus=corpus)
         if not self.index_path.is_relative_to(self.root):
-            raise VectorIndexError("vector_config_invalid", "index_path must remain inside the vault")
+            raise VectorIndexError("invalid_config", "index_path must remain inside the vault")
 
     @property
     def manifest_path(self) -> Path:
