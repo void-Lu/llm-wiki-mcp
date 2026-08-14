@@ -30,6 +30,8 @@ ARCHIVE_REQUIRED_COLUMNS = {
     "archive_operations": frozenset(
         {"operation_id", "archive_id", "operation_type", "state", "plan_hash", "actor", "created_at", "updated_at", "error_code"}
     ),
+    "archive_operation_items": frozenset({"operation_id", "original_path", "original_hash", "staged_path", "kind"}),
+    "archive_events": frozenset({"id", "operation_id", "archive_id", "event_type", "created_at", "payload"}),
     "tombstones": frozenset({"archive_id", "purged_at", "reason", "payload"}),
 }
 ARCHIVE_OPERATIONS_STATUS_COLUMNS = (

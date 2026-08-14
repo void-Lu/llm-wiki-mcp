@@ -4,6 +4,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+import pytest
+
 from archive.archive_service import ArchiveService
 from archive.archive_status_reader import ArchiveStatusReader
 
@@ -71,6 +73,34 @@ def test_missing_schema_is_incompatible_without_migration(tmp_path: Path) -> Non
     assert result["state"] == "incompatible"
     assert result["code"] == "archive_state_incompatible"
     assert "archive_plans" in result["missing_tables"]
+    assert _tree_snapshot(root) == before
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    (
+        ("archive_plans", "payload"),
+        ("archive_operation_items", "kind"),
+        ("archive_events", "payload"),
+    ),
+)
+def test_missing_columns_in_any_archive_table_are_incompatible(
+    tmp_path: Path,
+    table: str,
+    column: str,
+) -> None:
+    root = tmp_path / "vault"
+    ArchiveService(root)
+    state_path = root / ".llm-wiki" / "state.sqlite3"
+    with sqlite3.connect(state_path) as connection:
+        connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+
+    before = _tree_snapshot(root)
+    result = ArchiveStatusReader(root).status()
+
+    assert result["ok"] is False
+    assert result["state"] == "incompatible"
+    assert result["missing_columns"] == {table: [column]}
     assert _tree_snapshot(root) == before
 
 
