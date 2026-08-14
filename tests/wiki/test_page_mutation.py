@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_mutation import (
+    MutationResult,
+    PageMutationCoordinator,
+    dependency_projection_of,
+    retrieval_index_of,
+    safe_stages_of,
+    stage_result_of,
+)
 from wiki.page_operation_store import PageOperationStore
 from wiki.update_plan_store import UpdatePlanStore
 
@@ -175,6 +182,33 @@ def test_write_and_project_plan_claims_consumes_and_returns_safe_stages(tmp_path
     assert result.state == "completed"
     assert result.stages["dependencies"]["state"] == "succeeded"
     assert plans.get(plan_id).state == "consumed"
+
+
+def test_stage_explanation_helpers_use_safe_persisted_views(tmp_path: Path) -> None:
+    _, store, _, operation_id = _operation(tmp_path)
+    store.record_stage(
+        operation_id,
+        "retrieval",
+        "succeeded",
+        result={"ok": True, "state": "ready", "retrieval_index": {"secret": "hidden"}, "written": ["wiki/page.md"]},
+    )
+    operation = store.get_operation(operation_id)
+    assert operation is not None
+
+    safe_stages = safe_stages_of(operation)
+    assert safe_stages["retrieval"]["result"] == {"ok": True, "state": "ready", "written": ["wiki/page.md"]}
+
+    result = MutationResult(
+        ok=True,
+        stages={
+            "dependencies": {"state": "succeeded"},
+            "retrieval": safe_stages["retrieval"],
+            "navigation": {"state": "pending"},
+        },
+    )
+    assert dependency_projection_of(result) == {"ok": True, "state": "ready"}
+    assert retrieval_index_of(result) == {"ok": True, "state": "ready", "written": ["wiki/page.md"]}
+    assert stage_result_of(result, "navigation") is None
 
 
 def test_write_and_project_claimed_prepared_plan_is_not_replayed(tmp_path: Path) -> None:

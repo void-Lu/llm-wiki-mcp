@@ -89,6 +89,46 @@ class MutationResult:
         return result
 
 
+def safe_stages_of(operation: PageOperation) -> dict[str, dict[str, object]]:
+    """返回 page-operation store 所拥有的有界阶段视图。"""
+
+    return {name: PageOperationStore.safe_stage_record(record) for name, record in operation.stages.items()}
+
+
+def stage_result_of(result: MutationResult, stage: str) -> dict[str, object] | None:
+    """读取一个已持久化的阶段结果；不存在时返回 ``None``。"""
+
+    record = result.stages.get(stage)
+    if not isinstance(record, Mapping):
+        return None
+    value = record.get("result")
+    return dict(value) if isinstance(value, Mapping) else None
+
+
+def dependency_projection_of(result: MutationResult) -> dict[str, object]:
+    """解释 formal 页面响应中的 dependencies 阶段。
+
+    阶段结果的解释 helper 与投影 builder 同居；嵌套键在持久化层被
+    ``_safe_stage_result`` 白名单削平。
+    """
+
+    stage = result.stages.get("dependencies")
+    if not isinstance(stage, Mapping):
+        return {"ok": True, "state": "ready"}
+    stage_result = stage.get("result")
+    if isinstance(stage_result, Mapping):
+        return dict(stage_result)
+    if stage.get("state") == "succeeded":
+        return {"ok": True, "state": "ready"}
+    return {"ok": True, "state": "ready"}
+
+
+def retrieval_index_of(result: MutationResult) -> dict[str, object] | None:
+    """解释 formal retrieval 投影，并保持缺失时的 ``None`` 形状。"""
+
+    return stage_result_of(result, "retrieval")
+
+
 class PageMutationError(ValueError):
     """Stable failure from the page mutation coordinator."""
 
@@ -460,7 +500,7 @@ class PageMutationCoordinator:
             "audit_log": audit_log,
         }
 
-    def commit_with_projections(
+    def _commit_with_projections(
         self,
         operation_id: str,
         text: str,
@@ -604,7 +644,7 @@ class PageMutationCoordinator:
                         operation_id=operation.operation_id,
                     )
 
-        projection = self.commit_with_projections(
+        projection = self._commit_with_projections(
             operation.operation_id,
             text,
             expected_hash=expected_hash,
@@ -647,12 +687,7 @@ class PageMutationCoordinator:
         current = operation
         if operation_id is not None:
             current = self._store.get_operation(operation_id) or operation
-        stages: dict[str, dict[str, object]] = {}
-        if current is not None:
-            stages = {
-                name: self._store.safe_stage_record(record)
-                for name, record in current.stages.items()
-            }
+        stages: dict[str, dict[str, object]] = safe_stages_of(current) if current is not None else {}
         return MutationResult.from_mapping(result, stages=stages)
 
     def _classify_commit_failure(self, operation: PageOperation, target: Path) -> dict[str, object]:
@@ -774,5 +809,9 @@ __all__ = [
     "PageMutationError",
     "Projection",
     "ProjectionProfile",
+    "dependency_projection_of",
     "fault_barrier",
+    "retrieval_index_of",
+    "safe_stages_of",
+    "stage_result_of",
 ]

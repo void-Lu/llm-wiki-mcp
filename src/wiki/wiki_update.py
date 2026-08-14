@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 import yaml
 
-from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_mutation import PageMutationCoordinator, dependency_projection_of, retrieval_index_of, stage_result_of
 from wiki.atomic_file import sha256_file
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
@@ -176,10 +176,9 @@ def apply_update(
         if mutation.repair_action:
             replay["repair_action"] = mutation.repair_action
         return _attach_related_page_skips(replay, related_pages, related_pages_skipped)
-    stages = mutation.stages
-    dependency_projection = stages.get("dependencies", {}).get("result", {"ok": True, "state": "ready"})
-    navigation = stages.get("navigation", {}).get("result")
-    retrieval_index = stages.get("retrieval", {}).get("result")
+    dependency_projection = dependency_projection_of(mutation)
+    navigation = stage_result_of(mutation, "navigation")
+    retrieval_index = retrieval_index_of(mutation)
     result = {"ok": True, "state": mutation.state or "completed", "action": "apply", "page_path": page_path, "operation_id": mutation.operation_id, "hash": updated_hash, "page_hash": mutation.page_hash or updated_hash, "navigation": navigation, "retrieval_index": retrieval_index, "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "dependency_projection": dependency_projection, "provenance_status": "verified" if _stored_source_hashes(final) else "provenance_unverified", "freshness": str(final.get("freshness") or "review_required")}
     if mutation.repair_action:
         result["repair_action"] = mutation.repair_action

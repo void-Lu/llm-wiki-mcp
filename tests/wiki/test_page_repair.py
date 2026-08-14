@@ -3,7 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import Path
 
-from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_mutation import PageMutationCoordinator, safe_stages_of
 from wiki.page_operation_store import PageOperationStore
 from wiki.page_repair import PageRepairService
 
@@ -37,6 +37,7 @@ def test_page_repair_rebuilds_only_projections_and_audits_once(tmp_path: Path) -
     assert summary["request_key"] == "repair-request"
     assert summary["created_at"] == operation.created_at
     assert "body" not in str(summary)
+    assert summary["stages"] == safe_stages_of(operation)
     first = service.apply(operation.operation_id)
     second = service.apply(operation.operation_id)
 

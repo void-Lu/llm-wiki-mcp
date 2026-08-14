@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_mutation import PageMutationCoordinator, safe_stages_of
 from wiki.page_operation_store import PageOperation, PageOperationStore
 
 
@@ -33,10 +33,7 @@ class PageRepairService:
 
 def _operation_summary(operation: PageOperation) -> dict[str, object]:
     summary = operation.to_dict()
-    summary["stages"] = {
-        key: PageOperationStore.safe_stage_record(value)
-        for key, value in operation.stages.items()
-    }
+    summary["stages"] = safe_stages_of(operation)
     return summary
 
 

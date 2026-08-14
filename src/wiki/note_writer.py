@@ -7,7 +7,7 @@ from typing import Any
 
 from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
-from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_mutation import PageMutationCoordinator, dependency_projection_of
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import WikiPathError, create_wiki_root, resolve_within_root, safe_segment, slug, translate_path_error
@@ -303,8 +303,7 @@ def save_obsidian_note(
     if not projection_result.ok:
         return projection_result.to_dict()
     operation_id = projection_result.operation_id or ""
-    stages = projection_result.stages
-    dependency_projection = stages.get("dependencies", {}).get("result", {"ok": True, "state": "ready"})
+    dependency_projection = dependency_projection_of(projection_result)
     broken_wikilinks = validate_wikilinks(redacted_content, root)
     result: dict[str, Any] = {
         "ok": True,

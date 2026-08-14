@@ -233,7 +233,8 @@ class ChatMemoryService:
         if not isinstance(stage_result, Mapping):
             stage_result = {}
         if stage.get("state") == "succeeded":
-            retrieval_index = dict(stage_result.get("retrieval_index") or stage_result)
+            # 持久化白名单会削平嵌套 retrieval_index；safe stage result 已是公开视图。
+            retrieval_index = dict(stage_result)
             indexed = retrieval_index.get("state") not in {"rebuild_required", "not_indexed"} and retrieval_index.get("ok") is True
             return {
                 "ok": indexed,
