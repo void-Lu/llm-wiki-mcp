@@ -14,8 +14,7 @@ from wiki.page_mutation import (
     safe_stages_of,
     stage_result_of,
 )
-from wiki.page_operation_store import PageOperationStore
-from wiki.update_plan_store import UpdatePlanStore
+from wiki.page_operation_store import PageOperationStore, UpdatePlanError
 
 
 def _operation(tmp_path: Path, old: str = "old", new: str = "new") -> tuple[PageMutationCoordinator, PageOperationStore, Path, str]:
@@ -153,20 +152,20 @@ def test_projection_failure_is_repair_pending_and_retry_skips_succeeded_stages(t
     assert calls == ["dependencies", "retrieval", "navigation", "overview", "audit_log"]
 
 
-def _plan_inputs(tmp_path: Path) -> tuple[PageMutationCoordinator, UpdatePlanStore, Path, str, str, str]:
+def _plan_inputs(tmp_path: Path) -> tuple[PageMutationCoordinator, PageOperationStore, Path, str, str, str]:
     page = tmp_path / "wiki/concepts/general/plan.md"
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text("old", encoding="utf-8")
     base_hash = sha256(b"old").hexdigest()
     text = "new"
     intended_hash = sha256(text.encode()).hexdigest()
-    plans = UpdatePlanStore(tmp_path)
-    plan = plans.issue(page.relative_to(tmp_path).as_posix(), base_hash, "intent")
-    return PageMutationCoordinator(tmp_path, plan_store=plans), plans, page, plan.plan_id, base_hash, intended_hash
+    store = PageOperationStore(tmp_path)
+    plan = store.issue_plan(page.relative_to(tmp_path).as_posix(), base_hash, "intent")
+    return PageMutationCoordinator(tmp_path, store=store), store, page, plan.plan_id, base_hash, intended_hash
 
 
 def test_write_and_project_plan_claims_consumes_and_returns_safe_stages(tmp_path: Path) -> None:
-    coordinator, plans, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
+    coordinator, store, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
     result = coordinator.write_and_project(
         request_key=plan_id,
         operation_kind="update",
@@ -181,7 +180,7 @@ def test_write_and_project_plan_claims_consumes_and_returns_safe_stages(tmp_path
     assert result.ok is True
     assert result.state == "completed"
     assert result.stages["dependencies"]["state"] == "succeeded"
-    assert plans.get(plan_id).state == "consumed"
+    assert store.get_plan(plan_id).state == "consumed"
 
 
 def test_stage_explanation_helpers_use_safe_persisted_views(tmp_path: Path) -> None:
@@ -262,15 +261,15 @@ def test_mutation_result_from_mapping_omits_none_fields_and_empty_stages() -> No
 
 
 def test_write_and_project_claimed_prepared_plan_is_not_replayed(tmp_path: Path) -> None:
-    coordinator, plans, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
-    operation = plans.store.create_operation(
+    coordinator, store, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
+    operation = store.create_operation(
         request_key=plan_id,
         operation_kind="update",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
         intended_hash=intended_hash,
     )
-    plans.claim(
+    store.claim_plan(
         plan_id,
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
@@ -293,8 +292,8 @@ def test_write_and_project_claimed_prepared_plan_is_not_replayed(tmp_path: Path)
 
 
 def test_write_and_project_rejects_expired_and_intent_drift(tmp_path: Path) -> None:
-    coordinator, plans, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
-    connection = sqlite3.connect(plans.path)
+    coordinator, store, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
+    connection = sqlite3.connect(store.path)
     connection.execute("UPDATE update_plans SET expires_at=? WHERE plan_id=?", ("2000-01-01T00:00:00+00:00", plan_id))
     connection.commit()
     connection.close()
@@ -311,7 +310,7 @@ def test_write_and_project_rejects_expired_and_intent_drift(tmp_path: Path) -> N
     )
     assert expired.code == "plan_expired"
 
-    fresh = plans.issue(page.relative_to(tmp_path).as_posix(), base_hash, "intent")
+    fresh = store.issue_plan(page.relative_to(tmp_path).as_posix(), base_hash, "intent")
     drift = coordinator.write_and_project(
         request_key=fresh.plan_id,
         operation_kind="update",
@@ -327,7 +326,7 @@ def test_write_and_project_rejects_expired_and_intent_drift(tmp_path: Path) -> N
 
 
 def test_write_and_project_claim_failure_marks_operation_failed_precommit(tmp_path: Path) -> None:
-    coordinator, plans, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
+    coordinator, store, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
     result = coordinator.write_and_project(
         request_key=plan_id,
         operation_kind="update",
@@ -340,13 +339,13 @@ def test_write_and_project_claim_failure_marks_operation_failed_precommit(tmp_pa
         intent_hash="intent",
     )
     assert result.code == "plan_intent_drift"
-    operation = plans.store.get_operation_by_request_key(plan_id)
+    operation = store.get_operation_by_request_key(plan_id)
     assert operation is not None
     assert operation.state == "failed_precommit"
 
 
 def test_write_and_project_consumed_replay_exposes_repair_action(tmp_path: Path) -> None:
-    coordinator, plans, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
+    coordinator, store, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
     first = coordinator.write_and_project(
         request_key=plan_id,
         operation_kind="update",
@@ -359,9 +358,9 @@ def test_write_and_project_consumed_replay_exposes_repair_action(tmp_path: Path)
         intent_hash="intent",
     )
     assert first.ok
-    operation = plans.store.get_operation(first.operation_id)
+    operation = store.get_operation(first.operation_id)
     assert operation is not None
-    plans.store.set_operation_state(operation.operation_id, "repair_pending")
+    store.set_operation_state(operation.operation_id, "repair_pending")
     replay = coordinator.write_and_project(
         request_key=plan_id,
         operation_kind="update",
@@ -378,15 +377,13 @@ def test_write_and_project_consumed_replay_exposes_repair_action(tmp_path: Path)
 
 
 def test_write_and_project_plan_consume_failure_is_repair_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    coordinator, plans, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
+    coordinator, store, page, plan_id, base_hash, intended_hash = _plan_inputs(tmp_path)
 
     def fail_consume(*args: object, **kwargs: object) -> object:
         del args, kwargs
-        from wiki.update_plan_store import UpdatePlanError
-
         raise UpdatePlanError("plan_state_busy")
 
-    monkeypatch.setattr(plans, "consume", fail_consume)
+    monkeypatch.setattr(store, "consume_plan", fail_consume)
     result = coordinator.write_and_project(
         request_key=plan_id,
         operation_kind="update",

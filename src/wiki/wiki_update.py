@@ -12,9 +12,9 @@ import yaml
 
 from wiki.page_mutation import PageMutationCoordinator, dependency_projection_of, retrieval_index_of, stage_result_of
 from wiki.atomic_file import sha256_file
+from wiki.page_operation_store import PageOperationStore, UpdatePlanError
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
-from wiki.update_plan_store import UpdatePlanError, UpdatePlanStore
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
@@ -64,7 +64,7 @@ def preview_update(
     current_hash = sha256_file(target)
     intent_hash = _plan_id(page_path, current_hash, incoming_body, incoming)
     try:
-        plan = UpdatePlanStore(str(root)).issue(page_path, current_hash, intent_hash)
+        plan = PageOperationStore(str(root)).issue_plan(page_path, current_hash, intent_hash)
     except UpdatePlanError as exc:
         return {"ok": False, "code": exc.code}
     result = {"ok": True, "action": "preview", "page_path": page_path, "current_hash": current_hash, "plan_id": plan.plan_id, "plan_expires_at": plan.expires_at, "locked_fields": sorted(LOCKED_FIELDS), "locked_field_violations": violations, "removed_sources": sorted(removed_sources), "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "diff": "".join(difflib.unified_diff(old_body.splitlines(True), incoming_body.splitlines(True), fromfile="current", tofile="incoming"))}
@@ -103,8 +103,8 @@ def apply_update(
     incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages, heading=related_pages_heading)
     incoming_body, normalized_count = auto_normalize_wikilinks(incoming_body, root)
     broken_wikilinks = validate_wikilinks(incoming_body, root)
-    plan_store = UpdatePlanStore(str(root)) if plan_id else None
-    plan_snapshot = plan_store.get(plan_id) if plan_store is not None and plan_id else None
+    store = PageOperationStore(str(root)) if plan_id else None
+    plan_snapshot = store.get_plan(plan_id) if store is not None and plan_id else None
     plan_base_hash = plan_snapshot.base_hash if plan_snapshot is not None and plan_snapshot.state == "consumed" else current_hash
     expected_plan = _plan_id(page_path, plan_base_hash, incoming_body, incoming)
     if existing.get("lifecycle", "active") != "active":
@@ -150,7 +150,7 @@ def apply_update(
     except WikiWriteError as exc:
         return _attach_related_page_skips({"ok": False, "code": exc.code, "error": str(exc)}, related_pages, related_pages_skipped)
     updated_hash = _digest(prepared.text)
-    coordinator = PageMutationCoordinator(root, plan_store=plan_store)
+    coordinator = PageMutationCoordinator(root)
     mutation = coordinator.write_and_project(
         request_key=plan_id or f"body:{secrets.token_urlsafe(18)}",
         operation_kind="update",

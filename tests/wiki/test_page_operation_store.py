@@ -7,8 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from wiki.page_operation_store import PageOperationError, PageOperationStore
-from wiki.update_plan_store import UpdatePlanError, UpdatePlanStore
+from wiki.page_operation_store import PageOperationError, PageOperationStore, UpdatePlanError
 
 
 def test_page_state_is_separate_from_archive_state_and_does_not_store_body(tmp_path: Path) -> None:
@@ -41,13 +40,6 @@ def test_page_operation_store_exposes_public_path_and_connection_helpers(tmp_pat
     assert store.normalize_page_path(r"wiki\concepts\page.md") == "wiki/concepts/page.md"
     with store.connection() as connection:
         assert connection.execute("SELECT 1").fetchone()[0] == 1
-
-
-def test_update_plan_store_does_not_reach_into_private_page_store_api() -> None:
-    source = Path("src/wiki/update_plan_store.py").read_text(encoding="utf-8")
-
-    assert "self.store._connection" not in source
-    assert "_normalize_page_path" not in source
 
 
 def test_operation_state_and_stage_results_are_recoverable(tmp_path: Path) -> None:
@@ -135,19 +127,19 @@ def test_page_state_schema_version_mismatch_is_rejected(tmp_path: Path) -> None:
 
 
 def test_update_plan_is_opaque_single_claim_and_single_consume(tmp_path: Path) -> None:
-    plans = UpdatePlanStore(str(tmp_path))
-    plan = plans.issue("wiki/concepts/general/page.md", "base", "intent", ttl_seconds=300)
+    store = PageOperationStore(str(tmp_path))
+    plan = store.issue_plan("wiki/concepts/general/page.md", "base", "intent", ttl_seconds=300)
     assert len(plan.plan_id) >= 40
     assert "body" not in plan.to_dict()
 
-    operation = plans.store.create_operation(
+    operation = store.create_operation(
         request_key=plan.plan_id,
         operation_kind="update",
         page_path=plan.page_path,
         base_hash=plan.base_hash,
         intended_hash="page-hash",
     )
-    claimed = plans.claim(
+    claimed = store.claim_plan(
         plan.plan_id,
         page_path=plan.page_path,
         base_hash="base",
@@ -156,7 +148,7 @@ def test_update_plan_is_opaque_single_claim_and_single_consume(tmp_path: Path) -
     )
     assert claimed.state == "claimed"
     with pytest.raises(UpdatePlanError) as claim_error:
-        plans.claim(
+        store.claim_plan(
             plan.plan_id,
             page_path=plan.page_path,
             base_hash="base",
@@ -165,49 +157,49 @@ def test_update_plan_is_opaque_single_claim_and_single_consume(tmp_path: Path) -
         )
     assert claim_error.value.code == "plan_claimed"
 
-    consumed = plans.consume(plan.plan_id, operation_id=operation.operation_id, committed_hash="page-hash")
+    consumed = store.consume_plan(plan.plan_id, operation_id=operation.operation_id, committed_hash="page-hash")
     assert consumed.state == "consumed"
-    assert plans.consume(plan.plan_id, operation_id=operation.operation_id, committed_hash="page-hash").state == "consumed"
+    assert store.consume_plan(plan.plan_id, operation_id=operation.operation_id, committed_hash="page-hash").state == "consumed"
     with pytest.raises(UpdatePlanError) as used_error:
-        plans.consume(plan.plan_id, operation_id="other-operation", committed_hash="page-hash")
+        store.consume_plan(plan.plan_id, operation_id="other-operation", committed_hash="page-hash")
     assert used_error.value.code == "plan_used"
 
 
 def test_update_plan_rejects_unknown_drift_and_expiry_codes(tmp_path: Path) -> None:
-    plans = UpdatePlanStore(str(tmp_path))
+    store = PageOperationStore(str(tmp_path))
     with pytest.raises(UpdatePlanError) as unknown:
-        plans.claim("unknown", page_path="wiki/concepts/page.md", base_hash="base", intent_hash="intent", operation_id="op")
+        store.claim_plan("unknown", page_path="wiki/concepts/page.md", base_hash="base", intent_hash="intent", operation_id="op")
     assert unknown.value.code == "plan_unknown"
 
-    base_plan = plans.issue("wiki/concepts/base.md", "base", "intent")
-    base_operation = plans.store.create_operation(request_key="base-op", operation_kind="update", page_path=base_plan.page_path, base_hash="base", intended_hash="page")
+    base_plan = store.issue_plan("wiki/concepts/base.md", "base", "intent")
+    base_operation = store.create_operation(request_key="base-op", operation_kind="update", page_path=base_plan.page_path, base_hash="base", intended_hash="page")
     with pytest.raises(UpdatePlanError) as base_error:
-        plans.claim(base_plan.plan_id, page_path=base_plan.page_path, base_hash="changed", intent_hash="intent", operation_id=base_operation.operation_id)
+        store.claim_plan(base_plan.plan_id, page_path=base_plan.page_path, base_hash="changed", intent_hash="intent", operation_id=base_operation.operation_id)
     assert base_error.value.code == "plan_base_mismatch"
 
-    intent_plan = plans.issue("wiki/concepts/intent.md", "base", "intent")
-    intent_operation = plans.store.create_operation(request_key="intent-op", operation_kind="update", page_path=intent_plan.page_path, base_hash="base", intended_hash="page")
+    intent_plan = store.issue_plan("wiki/concepts/intent.md", "base", "intent")
+    intent_operation = store.create_operation(request_key="intent-op", operation_kind="update", page_path=intent_plan.page_path, base_hash="base", intended_hash="page")
     with pytest.raises(UpdatePlanError) as intent_error:
-        plans.claim(intent_plan.plan_id, page_path=intent_plan.page_path, base_hash="base", intent_hash="changed", operation_id=intent_operation.operation_id)
+        store.claim_plan(intent_plan.plan_id, page_path=intent_plan.page_path, base_hash="base", intent_hash="changed", operation_id=intent_operation.operation_id)
     assert intent_error.value.code == "plan_intent_drift"
 
-    expired_plan = plans.issue("wiki/concepts/expired.md", "base", "intent")
-    connection = sqlite3.connect(plans.path)
+    expired_plan = store.issue_plan("wiki/concepts/expired.md", "base", "intent")
+    connection = sqlite3.connect(store.path)
     connection.execute("UPDATE update_plans SET expires_at=? WHERE plan_id=?", (datetime(2000, 1, 1, tzinfo=UTC).isoformat(), expired_plan.plan_id))
     connection.commit()
     connection.close()
-    expired_operation = plans.store.create_operation(request_key="expired-op", operation_kind="update", page_path=expired_plan.page_path, base_hash="base", intended_hash="page")
+    expired_operation = store.create_operation(request_key="expired-op", operation_kind="update", page_path=expired_plan.page_path, base_hash="base", intended_hash="page")
     with pytest.raises(UpdatePlanError) as expired_error:
-        plans.claim(expired_plan.plan_id, page_path=expired_plan.page_path, base_hash="base", intent_hash="intent", operation_id=expired_operation.operation_id)
+        store.claim_plan(expired_plan.plan_id, page_path=expired_plan.page_path, base_hash="base", intent_hash="intent", operation_id=expired_operation.operation_id)
     assert expired_error.value.code == "plan_expired"
 
 
 def test_only_one_thread_can_claim_the_same_plan(tmp_path: Path) -> None:
-    plans = UpdatePlanStore(str(tmp_path))
-    plan = plans.issue("wiki/concepts/concurrent.md", "base", "intent")
+    store = PageOperationStore(str(tmp_path))
+    plan = store.issue_plan("wiki/concepts/concurrent.md", "base", "intent")
 
     def claim(index: int) -> str:
-        operation = plans.store.create_operation(
+        operation = store.create_operation(
             request_key=f"concurrent-{index}",
             operation_kind="update",
             page_path=plan.page_path,
@@ -215,7 +207,7 @@ def test_only_one_thread_can_claim_the_same_plan(tmp_path: Path) -> None:
             intended_hash="page",
         )
         try:
-            plans.claim(plan.plan_id, page_path=plan.page_path, base_hash="base", intent_hash="intent", operation_id=operation.operation_id)
+            store.claim_plan(plan.plan_id, page_path=plan.page_path, base_hash="base", intent_hash="intent", operation_id=operation.operation_id)
         except UpdatePlanError as exc:
             return exc.code
         return "claimed"

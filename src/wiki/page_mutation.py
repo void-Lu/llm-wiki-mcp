@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 import threading
@@ -13,8 +12,7 @@ from typing import Any, Callable, Mapping
 from common.privacy_policy import normalize_vault_relative
 from wiki.atomic_file import AtomicFileError, FaultBarrier, atomic_write_text, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
-from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore
-from wiki.update_plan_store import UpdatePlanError, UpdatePlanStore
+from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
 from wiki.wiki_index import refresh_navigation
 from wiki.wiki_io import read_markdown_page, refresh_page_retrieval
 from wiki.wiki_log import append_log_entry
@@ -163,13 +161,11 @@ class PageMutationCoordinator:
         vault_root: str | Path,
         *,
         store: PageOperationStore | None = None,
-        plan_store: UpdatePlanStore | None = None,
         fault: FaultBarrier | None = None,
         profiles: Mapping[str, ProjectionProfile] | None = None,
     ):
         self.root = Path(vault_root).expanduser().resolve()
         self._store = store or PageOperationStore(self.root)
-        self._plan_store = plan_store or UpdatePlanStore(self._store)
         self.fault = fault
         self.profiles = {**_DEFAULT_PROFILES, **dict(profiles or {})}
 
@@ -568,7 +564,7 @@ class PageMutationCoordinator:
         """Prepare, commit, project, and optionally consume one mutation plan."""
 
         if plan_id is not None:
-            plan = self._plan_store.get(plan_id)
+            plan = self._store.get_plan(plan_id)
             if plan is None:
                 return MutationResult(ok=False, code="plan_unknown")
             if plan.state == "consumed":
@@ -590,7 +586,7 @@ class PageMutationCoordinator:
                     },
                     operation,
                 )
-            if _plan_is_expired(plan.expires_at):
+            if plan_is_expired(plan.expires_at):
                 return MutationResult(ok=False, code="plan_expired")
             if plan.state == "expired" or plan.state not in {"issued", "claimed"}:
                 return MutationResult(ok=False, code="plan_expired" if plan.state == "expired" else "plan_unknown")
@@ -634,10 +630,10 @@ class PageMutationCoordinator:
                 return MutationResult(ok=False, code=exc.code)
 
         if plan_id is not None:
-            plan = self._plan_store.get(plan_id)
+            plan = self._store.get_plan(plan_id)
             if plan is not None and plan.state == "issued":
                 try:
-                    self._plan_store.claim(
+                    self._store.claim_plan(
                         plan_id,
                         page_path=page_path,
                         base_hash=base_hash or "",
@@ -664,7 +660,7 @@ class PageMutationCoordinator:
 
         if plan_id is not None:
             try:
-                self._plan_store.consume(
+                self._store.consume_plan(
                     plan_id,
                     operation_id=operation.operation_id,
                     committed_hash=str(projection.get("page_hash") or intended_hash),
@@ -803,13 +799,6 @@ def _sources(frontmatter: Mapping[str, Any]) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return [str(value)] if value else []
-
-
-def _plan_is_expired(value: str) -> bool:
-    try:
-        return datetime.fromisoformat(value) <= datetime.now(UTC)
-    except ValueError:
-        return True
 
 
 __all__ = [
