@@ -177,16 +177,7 @@ def search_ladder(
                 hits = store.search_fts(
                     step.query,
                     limit=limit,
-                    mode=cast(
-                        Literal[
-                            "strict",
-                            "relaxed",
-                            "qualified_code",
-                            "identifier_phrase",
-                            "raw_prefix",
-                        ],
-                        step.mode,
-                    ),
+                    mode=step.mode,
                     **cast(dict[str, Any], dict(step.kwargs)),
                 )
         except RetrievalIndexError as exc:
