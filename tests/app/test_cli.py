@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from app.cli import main
-from archive.archive_service import ArchiveService
+from archive.archive_schema import ARCHIVE_TABLE_DDL
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import RetrievalIndexStore
 
@@ -158,9 +158,10 @@ def test_archive_status_missing_vault_is_read_only(tmp_path: Path, capsys: pytes
 
 def test_archive_status_existing_vault_reports_ready_operations(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     vault = tmp_path / "vault"
-    ArchiveService(vault)
     state_path = vault / ".llm-wiki" / "state.sqlite3"
+    state_path.parent.mkdir(parents=True)
     with sqlite3.connect(state_path) as connection:
+        connection.executescript(ARCHIVE_TABLE_DDL)
         connection.execute(
             "INSERT INTO archive_operations "
             "(operation_id, archive_id, operation_type, state, plan_hash, actor, created_at, updated_at, error_code) "

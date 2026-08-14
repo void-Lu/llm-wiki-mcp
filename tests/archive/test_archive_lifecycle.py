@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import sqlite3
 
 import archive.archive_service as archive_service_module
 from archive.archive_migration import apply_legacy_migration, plan_legacy_migration
+from archive.archive_schema import ARCHIVE_REQUIRED_COLUMNS, ARCHIVE_REQUIRED_TABLES, ARCHIVE_TABLE_DDL
 from archive.archive_service import ArchiveService
 from wiki.knowledge_dependencies import KnowledgeDependencies
 
@@ -13,6 +16,49 @@ def _page(root: Path, relative: str, lifecycle: str = "deprecated") -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"---\ngenerated: true\nlifecycle: {lifecycle}\n---\n\n# Archived\n", encoding="utf-8")
     return target
+
+
+def test_archive_service_constructor_has_no_state_side_effect_until_first_write(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    service = ArchiveService(root)
+
+    assert not (root / ".llm-wiki").exists()
+    assert not (root / ".llm-wiki" / "state.sqlite3").exists()
+
+    _page(root, "wiki/concepts/example.md")
+    planned = service.plan_archive("wiki/concepts/example.md", reason="deprecated")
+
+    state_path = root / ".llm-wiki" / "state.sqlite3"
+    assert planned["ok"] is True
+    assert state_path.exists()
+    with sqlite3.connect(state_path) as connection:
+        connection.row_factory = sqlite3.Row
+        actual_tables = {
+            row["name"]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert set(ARCHIVE_REQUIRED_TABLES) <= actual_tables
+        for table, required_columns in ARCHIVE_REQUIRED_COLUMNS.items():
+            actual_columns = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            assert actual_columns == set(required_columns)
+
+
+def test_archive_schema_ddl_matches_required_columns() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.executescript(ARCHIVE_TABLE_DDL)
+        actual_tables = {
+            row["name"]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert set(ARCHIVE_REQUIRED_TABLES) <= actual_tables
+        for table, required_columns in ARCHIVE_REQUIRED_COLUMNS.items():
+            actual_columns = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            assert actual_columns == set(required_columns)
 
 
 def test_archive_restore_is_immutable_and_plan_gated(tmp_path: Path) -> None:
@@ -118,6 +164,29 @@ def test_restore_failure_rolls_back_files_created_by_that_operation(tmp_path: Pa
     assert failing.recover()["recovered"] == []
 
 
+def test_purge_writes_named_tombstone_columns(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _page(root, "wiki/concepts/example.md")
+    service = ArchiveService(root)
+    archive_plan = service.plan_archive("wiki/concepts/example.md", reason="deprecated")
+    archive = service.apply(archive_plan["plan_id"])
+
+    result = service.purge(archive["archive_id"], authorized=True, reason="retention")
+
+    assert result["ok"] is True
+    with sqlite3.connect(root / ".llm-wiki" / "state.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT archive_id,purged_at,reason,payload FROM tombstones WHERE archive_id=?",
+            (archive["archive_id"],),
+        ).fetchone()
+    assert row is not None
+    assert row["archive_id"] == archive["archive_id"]
+    assert row["purged_at"]
+    assert row["reason"] == "retention"
+    assert json.loads(row["payload"])["archive_id"] == archive["archive_id"]
+
+
 def test_legacy_migration_blocks_non_markdown_queries_and_is_repeatable(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     query = root / "wiki" / "queries" / "unexpected.json"
@@ -140,6 +209,19 @@ def test_legacy_migration_blocks_non_markdown_queries_and_is_repeatable(tmp_path
     assert not chat.exists()
     assert not (root / "raw" / "sources" / "chat" / "legacy" / "session.md").exists()
     assert apply_legacy_migration(root)["already_migrated"] is True
+
+
+def test_legacy_migration_initializes_archive_state_on_write(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    chat = root / "wiki" / "chatlog" / "session.md"
+    chat.parent.mkdir(parents=True)
+    chat.write_text("legacy chat", encoding="utf-8")
+
+    assert not (root / ".llm-wiki" / "state.sqlite3").exists()
+    result = apply_legacy_migration(root)
+
+    assert result["ok"] is True
+    assert (root / ".llm-wiki" / "state.sqlite3").exists()
 
 
 def test_legacy_migration_preserves_date_frontmatter(tmp_path: Path) -> None:

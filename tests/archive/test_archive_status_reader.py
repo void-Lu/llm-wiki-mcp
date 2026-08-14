@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from archive.archive_service import ArchiveService
+from archive.archive_schema import ARCHIVE_TABLE_DDL
 from archive.archive_status_reader import ArchiveStatusReader
 
 
@@ -16,6 +16,14 @@ def _tree_snapshot(root: Path) -> dict[str, tuple[int, int]]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def _create_archive_state(root: Path) -> Path:
+    state_path = root / ".llm-wiki" / "state.sqlite3"
+    state_path.parent.mkdir(parents=True)
+    with sqlite3.connect(state_path) as connection:
+        connection.executescript(ARCHIVE_TABLE_DDL)
+    return state_path
 
 
 def test_missing_state_is_reported_without_creating_vault_files(tmp_path: Path) -> None:
@@ -34,8 +42,7 @@ def test_missing_state_is_reported_without_creating_vault_files(tmp_path: Path) 
 
 def test_existing_state_is_read_only_and_preserves_file_tree(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "vault"
-    ArchiveService(root)
-    state_path = root / ".llm-wiki" / "state.sqlite3"
+    state_path = _create_archive_state(root)
     before = _tree_snapshot(root)
     real_connect = sqlite3.connect
     calls: list[tuple[object, object]] = []
@@ -90,8 +97,7 @@ def test_missing_columns_in_any_archive_table_are_incompatible(
     column: str,
 ) -> None:
     root = tmp_path / "vault"
-    ArchiveService(root)
-    state_path = root / ".llm-wiki" / "state.sqlite3"
+    state_path = _create_archive_state(root)
     with sqlite3.connect(state_path) as connection:
         connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
 
@@ -101,6 +107,29 @@ def test_missing_columns_in_any_archive_table_are_incompatible(
     assert result["ok"] is False
     assert result["state"] == "incompatible"
     assert result["missing_columns"] == {table: [column]}
+    assert _tree_snapshot(root) == before
+
+
+def test_existing_tombstone_shape_is_read_without_migration(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    state_path = _create_archive_state(root)
+    with sqlite3.connect(state_path) as connection:
+        connection.execute(
+            "INSERT INTO tombstones(archive_id,purged_at,reason,payload) VALUES(?,?,?,?)",
+            (
+                "archive-1",
+                "2026-08-15T00:00:00+00:00",
+                "retention",
+                '{"archive_id":"archive-1","path_hashes":["sha256:legacy"],"forget":false}',
+            ),
+        )
+
+    before = _tree_snapshot(root)
+    result = ArchiveStatusReader(root).status()
+
+    assert result["ok"] is True
+    assert result["state"] == "ready"
+    assert result["tombstone_count"] == 1
     assert _tree_snapshot(root) == before
 
 

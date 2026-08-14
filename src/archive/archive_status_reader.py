@@ -18,9 +18,9 @@ from wiki.wiki_paths import STATE_DB
 class ArchiveStatusReader:
     """Own the read-only archive status contract.
 
-    ``ArchiveService`` is intentionally not reused here: its constructor
-    creates the state directory and runs schema initialization.  Status is a
-    read path, so a missing or incompatible database must remain untouched.
+    This adapter remains separate from ``ArchiveService`` because status uses
+    a read-only connection with ``query_only`` semantics.  A missing or
+    incompatible database is an observation, not a request to initialize it.
     """
 
     def __init__(self, vault_root: str | Path) -> None:
@@ -81,7 +81,8 @@ class ArchiveStatusReader:
                     "FROM archive_operations ORDER BY updated_at DESC"
                 ).fetchall()
             ]
-            tombstones = int(connection.execute("SELECT count(*) FROM tombstones").fetchone()[0])
+            tombstone_row = connection.execute("SELECT count(*) AS tombstone_count FROM tombstones").fetchone()
+            tombstones = int(tombstone_row["tombstone_count"])
             return {
                 "ok": True,
                 "state": "ready",

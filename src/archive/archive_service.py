@@ -48,9 +48,7 @@ class ArchiveService:
         self.fault_at = fault_at
         self.archive_root = self.root / "archives"
         self.state_path = self.root / STATE_DB
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
-        self.planner = ArchivePlanner(self.root)
+        self._planner: ArchivePlanner | None = None
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -63,9 +61,15 @@ class ArchiveService:
         finally:
             conn.close()
 
-    def _initialize(self) -> None:
+    def _ensure_state(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as conn:
             conn.executescript(ARCHIVE_TABLE_DDL)
+
+    def _get_planner(self) -> ArchivePlanner:
+        if self._planner is None:
+            self._planner = ArchivePlanner(self.root)
+        return self._planner
 
     def plan_archive(
         self,
@@ -77,7 +81,8 @@ class ArchiveService:
         restorable: bool = True,
         attachments: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        plan = self.planner.archive_plan(
+        self._ensure_state()
+        plan = self._get_planner().archive_plan(
             targets,
             reason=reason,
             cascade=cascade,
@@ -90,7 +95,8 @@ class ArchiveService:
         return self._plan_payload(plan)
 
     def plan_restore(self, archive_id: str, *, targets: list[str] | None = None) -> dict[str, Any]:
-        plan = self.planner.restore_plan(archive_id, targets=targets)
+        self._ensure_state()
+        plan = self._get_planner().restore_plan(archive_id, targets=targets)
         self._save_plan(plan)
         return self._plan_payload(plan)
 
@@ -102,6 +108,7 @@ class ArchiveService:
         return payload
 
     def apply(self, plan_id: str) -> dict[str, Any]:
+        self._ensure_state()
         try:
             plan = self._load_plan(plan_id)
         except ArchiveError as exc:
@@ -177,7 +184,7 @@ class ArchiveService:
             for attachment in plan.attachments
             if attachment.content is not None
         }
-        current = self.planner.archive_plan(
+        current = self._get_planner().archive_plan(
             [item.original_path for item in plan.items],
             reason=plan.reason or "manual",
             cascade=plan.cascade,
@@ -290,6 +297,7 @@ class ArchiveService:
             return {"ok": False, "code": getattr(exc, "code", "restore_apply_failed"), "error": str(exc), "operation_id": operation_id}
 
     def recover(self) -> dict[str, Any]:
+        self._ensure_state()
         with self._connection() as conn:
             rows = list(conn.execute("SELECT operation_id,state FROM archive_operations"))
         ids = [row[0] for row in rows if row[1] not in {"committed", "rolled_back"}]
@@ -369,6 +377,7 @@ class ArchiveService:
         return operation_id
 
     def purge(self, archive_id: str, *, authorized: bool = False, forget: bool = False, reason: str = "manual") -> dict[str, Any]:
+        self._ensure_state()
         if not authorized: return {"ok": False, "code": "purge_not_authorized"}
         try:
             bundle = self._bundle(archive_id); manifest = verify_bundle(self.root, bundle)
@@ -378,14 +387,22 @@ class ArchiveService:
                 dependent
                 for item in manifest.items
                 if item.kind == "raw"
-                for dependent in self.planner.dependencies.dependents(item.original_path)
+                for dependent in self._get_planner().dependencies.dependents(item.original_path)
                 if (self.root / dependent).is_file()
             )
             if active: return {"ok": False, "code": "purge_active_reference", "paths": active}
             path_hashes = () if forget else tuple("sha256:" + sha256(item.original_path.encode()).hexdigest() for item in manifest.items)
             tombstone = Tombstone(archive_id=archive_id, purged_at=_now(), reason=reason, path_hashes=path_hashes, forget=forget)
             with self._connection() as conn:
-                conn.execute("INSERT OR REPLACE INTO tombstones VALUES(?,?,?,?)", (archive_id, tombstone.purged_at, reason, json.dumps(tombstone.to_dict(), ensure_ascii=False)))
+                conn.execute(
+                    "INSERT OR REPLACE INTO tombstones(archive_id,purged_at,reason,payload) VALUES(?,?,?,?)",
+                    (
+                        tombstone.archive_id,
+                        tombstone.purged_at,
+                        tombstone.reason,
+                        json.dumps(tombstone.to_dict(), ensure_ascii=False),
+                    ),
+                )
             shutil.rmtree(bundle)
             self._event(uuid4().hex, archive_id, "purged", {"count": len(manifest.items), "forget": forget})
             self.rebuild_archive_index()
@@ -393,6 +410,7 @@ class ArchiveService:
         except ArchiveError as exc: return {"ok": False, "code": exc.code, "error": str(exc)}
 
     def rebuild_archive_index(self) -> dict[str, Any]:
+        self._ensure_state()
         store = RetrievalIndexStore(self.root, scope="archive")
         try:
             # Do not let a directory merely placed under bundles become
