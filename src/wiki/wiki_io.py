@@ -43,6 +43,13 @@ def read_markdown_page(path: str | Path, vault_root: str | Path | None = None) -
     )
 
 
+def is_manual_page(path: Path) -> bool:
+    if not path.exists():
+        return False
+    frontmatter, _ = split_frontmatter(path.read_text(encoding="utf-8"))
+    return frontmatter.get("generated") is not True
+
+
 def prepare_wiki_page(
     vault_root: str | Path,
     page: WikiPage,
@@ -58,10 +65,8 @@ def prepare_wiki_page(
         target = resolve_within_root(root, relative_path)
     except WikiPathError as exc:
         raise WikiWriteError(translate_path_error(exc.code, "io"), "resolved page path escapes wiki root") from exc
-    if target.exists() and overwrite_generated_only:
-        existing_frontmatter, _ = split_frontmatter(target.read_text(encoding="utf-8"))
-        if existing_frontmatter.get("generated") is not True:
-            raise WikiWriteError("manual_page_exists", f"refusing to overwrite non-generated wiki page: {relative_path.as_posix()}")
+    if overwrite_generated_only and is_manual_page(target):
+        raise WikiWriteError("manual_page_exists", f"refusing to overwrite non-generated wiki page: {relative_path.as_posix()}")
 
     policy = PrivacyPolicy()
     title = policy.redact_display_text(page.title)

@@ -6,7 +6,7 @@ from typing import Any
 import yaml
 
 from wiki.atomic_file import FaultBarrier, atomic_write_text
-from wiki.wiki_io import split_frontmatter
+from wiki.wiki_io import is_manual_page, split_frontmatter
 from wiki.wiki_paths import ARCHIVES_DIR, ARCHIVES_LOG_PATH, filesystem_path
 from wiki.wikilinks import format_wikilink
 
@@ -85,7 +85,7 @@ def _write_top_index(
     changed: list[str] | None = None,
 ) -> dict[str, Any] | None:
     target = root / "wiki" / "index.md"
-    if _is_manual_page(target):
+    if is_manual_page(target):
         return _manual_page_error(target, root)
     lines = ["---", "type: index", "generated: true", "---", "", "# Index", ""]
     for title, relative_dir in _TOP_LEVEL_GROUPS:
@@ -106,7 +106,7 @@ def _write_project_index(
 ) -> dict[str, Any] | None:
     project_dir = root / "wiki" / "projects" / project
     target = project_dir / "index.md"
-    if _is_manual_page(target):
+    if is_manual_page(target):
         return _manual_page_error(target, root)
     lines = ["---", "type: project_index", "generated: true", f"project: {project}", "---", "", f"# {project}", ""]
     for heading, subdir in _PROJECT_GROUPS:
@@ -224,7 +224,7 @@ def _write_listing_index(
     fault: FaultBarrier | None = None,
     changed: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    if _is_manual_page(target):
+    if is_manual_page(target):
         return _manual_page_error(target, root)
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
     lines = ["---", *yaml_text.splitlines(), "---", "", f"# {title}", "", *(entries or ["- 无"])]
@@ -296,13 +296,6 @@ def _read_page_metadata(path: Path) -> tuple[dict[str, Any], str]:
             heading = line[2:].strip()
             break
     return frontmatter, heading
-
-
-def _is_manual_page(path: Path) -> bool:
-    if not path.exists():
-        return False
-    frontmatter, _ = split_frontmatter(path.read_text(encoding="utf-8"))
-    return frontmatter.get("generated") is not True
 
 
 def _manual_page_error(path: Path, root: Path) -> dict[str, Any]:

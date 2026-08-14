@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from wiki.atomic_file import FaultBarrier, atomic_write_text
-from wiki.wiki_io import split_frontmatter
+from wiki.wiki_io import is_manual_page, split_frontmatter
 from wiki.wiki_log import read_recent_log_entries
 from wiki.wiki_paths import filesystem_path
 
@@ -14,7 +14,7 @@ def refresh_overview(vault_root: str | Path, *, fault: FaultBarrier | None = Non
     root = filesystem_path(vault_root)
     wiki_root = root / "wiki"
     target = wiki_root / "overview.md"
-    if _is_manual_page(target):
+    if is_manual_page(target):
         return {
             "ok": False,
             "code": "manual_page_exists",
@@ -57,10 +57,3 @@ def refresh_overview(vault_root: str | Path, *, fault: FaultBarrier | None = Non
 def _read_frontmatter(path: Path) -> dict[str, Any]:
     frontmatter, _ = split_frontmatter(path.read_text(encoding="utf-8"))
     return frontmatter
-
-
-def _is_manual_page(path: Path) -> bool:
-    if not path.exists():
-        return False
-    frontmatter = _read_frontmatter(path)
-    return frontmatter.get("generated") is not True
