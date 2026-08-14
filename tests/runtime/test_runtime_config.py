@@ -145,19 +145,6 @@ def test_relative_config_dir_env_override_is_rejected(monkeypatch: pytest.Monkey
     assert "absolute path" in message
 
 
-def test_relative_user_data_dir_env_override_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    vault = _make_vault(tmp_path / "Env Data Vault")
-    config_path = tmp_path / "config" / "config.yaml"
-    monkeypatch.setenv("LLM_WIKI_USER_DATA_DIR", "relative-data")
-
-    with pytest.raises(ValueError) as exc_info:
-        resolve_runtime_config(vault_root_arg=vault, config_path=config_path)
-
-    message = str(exc_info.value)
-    assert "LLM_WIKI_USER_DATA_DIR" in message
-    assert "absolute path" in message
-
-
 def test_missing_config_does_not_use_current_working_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     cwd_vault = _make_vault(tmp_path / "cwd-vault")
     monkeypatch.chdir(cwd_vault)
@@ -172,17 +159,22 @@ def test_missing_config_does_not_use_current_working_directory(monkeypatch: pyte
     assert str(cwd_vault) not in message
 
 
-def test_default_vault_local_storage_layout(tmp_path: Path):
+def test_runtime_config_excludes_retired_local_storage_layout(tmp_path: Path):
     vault = _make_vault(tmp_path / "Vault With Spaces")
 
     runtime = resolve_runtime_config(vault_root_arg=vault)
 
-    assert runtime.chroma_path == vault / ".rag-index" / "chroma"
-    assert runtime.manifest_path == vault / ".rag-index" / "index-manifest.json"
-    assert runtime.embedding_cache_path == vault / ".models"
-    assert runtime.chroma_path.is_relative_to(vault)
-    assert runtime.manifest_path.is_relative_to(vault)
-    assert runtime.embedding_cache_path.is_relative_to(vault)
+    retired_fields = {
+        "data_root",
+        "vault_data_root",
+        "chroma_path",
+        "manifest_path",
+        "embedding_cache_path",
+        "user_data_root",
+        "vault_storage_dir",
+    }
+    assert all(not hasattr(runtime, field) for field in retired_fields)
+    assert runtime.vault_storage_id == vault_storage_id(vault)
 
 
 def test_two_vaults_with_same_folder_name_get_different_storage_ids(tmp_path: Path):

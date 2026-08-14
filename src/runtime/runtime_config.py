@@ -10,7 +10,7 @@ from typing import Any, Literal, Mapping
 
 import yaml
 
-from runtime.platform_paths import global_config_path, user_data_dir
+from runtime.platform_paths import global_config_path
 
 VAULT_ROOT_ENV = "LLM_WIKI_VAULT_ROOT"
 CONFIG_SCHEMA_VERSION = 1
@@ -127,19 +127,6 @@ class RuntimeConfig:
     resolution_source: str
     global_config_path: Path
     sources_config_path: Path
-    data_root: Path
-    vault_data_root: Path
-    chroma_path: Path
-    manifest_path: Path
-    embedding_cache_path: Path
-
-    @property
-    def user_data_root(self) -> Path:
-        return self.data_root
-
-    @property
-    def vault_storage_dir(self) -> Path:
-        return self.vault_data_root
 
 
 def _slug(value: str) -> str:
@@ -457,6 +444,13 @@ def _missing_sources_error(vault_root: Path, sources_config_path: Path) -> Runti
 
 
 def resolve_runtime_config(vault_root_arg: str | Path | None = None, config_path: str | Path | None = None, data_root: str | Path | None = None, require_sources_config: bool = True) -> RuntimeConfig:
+    """Resolve the legacy CLI runtime snapshot without retired path caches.
+
+    ``data_root`` remains an accepted keyword for older callers, but it is no
+    longer persisted in ``RuntimeConfig`` or used to derive vault storage.
+    """
+
+    del data_root
     registry = ConfigRegistry.from_file(config_path)
     if vault_root_arg is not None:
         vault_root = _resolve_required_absolute_path(vault_root_arg, description="vault_root")
@@ -479,6 +473,11 @@ def resolve_runtime_config(vault_root_arg: str | Path | None = None, config_path
     sources_config_path = vault_root / "rag" / "sources.yaml"
     if require_sources_config and not sources_config_path.exists():
         raise _missing_sources_error(vault_root, sources_config_path)
-    root_data = _resolved_path(data_root) if data_root is not None else user_data_dir()
-    vault_data_root = vault_root / ".rag-index"
-    return RuntimeConfig(vault_root, vault_name, vault_storage_id(vault_root), source, registry.config_path, sources_config_path, root_data, vault_data_root, vault_data_root / "chroma", vault_data_root / "index-manifest.json", vault_root / ".models")
+    return RuntimeConfig(
+        vault_root=vault_root,
+        vault_name=vault_name,
+        vault_storage_id=vault_storage_id(vault_root),
+        resolution_source=source,
+        global_config_path=registry.config_path,
+        sources_config_path=sources_config_path,
+    )

@@ -17,9 +17,9 @@ from retrieval.retrieval_eval import (
     write_retrieval_eval_report,
 )
 from retrieval.retrieval_gold import RetrievalGoldError, finalize_retrieval_gold, sample_retrieval_gold
-from runtime.runtime_config import ConfigRegistry, RuntimeConfig, RuntimeConfigError, resolve_runtime_config, write_global_config
+from runtime.runtime_config import ConfigRegistry, ResolvedVault, RuntimeConfig, RuntimeConfigError, VaultSettings, resolve_runtime_config, vault_storage_id, write_global_config
 from retrieval.query_pipeline import DEFAULT_TOP_K
-from retrieval.vector_index import VectorIndexError, VectorIndexStore, parse_vector_settings, vector_index_records
+from retrieval.vector_index import VectorIndexError, VectorIndexStore, default_vector_index_path, parse_vector_settings, vector_index_records
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError, local_provider_readiness
 from archive.archive_migration import apply_legacy_migration, plan_legacy_migration
 from archive.archive_status_reader import ArchiveStatusReader
@@ -29,25 +29,47 @@ from wiki.privacy_audit import PrivacyAuditError, PrivacyAuditService
 from wiki.provenance_migration import ProvenanceMigrationError, ProvenanceMigrationService
 
 
+def _status_resolution(runtime: RuntimeConfig) -> tuple[ConfigRegistry, ResolvedVault]:
+    registry = ConfigRegistry.from_file(runtime.global_config_path)
+    configured = registry.config.vaults.get(runtime.vault_name)
+    if configured is None or configured.root != runtime.vault_root:
+        configured = next(
+            (settings for settings in registry.config.vaults.values() if settings.root == runtime.vault_root),
+            None,
+        )
+    if configured is not None:
+        return registry, ResolvedVault(configured.name, configured.root, configured, "config")
+
+    source = "env" if runtime.resolution_source == "env" else "legacy"
+    return registry, ResolvedVault(runtime.vault_name, runtime.vault_root, VaultSettings(runtime.vault_name, runtime.vault_root), source)
+
+
+def _storage_relative(root: Path, path: Path) -> str:
+    return path.resolve().relative_to(root.resolve()).as_posix()
+
+
 def _runtime_payload(runtime: RuntimeConfig) -> dict[str, Any]:
+    registry, resolution = _status_resolution(runtime)
+    status = registry.public_status(resolution)
+    root = resolution.root
+    storage_paths = {
+        "state": _storage_relative(root, root / ".llm-wiki" / "state.sqlite3"),
+        "page_state": _storage_relative(root, root / ".llm-wiki" / "page-state.sqlite3"),
+        "retrieval_index": _storage_relative(root, RetrievalIndexStore(root).path),
+        "vector_index": _storage_relative(root, default_vector_index_path(root)),
+        "archives": f"{_storage_relative(root, root / 'archives')}/",
+    }
     return {
         "ok": True,
+        **status,
         "vault_root": str(runtime.vault_root),
-        "vault_name": runtime.vault_name,
-        "resolution_source": runtime.resolution_source,
+        "vault": resolution.name,
+        "storage_id": vault_storage_id(runtime.vault_root),
+        "storage_paths": storage_paths,
         "config_path": str(runtime.global_config_path),
         "global_config_path": str(runtime.global_config_path),
         "sources_config_path": str(runtime.sources_config_path),
         "sources_config_exists": runtime.sources_config_path.exists(),
-        "data_root": str(runtime.data_root),
-        "user_data_root": str(runtime.user_data_root),
-        "vault_data_root": str(runtime.vault_data_root),
-        "vault_storage_dir": str(runtime.vault_storage_dir),
-        "vault_storage_id": runtime.vault_storage_id,
-        "chroma_path": str(runtime.chroma_path),
-        "manifest_path": str(runtime.manifest_path),
-        "embedding_cache_path": str(runtime.embedding_cache_path),
-        "model_cache_path": str(runtime.embedding_cache_path),
     }
 
 

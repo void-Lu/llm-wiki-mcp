@@ -45,13 +45,19 @@ def test_init_writes_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
     assert output["vault_root"] == str(vault.resolve())
-    assert output["resolution_source"] == "argument"
+    assert output["logical_vault"] == "homework"
+    assert output["vault"] == "homework"
+    assert output["resolution_source"] == "config"
     assert output["config_path"] == str((config_dir / "config.yaml").resolve())
-    # vault-local: data lives inside vault
-    assert output["vault_data_root"] == str((vault / ".rag-index").resolve())
-    assert output["chroma_path"].endswith("chroma")
-    assert output["manifest_path"].endswith("index-manifest.json")
-    assert output["embedding_cache_path"] == str((vault / ".models").resolve())
+    assert output["storage_paths"] == {
+        "state": ".llm-wiki/state.sqlite3",
+        "page_state": ".llm-wiki/page-state.sqlite3",
+        "retrieval_index": ".llm-wiki/retrieval.sqlite3",
+        "vector_index": ".llm-wiki/vector-index",
+        "archives": "archives/",
+    }
+    assert output["storage_id"]
+    assert not {"data_root", "user_data_root", "vault_data_root", "vault_storage_dir", "chroma_path", "manifest_path", "embedding_cache_path", "model_cache_path", "vault_storage_id"} & output.keys()
     assert output["sources_config_exists"] is True
 
 
@@ -68,13 +74,14 @@ def test_status_reads_same_global_config(monkeypatch: pytest.MonkeyPatch, tmp_pa
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
     assert output["vault_root"] == str(vault.resolve())
-    assert output["resolution_source"] == "global_config"
+    assert output["logical_vault"] == "homework"
+    assert output["vault"] == "homework"
+    assert output["resolution_source"] == "config"
     assert output["config_path"] == str((config_dir / "config.yaml").resolve())
-    # vault-local: data lives inside vault
-    assert output["vault_data_root"] == str((vault / ".rag-index").resolve())
-    assert output["chroma_path"].endswith("chroma")
-    assert output["manifest_path"].endswith("index-manifest.json")
-    assert output["embedding_cache_path"] == str((vault / ".models").resolve())
+    assert output["storage_paths"]["retrieval_index"] == ".llm-wiki/retrieval.sqlite3"
+    assert output["storage_paths"]["vector_index"] == ".llm-wiki/vector-index"
+    assert output["storage_paths"]["archives"] == "archives/"
+    assert not {"data_root", "user_data_root", "vault_data_root", "vault_storage_dir", "chroma_path", "manifest_path", "embedding_cache_path", "model_cache_path", "vault_storage_id"} & output.keys()
     assert output["sources_config_exists"] is True
 
 
@@ -102,16 +109,14 @@ def test_status_reports_full_diagnostics_when_sources_config_is_missing(
     assert output["code"] == "missing_sources_config"
     assert "rag/sources.yaml" in output["error"]
     assert output["vault_root"] == str(vault.resolve())
-    assert output["resolution_source"] == "global_config"
+    assert output["logical_vault"] == "homework"
+    assert output["vault"] == "homework"
+    assert output["resolution_source"] == "config"
     assert output["config_path"] == str((config_dir / "config.yaml").resolve())
     assert output["global_config_path"] == str((config_dir / "config.yaml").resolve())
-    # vault-local: data lives inside vault
-    assert output["vault_data_root"] == str((vault / ".rag-index").resolve())
-    assert output["vault_storage_dir"] == output["vault_data_root"]
-    assert output["chroma_path"].endswith("chroma")
-    assert output["manifest_path"].endswith("index-manifest.json")
-    assert output["embedding_cache_path"] == str((vault / ".models").resolve())
-    assert output["model_cache_path"] == str((vault / ".models").resolve())
+    assert output["storage_paths"]["state"] == ".llm-wiki/state.sqlite3"
+    assert output["storage_paths"]["page_state"] == ".llm-wiki/page-state.sqlite3"
+    assert not {"data_root", "user_data_root", "vault_data_root", "vault_storage_dir", "chroma_path", "manifest_path", "embedding_cache_path", "model_cache_path", "vault_storage_id"} & output.keys()
     assert output["sources_config_path"] == str((vault / "rag" / "sources.yaml").resolve())
     assert output["sources_config_exists"] is False
 
