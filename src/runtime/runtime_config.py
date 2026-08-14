@@ -15,6 +15,17 @@ from runtime.platform_paths import global_config_path, user_data_dir
 VAULT_ROOT_ENV = "LLM_WIKI_VAULT_ROOT"
 CONFIG_SCHEMA_VERSION = 1
 
+# The runtime decoder and the deprecated vector_config compatibility decoder
+# consume this table. Changing it changes both parsing chains together and
+# removes the manual synchronization obligation recorded in 42d73437.
+VECTOR_SETTING_BOUNDS: dict[str, tuple[int | float, int | float, int | float]] = {
+    "batch_size": (16, 1, 256),
+    "max_sequence_length": (256, 64, 8192),
+    "candidate_limit": (50, 1, 500),
+    "rrf_k": (60, 1, 10_000),
+    "min_vector_score": (0.5, -1.0, 1.0),
+}
+
 
 class RuntimeConfigError(RuntimeError):
     def __init__(self, message: str, *, code: str = "missing_vault_root", config_path: Path | None = None):
@@ -187,17 +198,31 @@ def _bool(value: object, default: bool, name: str, path: Path) -> bool:
     return value
 
 
-def _integer(value: object, default: int, minimum: int, maximum: int, name: str, path: Path) -> int:
+def _integer(
+    value: object,
+    default: int | float,
+    minimum: int | float,
+    maximum: int | float,
+    name: str,
+    path: Path,
+) -> int:
     if value is None:
-        return default
+        return int(default)
     if type(value) is not int or not minimum <= value <= maximum:
         raise RuntimeConfigError(f"{name} must be an integer between {minimum} and {maximum}", code="invalid_config", config_path=path)
     return value
 
 
-def _number(value: object, default: float, minimum: float, maximum: float, name: str, path: Path) -> float:
+def _number(
+    value: object,
+    default: int | float,
+    minimum: int | float,
+    maximum: int | float,
+    name: str,
+    path: Path,
+) -> float:
     if value is None:
-        return default
+        return float(default)
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not minimum <= float(value) <= maximum:
         raise RuntimeConfigError(f"{name} must be a number between {minimum} and {maximum}", code="invalid_config", config_path=path)
     return float(value)
@@ -224,11 +249,15 @@ def _decode_embedding(value: object, path: Path) -> EmbeddingSettings:
         provider=provider,
         model_path=model_path,
         device=device,
-        batch_size=_integer(raw.get("batch_size"), 16, 1, 256, "embedding.batch_size", path),
-        max_sequence_length=_integer(raw.get("max_sequence_length"), 256, 64, 8192, "embedding.max_sequence_length", path),
-        candidate_limit=_integer(raw.get("candidate_limit"), 50, 1, 500, "embedding.candidate_limit", path),
-        rrf_k=_integer(raw.get("rrf_k"), 60, 1, 10_000, "embedding.rrf_k", path),
-        min_vector_score=_number(raw.get("min_vector_score"), 0.5, -1.0, 1.0, "embedding.min_vector_score", path),
+        batch_size=_integer(raw.get("batch_size"), *VECTOR_SETTING_BOUNDS["batch_size"], "embedding.batch_size", path),
+        max_sequence_length=_integer(
+            raw.get("max_sequence_length"), *VECTOR_SETTING_BOUNDS["max_sequence_length"], "embedding.max_sequence_length", path
+        ),
+        candidate_limit=_integer(raw.get("candidate_limit"), *VECTOR_SETTING_BOUNDS["candidate_limit"], "embedding.candidate_limit", path),
+        rrf_k=_integer(raw.get("rrf_k"), *VECTOR_SETTING_BOUNDS["rrf_k"], "embedding.rrf_k", path),
+        min_vector_score=_number(
+            raw.get("min_vector_score"), *VECTOR_SETTING_BOUNDS["min_vector_score"], "embedding.min_vector_score", path
+        ),
     )
 
 

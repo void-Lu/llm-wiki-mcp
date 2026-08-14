@@ -17,14 +17,11 @@ from typing import Any, Iterable, Sequence
 
 from retrieval.graph_retrieval import QueryCandidate
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
-from runtime.runtime_config import EmbeddingSettings
+from runtime.runtime_config import EmbeddingSettings, VECTOR_SETTING_BOUNDS
 from retrieval.vector_provider import VectorProvider, VectorProviderIdentity
 from wiki.wiki_io import read_markdown_page, split_frontmatter
 
 VECTOR_INDEX_SCHEMA_VERSION = 2
-DEFAULT_VECTOR_CANDIDATE_LIMIT = 50
-DEFAULT_RRF_K = 60
-DEFAULT_MIN_VECTOR_SCORE = 0.5
 _PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
 
 _DOCUMENT_READ_CACHE: dict[str, tuple[tuple[int, int], list[dict[str, object]]]] = {}
@@ -94,12 +91,14 @@ def parse_vector_settings(vault_root: str | Path, config: dict[str, Any] | None)
         provider=provider,
         model_path=model_path,
         index_path=index_path,
-        candidate_limit=_bounded_int(values.get("candidate_limit"), DEFAULT_VECTOR_CANDIDATE_LIMIT, 1, 500, "candidate_limit"),
-        rrf_k=_bounded_int(values.get("rrf_k"), DEFAULT_RRF_K, 1, 10_000, "rrf_k"),
-        min_vector_score=_bounded_float(values.get("min_vector_score"), DEFAULT_MIN_VECTOR_SCORE, -1.0, 1.0, "min_vector_score"),
+        candidate_limit=_bounded_int(values.get("candidate_limit"), *VECTOR_SETTING_BOUNDS["candidate_limit"], "candidate_limit"),
+        rrf_k=_bounded_int(values.get("rrf_k"), *VECTOR_SETTING_BOUNDS["rrf_k"], "rrf_k"),
+        min_vector_score=_bounded_float(values.get("min_vector_score"), *VECTOR_SETTING_BOUNDS["min_vector_score"], "min_vector_score"),
         device=str(values.get("device") or "cpu"),
-        batch_size=_bounded_int(values.get("batch_size"), 16, 1, 256, "batch_size"),
-        max_sequence_length=_bounded_int(values.get("max_sequence_length"), 256, 64, 8192, "max_sequence_length"),
+        batch_size=_bounded_int(values.get("batch_size"), *VECTOR_SETTING_BOUNDS["batch_size"], "batch_size"),
+        max_sequence_length=_bounded_int(
+            values.get("max_sequence_length"), *VECTOR_SETTING_BOUNDS["max_sequence_length"], "max_sequence_length"
+        ),
     )
 
 
@@ -135,9 +134,15 @@ def _resolved_index_path(root: Path, value: object) -> Path:
     return path
 
 
-def _bounded_int(value: object, default: int, minimum: int, maximum: int, name: str) -> int:
+def _bounded_int(
+    value: object,
+    default: int | float,
+    minimum: int | float,
+    maximum: int | float,
+    name: str,
+) -> int:
     if value is None:
-        return default
+        return int(default)
     if isinstance(value, bool):
         raise VectorIndexError("vector_config_invalid", f"{name} must be an integer")
     try:
@@ -149,9 +154,15 @@ def _bounded_int(value: object, default: int, minimum: int, maximum: int, name: 
     return parsed
 
 
-def _bounded_float(value: object, default: float, minimum: float, maximum: float, name: str) -> float:
+def _bounded_float(
+    value: object,
+    default: int | float,
+    minimum: int | float,
+    maximum: int | float,
+    name: str,
+) -> float:
     if value is None:
-        return default
+        return float(default)
     if isinstance(value, bool):
         raise VectorIndexError("vector_config_invalid", f"{name} must be a number")
     try:

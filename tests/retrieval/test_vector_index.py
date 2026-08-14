@@ -8,6 +8,7 @@ import pytest
 
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, VectorRecord, parse_vector_settings
 from retrieval.vector_provider import DeterministicFakeProvider
+from runtime.runtime_config import EmbeddingSettings
 
 
 class RecordingFakeProvider(DeterministicFakeProvider):
@@ -84,13 +85,15 @@ def test_local_only_settings_reject_credential_fields_and_external_provider(tmp_
 
 def test_parse_vector_settings_applies_defaults_and_bounds(tmp_path: Path) -> None:
     settings = parse_vector_settings(tmp_path, None)
-    assert settings.candidate_limit == 50
-    assert settings.max_sequence_length == 256
-    assert settings.rrf_k == 60
-    assert settings.min_vector_score == 0.5
+    runtime_defaults = EmbeddingSettings()
+    assert settings.batch_size == runtime_defaults.batch_size
+    assert settings.max_sequence_length == runtime_defaults.max_sequence_length
+    assert settings.candidate_limit == runtime_defaults.candidate_limit
+    assert settings.rrf_k == runtime_defaults.rrf_k
+    assert settings.min_vector_score == runtime_defaults.min_vector_score
     custom = parse_vector_settings(tmp_path, {"rrf_k": 30, "min_vector_score": 0.3, "candidate_limit": 20})
     assert custom.rrf_k == 30
     assert custom.min_vector_score == 0.3
     assert custom.candidate_limit == 20
-    with pytest.raises(VectorIndexError, match="min_vector_score"):
+    with pytest.raises(VectorIndexError, match="min_vector_score") as error:
         parse_vector_settings(tmp_path, {"min_vector_score": 2.0})
