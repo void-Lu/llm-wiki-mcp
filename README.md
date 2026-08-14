@@ -176,12 +176,8 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 
 不再注册 `wiki_generation` worker 工具。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 
-旧版 CodeGraph 摄入留下的页面和 raw 目录可通过 CLI 清理；`plan` 只预览，`apply` 删除匹配的存量内容并保留项目的 `architecture/` 目录：
-
-```bash
-uv run llm-wiki-mcp repair codegraph-removal plan --vault <vault-path>
-uv run llm-wiki-mcp repair codegraph-removal apply --vault <vault-path>
-```
+旧版 CodeGraph 摄入留下的内容已由用户在真实 vault 中完成迁移；退役清理命令已删除，
+无需再次运行存量清理。
 
 `retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测检索契约，输出 JSON 与 Markdown 报告。当前查询契约是 V2，`--query-version` 仅接受 `v2`；默认 `--entrypoint engine --retrieval-mode lexical`，不创建、不更新也不调用 vector/Embedding。需要验证 MCP 公共边界时使用 `--entrypoint mcp`，该入口会拒绝非词法配置，并覆盖 `project`、`type`、`tags`、`path_prefix`、空结果和错误契约。`--scope` 控制 V2 corpus。报告包含 Recall、Precision、MRR、nDCG（@1/@3/@5/@10）、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。传入 `--baseline-report <retrieval-eval.json>` 可执行冻结基线 gate：Recall/nDCG 回退不超过 0.02、过滤器 100%、无答案误命中率不超过 0.05、P95 增长不超过 10%，且词法-only 与 context budget 检查通过。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
@@ -285,16 +281,7 @@ vault_root/
 
 ### Raw provenance 与退役 capsule
 
-`wiki_ingest` 只负责 raw snapshot、hash 和索引投影，不调用 LLM，也不生成 `wiki/sources` 页面。非 chat 来源变化时，`SupersedeRegistry` 只登记并失效仍依赖该 raw 文件的遗留 generation job；不再提供 capsule 生成、claim 或 apply worker。活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes`。一次性归档由 `scripts/archive_wiki_sources.py` 完成，不注册为 MCP 常态工具。
-
-执行一次性归档时先预检，再显式提交：
-
-```bash
-python scripts/archive_wiki_sources.py --vault-root <vault-root>
-python scripts/archive_wiki_sources.py --vault-root <vault-root> --apply
-```
-
-脚本会把整个退役 namespace 作为一个不可恢复 bundle 归档；raw 文件不移动、不删除。缺失或冲突的 raw 映射会在页面标记 `review_required`，但不会阻断归档，完整映射审计保存在 bundle 的 `source-remap.json` 中。
+`wiki_ingest` 只负责 raw snapshot、hash 和索引投影，不调用 LLM，也不生成 `wiki/sources` 页面。非 chat 来源变化时只标记 `KnowledgeDependencies` 中仍依赖该 raw 文件的页面为 stale；响应保留 `stale_pages` 与 `generation` 信息性声明，不再返回已退役的 `superseded_jobs`。活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes`。真实 vault 已完成 `wiki/sources` 迁移，一次性归档工具已完成使命并删除；不再提供该清理命令或脚本。
 
 批量或重建立索引不是 MCP 工具职责：`retrieval-eval`、`vector build/update`、`index build/update`、archive admin 和 migration 都保留在 CLI 边界。
 
