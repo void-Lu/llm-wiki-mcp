@@ -51,6 +51,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时只标记 KnowledgeDependencies 的 stale 页面；知识编译/generation 已停用（`generation: enabled: false`）。MCP 工具名为 `wiki_ingest`。
 - 人工笔记写入在 [note_writer.py](src/wiki/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
 - 页面事实提交统一在 [page_mutation.py](src/wiki/page_mutation.py) 的 `PageMutationCoordinator`：CAS 原子写入后按 durable operation journal 执行 dependencies、retrieval、navigation、overview 和 audit log 投影；任一派生阶段失败都保留已提交页面并返回 `repair_pending`，由同一个 operation 走 `repair_page_operation` 恢复。
+- 正式知识页日志按职责分开：[wiki_log.py](src/wiki/wiki_log.py) 只负责条目渲染、脱敏、journal 去重和 operation index；[log_volume.py](src/wiki/log_volume.py) 独占 UTF-8 字节分卷、轮转、月度归档、`archives/log.md`、归档索引与逐文件原子写，`publish` 完成一次日志卷宗布局。
 - [projection_profile.py](src/wiki/projection_profile.py) 是“字节变更后要追哪些投影”的纯 registry，按 formal/chat、ingest、archive、provenance/privacy admin 登记有序阶段；它不持有执行器、journal 或 repair 状态。页面 mutation 由 [page_mutation_adapters.py](src/wiki/page_mutation_adapters.py) 的 `FormalPageAdapter`/`ChatSourceAdapter` 引用 formal/chat profile，并各自持有路径、请求键和投影入口策略；其他消费方仍把阶段名映射到自己的直接执行方法。
 - [page_policy.py](src/wiki/page_policy.py) 是 Wiki frontmatter 派生策略唯一 owner：`derive_page_policy`/`derive` 负责读侧 `freshness`/`maintenance`/`lifecycle`/`generated`/`replaced_by`，`stamp_page_policy`（`stamp` 短别名）负责写侧 `freshness`/`provenance_unverified`；stamp 只校验而不接管调用方的 `maintenance`/`replaced_by`。非法 `lifecycle` 统一归一为 `review_required`，调用方不重复实现。
 - 故障注入由 [atomic_file.py](src/wiki/atomic_file.py) 的 `fault_context` 统一持有；原子写入、页面投影和归档状态转换从当前 contextvar 读取 barrier，生产签名不再穿透 `fault`/`fault_at`，嵌套 context 退出后必须恢复外层值，执行 registry 进入线程前复制调用方 context。
@@ -121,7 +122,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 
 测试文件按功能包分组，命令为 `uv run pytest tests/<package>/test_<module>.py`：
 - CLI/runtime/config/provenance：`test_cli.py`、`test_runtime_config.py`、`test_runtime_provenance.py`、`test_readme_global_mcp_docs.py`
-- Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_atomic_file.py`、`test_page_mutation.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
+- Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_atomic_file.py`、`test_page_mutation.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_log_volume.py`、`test_wiki_files.py`
 - MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_note_writer.py`、`test_ingest_service.py`
 - 查询/检索/向量/wikilink（`tests/retrieval/`）：`test_run_query_v2.py`、`test_query_pipeline.py`、`test_query_execution_context.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_eval_dataset.py`、`test_retrieval_eval_report.py`、`test_retrieval_eval_service.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
 - 归档/辅助：`test_archive_lifecycle.py`、`test_git_utils.py`

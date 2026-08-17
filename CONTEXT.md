@@ -102,6 +102,10 @@ _避免使用_：更新计划、归档计划、无限期批量许可
 从原始来源或正式知识页重建的检索、导航、依赖或状态视图；它不是知识事实本身。
 _避免使用_：事实源、原始数据、正式知识
 
+**日志卷宗（Log Volume）**：
+`src/wiki/log_volume.py` 是正式知识页日志的有界物理布局 owner，持有 UTF-8 字节分卷、轮转阈值、月度归档卷、`archives/log.md` 追加、归档索引与逐文件原子写；它不负责条目语义、脱敏或 operation journal。`src/wiki/wiki_log.py` 只负责日志条目渲染、脱敏、journal 去重与 operation index。
+_避免使用_：跨文件事务、日志条目语义、脱敏策略、operation journal
+
 **投影 profile（Projection Profile）**：
 某类字节变更必须追上的有序派生投影清单，按变更 kind（正式页面提交、raw source 摄入、chat source、admin 改写、归档）区分；它是"字节变了要追什么投影"的唯一答案来源，不持有投影执行器、operation journal 或修复状态。
 纯 registry 与阶段别名由 `src/wiki/projection_profile.py` 持有；page mutation 通过 `src/wiki/page_mutation_adapters.py` 的 formal/chat adapter 引用对应 profile，并在 adapter 内绑定路径、请求键和本地执行器；ingest、archive、provenance/privacy admin 仍各自绑定阶段，不跨边界共享执行状态。
