@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-import retrieval.query_execution_context as context_module
 from retrieval.query_cancellation import QueryCancellationContext
-from retrieval.query_execution_context import QueryExecutionContext, QueryFilters, RRF_K
+from retrieval.query_execution_context import QueryExecutionContext, QueryFilters
+from retrieval.query_recall_policy import RRF_K
 from retrieval.query_recovery import (
     DEFAULT_RECOVERY_CONDITION,
     FallbackState,
@@ -12,7 +12,6 @@ from retrieval.query_recovery import (
     plan_fallback,
 )
 from retrieval.retrieval_index import RetrievalIndexStore
-from tests.helpers import write_test_page
 from wiki.wiki_index import refresh_indexes
 from wiki.wiki_paths import create_wiki_root
 
@@ -216,4 +215,3 @@ def test_query_execution_context_outcome_does_not_open_lazy_raw_store(tmp_path: 
     context.outcome()
 
     assert context.raw_store is None
-
