@@ -1,17 +1,15 @@
 from pathlib import Path
 
 from retrieval.query_pipeline import run_query_v2
-from retrieval.query_cancellation import QueryCancellationContext
 import retrieval.query_execution_context as query_execution_context_module
+import retrieval.entity_batch as entity_batch_module
 from retrieval.query_execution_context import (
-    AdaptiveCandidateScorePolicy,
-    QueryFilters,
     adaptive_expand,
-    _adaptive_select_candidates,
     _merge_coverage_items,
     _uncovered_latin_terms,
-    probe_hit,
 )
+from retrieval.entity_batch import AdaptiveCandidateScorePolicy, build_store_specs, select_candidates
+from retrieval.query_shared import QueryFilters, probe_hit
 from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
 from retrieval.vector_index import vector_index_records
@@ -529,18 +527,12 @@ def test_coverage_fusion_uses_effective_rrf_k() -> None:
     assert small_second["score"] != large_second["score"]
 
 
-def test_entity_batch_uses_passed_snapshot_without_metadata_reload(monkeypatch) -> None:
+def test_entity_batch_owner_uses_passed_snapshot_without_metadata_reload() -> None:
     pages = ({"path": "wiki/entities/auth.md", "frontmatter": {"type": "entity"}, "title": "N/auth"},)
     snapshot = QueryCorpusSnapshot("active", pages, {"wiki/entities/auth.md": {"type": "entity"}}, {})
     store = object()
 
-    monkeypatch.setattr(
-        query_execution_context_module,
-        "_store_metadata",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("metadata must come from snapshot")),
-    )
-    specs = query_execution_context_module._entity_store_specs(
-        Path("."),
+    specs = build_store_specs(
         store,  # type: ignore[arg-type]
         "knowledge",
         snapshot=snapshot,
@@ -1648,7 +1640,7 @@ def test_v2_batch_does_not_recurse_into_a_third_query_stage(tmp_path: Path, monk
     _write(root, "wiki/entities/n-search.md", "N/search", "N/search API reference", type="entity")
     refresh_indexes(root)
 
-    original_batch = query_execution_context_module._run_entity_batch
+    original_batch = entity_batch_module.run_entity_batch
     batch_calls = 0
     active = False
 
@@ -1662,7 +1654,7 @@ def test_v2_batch_does_not_recurse_into_a_third_query_stage(tmp_path: Path, monk
         finally:
             active = False
 
-    monkeypatch.setattr(query_execution_context_module, "_run_entity_batch", guarded_batch)
+    monkeypatch.setattr(entity_batch_module, "run_entity_batch", guarded_batch)
     result = run_query_v2(root, "Catalog", retrieval_mode="lexical")
 
     assert batch_calls == 1
@@ -1711,13 +1703,13 @@ def test_v2_treats_same_level_headings_and_table_rows_as_generic_enumeration(tmp
 
 def test_adaptive_entity_selection_keeps_high_score_platform_and_drops_score_cliff() -> None:
     items = [{"score": 10.0}, {"score": 9.0}, {"score": 4.0}]
-    selected, error = _adaptive_select_candidates(items, AdaptiveCandidateScorePolicy())
+    selected, error = select_candidates(items, AdaptiveCandidateScorePolicy())
 
     assert error == ""
     assert len(selected) == 2
     assert selected[1]["selection_reason"] == "same_high_score_platform"
 
-    unresolved, error = _adaptive_select_candidates([{"score": 0.01}], AdaptiveCandidateScorePolicy())
+    unresolved, error = select_candidates([{"score": 0.01}], AdaptiveCandidateScorePolicy())
     assert unresolved == []
     assert error == "unresolved:below_minimum_relevance"
 

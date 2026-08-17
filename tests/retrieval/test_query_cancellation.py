@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext
-from retrieval.query_execution_context import _store_metadata
+from retrieval.discovery import metadata_from_snapshot
 from retrieval.query_pipeline import run_query_v2
 from retrieval.query_snapshot import QueryCorpusSnapshot
 
@@ -59,7 +59,7 @@ def test_batch_checkpoint_is_sparse_but_zero_index_is_checked() -> None:
         context.checkpoint_batch(0, every=16, stage="metadata")
 
 
-def test_store_metadata_checkpoints_snapshot_pages_without_reordering() -> None:
+def test_discovery_owner_metadata_uses_snapshot_without_reordering() -> None:
     pages = tuple(
         {
             "path": f"wiki/concepts/page-{index:02d}.md",
@@ -70,7 +70,7 @@ def test_store_metadata_checkpoints_snapshot_pages_without_reordering() -> None:
     snapshot = QueryCorpusSnapshot("active", pages, {}, {})
     cancellation = MagicMock()
 
-    metadata = _store_metadata(object(), snapshot=snapshot, cancellation=cancellation)  # type: ignore[arg-type]
+    metadata = metadata_from_snapshot(snapshot, cancellation)
 
     assert list(metadata) == [page["path"] for page in pages]
     assert metadata["wiki/concepts/page-16.md"] == {"ordinal": 16}
