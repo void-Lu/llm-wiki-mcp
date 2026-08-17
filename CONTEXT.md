@@ -52,8 +52,16 @@ _避免使用_：等待超时、线程终止、墙上时钟截止日期
 各查询阶段主动观察期限并停止安排后续工作的取消保证；它不声称能够强制杀死已经进入不可取消阻塞调用的线程。
 _避免使用_：强制终止、进程隔离、仅停止等待
 
+**查询语料快照（QueryCorpusSnapshot）**：
+`src/retrieval/query_snapshot.py` 为一次查询捕获的不可变 active/raw 页面 metadata、provenance 与候选视图；同一调用的过滤、向量、图扩展、发现和 fallback 必须复用对应快照，不重新读取可能漂移的检索 store。
+_避免使用_：实时 store、全文正文、查询执行上下文
+
+**查询回退（Fallback）**：
+`src/retrieval/query_recovery.py` 中的回退计划、条件和 `assemble_recovery` 负责主召回不足时的有界分支选择及最终 fallback envelope 装配；它不持有查询 store、取消器或执行上下文的可变状态。
+_避免使用_：全库扫描、重建索引、查询执行上下文
+
 **查询执行上下文（QueryExecutionContext）**：
-一次 Query V2 调用的内部执行对象，持有本次查询的 root、检索 store、取消状态、执行 status，以及按需创建并记忆化的 raw store 与 raw snapshot；它负责 fallback、发现和 batch 阶段之间的状态传递，不是公开响应对象。
+`src/retrieval/query_execution_context.py` 中的 `QueryExecutionContext` 是一次 Query V2 调用的可变执行状态 owner，持有本次查询的 root、检索 store、取消状态、执行 status，以及按需创建并记忆化的 raw store 与 raw snapshot；它承接 fallback、发现和 batch 阶段的状态迁移。raw 分支把 raw index 规范化为 `fresh`、`stale`、`missing`，在 `coverage`、`all_coverage` 和 `raw_zero` 分支中按候选结果迁移 selected、recovery/context_items、命中计数、warning、词法模式与 coverage 标记；非 fresh 状态使用空 raw snapshot，不伪造 raw 候选。`outcome()` 只发布一次递归冻结的 `QueryExecutionOutcome` 只读视图，并在发布后封存上下文，不是公开响应对象本身。
 _避免使用_：紧凑正文、context pack、检索结果
 
 **Context Pack（紧凑正文）**：
@@ -81,6 +89,14 @@ _避免使用_：事实源、原始数据、正式知识
 **新鲜度（Freshness）**：
 正式知识页相对于其所声明来源版本的当前一致性状态；它不表示页面内容本身的质量或权威性。
 _避免使用_：来源验证状态、正确性、可信度、生命周期
+
+**页面策略（Page Policy）**：
+`src/wiki/page_policy.py` 中 frozen 的 `PagePolicy` 与纯函数 `derive_page_policy` 是 frontmatter 派生策略的单一 owner，统一产生 `freshness`、`maintenance`、`lifecycle`、`generated` 与 `replaced_by`；该模块不执行 I/O。非法 `lifecycle` 不向正式页面投影抛出异常，而是归一为 `review_required`；依赖存储层自己的 fail-closed 校验仍保持不变。
+_避免使用_：页面提交、操作状态、索引状态
+
+**PlanLifecycle**：
+`src/wiki/page_mutation.py` 内部的 `PlanLifecycle` 是 durable `Update Plan` 的规则门面，负责 `issued`、`claimed`、`consumed`、`expired` 的解析，以及 claim/consume 与页面 operation 之间的协调和稳定结果映射。它与 `PageOperation` 的 operation 状态机正交：plan lifecycle 控制变更许可、过期和幂等重放，operation 状态机记录页面事实提交、投影与修复（`prepared`、`page_committed`、`repair_pending`、`completed`、`failed_precommit`、`conflict`）；两者不能合并成一个状态字段或由调用方各自重建。
+_避免使用_：页面操作状态机、页面事实、无限期 token
 
 ## 边界与定位
 
