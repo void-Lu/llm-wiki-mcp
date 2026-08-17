@@ -8,13 +8,10 @@ there is no implicit history or journal rewrite.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import hashlib
-import json
 from pathlib import Path
 import re
 from typing import Iterable, Mapping
-from uuid import uuid4
 
 from common.privacy_policy import LocatorError, PrivacyPolicy, field_class, redact_storage_value
 from common.redaction import count_redaction_categories, redact_sensitive_text
@@ -23,8 +20,17 @@ from wiki.atomic_file import AtomicFileError, atomic_write_bytes, atomic_write_t
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_policy import derive_page_policy
 from wiki.projection_profile import projection_stages
+from wiki.repair_plan import (
+    RepairPageContext,
+    RepairPlanHooks,
+    RepairPlanOwner,
+    iter_admin_page_files,
+    projection_warning,
+    safe_file_hash,
+    string_map,
+)
 from wiki.wiki_io import render_page, split_frontmatter
-from wiki.wiki_paths import ADMIN_PLANS_DIR, KNOWLEDGE_DEPENDENCIES_DB, PRIVACY_AUDIT_DIR
+from wiki.wiki_paths import KNOWLEDGE_DEPENDENCIES_DB, PRIVACY_AUDIT_DIR, admin_wiki_page_file
 
 
 class PrivacyAuditError(ValueError):
@@ -35,7 +41,6 @@ class PrivacyAuditError(ValueError):
         self.code = code
 
 
-_PLAN_ID = re.compile(r"^[0-9a-f]{32}$")
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(#[^\]|]*)?(\|[^\]]*)?\]\]")
 
 
@@ -45,6 +50,13 @@ class PrivacyAuditService:
     def __init__(self, vault_root: str | Path):
         self.root = Path(vault_root).expanduser().resolve()
         self.policy = PrivacyPolicy()
+        self.plan_owner = RepairPlanOwner(
+            self.root,
+            kind="privacy_audit",
+            plan_prefix="privacy-audit-",
+            audit_dir=PRIVACY_AUDIT_DIR,
+            error_type=PrivacyAuditError,
+        )
 
     def plan(self) -> dict[str, object]:
         raw_pages: dict[str, dict[str, object]] = {}
@@ -57,7 +69,7 @@ class PrivacyAuditService:
             except (OSError, UnicodeDecodeError):
                 raw_pages[page_path] = {
                     "page_path": page_path,
-                    "expected_page_hash": _safe_hash(path),
+                    "expected_page_hash": safe_file_hash(path),
                     "issues": ["page_read_failed"],
                     "hit_fields": [],
                     "redaction_categories": {},
@@ -116,40 +128,22 @@ class PrivacyAuditService:
             for entry in raw_pages.values()
             if entry.get("hit_fields") or entry.get("filename_change") or entry.get("wikilink_changes") or entry.get("issues")
         ]
-        plan_id = uuid4().hex
-        plan = {
-            "schema_version": 1,
-            "kind": "privacy_audit",
-            "plan_id": plan_id,
-            "created_at": datetime.now(UTC).isoformat(),
-            "dry_run": True,
-            "filename_changes": [{"old_page_path": old, "new_page_path": new} for old, new in sorted(filename_map.items())],
-            "entries": entries,
-            "summary": _summary(entries),
-        }
-        self._write_plan(plan_id, plan)
-        return {
-            "ok": True,
-            "kind": plan["kind"],
-            "plan_id": plan_id,
-            "dry_run": True,
-            "summary": plan["summary"],
-            "entries": entries,
-        }
+        plan = self.plan_owner.create_plan(
+            {
+                "filename_changes": [{"old_page_path": old, "new_page_path": new} for old, new in sorted(filename_map.items())],
+                "entries": entries,
+                "summary": _summary(entries),
+            }
+        )
+        return self.plan_owner.plan_response(plan)
 
     def apply(self, plan_id: str, *, allow_locator_changes: bool = False) -> dict[str, object]:
-        plan = self._read_plan(plan_id)
-        audit_path = self.root / PRIVACY_AUDIT_DIR / f"{plan_id}.audit.json"
-        if audit_path.is_file():
-            try:
-                previous = json.loads(audit_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                previous = {}
-            if isinstance(previous, dict) and previous.get("state") == "applied":
-                return {"ok": True, "already_applied": True, "plan_id": plan_id, "audit_state": "applied"}
+        plan = self.plan_owner.read_plan(plan_id)
+        if self.plan_owner.already_applied(plan_id):
+            return {"ok": True, "already_applied": True, "plan_id": plan_id, "audit_state": "applied"}
 
         raw_entries = plan.get("entries", [])
-        entries = [entry for entry in raw_entries if isinstance(entry, dict)] if isinstance(raw_entries, list) else []
+        entries = [entry for entry in raw_entries if isinstance(entry, Mapping)] if isinstance(raw_entries, list) else []
         locator_entries = [entry for entry in entries if _has_locator_change(entry)]
         if locator_entries and not allow_locator_changes:
             return {
@@ -172,132 +166,107 @@ class PrivacyAuditService:
             if new in old_paths and new != old:
                 return {"ok": False, "code": "privacy_locator_rename_collision", "plan_id": plan_id, "writes": 0}
 
-        originals: dict[str, bytes] = {}
-        targets: dict[str, Path] = {}
-        projections: dict[str, dict[str, object]] = {}
-        written_targets: list[Path] = []
         dependency: KnowledgeDependencies | None = None
         db_path = self.root / KNOWLEDGE_DEPENDENCIES_DB
         if db_path.is_file():
             dependency = KnowledgeDependencies(self.root)
-        results: list[dict[str, object]] = []
-        warnings: list[dict[str, str]] = []
-        try:
-            for entry in entries:
-                page_path = str(entry.get("page_path", ""))
-                source = self._page_file(page_path)
-                original = source.read_bytes()
-                originals[page_path] = original
-                expected = str(entry.get("expected_page_hash", ""))
-                actual = hashlib.sha256(original).hexdigest()
-                if actual != expected:
-                    return {
-                        "ok": False,
-                        "code": "privacy_audit_cas_mismatch",
-                        "plan_id": plan_id,
-                        "page_path": page_path,
-                        "expected_page_hash": expected,
-                        "actual_page_hash": actual,
-                        "writes": 0,
-                    }
-                target_path = self._page_file(filename_map.get(page_path, page_path), allow_missing=True)
-                if target_path != source and target_path.exists():
-                    return {"ok": False, "code": "privacy_locator_rename_collision", "plan_id": plan_id, "writes": 0}
-                targets[page_path] = target_path
-                if dependency is not None:
-                    projections[page_path] = KnowledgeDependencies.read_page_projection(self.root, page_path)
+        def preflight(items: list[Mapping[str, object]]) -> Mapping[str, object] | None:
+            for item in items:
+                page_path = str(item.get("page_path", ""))
+                source = self.plan_owner.page_file(page_path)
+                target = self.plan_owner.page_file(filename_map.get(page_path, page_path), allow_missing=True)
+                if target != source and target.exists():
+                    return {"ok": False, "code": "privacy_locator_rename_collision", "writes": 0}
+            return None
 
-            for entry in entries:
-                page_path = str(entry["page_path"])
-                original = originals[page_path]
-                transformed = _transform_text(original.decode("utf-8"), filename_map)
-                target = targets[page_path]
-                source = self._page_file(page_path)
-                renamed = target != source
-                if transformed.encode("utf-8") != original or renamed:
-                    atomic_write_bytes(target, transformed.encode("utf-8"))
-                    written_targets.append(target)
-                after_hash = sha256_file(target)
-                if dependency is not None:
-                    frontmatter, _ = split_frontmatter(transformed)
-                    desired_hashes = _string_map(frontmatter.get("source_hashes"))
-                    policy = derive_page_policy(frontmatter)
-                    dependency.update_page(
-                        target.relative_to(self.root).as_posix(),
-                        after_hash,
-                        desired_hashes,
-                        generated=policy.generated,
-                        maintenance=policy.maintenance,
-                        lifecycle=policy.lifecycle,
-                        replaced_by=policy.replaced_by,
-                        freshness=policy.freshness,
-                    )
-                    if target != self._page_file(page_path):
-                        dependency.remove_page(page_path)
-                if renamed:
-                    source.unlink()
-                warning = self._refresh_retrieval(
-                    target,
-                    page_path,
-                    old_page_path=page_path if renamed else None,
-                )
-                if warning is not None:
-                    warnings.append(warning)
-                results.append(
-                    {
-                        "page_path": page_path,
-                        "after_page_path": target.relative_to(self.root).as_posix(),
-                        "before_page_hash": hashlib.sha256(original).hexdigest(),
-                        "after_page_hash": after_hash,
-                        "hit_fields": entry.get("hit_fields", []),
-                        "filename_change": entry.get("filename_change"),
-                        "wikilink_changes": entry.get("wikilink_changes", []),
-                    }
-                )
+        hooks = RepairPlanHooks(
+            prepare=lambda context: self._prepare_page(context, filename_map, dependency),
+            apply=lambda context: self._apply_page(context, filename_map, dependency),
+            rollback=lambda context: self._rollback_page(context, dependency),
+        )
+        return self.plan_owner.apply(
+            plan_id,
+            plan=plan,
+            hooks=hooks,
+            entries=entries,
+            preflight=preflight,
+            cas_code="privacy_audit_cas_mismatch",
+            rollback_code="privacy_audit_rolled_back",
+            rollback_failed_code="privacy_audit_rollback_failed",
+            response_fields={"history_written": False},
+            audit_fields={"allow_locator_changes": allow_locator_changes, "history_written": False},
+        )
 
-            audit = {
-                "schema_version": 1,
-                "kind": "privacy_audit",
-                "plan_id": plan_id,
-                "state": "applied",
-                "rolled_back": False,
-                "allow_locator_changes": allow_locator_changes,
-                "entries": results,
-                "writes": len(written_targets),
-                "history_written": False,
-                "warnings": warnings,
-            }
-            atomic_write_text(audit_path, json.dumps(audit, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            response = {"ok": True, "plan_id": plan_id, "applied": True, "writes": len(written_targets), "history_written": False, "entries": results}
-            if warnings:
-                response["warnings"] = warnings
-            return response
-        except Exception as exc:
-            rollback_errors = _rollback(self.root, originals, targets, written_targets, projections, dependency)
-            rollback_audit = {
-                "schema_version": 1,
-                "kind": "privacy_audit",
-                "plan_id": plan_id,
-                "state": "rolled_back",
-                "rolled_back": not rollback_errors,
-                "error_code": _stable_error_code(exc),
-                "rollback_errors": rollback_errors,
-                "entries": results,
-                "history_written": False,
-                "warnings": warnings,
-            }
-            try:
-                atomic_write_text(audit_path, json.dumps(rollback_audit, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            except Exception:
-                pass
-            return {
-                "ok": False,
-                "code": "privacy_audit_rolled_back" if not rollback_errors else "privacy_audit_rollback_failed",
-                "plan_id": plan_id,
-                "rolled_back": not rollback_errors,
-                "writes": 0,
-                "error_code": _stable_error_code(exc),
-            }
+    def _prepare_page(
+        self,
+        context: RepairPageContext,
+        filename_map: Mapping[str, str],
+        dependency: KnowledgeDependencies | None,
+    ) -> None:
+        target = admin_wiki_page_file(
+            self.root,
+            filename_map.get(context.page_path, context.page_path),
+            allow_missing=True,
+        )
+        context.metadata["target"] = target
+        if dependency is not None:
+            context.metadata["projection"] = KnowledgeDependencies.read_page_projection(self.root, context.page_path)
+
+    def _apply_page(
+        self,
+        context: RepairPageContext,
+        filename_map: Mapping[str, str],
+        dependency: KnowledgeDependencies | None,
+    ) -> dict[str, object]:
+        target = context.metadata["target"]
+        if not isinstance(target, Path):
+            raise PrivacyAuditError("page_not_found")
+        transformed = _transform_text(context.original.decode("utf-8"), filename_map)
+        renamed = target != context.source
+        if transformed.encode("utf-8") != context.original or renamed:
+            atomic_write_bytes(target, transformed.encode("utf-8"))
+            context.wrote = True
+        after_hash = sha256_file(target)
+        if dependency is not None:
+            frontmatter, _ = split_frontmatter(transformed)
+            desired_hashes = string_map(frontmatter.get("source_hashes"))
+            policy = derive_page_policy(frontmatter)
+            dependency.update_page(
+                target.relative_to(self.root).as_posix(),
+                after_hash,
+                desired_hashes,
+                generated=policy.generated,
+                maintenance=policy.maintenance,
+                lifecycle=policy.lifecycle,
+                replaced_by=policy.replaced_by,
+                freshness=policy.freshness,
+            )
+            if target != context.source:
+                dependency.remove_page(context.page_path)
+        if renamed:
+            context.source.unlink()
+        warning = self._refresh_retrieval(target, context.page_path, old_page_path=context.page_path if renamed else None)
+        if warning is not None:
+            context.add_warning(warning)
+        return {
+            "page_path": context.page_path,
+            "after_page_path": target.relative_to(self.root).as_posix(),
+            "before_page_hash": hashlib.sha256(context.original).hexdigest(),
+            "after_page_hash": after_hash,
+            "hit_fields": context.entry.get("hit_fields", []),
+            "filename_change": context.entry.get("filename_change"),
+            "wikilink_changes": context.entry.get("wikilink_changes", []),
+        }
+
+    def _rollback_page(self, context: RepairPageContext, dependency: KnowledgeDependencies | None) -> None:
+        target = context.metadata.get("target")
+        if isinstance(target, Path) and target != context.source:
+            target.unlink(missing_ok=True)
+        if context.wrote:
+            atomic_write_bytes(context.source, context.original)
+        projection = context.metadata.get("projection")
+        if dependency is not None and isinstance(projection, Mapping):
+            _restore_projection(self.root, dependency, context.page_path, projection)
 
     def _refresh_retrieval(
         self,
@@ -315,57 +284,23 @@ class PrivacyAuditService:
             try:
                 result = store.update_page_from_file(target)
             except Exception as exc:
-                return _projection_warning(page_path, exc)
+                return projection_warning(page_path, exc)
             if result.get("ok") is not True or result.get("state") == "rebuild_required":
-                return _projection_warning(page_path, result)
+                return projection_warning(page_path, result)
             if old_page_path is not None:
                 try:
                     deleted = store.delete_page(old_page_path)
                 except Exception as exc:
-                    return _projection_warning(page_path, exc)
+                    return projection_warning(page_path, exc)
                 if deleted.get("ok") is False and deleted.get("code") != "index_missing":
-                    return _projection_warning(page_path, deleted)
+                    return projection_warning(page_path, deleted)
         return None
 
     def _iter_page_files(self) -> Iterable[Path]:
-        wiki_root = self.root / "wiki"
-        if not wiki_root.is_dir():
-            return ()
-        return (
-            path
-            for path in sorted(wiki_root.rglob("*.md"))
-            if path.is_file() and "archives" not in path.relative_to(self.root).parts
-        )
+        return iter_admin_page_files(self.root)
 
     def _page_file(self, value: str, *, allow_missing: bool = False) -> Path:
-        if not isinstance(value, str) or not value.startswith("wiki/"):
-            raise PrivacyAuditError("invalid_page_path")
-        parts = value.split("/")
-        if any(not part or part in {".", ".."} for part in parts):
-            raise PrivacyAuditError("invalid_page_path")
-        candidate = (self.root / Path(*parts)).resolve()
-        relative_parts = candidate.relative_to(self.root).parts if candidate.is_relative_to(self.root) else ()
-        if not candidate.is_relative_to(self.root) or not relative_parts or relative_parts[0].casefold() != "wiki" or candidate.suffix.casefold() != ".md" or (not allow_missing and not candidate.is_file()):
-            raise PrivacyAuditError("page_not_found")
-        return candidate
-
-    def _write_plan(self, plan_id: str, plan: Mapping[str, object]) -> None:
-        target = self.root / ADMIN_PLANS_DIR / f"privacy-audit-{plan_id}.json"
-        atomic_write_text(target, json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-
-    def _read_plan(self, plan_id: str) -> dict[str, object]:
-        if not isinstance(plan_id, str) or _PLAN_ID.fullmatch(plan_id) is None:
-            raise PrivacyAuditError("invalid_plan_id")
-        path = self.root / ADMIN_PLANS_DIR / f"privacy-audit-{plan_id}.json"
-        if not path.is_file():
-            raise PrivacyAuditError("plan_not_found")
-        try:
-            plan = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise PrivacyAuditError("plan_invalid") from exc
-        if not isinstance(plan, dict) or plan.get("kind") != "privacy_audit" or plan.get("plan_id") != plan_id:
-            raise PrivacyAuditError("plan_invalid")
-        return plan
+        return self.plan_owner.page_file(value, allow_missing=allow_missing)
 
 
 def _changed_fields(before: object, after: object, prefix: str = "") -> list[str]:
@@ -451,52 +386,26 @@ def _has_locator_change(entry: Mapping[str, object]) -> bool:
     return bool(entry.get("filename_change") or entry.get("wikilink_changes"))
 
 
-def _rollback(
+def _restore_projection(
     root: Path,
-    originals: Mapping[str, bytes],
-    targets: Mapping[str, Path],
-    written_targets: Iterable[Path],
-    projections: Mapping[str, dict[str, object]],
-    dependency: KnowledgeDependencies | None,
-) -> list[str]:
-    errors: list[str] = []
-    old_paths = {(root / Path(*path.split("/"))).resolve() for path in originals}
-    for target in reversed(list(written_targets)):
-        if target not in old_paths:
-            try:
-                target.unlink(missing_ok=True)
-            except OSError:
-                errors.append("target_remove_failed")
-    for page_path, content in originals.items():
-        old = (root / Path(*page_path.split("/"))).resolve()
-        try:
-            atomic_write_bytes(old, content)
-        except Exception:
-            errors.append("page_restore_failed")
-    if dependency is not None:
-        for page_path, projection in projections.items():
-            try:
-                target = targets[page_path]
-                old = (root / Path(*page_path.split("/"))).resolve()
-                if target != old:
-                    dependency.remove_page(target.relative_to(root).as_posix())
-                if projection.get("state") == "ready":
-                    policy = derive_page_policy(projection)
-                    dependency.update_page(
-                        page_path,
-                        str(projection.get("page_hash", "")),
-                        _string_map(projection.get("edges")),
-                        generated=policy.generated,
-                        maintenance=policy.maintenance,
-                        lifecycle=policy.lifecycle,
-                        replaced_by=policy.replaced_by,
-                        freshness=policy.freshness,
-                    )
-                else:
-                    dependency.remove_page(page_path)
-            except Exception:
-                errors.append("dependency_restore_failed")
-    return errors
+    dependency: KnowledgeDependencies,
+    page_path: str,
+    projection: Mapping[str, object],
+) -> None:
+    if projection.get("state") == "ready":
+        policy = derive_page_policy(projection)
+        dependency.update_page(
+            page_path,
+            str(projection.get("page_hash", "")),
+            string_map(projection.get("edges")),
+            generated=policy.generated,
+            maintenance=policy.maintenance,
+            lifecycle=policy.lifecycle,
+            replaced_by=policy.replaced_by,
+            freshness=policy.freshness,
+        )
+    else:
+        dependency.remove_page(page_path)
 
 
 def _summary(entries: Iterable[Mapping[str, object]]) -> dict[str, int]:
@@ -510,40 +419,4 @@ def _summary(entries: Iterable[Mapping[str, object]]) -> dict[str, int]:
     return result
 
 
-def _string_map(value: object) -> dict[str, str]:
-    if not isinstance(value, Mapping):
-        return {}
-    return {str(key): str(item) for key, item in value.items()}
-
-
-def _stable_error_code(exc: Exception) -> str:
-    if isinstance(exc, (PrivacyAuditError, AtomicFileError)):
-        return getattr(exc, "code", "privacy_audit_failed")
-    return "privacy_audit_failed"
-
-
-def _projection_warning(page_path: str, result_or_error: object) -> dict[str, str]:
-    """把索引失败压缩为稳定 code 与安全短消息，不携带原始异常。"""
-
-    raw_code = getattr(result_or_error, "code", None)
-    if isinstance(result_or_error, Mapping):
-        raw_code = result_or_error.get("code")
-    code = str(raw_code or "retrieval_projection_failed")
-    if re.fullmatch(r"[a-z][a-z0-9_]*", code) is None:
-        code = "retrieval_projection_failed"
-    return {
-        "page_path": page_path,
-        "stage": "retrieval",
-        "code": code,
-        "message": "retrieval projection was not refreshed",
-    }
-
-
-def _safe_hash(path: Path) -> str | None:
-    try:
-        return sha256_file(path)
-    except OSError:
-        return None
-
-
-__all__ = ["PrivacyAuditError", "PrivacyAuditService"]
+__all__ = ["AtomicFileError", "PrivacyAuditError", "PrivacyAuditService", "atomic_write_text"]

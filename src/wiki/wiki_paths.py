@@ -375,6 +375,39 @@ def validate_wiki_page_path(
     return normalized
 
 
+def admin_wiki_page_file(
+    vault_root: str | Path,
+    value: str | Path,
+    *,
+    allow_missing: bool = False,
+) -> Path:
+    """Resolve one admin Wiki page while preserving only physical boundaries.
+
+    This is intentionally different from :func:`validate_wiki_page_path`:
+    admin maintenance may inspect or repair legacy/maintenance prefixes and
+    generated navigation indexes, so it does not apply the ordinary writer's
+    forbidden-prefix or navigation-index policy.  It still requires a
+    vault-relative ``wiki/`` Markdown path, validates every Windows-safe path
+    segment, and rejects symlink/logical escapes from ``vault_root``.
+    """
+
+    root = Path(vault_root).expanduser().resolve()
+    normalized = _logical_path(value)
+    if normalized.is_absolute() or any(part in {"", ".", ".."} for part in normalized.parts):
+        raise WikiPathError("path_escape", "admin page path must stay inside wiki root")
+    if not normalized.parts or normalized.parts[0].casefold() != "wiki":
+        raise WikiPathError("invalid_wiki_path", "admin page path must be under wiki/")
+    if normalized.suffix.casefold() != ".md":
+        raise WikiPathError("invalid_wiki_path", "admin page must be a markdown file")
+    for part in normalized.parts[1:]:
+        stem = Path(part).stem if part.casefold().endswith(".md") else part
+        safe_segment(stem)
+    candidate = resolve_within_root(root, normalized)
+    if not allow_missing and not candidate.is_file():
+        raise WikiPathError("page_not_found", "admin page does not exist")
+    return candidate
+
+
 def _logical_path(value: str | Path) -> Path:
     if isinstance(value, Path):
         return Path(*value.parts)

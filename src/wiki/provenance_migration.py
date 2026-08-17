@@ -8,13 +8,9 @@ source snapshots immediately before writing.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import hashlib
-import json
 from pathlib import Path
-import re
 from typing import Iterable, Mapping
-from uuid import uuid4
 
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.atomic_file import AtomicFileError, atomic_write_bytes, atomic_write_text, sha256_file
@@ -22,9 +18,18 @@ from common.privacy_policy import normalize_vault_relative
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_policy import derive_page_policy
 from wiki.projection_profile import projection_stages
+from wiki.repair_plan import (
+    RepairPageContext,
+    RepairPlanHooks,
+    RepairPlanOwner,
+    iter_admin_page_files,
+    projection_warning,
+    safe_file_hash,
+    string_map,
+)
 from wiki.source_provenance import SourceProvenanceError, SourceProvenanceResolver, source_path_key
 from wiki.wiki_io import render_page, split_frontmatter
-from wiki.wiki_paths import ADMIN_PLANS_DIR, MIGRATIONS_DIR
+from wiki.wiki_paths import MIGRATIONS_DIR
 
 
 class ProvenanceMigrationError(ValueError):
@@ -35,7 +40,6 @@ class ProvenanceMigrationError(ValueError):
         self.code = code
 
 
-_PLAN_ID = re.compile(r"^[0-9a-f]{32}$")
 _STRUCTURAL = {"index.md", "log.md", "overview.md"}
 _LEGACY_SOURCE_PREFIXES = ("wiki/sources/", "wiki/chatlog/", "wiki/archives/")
 _MISSING_SOURCE_CODES = {"source_not_found", "source_not_file", "source_read_failed"}
@@ -56,6 +60,13 @@ class ProvenanceMigrationService:
     def __init__(self, vault_root: str | Path):
         self.root = Path(vault_root).expanduser().resolve()
         self.resolver = SourceProvenanceResolver(self.root)
+        self.plan_owner = RepairPlanOwner(
+            self.root,
+            kind="provenance_migration",
+            plan_prefix="provenance-migration-",
+            audit_dir=MIGRATIONS_DIR,
+            error_type=ProvenanceMigrationError,
+        )
 
     def plan(self, page_path: str | None = None) -> dict[str, object]:
         pages = [self._page_file(page_path)] if page_path else list(self._iter_page_files())
@@ -64,139 +75,80 @@ class ProvenanceMigrationService:
             entry = self._classify_page(path)
             if entry is not None:
                 entries.append(entry)
-        plan_id = uuid4().hex
-        plan = {
-            "schema_version": 1,
-            "kind": "provenance_migration",
-            "plan_id": plan_id,
-            "created_at": datetime.now(UTC).isoformat(),
-            "dry_run": True,
-            "entries": entries,
-            "summary": _summary(entries),
-        }
-        self._write_plan(plan_id, plan)
-        return {
-            "ok": True,
-            "kind": plan["kind"],
-            "plan_id": plan_id,
-            "dry_run": True,
-            "summary": plan["summary"],
-            "entries": entries,
-        }
+        plan = self.plan_owner.create_plan({"entries": entries, "summary": _summary(entries)})
+        return self.plan_owner.plan_response(plan)
 
     def apply(self, plan_id: str) -> dict[str, object]:
-        plan = self._read_plan(plan_id)
-        audit_path = self.root / MIGRATIONS_DIR / f"{plan_id}.audit.json"
-        if audit_path.is_file():
-            try:
-                previous = json.loads(audit_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                previous = {}
-            if isinstance(previous, dict) and previous.get("state") == "applied":
-                return {"ok": True, "already_applied": True, "plan_id": plan_id, "audit_state": "applied"}
-
+        plan = self.plan_owner.read_plan(plan_id)
         raw_entries = plan.get("entries", [])
-        entries = [item for item in raw_entries if isinstance(item, dict)] if isinstance(raw_entries, list) else []
+        entries = [item for item in raw_entries if isinstance(item, Mapping)] if isinstance(raw_entries, list) else []
         applyable = [item for item in entries if item.get("applyable") is True]
         preflight = self._preflight(applyable)
         if not preflight["ok"]:
             return {**preflight, "plan_id": plan_id, "writes": 0}
 
-        originals: dict[str, bytes] = {}
-        projections: dict[str, dict[str, object]] = {}
-        written_pages: list[str] = []
         dependency = KnowledgeDependencies(self.root)
-        results: list[dict[str, object]] = []
-        warnings: list[dict[str, str]] = []
-        try:
-            for item in applyable:
-                page_path = str(item["page_path"])
-                target = self._page_file(page_path)
-                original = target.read_bytes()
-                originals[page_path] = original
-                projections[page_path] = KnowledgeDependencies.read_page_projection(self.root, page_path)
-                frontmatter, body = split_frontmatter(original.decode("utf-8"))
-                desired_hashes = _string_map(item.get("current_source_hashes"))
-                current_hashes = _canonical_source_hashes(frontmatter.get("source_hashes"))
-                if current_hashes != desired_hashes:
-                    updated_frontmatter = dict(frontmatter)
-                    updated_frontmatter["source_hashes"] = desired_hashes
-                    rendered = render_page(updated_frontmatter, body)
-                    atomic_write_text(target, rendered)
-                    written_pages.append(page_path)
-                else:
-                    rendered = original.decode("utf-8")
-                policy = derive_page_policy(frontmatter)
-                dependency.update_page(
-                    page_path,
-                    sha256_file(target),
-                    desired_hashes,
-                    generated=policy.generated,
-                    maintenance=policy.maintenance,
-                    lifecycle=policy.lifecycle,
-                    replaced_by=policy.replaced_by,
-                    freshness=policy.freshness,
-                )
-                warning = self._refresh_retrieval(target, page_path)
-                if warning is not None:
-                    warnings.append(warning)
-                results.append(
-                    {
-                        "page_path": page_path,
-                        "before_page_hash": hashlib.sha256(original).hexdigest(),
-                        "after_page_hash": sha256_file(target),
-                        "page_written": rendered != original.decode("utf-8"),
-                        "dependency_diff": item.get("dependency_diff", {}),
-                    }
-                )
+        hooks = RepairPlanHooks(
+            prepare=lambda context: self._prepare_page(context, dependency),
+            apply=lambda context: self._apply_page(context, dependency),
+            rollback=lambda context: self._rollback_page(context, dependency),
+        )
+        return self.plan_owner.apply(
+            plan_id,
+            plan=plan,
+            hooks=hooks,
+            entries=applyable,
+            cas_code="provenance_migration_cas_mismatch",
+            rollback_code="provenance_migration_rolled_back",
+            rollback_failed_code="provenance_migration_rollback_failed",
+            response_fields={"skipped": len(entries) - len(applyable)},
+        )
 
-            audit = {
-                "schema_version": 1,
-                "kind": "provenance_migration",
-                "plan_id": plan_id,
-                "state": "applied",
-                "rolled_back": False,
-                "entries": results,
-                "writes": len(written_pages),
-                "warnings": warnings,
-            }
-            atomic_write_text(audit_path, json.dumps(audit, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            response = {
-                "ok": True,
-                "plan_id": plan_id,
-                "applied": True,
-                "writes": len(written_pages),
-                "skipped": len(entries) - len(applyable),
-                "entries": results,
-            }
-            if warnings:
-                response["warnings"] = warnings
-            return response
-        except Exception as exc:
-            rollback_errors = self._rollback(written_pages, originals, projections, dependency)
-            rollback_audit = {
-                "schema_version": 1,
-                "kind": "provenance_migration",
-                "plan_id": plan_id,
-                "state": "rolled_back",
-                "rolled_back": not rollback_errors,
-                "error_code": _stable_error_code(exc),
-                "rollback_errors": rollback_errors,
-                "entries": results,
-                "warnings": warnings,
-            }
-            try:
-                atomic_write_text(audit_path, json.dumps(rollback_audit, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            except Exception:
-                pass
-            return {
-                "ok": False,
-                "code": "provenance_migration_rolled_back" if not rollback_errors else "provenance_migration_rollback_failed",
-                "plan_id": plan_id,
-                "rolled_back": not rollback_errors,
-                "writes": 0,
-                "error_code": _stable_error_code(exc),
-            }
+    def _prepare_page(self, context: RepairPageContext, dependency: KnowledgeDependencies) -> None:
+        context.metadata["projection"] = KnowledgeDependencies.read_page_projection(self.root, context.page_path)
+
+    def _apply_page(self, context: RepairPageContext, dependency: KnowledgeDependencies) -> dict[str, object]:
+        item = context.entry
+        original = context.original
+        frontmatter, body = split_frontmatter(original.decode("utf-8"))
+        desired_hashes = string_map(item.get("current_source_hashes"))
+        current_hashes = _canonical_source_hashes(frontmatter.get("source_hashes"))
+        if current_hashes != desired_hashes:
+            updated_frontmatter = dict(frontmatter)
+            updated_frontmatter["source_hashes"] = desired_hashes
+            rendered = render_page(updated_frontmatter, body)
+            atomic_write_text(context.source, rendered)
+            context.wrote = True
+        else:
+            rendered = original.decode("utf-8")
+        policy = derive_page_policy(frontmatter)
+        dependency.update_page(
+            context.page_path,
+            sha256_file(context.source),
+            desired_hashes,
+            generated=policy.generated,
+            maintenance=policy.maintenance,
+            lifecycle=policy.lifecycle,
+            replaced_by=policy.replaced_by,
+            freshness=policy.freshness,
+        )
+        warning = self._refresh_retrieval(context.source, context.page_path)
+        if warning is not None:
+            context.add_warning(warning)
+        return {
+            "page_path": context.page_path,
+            "before_page_hash": hashlib.sha256(original).hexdigest(),
+            "after_page_hash": sha256_file(context.source),
+            "page_written": rendered != original.decode("utf-8"),
+            "dependency_diff": item.get("dependency_diff", {}),
+        }
+
+    def _rollback_page(self, context: RepairPageContext, dependency: KnowledgeDependencies) -> None:
+        if context.wrote:
+            atomic_write_bytes(context.source, context.original)
+        projection = context.metadata.get("projection")
+        if isinstance(projection, Mapping):
+            _restore_projection(dependency, context.page_path, projection)
 
     def _refresh_retrieval(self, target: Path, page_path: str) -> dict[str, str] | None:
         """按 admin profile 增量刷新页面；索引故障不回滚页面事实。"""
@@ -207,33 +159,16 @@ class ProvenanceMigrationService:
             try:
                 result = RetrievalIndexStore(self.root, scope="active").update_page_from_file(target)
             except Exception as exc:
-                return _projection_warning(page_path, exc)
+                return projection_warning(page_path, exc)
             if result.get("ok") is not True or result.get("state") == "rebuild_required":
-                return _projection_warning(page_path, result)
+                return projection_warning(page_path, result)
         return None
 
     def _iter_page_files(self) -> Iterable[Path]:
-        wiki_root = self.root / "wiki"
-        if not wiki_root.is_dir():
-            return ()
-        return (
-            path
-            for path in sorted(wiki_root.rglob("*.md"))
-            if path.is_file() and "archives" not in path.relative_to(self.root).parts
-        )
+        return iter_admin_page_files(self.root)
 
     def _page_file(self, value: str) -> Path:
-        if not isinstance(value, str) or not value:
-            raise ProvenanceMigrationError("invalid_page_path")
-        normalized = value.replace("\\", "/")
-        parts = normalized.split("/")
-        if not normalized.startswith("wiki/") or normalized.endswith("/") or any(not part or part in {".", ".."} for part in parts):
-            raise ProvenanceMigrationError("invalid_page_path")
-        candidate = (self.root / Path(*parts)).resolve()
-        relative_parts = candidate.relative_to(self.root).parts if candidate.is_relative_to(self.root) else ()
-        if not candidate.is_relative_to(self.root) or not relative_parts or relative_parts[0].casefold() != "wiki" or not candidate.is_file() or candidate.suffix.casefold() != ".md":
-            raise ProvenanceMigrationError("page_not_found")
-        return candidate
+        return self.plan_owner.page_file(value)
 
     def _classify_page(self, path: Path) -> dict[str, object] | None:
         page_path = path.relative_to(self.root).as_posix()
@@ -247,7 +182,7 @@ class ProvenanceMigrationService:
                 "page_path": page_path,
                 "category": "invalid",
                 "issues": ["page_read_failed"],
-                "expected_page_hash": _safe_hash(path),
+                "expected_page_hash": safe_file_hash(path),
                 "applyable": False,
                 "dependency_diff": {"mode": "full", "added": [], "removed": [], "changed": []},
             }
@@ -328,41 +263,10 @@ class ProvenanceMigrationService:
             ),
         }
 
-    def _write_plan(self, plan_id: str, plan: Mapping[str, object]) -> None:
-        target = self.root / ADMIN_PLANS_DIR / f"provenance-migration-{plan_id}.json"
-        atomic_write_text(target, json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-
-    def _read_plan(self, plan_id: str) -> dict[str, object]:
-        _validate_plan_id(plan_id)
-        path = self.root / ADMIN_PLANS_DIR / f"provenance-migration-{plan_id}.json"
-        if not path.is_file():
-            raise ProvenanceMigrationError("plan_not_found")
-        try:
-            plan = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ProvenanceMigrationError("plan_invalid") from exc
-        if not isinstance(plan, dict) or plan.get("kind") != "provenance_migration" or plan.get("plan_id") != plan_id:
-            raise ProvenanceMigrationError("plan_invalid")
-        return plan
-
-    def _preflight(self, entries: list[dict[str, object]]) -> dict[str, object]:
+    def _preflight(self, entries: list[Mapping[str, object]]) -> dict[str, object]:
         for item in entries:
             page_path = str(item.get("page_path", ""))
-            try:
-                target = self._page_file(page_path)
-            except ProvenanceMigrationError as exc:
-                return {"ok": False, "code": exc.code, "page_path": page_path}
-            expected = str(item.get("expected_page_hash", ""))
-            actual = sha256_file(target)
-            if actual != expected:
-                return {
-                    "ok": False,
-                    "code": "provenance_migration_cas_mismatch",
-                    "page_path": page_path,
-                    "expected_page_hash": expected,
-                    "actual_page_hash": actual,
-                }
-            expected_sources = _string_map(item.get("current_source_hashes"))
+            expected_sources = string_map(item.get("current_source_hashes"))
             try:
                 current = self.resolver.resolve_many(list(expected_sources))
             except SourceProvenanceError as exc:
@@ -370,26 +274,6 @@ class ProvenanceMigrationService:
             if {item.relative_path: item.sha256 for item in current} != expected_sources:
                 return {"ok": False, "code": "provenance_source_drift", "page_path": page_path}
         return {"ok": True}
-
-    def _rollback(
-        self,
-        written_pages: list[str],
-        originals: Mapping[str, bytes],
-        projections: Mapping[str, dict[str, object]],
-        dependency: KnowledgeDependencies,
-    ) -> list[str]:
-        errors: list[str] = []
-        for page_path in reversed(written_pages):
-            try:
-                atomic_write_bytes(self._page_file(page_path), originals[page_path])
-            except Exception:
-                errors.append("page_restore_failed")
-        for page_path, projection in projections.items():
-            try:
-                _restore_projection(dependency, page_path, projection)
-            except Exception:
-                errors.append("dependency_restore_failed")
-        return errors
 
 
 def _has_provenance_fields(path: Path) -> bool:
@@ -457,12 +341,6 @@ def _summary(entries: Iterable[Mapping[str, object]]) -> dict[str, int]:
     return dict(sorted(result.items()))
 
 
-def _string_map(value: object) -> dict[str, str]:
-    if not isinstance(value, Mapping):
-        return {}
-    return {str(key): str(item) for key, item in value.items()}
-
-
 def _restore_projection(dependency: KnowledgeDependencies, page_path: str, projection: Mapping[str, object]) -> None:
     if projection.get("state") != "ready":
         dependency.remove_page(page_path)
@@ -471,7 +349,7 @@ def _restore_projection(dependency: KnowledgeDependencies, page_path: str, proje
     dependency.update_page(
         page_path,
         str(projection.get("page_hash", "")),
-        _string_map(projection.get("edges")),
+        string_map(projection.get("edges")),
         generated=policy.generated,
         maintenance=policy.maintenance,
         lifecycle=policy.lifecycle,
@@ -479,40 +357,4 @@ def _restore_projection(dependency: KnowledgeDependencies, page_path: str, proje
         freshness=policy.freshness,
     )
 
-
-def _validate_plan_id(value: str) -> None:
-    if not isinstance(value, str) or _PLAN_ID.fullmatch(value) is None:
-        raise ProvenanceMigrationError("invalid_plan_id")
-
-
-def _safe_hash(path: Path) -> str | None:
-    try:
-        return sha256_file(path)
-    except OSError:
-        return None
-
-
-def _stable_error_code(exc: Exception) -> str:
-    if isinstance(exc, (ProvenanceMigrationError, SourceProvenanceError, AtomicFileError)):
-        return getattr(exc, "code", "migration_failed")
-    return "migration_failed"
-
-
-def _projection_warning(page_path: str, result_or_error: object) -> dict[str, str]:
-    """把索引失败压缩为稳定 code 与安全短消息，不携带原始异常。"""
-
-    raw_code = getattr(result_or_error, "code", None)
-    if isinstance(result_or_error, Mapping):
-        raw_code = result_or_error.get("code")
-    code = str(raw_code or "retrieval_projection_failed")
-    if re.fullmatch(r"[a-z][a-z0-9_]*", code) is None:
-        code = "retrieval_projection_failed"
-    return {
-        "page_path": page_path,
-        "stage": "retrieval",
-        "code": code,
-        "message": "retrieval projection was not refreshed",
-    }
-
-
-__all__ = ["ProvenanceMigrationError", "ProvenanceMigrationService"]
+__all__ = ["AtomicFileError", "ProvenanceMigrationError", "ProvenanceMigrationService"]
