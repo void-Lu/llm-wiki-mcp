@@ -7,25 +7,24 @@ from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 import threading
-from typing import Any, Callable, Mapping
+from typing import Any, Iterable, Mapping
 
 import yaml
 
-from common.privacy_policy import normalize_vault_relative
 from wiki.atomic_file import AtomicFileError, atomic_write_text, current_fault, sha256_file
-from wiki.knowledge_dependencies import KnowledgeDependencies
-from wiki.page_policy import derive_page_policy
+from wiki.page_mutation_adapters import (
+    ChatSourceAdapter,
+    FormalPageAdapter,
+    Projection,
+    ProjectionContext,
+    WriteAdapter,
+    WriteAdapterError,
+    WriteAdapterRegistry,
+    default_write_adapters,
+)
 from wiki.page_operation_store import PageOperation, PageOperationError, PageOperationStore, UpdatePlan, UpdatePlanError, plan_is_expired
-from wiki.projection_profile import projection_stages
-from wiki.wiki_index import refresh_navigation
-from wiki.wiki_io import read_markdown_page
-from wiki.wiki_log import WikiLogStore, append_log_entry
-from wiki.wiki_models import WikiLogEntry
-from wiki.wiki_overview import refresh_overview
-from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
-
-
-Projection = Callable[[], Mapping[str, object] | None]
+from wiki.wiki_log import WikiLogStore
+from wiki.wiki_paths import WikiPathError, translate_path_error
 
 
 @dataclass(frozen=True)
@@ -371,11 +370,13 @@ class PageMutationCoordinator:
         vault_root: str | Path,
         *,
         store: PageOperationStore | None = None,
+        adapters: Iterable[WriteAdapter] | None = None,
     ):
         self.root = Path(vault_root).expanduser().resolve()
         self._store = store or PageOperationStore(self.root)
         self._log_store = WikiLogStore(self.root, operation_store=self._store)
         self._plan_lifecycle = PlanLifecycle(self._store)
+        self._adapters = WriteAdapterRegistry(adapters if adapters is not None else default_write_adapters())
 
     def issue_plan(
         self,
@@ -388,6 +389,21 @@ class PageMutationCoordinator:
         """Issue one update plan through the lifecycle owner."""
 
         return self._plan_lifecycle.issue(page_path, base_hash, intent, ttl_seconds=ttl_seconds)
+
+    def build_plan_intent(
+        self,
+        *,
+        operation_kind: str,
+        body: str,
+        frontmatter: Mapping[str, Any],
+    ) -> PlanIntent:
+        """Build a plan intent through the registered kind adapter."""
+
+        try:
+            adapter = self._adapter_for_operation(operation_kind)
+        except WriteAdapterError as exc:
+            raise PageMutationError(exc.code) from exc
+        return adapter.build_plan_intent(body, frontmatter)
 
     def prepare(
         self,
@@ -416,7 +432,8 @@ class PageMutationCoordinator:
         operation = self._store.get_operation(operation_id)
         if operation is None:
             return MutationResult(ok=False, code="operation_not_found")
-        target = self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source")
+        adapter = self._adapter_for_operation(operation.operation_kind)
+        target = self._target(operation.page_path, adapter=adapter)
         current_hash = _hash_if_exists(target)
         expected_base = operation.base_hash if expected_hash is None else expected_hash
         if current_hash != expected_base:
@@ -495,7 +512,8 @@ class PageMutationCoordinator:
                 operation,
             )
 
-        for stage in projection_stages(operation.operation_kind):
+        adapter = self._adapter_for_operation(operation.operation_kind)
+        for stage in adapter.projection_stages():
             current = self._store.get_operation(operation_id)
             if current is None:
                 return MutationResult(ok=False, code="operation_not_found")
@@ -555,7 +573,7 @@ class PageMutationCoordinator:
             return self._mutation_result({"ok": True, "state": "completed", "operation_id": operation_id}, operation)
         classification = self._classify_disk(
             operation,
-            self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source"),
+            self._target(operation.page_path, adapter=self._adapter_for_operation(operation.operation_kind)),
         )
         if classification == "intended":
             try:
@@ -588,169 +606,76 @@ class PageMutationCoordinator:
 
     def project_existing(
         self,
+        page_path_or_operation_id: str,
+        content_hash: str | None = None,
+        *,
+        projections: Mapping[str, Projection] | None = None,
+    ) -> MutationResult:
+        """Project durable bytes without rewriting their file.
+
+        The public ``(page_path, content_hash)`` form is the first-class
+        existing-fact entry point.  The operation-id form remains as a narrow
+        compatibility seam for repair callers and older integrations.
+        """
+
+        if content_hash is None:
+            return self._project_existing_operation(page_path_or_operation_id, projections=projections)
+        return self._project_existing_path(page_path_or_operation_id, content_hash)
+
+    def _project_existing_operation(
+        self,
         operation_id: str,
         *,
         projections: Mapping[str, Projection] | None = None,
     ) -> MutationResult:
-        """Project an already durable fact without rewriting its file.
-
-        Immutable raw revisions can predate the page-operation journal (or a
-        process can crash after the file replace).  Recovery classifies the
-        existing bytes as the intended fact and then reuses the same stage
-        runner, so idempotent retries never create a second revision.
-        """
-
         operation = self._store.get_operation(operation_id)
         if operation is None:
             return MutationResult(ok=False, code="operation_not_found")
-        if projections is not None:
-            selected = projections
-        else:
-            selected = self.projections_for(operation)
+        selected = projections if projections is not None else self.projections_for(operation)
         return self.repair(operation_id, selected)
+
+    def _project_existing_path(self, page_path: str, content_hash: str) -> MutationResult:
+        try:
+            adapter = self._adapter_for_path(page_path)
+            target = self._target(page_path, adapter=adapter)
+        except (PageMutationError, WriteAdapterError) as exc:
+            return MutationResult(ok=False, code=str(getattr(exc, "code", "path_not_allowed")))
+        actual_hash = _hash_if_exists(target)
+        if actual_hash is None:
+            return MutationResult(ok=False, code="page_not_found")
+        if actual_hash != content_hash:
+            return MutationResult(ok=False, code="expected_hash_mismatch", page_hash=actual_hash)
+        request_key = adapter.existing_request_key(self.root, page_path, content_hash, target)
+        existing = self._store.get_operation_by_request_key(request_key)
+        if existing is not None:
+            return replace(self._project_existing_operation(existing.operation_id), already_applied=True)
+        try:
+            operation = self.prepare(
+                request_key=request_key,
+                operation_kind=adapter.existing_operation_kind(),
+                page_path=page_path,
+                base_hash=content_hash,
+                intended_hash=content_hash,
+            )
+        except PageOperationError as exc:
+            return MutationResult(ok=False, code=exc.code)
+        result = self._project_existing_operation(operation.operation_id)
+        return result
 
     def projections_for(
         self,
         operation: PageOperation,
     ) -> dict[str, Projection]:
-        """Build the projection set selected by the operation's source kind."""
+        """Build the projection set selected by the registered adapter."""
 
-        target = self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source")
+        adapter = self._adapter_for_operation(operation.operation_kind)
+        target = self._target(operation.page_path, adapter=adapter)
         if not target.is_file():
             return {
                 stage: (lambda: {"ok": False, "code": "page_not_found"})
-                for stage in projection_stages(operation.operation_kind)
+                for stage in adapter.projection_stages()
             }
-        if operation.operation_kind == "chat_source":
-            return self._chat_source_projections(operation, target)
-        return self._formal_page_projections(operation, target)
-
-    def _formal_page_projections(
-        self,
-        operation: PageOperation,
-        target: Path,
-    ) -> dict[str, Projection]:
-        page = read_markdown_page(target, self.root)
-        source_hashes = _source_hashes(page.frontmatter)
-        sources = _sources(page.frontmatter)
-        policy = derive_page_policy(page.frontmatter, source_hashes)
-
-        def dependencies() -> dict[str, object]:
-            KnowledgeDependencies(self.root).update_page(
-                operation.page_path,
-                operation.intended_hash,
-                source_hashes,
-                generated=policy.generated,
-                maintenance=policy.maintenance,
-                lifecycle=policy.lifecycle,
-                replaced_by=policy.replaced_by,
-                freshness=policy.freshness,
-            )
-            return {"ok": True, "state": "ready"}
-
-        def retrieval() -> dict[str, object]:
-            from retrieval.retrieval_index import RetrievalIndexStore
-
-            return RetrievalIndexStore(self.root, scope="active").update_page_from_file(target)
-
-        def navigation() -> dict[str, object]:
-            return refresh_navigation(self.root)
-
-        def overview() -> dict[str, object]:
-            return refresh_overview(self.root)
-
-        def audit_log() -> dict[str, object]:
-            return append_log_entry(
-                self.root,
-                WikiLogEntry(
-                    operation="update" if operation.operation_kind == "update" else "note",
-                    title=page.title,
-                    paths=[operation.page_path],
-                    sources=sources,
-                    project=str(page.frontmatter.get("project") or ""),
-                    status="ok",
-                    operation_id=operation.operation_id,
-                ),
-                log_store=self._log_store,
-            )
-
-        return {
-            "dependencies": dependencies,
-            "retrieval": retrieval,
-            "navigation": navigation,
-            "overview": overview,
-            "audit_log": audit_log,
-        }
-
-    def _chat_source_projections(
-        self,
-        operation: PageOperation,
-        target: Path,
-    ) -> dict[str, Projection]:
-        """Build raw-chat projections without treating the source as a page."""
-
-        page = read_markdown_page(target, self.root)
-        session_id = str(page.frontmatter.get("session_id") or target.parent.name)
-        project = str(page.frontmatter.get("project") or "")
-        source_hash = operation.intended_hash
-
-        def dependencies() -> dict[str, object]:
-            dependencies = KnowledgeDependencies(self.root)
-            affected: set[str] = set()
-            # A formal page may pin any immutable revision. A new revision
-            # supersedes the whole session lineage, so compare the new bytes
-            # against every revision path without changing stored source edges.
-            for revision_path in sorted(target.parent.glob("revision-*.md")):
-                relative = revision_path.relative_to(self.root).as_posix()
-                affected.update(dependencies.source_changed(relative, source_hash))
-            return {"ok": True, "state": "ready", "affected_count": len(affected)}
-
-        def retrieval() -> dict[str, object]:
-            # Chat revisions live in the active/history projection.  The raw
-            # store intentionally excludes chat, so update the active store
-            # incrementally. Missing/incompatible stores require an explicit
-            # administrator rebuild and must not trigger a hidden full build.
-            from retrieval.retrieval_index import RetrievalIndexStore
-
-            store = RetrievalIndexStore(self.root, scope="active")
-            result = store.update_page_from_file(target)
-            if result.get("code") == "not_eligible":
-                return {"ok": True, "state": "not_applicable", "code": "not_eligible"}
-            if not result.get("ok"):
-                return result
-            return {
-                "ok": True,
-                "state": str(result.get("state") or "ready"),
-                "code": str(result.get("code") or "ready"),
-                "operation": result.get("operation"),
-                "retrieval_index": dict(result),
-            }
-
-        def not_applicable() -> dict[str, object]:
-            return {"ok": True, "state": "not_applicable", "code": "not_applicable"}
-
-        def audit_log() -> dict[str, object]:
-            return append_log_entry(
-                self.root,
-                WikiLogEntry(
-                    operation="chat_source",
-                    title=session_id,
-                    paths=[operation.page_path],
-                    sources=[],
-                    project=project,
-                    status="ok",
-                    operation_id=operation.operation_id,
-                ),
-                log_store=self._log_store,
-            )
-
-        return {
-            "dependencies": dependencies,
-            "retrieval": retrieval,
-            "navigation": not_applicable,
-            "overview": not_applicable,
-            "audit_log": audit_log,
-        }
+        return adapter.build_projections(ProjectionContext(self.root, self._log_store), operation, target)
 
     def _commit_with_projections(
         self,
@@ -798,7 +723,7 @@ class PageMutationCoordinator:
     def write_and_project(
         self,
         *,
-        request_key: str,
+        request_key: str | None = None,
         operation_kind: str,
         page_path: str,
         base_hash: str | None,
@@ -809,11 +734,25 @@ class PageMutationCoordinator:
     ) -> MutationResult:
         """Prepare, commit, project, and optionally consume one mutation plan.
 
-        ``request_key`` remains a compatibility seam for the current formal/chat
-        callers; C5 owns moving its kind-specific derivation into adapters.
+        Request-key derivation belongs to the registered kind adapter.  An
+        explicit key remains accepted for compatibility with lower-level
+        callers and durable plan replay.
         """
 
+        try:
+            adapter = self._adapter_for_operation(operation_kind)
+        except WriteAdapterError as exc:
+            return MutationResult(ok=False, code=exc.code)
         intended_hash = sha256(text.encode("utf-8")).hexdigest()
+        effective_request_key = adapter.request_key(
+            operation_kind=operation_kind,
+            page_path=page_path,
+            base_hash=base_hash,
+            intended_hash=intended_hash,
+            text=text,
+            plan_id=plan_id,
+            explicit_request_key=request_key,
+        )
         resolution = self._plan_lifecycle.resolve(
             plan_id,
             page_path=page_path,
@@ -830,16 +769,16 @@ class PageMutationCoordinator:
             return resolution.result
         operation = resolution.operation
 
-        if operation_kind == "chat_source" and operation is None:
-            existing = self._store.get_operation_by_request_key(request_key)
+        if adapter.replay_existing_requests and operation is None:
+            existing = self._store.get_operation_by_request_key(effective_request_key)
             if existing is not None:
-                existing_result = self.project_existing(existing.operation_id)
+                existing_result = self._project_existing_operation(existing.operation_id)
                 return replace(existing_result, already_applied=True)
 
         if operation is None:
             try:
                 operation = self.prepare(
-                    request_key=request_key,
+                    request_key=effective_request_key,
                     operation_kind=operation_kind,
                     page_path=page_path,
                     base_hash=base_hash,
@@ -937,17 +876,18 @@ class PageMutationCoordinator:
         except Exception:
             pass
 
-    def _target(self, page_path: str, *, allow_raw_source: bool = False) -> Path:
-        if allow_raw_source:
-            normalized = normalize_vault_relative(page_path)
-            relative = Path(*normalized.split("/"))
-        else:
-            try:
-                relative = validate_wiki_page_path(page_path, allow_navigation_index=False)
-            except WikiPathError as exc:
-                raise PageMutationError(translate_path_error(exc.code, "mutation")) from exc
+    def _adapter_for_operation(self, operation_kind: str) -> WriteAdapter:
         try:
-            return resolve_within_root(self.root, relative)
+            return self._adapters.for_operation_kind(operation_kind)
+        except WriteAdapterError:
+            raise
+
+    def _adapter_for_path(self, page_path: str) -> WriteAdapter:
+        return self._adapters.for_path(page_path)
+
+    def _target(self, page_path: str, *, adapter: WriteAdapter) -> Path:
+        try:
+            return adapter.target(self.root, page_path)
         except WikiPathError as exc:
             raise PageMutationError(translate_path_error(exc.code, "mutation")) from exc
 
@@ -972,22 +912,10 @@ def _hash_if_exists(path: Path) -> str | None:
         return None
 
 
-def _source_hashes(frontmatter: Mapping[str, Any]) -> dict[str, str]:
-    value = frontmatter.get("source_hashes")
-    if not isinstance(value, Mapping):
-        return {}
-    return {str(key): str(item) for key, item in value.items() if str(key) and str(item)}
-
-
-def _sources(frontmatter: Mapping[str, Any]) -> list[str]:
-    value = frontmatter.get("sources", [])
-    if isinstance(value, list):
-        return [str(item) for item in value]
-    return [str(value)] if value else []
-
-
 __all__ = [
     "MutationResult",
+    "ChatSourceAdapter",
+    "FormalPageAdapter",
     "PlanIntent",
     "PlanLifecycle",
     "PlanResolution",
