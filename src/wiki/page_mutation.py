@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 import threading
@@ -55,9 +55,69 @@ class MutationResult:
             page_hash=str(result["page_hash"]) if result.get("page_hash") is not None else None,
             repair_action=str(result["repair_action"]) if result.get("repair_action") is not None else None,
             failed_stage=str(result["failed_stage"]) if result.get("failed_stage") is not None else None,
-            already_applied=bool(result.get("already_applied", False)),
+            already_applied=result.get("already_applied") is True,
             stages=dict(stages or {}),
         )
+
+    def stage_result(self, stage: str) -> dict[str, object] | None:
+        """Return one safe, persisted stage result without exposing store records."""
+
+        record = self.stages.get(stage)
+        if not isinstance(record, Mapping):
+            return None
+        value = record.get("result")
+        return dict(value) if isinstance(value, Mapping) else None
+
+    def dependency_projection(self) -> dict[str, object]:
+        """Explain the formal dependencies projection from the safe stage view."""
+
+        stage = self.stages.get("dependencies")
+        if not isinstance(stage, Mapping):
+            return {"ok": True, "state": "ready"}
+        result = stage.get("result")
+        if isinstance(result, Mapping):
+            return dict(result)
+        if stage.get("state") == "succeeded":
+            return {"ok": True, "state": "ready"}
+        state = stage.get("state")
+        if isinstance(state, str) and state:
+            code = stage.get("code")
+            return {
+                "ok": False,
+                "state": state,
+                "code": str(code) if isinstance(code, str) and code else f"dependencies_{state}",
+            }
+        return {"ok": True, "state": "ready"}
+
+    def retrieval_index(self) -> dict[str, object] | None:
+        """Return the safe retrieval projection, preserving the missing shape."""
+
+        return self.stage_result("retrieval")
+
+    def index_response(self) -> dict[str, Any]:
+        """Project chat retrieval state into the stable chat response shape."""
+
+        stage = self.stages.get("retrieval", {})
+        if not isinstance(stage, Mapping):
+            stage = {}
+        stage_result = self.stage_result("retrieval") or {}
+        if stage.get("state") == "succeeded":
+            retrieval_index = dict(stage_result)
+            indexed = retrieval_index.get("state") not in {"rebuild_required", "not_indexed"} and retrieval_index.get("ok") is True
+            return {
+                "ok": indexed,
+                "generation": {"enabled": False, "reason": "raw_only"},
+                "retrieval_index": retrieval_index,
+            }
+        return {
+            "ok": False,
+            "generation": {"enabled": False, "reason": "raw_only"},
+            "retrieval_index": {
+                "ok": False,
+                "state": stage.get("state", "pending"),
+                "code": stage.get("code") or "retrieval_pending",
+            },
+        }
 
     def to_dict(self) -> dict[str, object]:
         """Return the legacy-shaped scalar result plus the safe stage view."""
@@ -87,46 +147,21 @@ def safe_stages_of(operation: PageOperation) -> dict[str, dict[str, object]]:
 
 
 def stage_result_of(result: MutationResult, stage: str) -> dict[str, object] | None:
-    """读取一个已持久化的阶段结果；不存在时返回 ``None``。"""
+    """Compatibility shim; new consumers call ``MutationResult.stage_result``."""
 
-    record = result.stages.get(stage)
-    if not isinstance(record, Mapping):
-        return None
-    value = record.get("result")
-    return dict(value) if isinstance(value, Mapping) else None
+    return result.stage_result(stage)
 
 
 def dependency_projection_of(result: MutationResult) -> dict[str, object]:
-    """解释 formal 页面响应中的 dependencies 阶段。
+    """Compatibility shim; new consumers call ``MutationResult.dependency_projection``."""
 
-    阶段结果的解释 helper 与投影 builder 同居；嵌套键在持久化层被
-    ``_safe_stage_result`` 白名单削平。失败阶段没有 result 时如实暴露失败，
-    不伪装成 ready。
-    """
-
-    stage = result.stages.get("dependencies")
-    if not isinstance(stage, Mapping):
-        return {"ok": True, "state": "ready"}
-    stage_result = stage.get("result")
-    if isinstance(stage_result, Mapping):
-        return dict(stage_result)
-    if stage.get("state") == "succeeded":
-        return {"ok": True, "state": "ready"}
-    state = stage.get("state")
-    if isinstance(state, str) and state:
-        code = stage.get("code")
-        return {
-            "ok": False,
-            "state": state,
-            "code": str(code) if isinstance(code, str) and code else f"dependencies_{state}",
-        }
-    return {"ok": True, "state": "ready"}
+    return result.dependency_projection()
 
 
 def retrieval_index_of(result: MutationResult) -> dict[str, object] | None:
-    """解释 formal retrieval 投影，并保持缺失时的 ``None`` 形状。"""
+    """Compatibility shim; new consumers call ``MutationResult.retrieval_index``."""
 
-    return stage_result_of(result, "retrieval")
+    return result.retrieval_index()
 
 
 class PageMutationError(ValueError):
@@ -311,26 +346,35 @@ class PageMutationCoordinator:
         text: str,
         *,
         expected_hash: str | None = None,
-    ) -> dict[str, object]:
+    ) -> MutationResult:
         operation = self._store.get_operation(operation_id)
         if operation is None:
-            return {"ok": False, "code": "operation_not_found"}
+            return MutationResult(ok=False, code="operation_not_found")
         target = self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source")
         current_hash = _hash_if_exists(target)
         expected_base = operation.base_hash if expected_hash is None else expected_hash
         if current_hash != expected_base:
             self._mark_precommit_failure(operation_id, "expected_hash_mismatch")
-            return {"ok": False, "code": "expected_hash_mismatch", "operation_id": operation_id, "state": "failed_precommit"}
+            return self._mutation_result(
+                {"ok": False, "code": "expected_hash_mismatch", "operation_id": operation_id, "state": "failed_precommit"},
+                operation,
+            )
         intended_hash = sha256(text.encode("utf-8")).hexdigest()
         if intended_hash != operation.intended_hash:
             self._mark_precommit_failure(operation_id, "operation_intent_drift")
-            return {"ok": False, "code": "operation_intent_drift", "operation_id": operation_id, "state": "failed_precommit"}
+            return self._mutation_result(
+                {"ok": False, "code": "operation_intent_drift", "operation_id": operation_id, "state": "failed_precommit"},
+                operation,
+            )
 
         with self._page_lock(operation.page_path):
             current_hash = _hash_if_exists(target)
             if current_hash != expected_base:
                 self._mark_precommit_failure(operation_id, "expected_hash_mismatch")
-                return {"ok": False, "code": "expected_hash_mismatch", "operation_id": operation_id, "state": "failed_precommit"}
+                return self._mutation_result(
+                    {"ok": False, "code": "expected_hash_mismatch", "operation_id": operation_id, "state": "failed_precommit"},
+                    operation,
+                )
             try:
                 atomic_write_text(target, text)
             except AtomicFileError:
@@ -345,38 +389,50 @@ class PageMutationCoordinator:
                         self._store.set_operation_state(operation_id, "repair_pending", error_code="journal_commit_pending")
                     except Exception:
                         pass
-                    return {
-                        "ok": True,
-                        "state": "repair_pending",
-                        "operation_id": operation_id,
-                        "page_hash": operation.intended_hash,
-                        "code": "journal_commit_pending",
-                    }
+                    return self._mutation_result(
+                        {
+                            "ok": True,
+                            "state": "repair_pending",
+                            "operation_id": operation_id,
+                            "page_hash": operation.intended_hash,
+                            "code": "journal_commit_pending",
+                        },
+                        operation,
+                    )
                 return self._classify_commit_failure(operation, target)
-        return {
-            "ok": True,
-            "state": "page_committed",
-            "operation_id": committed.operation_id,
-            "page_hash": committed.intended_hash,
-        }
+        return self._mutation_result(
+            {
+                "ok": True,
+                "state": "page_committed",
+                "operation_id": committed.operation_id,
+                "page_hash": committed.intended_hash,
+            },
+            committed,
+        )
 
     def run_projections(
         self,
         operation_id: str,
         projections: Mapping[str, Projection],
-    ) -> dict[str, object]:
+    ) -> MutationResult:
         operation = self._store.get_operation(operation_id)
         if operation is None:
-            return {"ok": False, "code": "operation_not_found"}
+            return MutationResult(ok=False, code="operation_not_found")
         if operation.state == "completed":
-            return {"ok": True, "state": "completed", "operation_id": operation_id, "already_applied": True}
+            return self._mutation_result(
+                {"ok": True, "state": "completed", "operation_id": operation_id, "already_applied": True},
+                operation,
+            )
         if operation.state not in {"page_committed", "repair_pending"}:
-            return {"ok": False, "code": "operation_not_committed", "state": operation.state, "operation_id": operation_id}
+            return self._mutation_result(
+                {"ok": False, "code": "operation_not_committed", "state": operation.state, "operation_id": operation_id},
+                operation,
+            )
 
         for stage in projection_stages(operation.operation_kind):
             current = self._store.get_operation(operation_id)
             if current is None:
-                return {"ok": False, "code": "operation_not_found"}
+                return MutationResult(ok=False, code="operation_not_found")
             if current.stages.get(stage, {}).get("state") == "succeeded":
                 continue
             try:
@@ -389,7 +445,18 @@ class PageMutationCoordinator:
                     code = str(result_dict.get("code") or f"{stage}_failed")
                     self._store.record_stage(operation_id, stage, "failed", code=code, result=result_dict)
                     self._store.set_operation_state(operation_id, "repair_pending", error_code=code)
-                    return {"ok": True, "state": "repair_pending", "operation_id": operation_id, "failed_stage": stage, "code": "projection_repair_required", "repair_action": "repair_page_operation"}
+                    updated = self._store.get_operation(operation_id) or current
+                    return self._mutation_result(
+                        {
+                            "ok": True,
+                            "state": "repair_pending",
+                            "operation_id": operation_id,
+                            "failed_stage": stage,
+                            "code": "projection_repair_required",
+                            "repair_action": "repair_page_operation",
+                        },
+                        updated,
+                    )
                 self._store.record_stage(operation_id, stage, "succeeded", result=result_dict)
             except Exception as exc:
                 code = str(getattr(exc, "code", None) or f"{stage}_failed")
@@ -398,16 +465,28 @@ class PageMutationCoordinator:
                     self._store.set_operation_state(operation_id, "repair_pending", error_code=code)
                 except Exception:
                     pass
-                return {"ok": True, "state": "repair_pending", "operation_id": operation_id, "failed_stage": stage, "code": "projection_repair_required", "repair_action": "repair_page_operation"}
+                updated = self._store.get_operation(operation_id) or current
+                return self._mutation_result(
+                    {
+                        "ok": True,
+                        "state": "repair_pending",
+                        "operation_id": operation_id,
+                        "failed_stage": stage,
+                        "code": "projection_repair_required",
+                        "repair_action": "repair_page_operation",
+                    },
+                    updated,
+                )
         self._store.set_operation_state(operation_id, "completed")
-        return {"ok": True, "state": "completed", "operation_id": operation_id}
+        completed = self._store.get_operation(operation_id) or operation
+        return self._mutation_result({"ok": True, "state": "completed", "operation_id": operation_id}, completed)
 
-    def recover(self, operation_id: str) -> dict[str, object]:
+    def recover(self, operation_id: str) -> MutationResult:
         operation = self._store.get_operation(operation_id)
         if operation is None:
-            return {"ok": False, "code": "operation_not_found"}
+            return MutationResult(ok=False, code="operation_not_found")
         if operation.state == "completed":
-            return {"ok": True, "state": "completed", "operation_id": operation_id}
+            return self._mutation_result({"ok": True, "state": "completed", "operation_id": operation_id}, operation)
         classification = self._classify_disk(
             operation,
             self._target(operation.page_path, allow_raw_source=operation.operation_kind == "chat_source"),
@@ -417,21 +496,27 @@ class PageMutationCoordinator:
                 self._store.set_operation_state(operation_id, "page_committed")
             except PageOperationError:
                 pass
-            return {"ok": True, "state": "repair_pending", "operation_id": operation_id, "hash_classification": "intended"}
+            return self._mutation_result({"ok": True, "state": "repair_pending", "operation_id": operation_id}, operation)
         if classification == "base":
             self._mark_precommit_failure(operation_id, "write_failed_precommit")
-            return {"ok": False, "state": "failed_precommit", "operation_id": operation_id, "code": "write_failed_precommit", "hash_classification": "base"}
+            return self._mutation_result(
+                {"ok": False, "state": "failed_precommit", "operation_id": operation_id, "code": "write_failed_precommit"},
+                operation,
+            )
         try:
             self._store.set_operation_state(operation_id, "conflict", error_code="operation_conflict")
         except PageOperationError:
             pass
-        return {"ok": False, "state": "conflict", "operation_id": operation_id, "code": "operation_conflict", "hash_classification": "third"}
+        return self._mutation_result(
+            {"ok": False, "state": "conflict", "operation_id": operation_id, "code": "operation_conflict"},
+            operation,
+        )
 
-    def repair(self, operation_id: str, projections: Mapping[str, Projection]) -> dict[str, object]:
+    def repair(self, operation_id: str, projections: Mapping[str, Projection]) -> MutationResult:
         recovered = self.recover(operation_id)
-        if recovered.get("state") == "completed":
+        if recovered.state == "completed":
             return recovered
-        if recovered.get("state") != "repair_pending":
+        if recovered.state != "repair_pending":
             return recovered
         return self.run_projections(operation_id, projections)
 
@@ -440,7 +525,7 @@ class PageMutationCoordinator:
         operation_id: str,
         *,
         projections: Mapping[str, Projection] | None = None,
-    ) -> dict[str, object]:
+    ) -> MutationResult:
         """Project an already durable fact without rewriting its file.
 
         Immutable raw revisions can predate the page-operation journal (or a
@@ -451,7 +536,7 @@ class PageMutationCoordinator:
 
         operation = self._store.get_operation(operation_id)
         if operation is None:
-            return {"ok": False, "code": "operation_not_found"}
+            return MutationResult(ok=False, code="operation_not_found")
         if projections is not None:
             selected = projections
         else:
@@ -607,34 +692,41 @@ class PageMutationCoordinator:
         text: str,
         *,
         expected_hash: str | None = None,
-    ) -> dict[str, object]:
+    ) -> MutationResult:
         """Commit a prepared operation and run its standard projections."""
 
         operation = self._store.get_operation(operation_id)
         if operation is None:
-            return {"ok": False, "code": "operation_not_found"}
+            return MutationResult(ok=False, code="operation_not_found")
         if operation.state == "completed":
-            return {
-                "ok": True,
-                "state": "completed",
-                "operation_id": operation.operation_id,
-                "page_hash": operation.intended_hash,
-                "already_applied": True,
-            }
+            return self._mutation_result(
+                {
+                    "ok": True,
+                    "state": "completed",
+                    "operation_id": operation.operation_id,
+                    "page_hash": operation.intended_hash,
+                    "already_applied": True,
+                },
+                operation,
+            )
         if operation.state == "prepared":
             commit_result = self.commit(operation_id, text, expected_hash=expected_hash)
-            if not commit_result.get("ok"):
+            if not commit_result.ok:
                 return commit_result
         elif operation.state not in {"page_committed", "repair_pending"}:
-            return {
-                "ok": False,
-                "code": "operation_not_committed",
-                "state": operation.state,
-                "operation_id": operation.operation_id,
-            }
+            return self._mutation_result(
+                {
+                    "ok": False,
+                    "code": "operation_not_committed",
+                    "state": operation.state,
+                    "operation_id": operation.operation_id,
+                },
+                operation,
+            )
         projections = self.projections_for(operation)
         result = self.run_projections(operation_id, projections)
-        result.setdefault("page_hash", operation.intended_hash)
+        if result.page_hash is None:
+            return replace(result, page_hash=operation.intended_hash)
         return result
 
     def write_and_project(
@@ -661,14 +753,7 @@ class PageMutationCoordinator:
             existing = self._store.get_operation_by_request_key(request_key)
             if existing is not None:
                 existing_result = self.project_existing(existing.operation_id)
-                existing_result = {
-                    **existing_result,
-                    "already_applied": True,
-                }
-                return self._mutation_result(
-                    existing_result,
-                    existing,
-                )
+                return replace(existing_result, already_applied=True)
 
         if operation is None:
             try:
@@ -699,18 +784,18 @@ class PageMutationCoordinator:
             text,
             expected_hash=expected_hash,
         )
-        if not projection.get("ok"):
-            return self._mutation_result(projection, operation)
+        if not projection.ok:
+            return projection
 
         consume_failure = self._plan_lifecycle.consume(
             plan_id,
             operation.operation_id,
-            str(projection.get("page_hash") or intended_hash),
+            str(projection.page_hash or intended_hash),
             intended_hash,
         )
         if consume_failure is not None:
             return consume_failure
-        return self._mutation_result(projection, operation)
+        return projection
 
     def _mutation_result(
         self,
@@ -724,22 +809,38 @@ class PageMutationCoordinator:
         stages: dict[str, dict[str, object]] = safe_stages_of(current) if current is not None else {}
         return MutationResult.from_mapping(result, stages=stages)
 
-    def _classify_commit_failure(self, operation: PageOperation, target: Path) -> dict[str, object]:
+    def _classify_commit_failure(self, operation: PageOperation, target: Path) -> MutationResult:
         classification = self._classify_disk(operation, target)
         if classification == "intended":
             try:
                 self._store.set_operation_state(operation.operation_id, "page_committed")
             except Exception:
                 pass
-            return {"ok": True, "state": "repair_pending", "operation_id": operation.operation_id, "page_hash": operation.intended_hash, "code": "projection_repair_required", "repair_action": "repair_page_operation"}
+            return self._mutation_result(
+                {
+                    "ok": True,
+                    "state": "repair_pending",
+                    "operation_id": operation.operation_id,
+                    "page_hash": operation.intended_hash,
+                    "code": "projection_repair_required",
+                    "repair_action": "repair_page_operation",
+                },
+                operation,
+            )
         if classification == "base":
             self._mark_precommit_failure(operation.operation_id, "write_failed_precommit")
-            return {"ok": False, "code": "write_failed_precommit", "state": "failed_precommit", "operation_id": operation.operation_id}
+            return self._mutation_result(
+                {"ok": False, "code": "write_failed_precommit", "state": "failed_precommit", "operation_id": operation.operation_id},
+                operation,
+            )
         try:
             self._store.set_operation_state(operation.operation_id, "conflict", error_code="operation_conflict")
         except Exception:
             pass
-        return {"ok": False, "code": "operation_conflict", "state": "conflict", "operation_id": operation.operation_id}
+        return self._mutation_result(
+            {"ok": False, "code": "operation_conflict", "state": "conflict", "operation_id": operation.operation_id},
+            operation,
+        )
 
     def _classify_disk(self, operation: PageOperation, target: Path) -> str:
         current = _hash_if_exists(target)

@@ -9,10 +9,7 @@ import pytest
 from wiki.page_mutation import (
     MutationResult,
     PageMutationCoordinator,
-    dependency_projection_of,
-    retrieval_index_of,
     safe_stages_of,
-    stage_result_of,
 )
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_operation_store import PageOperationStore, UpdatePlanError
@@ -45,8 +42,8 @@ def test_precommit_fault_keeps_old_page_and_is_not_repairable(stage: str, tmp_pa
 
     with fault_context(fault):
         result = coordinator.commit(operation_id, "new")
-    assert result["ok"] is False
-    assert result["code"] == "write_failed_precommit"
+    assert result.ok is False
+    assert result.code == "write_failed_precommit"
     assert page.read_text(encoding="utf-8") == "old"
     operation = store.get_operation(operation_id)
     assert operation is not None
@@ -62,8 +59,8 @@ def test_post_replace_fault_is_repair_pending_and_keeps_new_page(tmp_path: Path)
 
     with fault_context(fault):
         result = coordinator.commit(operation_id, "new")
-    assert result["ok"] is True
-    assert result["state"] == "repair_pending"
+    assert result.ok is True
+    assert result.state == "repair_pending"
     assert page.read_text(encoding="utf-8") == "new"
     operation = store.get_operation(operation_id)
     assert operation is not None
@@ -79,8 +76,8 @@ def test_journal_commit_fault_is_repair_pending_and_keeps_new_page(tmp_path: Pat
 
     with fault_context(fault):
         result = coordinator.commit(operation_id, "new")
-    assert result["ok"] is True
-    assert result["state"] == "repair_pending"
+    assert result.ok is True
+    assert result.state == "repair_pending"
     assert page.read_text(encoding="utf-8") == "new"
     operation = store.get_operation(operation_id)
     assert operation is not None
@@ -90,7 +87,7 @@ def test_journal_commit_fault_is_repair_pending_and_keeps_new_page(tmp_path: Pat
 @pytest.mark.parametrize("stage", ["dependencies", "retrieval", "navigation", "overview", "audit_log"])
 def test_each_projection_fault_is_repairable_without_rewriting_page(tmp_path: Path, stage: str) -> None:
     coordinator, _, page, operation_id = _operation(tmp_path)
-    assert coordinator.commit(operation_id, "new")["ok"] is True
+    assert coordinator.commit(operation_id, "new").ok is True
     before = page.read_bytes()
     projections = {name: (lambda: {"ok": True, "state": "ready"}) for name in ("dependencies", "retrieval", "navigation", "overview", "audit_log")}
 
@@ -100,11 +97,11 @@ def test_each_projection_fault_is_repairable_without_rewriting_page(tmp_path: Pa
 
     with fault_context(fault):
         pending = coordinator.run_projections(operation_id, projections)
-    assert pending["ok"] is True
-    assert pending["state"] == "repair_pending"
-    assert pending["failed_stage"] == stage
+    assert pending.ok is True
+    assert pending.state == "repair_pending"
+    assert pending.failed_stage == stage
     assert page.read_bytes() == before
-    assert coordinator.run_projections(operation_id, projections)["state"] == "completed"
+    assert coordinator.run_projections(operation_id, projections).state == "completed"
     assert page.read_bytes() == before
 
 
@@ -134,24 +131,24 @@ def test_recovery_classifies_base_intended_and_third_hashes(tmp_path: Path) -> N
     coordinator, _, page, operation_id = _operation(tmp_path)
     page.write_text("new", encoding="utf-8")
     intended = coordinator.recover(operation_id)
-    assert intended["hash_classification"] == "intended"
-    assert intended["state"] == "repair_pending"
+    assert intended.ok is True
+    assert intended.state == "repair_pending"
 
     coordinator, _, page, operation_id = _operation(tmp_path, old="old-2", new="new-2")
     base = coordinator.recover(operation_id)
-    assert base["code"] == "write_failed_precommit"
-    assert base["hash_classification"] == "base"
+    assert base.code == "write_failed_precommit"
+    assert base.state == "failed_precommit"
 
     coordinator, _, page, operation_id = _operation(tmp_path, old="old-3", new="new-3")
     page.write_text("third", encoding="utf-8")
     third = coordinator.recover(operation_id)
-    assert third["code"] == "operation_conflict"
-    assert third["hash_classification"] == "third"
+    assert third.code == "operation_conflict"
+    assert third.state == "conflict"
 
 
 def test_projection_failure_is_repair_pending_and_retry_skips_succeeded_stages(tmp_path: Path) -> None:
     coordinator, _, _, operation_id = _operation(tmp_path)
-    assert coordinator.commit(operation_id, "new")["ok"] is True
+    assert coordinator.commit(operation_id, "new").ok is True
     calls: list[str] = []
 
     def projection(name: str):
@@ -168,17 +165,34 @@ def test_projection_failure_is_repair_pending_and_retry_skips_succeeded_stages(t
     projections = {name: projection(name) for name in ("dependencies", "retrieval", "navigation", "overview", "audit_log")}
     with fault_context(fault):
         pending = coordinator.run_projections(operation_id, projections)
-    assert pending == {
+    assert pending.to_dict() == {
         "ok": True,
         "state": "repair_pending",
         "operation_id": operation_id,
         "failed_stage": "navigation",
         "code": "projection_repair_required",
         "repair_action": "repair_page_operation",
+        "stages": pending.to_dict()["stages"],
     }
     completed = coordinator.run_projections(operation_id, projections)
-    assert completed["state"] == "completed"
+    assert completed.state == "completed"
     assert calls == ["dependencies", "retrieval", "navigation", "overview", "audit_log"]
+
+
+def test_repair_and_project_existing_return_the_typed_mutation_result(tmp_path: Path) -> None:
+    coordinator, _, page, operation_id = _operation(tmp_path)
+    assert isinstance(coordinator.commit(operation_id, "new"), MutationResult)
+    projections = {name: (lambda: {"ok": True, "state": "ready"}) for name in ("dependencies", "retrieval", "navigation", "overview", "audit_log")}
+
+    repaired = coordinator.repair(operation_id, projections)
+    assert isinstance(repaired, MutationResult)
+    assert repaired.state == "completed"
+
+    projected = coordinator.project_existing(operation_id, projections=projections)
+    assert isinstance(projected, MutationResult)
+    assert projected.state == "completed"
+    assert projected.already_applied is False
+    assert page.read_text(encoding="utf-8") == "new"
 
 
 def _plan_inputs(tmp_path: Path) -> tuple[PageMutationCoordinator, PageOperationStore, Path, str, str, str]:
@@ -234,9 +248,9 @@ def test_stage_explanation_helpers_use_safe_persisted_views(tmp_path: Path) -> N
             "navigation": {"state": "pending"},
         },
     )
-    assert dependency_projection_of(result) == {"ok": True, "state": "ready"}
-    assert retrieval_index_of(result) == {"ok": True, "state": "ready", "written": ["wiki/page.md"]}
-    assert stage_result_of(result, "navigation") is None
+    assert result.dependency_projection() == {"ok": True, "state": "ready"}
+    assert result.retrieval_index() == {"ok": True, "state": "ready", "written": ["wiki/page.md"]}
+    assert result.stage_result("navigation") is None
 
 
 def test_dependency_projection_exposes_failed_stage_without_result() -> None:
@@ -247,17 +261,17 @@ def test_dependency_projection_exposes_failed_stage_without_result() -> None:
     pending = MutationResult(ok=True, stages={"dependencies": {"state": "pending"}})
     succeeded = MutationResult(ok=True, stages={"dependencies": {"state": "succeeded"}})
 
-    assert dependency_projection_of(failed) == {
+    assert failed.dependency_projection() == {
         "ok": False,
         "state": "failed",
         "code": "dependency_unavailable",
     }
-    assert dependency_projection_of(pending) == {
+    assert pending.dependency_projection() == {
         "ok": False,
         "state": "pending",
         "code": "dependencies_pending",
     }
-    assert dependency_projection_of(succeeded) == {"ok": True, "state": "ready"}
+    assert succeeded.dependency_projection() == {"ok": True, "state": "ready"}
 
 
 @pytest.mark.parametrize(
@@ -268,7 +282,7 @@ def test_dependency_projection_exposes_failed_stage_without_result() -> None:
         ("already_applied", False, {"ok": True, "state": "already_applied"}),
     ],
 )
-def test_mutation_result_to_dict_keeps_already_applied_dual_representation(
+def test_mutation_result_to_dict_keeps_public_replay_representation(
     state: str, already_applied: bool, expected: dict[str, object]
 ) -> None:
     result = MutationResult(ok=True, state=state, already_applied=already_applied)
@@ -284,9 +298,14 @@ def test_mutation_result_from_mapping_omits_none_fields_and_empty_stages() -> No
         {"ok": False, "state": None, "code": "plan_unknown", "page_hash": None},
         stages={},
     )
+    legacy_bool = MutationResult.from_mapping(
+        {"ok": True, "state": "completed", "already_applied": "completed"},
+        stages={},
+    )
 
     assert replay.to_dict() == {"ok": True, "state": "already_applied", "operation_id": "op-1", "already_applied": True}
     assert failed.to_dict() == {"ok": False, "code": "plan_unknown"}
+    assert legacy_bool.already_applied is False
 
 
 def test_write_and_project_claimed_prepared_plan_is_not_replayed(tmp_path: Path) -> None:
