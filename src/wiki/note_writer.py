@@ -296,7 +296,6 @@ def save_obsidian_note(
         operation_kind="update" if base_hash is not None else "create",
         page_path=relative_path.as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text=prepared.text,
         expected_hash=base_hash,
     )

@@ -158,7 +158,6 @@ class ChatMemoryService:
         if "project" in redacted_metadata:
             frontmatter["project"] = redacted_metadata["project"]
         serialized = self._serialize(frontmatter, redacted_transcript)
-        intended_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         request_key = self._request_key(str(redacted_metadata["session_id"]), redacted_hash)
         try:
             result = self.coordinator.write_and_project(
@@ -166,7 +165,6 @@ class ChatMemoryService:
                 operation_kind="chat_source",
                 page_path=relative.as_posix(),
                 base_hash=None,
-                intended_hash=intended_hash,
                 text=serialized,
             )
         except ValueError as exc:
@@ -193,7 +191,6 @@ class ChatMemoryService:
                 operation_kind="chat_source",
                 page_path=path.relative_to(self.root).as_posix(),
                 base_hash=current_hash,
-                intended_hash=current_hash,
                 text=path.read_text(encoding="utf-8"),
                 expected_hash=current_hash,
             )

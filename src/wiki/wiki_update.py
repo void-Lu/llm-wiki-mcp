@@ -8,11 +8,9 @@ from pathlib import Path
 import secrets
 from typing import Any, Mapping
 
-import yaml
-
-from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_mutation import PageMutationCoordinator, PlanIntent, plan_intent_hash
 from wiki.atomic_file import sha256_file
-from wiki.page_operation_store import PageOperationStore, UpdatePlanError
+from wiki.page_operation_store import UpdatePlanError
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
@@ -28,7 +26,7 @@ def _digest(text: str) -> str:
 
 
 def _plan_id(path: str, current_hash: str, body: str, frontmatter: Mapping[str, Any]) -> str:
-    return _digest("\0".join((path, current_hash, body, yaml.safe_dump(dict(frontmatter), sort_keys=True, allow_unicode=True))))
+    return plan_intent_hash(path, current_hash, PlanIntent(body=body, frontmatter=frontmatter))
 
 
 def preview_update(
@@ -62,9 +60,12 @@ def preview_update(
     violations = _locked_violations(fm, incoming)
     removed_sources = set(_sources(fm)) - set(_sources(incoming)) if "sources" in incoming else set()
     current_hash = sha256_file(target)
-    intent_hash = _plan_id(page_path, current_hash, incoming_body, incoming)
     try:
-        plan = PageOperationStore(str(root)).issue_plan(page_path, current_hash, intent_hash)
+        plan = PageMutationCoordinator(root).issue_plan(
+            page_path=page_path,
+            base_hash=current_hash,
+            intent=PlanIntent(body=incoming_body, frontmatter=incoming),
+        )
     except UpdatePlanError as exc:
         return {"ok": False, "code": exc.code}
     result = {"ok": True, "action": "preview", "page_path": page_path, "current_hash": current_hash, "plan_id": plan.plan_id, "plan_expires_at": plan.expires_at, "locked_fields": sorted(LOCKED_FIELDS), "locked_field_violations": violations, "removed_sources": sorted(removed_sources), "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "diff": "".join(difflib.unified_diff(old_body.splitlines(True), incoming_body.splitlines(True), fromfile="current", tofile="incoming"))}
@@ -103,10 +104,6 @@ def apply_update(
     incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages, heading=related_pages_heading)
     incoming_body, normalized_count = auto_normalize_wikilinks(incoming_body, root)
     broken_wikilinks = validate_wikilinks(incoming_body, root)
-    store = PageOperationStore(str(root)) if plan_id else None
-    plan_snapshot = store.get_plan(plan_id) if store is not None and plan_id else None
-    plan_base_hash = plan_snapshot.base_hash if plan_snapshot is not None and plan_snapshot.state == "consumed" else current_hash
-    expected_plan = _plan_id(page_path, plan_base_hash, incoming_body, incoming)
     if existing.get("lifecycle", "active") != "active":
         return {"ok": False, "code": "inactive_page"}
     violations = _locked_violations(existing, incoming)
@@ -117,10 +114,6 @@ def apply_update(
     structural_change = bool(incoming) or related_pages is not None
     if structural_change and not plan_id:
         return _attach_related_page_skips({"ok": False, "code": "update_plan_required"}, related_pages, related_pages_skipped)
-    if expected_hash is None and not (plan_snapshot is not None and plan_snapshot.state == "consumed"):
-        return _attach_related_page_skips({"ok": False, "code": "expected_hash_required"}, related_pages, related_pages_skipped)
-    if expected_hash != current_hash and not (plan_snapshot is not None and plan_snapshot.state == "consumed"):
-        return {"ok": False, "code": "expected_hash_mismatch"}
     if resolved_sources is not None:
         try:
             resolved_sources = SourceProvenanceResolver(root).verify(resolved_sources)
@@ -156,11 +149,10 @@ def apply_update(
         operation_kind="update",
         page_path=page_path,
         base_hash=current_hash,
-        intended_hash=updated_hash,
         text=prepared.text,
-        expected_hash=current_hash,
+        expected_hash=expected_hash,
         plan_id=plan_id,
-        intent_hash=expected_plan,
+        plan_intent=PlanIntent(body=incoming_body, frontmatter=incoming),
     )
     mutation_dict = mutation.to_dict()
     if not mutation.ok:
