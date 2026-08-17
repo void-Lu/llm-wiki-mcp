@@ -13,7 +13,8 @@ from common.privacy_policy import normalize_vault_relative
 from wiki.atomic_file import AtomicFileError, atomic_write_text, current_fault, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_policy import derive_page_policy
-from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
+from wiki.page_operation_store import PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
+from wiki.projection_profile import projection_stages
 from wiki.wiki_index import refresh_navigation
 from wiki.wiki_io import read_markdown_page
 from wiki.wiki_log import WikiLogStore, append_log_entry
@@ -372,7 +373,7 @@ class PageMutationCoordinator:
         if operation.state not in {"page_committed", "repair_pending"}:
             return {"ok": False, "code": "operation_not_committed", "state": operation.state, "operation_id": operation_id}
 
-        for stage in PAGE_STAGES:
+        for stage in projection_stages(operation.operation_kind):
             current = self._store.get_operation(operation_id)
             if current is None:
                 return {"ok": False, "code": "operation_not_found"}
@@ -467,7 +468,7 @@ class PageMutationCoordinator:
         if not target.is_file():
             return {
                 stage: (lambda: {"ok": False, "code": "page_not_found"})
-                for stage in PAGE_STAGES
+                for stage in projection_stages(operation.operation_kind)
             }
         if operation.operation_kind == "chat_source":
             return self._chat_source_projections(operation, target)

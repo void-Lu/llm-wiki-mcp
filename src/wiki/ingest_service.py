@@ -8,6 +8,7 @@ from typing import Any
 
 from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter
 from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.projection_profile import projection_stages
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.source_provenance import source_path_key
 from wiki.wiki_paths import WikiPathError, safe_segment, translate_path_error
@@ -89,13 +90,30 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
             "index_scope": None,
             "index": {"ok": True, "state": "not_indexed", "code": "asset_not_indexed"},
         }
-    # Raw snapshots are the source of truth.  A changed snapshot only
-    # invalidates dependent page provenance; it never creates a derived page.
+    # Raw snapshots are the source of truth.  The profile only supplies the
+    # ordered inline stages; ingest still owns these direct calls and does not
+    # create a page-operation journal.
     provenance_result: dict[str, Any] | None = None
-    if type_value != "chat" and operation != "unchanged":
-        provenance_result = _invalidate_raw_provenance(root, target.relative_to(root), incoming_hash)
     index_scope = "active" if type_value == "chat" else "raw"
-    index = RetrievalIndexStore(root, scope=index_scope).update_page_from_file(target, allow_bootstrap=True)
+    projections = {
+        "raw_provenance": lambda: (
+            _invalidate_raw_provenance(root, target.relative_to(root), incoming_hash)
+            if operation != "unchanged"
+            else None
+        ),
+        "retrieval": lambda: RetrievalIndexStore(root, scope=index_scope).update_page_from_file(
+            target,
+            allow_bootstrap=True,
+        ),
+    }
+    profile_kind = "ingest_chat" if type_value == "chat" else "ingest"
+    index: dict[str, object] = {}
+    for stage in projection_stages(profile_kind):
+        result = projections[stage]()
+        if stage == "raw_provenance":
+            provenance_result = result
+        elif stage == "retrieval":
+            index = result
     response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "storage_kind": "text_source", "semantic_indexed": bool(index.get("ok")), "index_scope": index_scope, "index": index}
     if provenance_result is not None:
         response["generation"] = provenance_result["generation"]

@@ -12,11 +12,14 @@ import sqlite3
 from typing import Any, Iterator, Literal, Mapping, overload
 
 from common.privacy_policy import LocatorError, normalize_vault_relative
+from wiki.projection_profile import projection_stages
 from wiki.wiki_paths import PAGE_STATE_DB
 
 
 SCHEMA_VERSION = 1
-PAGE_STAGES = ("dependencies", "retrieval", "navigation", "overview", "audit_log")
+# Compatibility export: the formal page operation journal uses the formal
+# profile as its fixed stage schema.  The registry remains the single owner.
+PAGE_STAGES = projection_stages("formal")
 _OPERATION_STATES = {"prepared", "page_committed", "repair_pending", "completed", "failed_precommit", "conflict"}
 
 

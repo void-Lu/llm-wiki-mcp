@@ -24,6 +24,7 @@ from archive.archive_planner import ArchivePlanner
 from archive.archive_schema import ARCHIVE_TABLE_DDL
 from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
 from wiki.atomic_file import current_fault
+from wiki.projection_profile import projection_stages
 from wiki.wiki_paths import STATE_DB
 
 
@@ -251,7 +252,10 @@ class ArchiveService:
             shutil.rmtree(recovery, ignore_errors=True)
             self._event(operation_id, archive_id, "archived", {"items": [item.original_path for item in plan.items]})
             self._mark_plan_used(plan.plan_id)
-            index = self.rebuild_archive_index()
+            index: dict[str, Any] = {"ok": True, "state": "not_applicable"}
+            for stage in projection_stages("archive"):
+                if stage == "retrieval":
+                    index = self.rebuild_archive_index()
             return {"ok": True, "operation_id": operation_id, "archive_id": archive_id, "state": "committed", "archive_index": index}
         except Exception as exc:
             self._recover_operation(operation_id)
@@ -404,7 +408,9 @@ class ArchiveService:
                 )
             shutil.rmtree(bundle)
             self._event(uuid4().hex, archive_id, "purged", {"count": len(manifest.items), "forget": forget})
-            self.rebuild_archive_index()
+            for stage in projection_stages("archive"):
+                if stage == "retrieval":
+                    self.rebuild_archive_index()
             return {"ok": True, "archive_id": archive_id, "tombstone": tombstone.to_dict()}
         except ArchiveError as exc: return {"ok": False, "code": exc.code, "error": str(exc)}
 
