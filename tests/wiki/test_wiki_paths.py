@@ -14,7 +14,6 @@ from wiki.wiki_paths import (
     VECTOR_INDEX,
     VECTOR_INDEX_BY_CORPUS,
     WikiPathError,
-    WikiPaths,
     create_wiki_root,
     resolve_within_root,
     safe_segment,
@@ -154,10 +153,8 @@ def test_resolve_within_root_rejects_symlink_escape(tmp_path: Path) -> None:
 def test_create_wiki_root_creates_confirmed_directory_structure(tmp_path: Path):
     root = tmp_path / "Wiki root"
 
-    paths = create_wiki_root(root)
+    create_wiki_root(root)
 
-    assert isinstance(paths, WikiPaths)
-    assert paths.root == root.resolve()
     for relative in EXPECTED_DIRS:
         assert (root / relative).is_dir(), relative
     for relative in EXPECTED_FILES:
@@ -223,26 +220,6 @@ def test_create_wiki_root_writes_actionable_schema_template(tmp_path: Path):
     assert "archives/bundles/<yyyy>/<mm>/<archive-id>/" in schema
     assert "wiki/archives/" not in schema
     assert "generated: false" in schema
-
-
-def test_project_helpers_return_confirmed_project_substructure(tmp_path: Path):
-    paths = create_wiki_root(tmp_path / "vault")
-
-    assert paths.project_root("alpha") == paths.root / "wiki" / "projects" / "alpha"
-    assert paths.raw_project_root("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha"
-    assert paths.raw_project_requirements_dir("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha" / "requirements"
-    assert paths.raw_project_assets_dir("alpha") == paths.root / "raw" / "sources" / "projects" / "alpha" / "assets"
-    assert paths.project_specs_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "specs"
-    assert paths.project_plans_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "plans"
-    assert paths.project_architecture_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "architecture"
-    assert paths.project_code_facts_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "architecture" / "code-facts"
-    assert paths.project_pipelines_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "architecture" / "pipelines"
-    assert paths.project_code_overview_path("alpha") == paths.root / "wiki" / "projects" / "alpha" / "architecture" / "code-overview.md"
-    assert paths.project_troubleshooting_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "troubleshooting"
-    assert paths.project_researches_dir("alpha") == paths.root / "wiki" / "projects" / "alpha" / "researches"
-    assert paths.concepts_dir() == paths.root / "wiki" / "concepts"
-    assert paths.entities_dir() == paths.root / "wiki" / "entities"
-    assert paths.archives_dir() == paths.root / "archives"
 
 
 @pytest.mark.parametrize(

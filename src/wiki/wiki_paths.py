@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import re
 import string
-from dataclasses import dataclass
 from pathlib import Path
 
 WINDOWS_RESERVED_CHARS = set('<>:"|?*')
@@ -393,59 +392,6 @@ def _is_valid_project_path(path: Path) -> bool:
     return len(parts) >= 5 and parts[3] in _WIKI_PROJECT_SUBDIRS
 
 
-@dataclass(frozen=True)
-class WikiPaths:
-    root: Path
-
-    def project_root(self, project: str) -> Path:
-        return self.root / "wiki" / "projects" / safe_segment(project)
-
-    def raw_project_root(self, project: str) -> Path:
-        return self.root / "raw" / "sources" / "projects" / safe_segment(project)
-
-    def raw_project_requirements_dir(self, project: str) -> Path:
-        return self.raw_project_root(project) / "requirements"
-
-    def raw_project_chat_dir(self, project: str) -> Path:
-        return self.root / "raw" / "sources" / "chat"
-
-    def raw_project_assets_dir(self, project: str) -> Path:
-        return self.raw_project_root(project) / "assets"
-
-    def project_specs_dir(self, project: str) -> Path:
-        return self.project_root(project) / "specs"
-
-    def project_plans_dir(self, project: str) -> Path:
-        return self.project_root(project) / "plans"
-
-    def project_architecture_dir(self, project: str) -> Path:
-        return self.project_root(project) / "architecture"
-
-    def project_code_facts_dir(self, project: str) -> Path:
-        return self.project_architecture_dir(project) / "code-facts"
-
-    def project_pipelines_dir(self, project: str) -> Path:
-        return self.project_architecture_dir(project) / "pipelines"
-
-    def project_code_overview_path(self, project: str) -> Path:
-        return self.project_architecture_dir(project) / "code-overview.md"
-
-    def project_troubleshooting_dir(self, project: str) -> Path:
-        return self.project_root(project) / "troubleshooting"
-
-    def project_researches_dir(self, project: str) -> Path:
-        return self.project_root(project) / "researches"
-
-    def concepts_dir(self) -> Path:
-        return self.root / "wiki" / "concepts"
-
-    def entities_dir(self) -> Path:
-        return self.root / "wiki" / "entities"
-
-    def archives_dir(self) -> Path:
-        return self.root / "archives"
-
-
 def safe_segment(value: str) -> str:
     if not value:
         raise WikiPathError("empty_segment", "path segment is required")
@@ -463,7 +409,7 @@ def safe_segment(value: str) -> str:
     return value
 
 
-def create_wiki_root(vault_root: str | Path) -> WikiPaths:
+def create_wiki_root(vault_root: str | Path) -> None:
     root = Path(vault_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     for relative_dir in TOP_LEVEL_DIRS:
@@ -473,7 +419,6 @@ def create_wiki_root(vault_root: str | Path) -> WikiPaths:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
             target.write_text(default_text, encoding="utf-8")
-    return WikiPaths(root=root)
 
 
 def slug(
