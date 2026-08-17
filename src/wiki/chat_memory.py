@@ -215,37 +215,12 @@ class ChatMemoryService:
             response["repair_action"] = result.repair_action
         if result.failed_stage:
             response["failed_stage"] = result.failed_stage
-        response["index"] = self._index_response(result.stages)
+        response["index"] = result.index_response()
         return response
 
     @staticmethod
     def _request_key(session_id: str, redacted_hash: str) -> str:
         return f"chat:{session_id}:{redacted_hash}"
-
-    @staticmethod
-    def _index_response(stages: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-        stage = stages.get("retrieval", {})
-        stage_result = stage.get("result", {})
-        if not isinstance(stage_result, Mapping):
-            stage_result = {}
-        if stage.get("state") == "succeeded":
-            # 持久化白名单会削平嵌套 retrieval_index；safe stage result 已是公开视图。
-            retrieval_index = dict(stage_result)
-            indexed = retrieval_index.get("state") not in {"rebuild_required", "not_indexed"} and retrieval_index.get("ok") is True
-            return {
-                "ok": indexed,
-                "generation": {"enabled": False, "reason": "raw_only"},
-                "retrieval_index": retrieval_index,
-            }
-        return {
-            "ok": False,
-            "generation": {"enabled": False, "reason": "raw_only"},
-            "retrieval_index": {
-                "ok": False,
-                "state": stage.get("state", "pending"),
-                "code": stage.get("code") or "retrieval_pending",
-            },
-        }
 
     def provenance(self, sources: object) -> dict[str, Any]:
         if not isinstance(sources, list) or not sources:

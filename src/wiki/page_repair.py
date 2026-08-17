@@ -28,7 +28,7 @@ class PageRepairService:
         operation = self.store.get_operation(operation_id)
         if operation is None:
             return {"ok": False, "code": "operation_not_found"}
-        return self.coordinator.repair(operation_id, self.coordinator.projections_for(operation))
+        return self.coordinator.repair(operation_id, self.coordinator.projections_for(operation)).to_dict()
 
 
 def _operation_summary(operation: PageOperation) -> dict[str, object]:

@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 import yaml
 
-from wiki.page_mutation import PageMutationCoordinator, dependency_projection_of, retrieval_index_of, stage_result_of
+from wiki.page_mutation import PageMutationCoordinator
 from wiki.atomic_file import sha256_file
 from wiki.page_operation_store import PageOperationStore, UpdatePlanError
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
@@ -165,7 +165,7 @@ def apply_update(
     mutation_dict = mutation.to_dict()
     if not mutation.ok:
         return _attach_related_page_skips(mutation_dict, related_pages, related_pages_skipped)
-    if mutation.already_applied or mutation.state == "already_applied":
+    if mutation.already_applied:
         replay = {
             "ok": True,
             "state": "already_applied",
@@ -176,9 +176,9 @@ def apply_update(
         if mutation.repair_action:
             replay["repair_action"] = mutation.repair_action
         return _attach_related_page_skips(replay, related_pages, related_pages_skipped)
-    dependency_projection = dependency_projection_of(mutation)
-    navigation = stage_result_of(mutation, "navigation")
-    retrieval_index = retrieval_index_of(mutation)
+    dependency_projection = mutation.dependency_projection()
+    navigation = mutation.stage_result("navigation")
+    retrieval_index = mutation.retrieval_index()
     result = {"ok": True, "state": mutation.state or "completed", "action": "apply", "page_path": page_path, "operation_id": mutation.operation_id, "hash": updated_hash, "page_hash": mutation.page_hash or updated_hash, "navigation": navigation, "retrieval_index": retrieval_index, "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "dependency_projection": dependency_projection, "provenance_status": "verified" if _stored_source_hashes(final) else "provenance_unverified", "freshness": str(final.get("freshness") or "review_required")}
     if mutation.repair_action:
         result["repair_action"] = mutation.repair_action
