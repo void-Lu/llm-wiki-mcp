@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from wiki import log_volume
 from wiki.atomic_file import atomic_write_text
 from wiki.wiki_io import is_manual_page, split_frontmatter
-from wiki.wiki_log import read_recent_log_entries
 from wiki.wiki_paths import filesystem_path
 
 
@@ -32,7 +32,9 @@ def refresh_overview(vault_root: str | Path) -> dict[str, Any]:
         else:
             manual += 1
 
-    recent = read_recent_log_entries(root, limit=5)
+    _preamble, blocks = log_volume.read_blocks(root / "wiki" / "log.md", "# Log")
+    headings = [block.splitlines()[0] for block in blocks if block.splitlines()]
+    recent = list(reversed(headings[-5:]))
     lines = [
         "---",
         "type: overview",
