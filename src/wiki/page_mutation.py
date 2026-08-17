@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 from common.privacy_policy import normalize_vault_relative
 from wiki.atomic_file import AtomicFileError, atomic_write_text, current_fault, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.page_policy import derive_page_policy
 from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
 from wiki.wiki_index import refresh_navigation
 from wiki.wiki_io import read_markdown_page
@@ -344,22 +345,18 @@ class PageMutationCoordinator:
         page = read_markdown_page(target, self.root)
         source_hashes = _source_hashes(page.frontmatter)
         sources = _sources(page.frontmatter)
-        freshness = str(page.frontmatter.get("freshness") or ("fresh" if source_hashes else "review_required"))
-        generated = bool(page.frontmatter.get("generated"))
-        maintenance = str(page.frontmatter.get("maintenance") or ("auto" if generated else "manual"))
-        lifecycle = str(page.frontmatter.get("lifecycle") or "active")
-        replaced_by = page.frontmatter.get("replaced_by")
+        policy = derive_page_policy(page.frontmatter, source_hashes)
 
         def dependencies() -> dict[str, object]:
             KnowledgeDependencies(self.root).update_page(
                 operation.page_path,
                 operation.intended_hash,
                 source_hashes,
-                generated=generated,
-                maintenance=maintenance,
-                lifecycle=lifecycle,
-                replaced_by=str(replaced_by) if replaced_by else None,
-                freshness=freshness if freshness in {"fresh", "stale", "review_required"} else "review_required",
+                generated=policy.generated,
+                maintenance=policy.maintenance,
+                lifecycle=policy.lifecycle,
+                replaced_by=policy.replaced_by,
+                freshness=policy.freshness,
             )
             return {"ok": True, "state": "ready"}
 

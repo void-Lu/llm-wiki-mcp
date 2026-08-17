@@ -14,6 +14,7 @@ from wiki.page_mutation import (
     safe_stages_of,
     stage_result_of,
 )
+from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_operation_store import PageOperationStore, UpdatePlanError
 from wiki.atomic_file import fault_context
 
@@ -105,6 +106,28 @@ def test_each_projection_fault_is_repairable_without_rewriting_page(tmp_path: Pa
     assert page.read_bytes() == before
     assert coordinator.run_projections(operation_id, projections)["state"] == "completed"
     assert page.read_bytes() == before
+
+
+def test_formal_projection_coerces_invalid_lifecycle_to_review_required(tmp_path: Path) -> None:
+    page = tmp_path / "wiki/concepts/general/page.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    text = "---\ngenerated: true\nlifecycle: invalid\n---\n\n# Page\n\n正文\n"
+    page.write_text(text, encoding="utf-8")
+    page_hash = sha256(text.encode()).hexdigest()
+    coordinator = PageMutationCoordinator(tmp_path)
+    operation = coordinator.prepare(
+        request_key="invalid-lifecycle",
+        operation_kind="update",
+        page_path="wiki/concepts/general/page.md",
+        base_hash=page_hash,
+        intended_hash=page_hash,
+    )
+
+    projection = coordinator.projections_for(operation)["dependencies"]()
+
+    assert projection == {"ok": True, "state": "ready"}
+    stored = KnowledgeDependencies.read_page_projection(tmp_path, "wiki/concepts/general/page.md")
+    assert stored["lifecycle"] == "review_required"
 
 
 def test_recovery_classifies_base_intended_and_third_hashes(tmp_path: Path) -> None:

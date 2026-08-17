@@ -5,9 +5,15 @@ from pathlib import Path
 import pytest
 
 from tests.helpers import write_test_page
-from wiki.wiki_io import WikiWriteError, prepare_wiki_page, read_markdown_page, strip_leading_h1
+from wiki.wiki_io import WikiWriteError, prepare_wiki_page, read_markdown_page, render_page, strip_leading_h1
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
+
+
+def test_render_page_uses_canonical_frontmatter_and_body_envelope() -> None:
+    assert render_page({"type": "concept", "generated": True}, "\n正文\n") == (
+        "---\ntype: concept\ngenerated: true\n---\n\n正文\n"
+    )
 
 
 def test_write_test_page_writes_and_reads_markdown_page_with_frontmatter(tmp_path: Path):

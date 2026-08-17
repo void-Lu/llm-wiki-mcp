@@ -20,7 +20,8 @@ from common.privacy_policy import LocatorError, PrivacyPolicy, field_class, reda
 from common.redaction import count_redaction_categories, redact_sensitive_text
 from wiki.atomic_file import AtomicFileError, atomic_write_bytes, atomic_write_text, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
-from wiki.wiki_io import split_frontmatter
+from wiki.page_policy import derive_page_policy
+from wiki.wiki_io import render_page, split_frontmatter
 from wiki.wiki_paths import ADMIN_PLANS_DIR, KNOWLEDGE_DEPENDENCIES_DB, PRIVACY_AUDIT_DIR
 
 
@@ -215,15 +216,16 @@ class PrivacyAuditService:
                 if dependency is not None:
                     frontmatter, _ = split_frontmatter(transformed)
                     desired_hashes = _string_map(frontmatter.get("source_hashes"))
+                    policy = derive_page_policy(frontmatter)
                     dependency.update_page(
                         target.relative_to(self.root).as_posix(),
                         after_hash,
                         desired_hashes,
-                        generated=bool(frontmatter.get("generated")),
-                        maintenance=_maintenance(frontmatter),
-                        lifecycle=_lifecycle(frontmatter),
-                        replaced_by=_optional_string(frontmatter.get("replaced_by")),
-                        freshness=_freshness(frontmatter),
+                        generated=policy.generated,
+                        maintenance=policy.maintenance,
+                        lifecycle=policy.lifecycle,
+                        replaced_by=policy.replaced_by,
+                        freshness=policy.freshness,
                     )
                     if target != self._page_file(page_path):
                         dependency.remove_page(page_path)
@@ -374,7 +376,7 @@ def _transform_text(text: str, filename_map: Mapping[str, str]) -> str:
     if frontmatter or text.lstrip().startswith("---"):
         redacted_body = redact_sensitive_text(body)
         transformed = (
-            _render_page(safe_frontmatter, redacted_body)
+            render_page(safe_frontmatter, redacted_body)
             if safe_frontmatter != frontmatter or redacted_body != body
             else locator_safe_text
         )
@@ -398,13 +400,6 @@ def _replace_wikilinks(text: str, filename_map: Mapping[str, str]) -> str:
         return match.group(0)
 
     return _WIKILINK.sub(replace, text)
-
-
-def _render_page(frontmatter: Mapping[str, object], body: str) -> str:
-    import yaml
-
-    yaml_text = yaml.safe_dump(dict(frontmatter), allow_unicode=True, sort_keys=False).strip()
-    return f"---\n{yaml_text}\n---\n\n{body.strip()}\n"
 
 
 def _has_locator_change(entry: Mapping[str, object]) -> bool:
@@ -441,15 +436,16 @@ def _rollback(
                 if target != old:
                     dependency.remove_page(target.relative_to(root).as_posix())
                 if projection.get("state") == "ready":
+                    policy = derive_page_policy(projection)
                     dependency.update_page(
                         page_path,
                         str(projection.get("page_hash", "")),
                         _string_map(projection.get("edges")),
-                        generated=bool(projection.get("generated")),
-                        maintenance=str(projection.get("maintenance") or "manual"),
-                        lifecycle=str(projection.get("lifecycle") or "active"),
-                        replaced_by=_optional_string(projection.get("replaced_by")),
-                        freshness=_freshness(projection),
+                        generated=policy.generated,
+                        maintenance=policy.maintenance,
+                        lifecycle=policy.lifecycle,
+                        replaced_by=policy.replaced_by,
+                        freshness=policy.freshness,
                     )
                 else:
                     dependency.remove_page(page_path)
@@ -473,24 +469,6 @@ def _string_map(value: object) -> dict[str, str]:
     if not isinstance(value, Mapping):
         return {}
     return {str(key): str(item) for key, item in value.items()}
-
-
-def _maintenance(frontmatter: Mapping[str, object]) -> str:
-    return str(frontmatter.get("maintenance") or ("auto" if frontmatter.get("generated") else "manual"))
-
-
-def _lifecycle(frontmatter: Mapping[str, object]) -> str:
-    value = str(frontmatter.get("lifecycle") or "active")
-    return value if value in {"active", "stale", "review_required", "superseded", "deprecated", "archived"} else "review_required"
-
-
-def _freshness(frontmatter: Mapping[str, object]) -> str:
-    value = str(frontmatter.get("freshness") or "fresh")
-    return value if value in {"fresh", "stale", "review_required"} else "review_required"
-
-
-def _optional_string(value: object) -> str | None:
-    return str(value) if value not in (None, "") else None
 
 
 def _stable_error_code(exc: Exception) -> str:

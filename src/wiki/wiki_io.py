@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -106,6 +106,14 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, "\n".join(lines[1:]).strip()
     frontmatter = loaded if isinstance(loaded, dict) else {}
     return frontmatter, "\n".join(lines[end + 1 :]).strip()
+
+
+def render_page(frontmatter: Mapping[str, object], body: str) -> str:
+    """Render frontmatter and body using the canonical Wiki page envelope."""
+
+    yaml_text = yaml.safe_dump(dict(frontmatter), allow_unicode=True, sort_keys=False).strip()
+    body_text = body.strip()
+    return f"---\n{yaml_text}\n---\n\n{body_text}\n"
 
 
 def strip_leading_h1(body: str) -> str:

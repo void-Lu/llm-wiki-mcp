@@ -9,11 +9,9 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Iterator, Iterable
 
+from wiki.page_policy import VALID_FRESHNESS, VALID_LIFECYCLE
 from wiki.source_provenance import source_path_key
 from wiki.wiki_paths import KNOWLEDGE_DEPENDENCIES_DB
-
-
-VALID_LIFECYCLE = {"active", "stale", "review_required", "superseded", "deprecated", "archived"}
 
 
 def _now() -> str:
@@ -122,7 +120,7 @@ class KnowledgeDependencies:
             raise ValueError("invalid lifecycle")
         if lifecycle == "superseded" and not replaced_by:
             raise ValueError("superseded pages require replaced_by")
-        if freshness not in {"fresh", "stale", "review_required"}:
+        if freshness not in VALID_FRESHNESS:
             raise ValueError("invalid freshness")
         with self._connection() as conn:
             conn.execute("INSERT INTO knowledge_pages(path,page_hash,freshness,lifecycle,generated,maintenance,replaced_by,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET page_hash=excluded.page_hash,freshness=excluded.freshness,lifecycle=excluded.lifecycle,generated=excluded.generated,maintenance=excluded.maintenance,replaced_by=excluded.replaced_by,updated_at=excluded.updated_at", (path, page_hash, freshness, lifecycle, int(generated), maintenance, replaced_by, _now()))

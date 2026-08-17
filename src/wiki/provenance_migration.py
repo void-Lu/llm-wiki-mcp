@@ -16,13 +16,12 @@ import re
 from typing import Iterable, Mapping
 from uuid import uuid4
 
-import yaml
-
 from wiki.atomic_file import AtomicFileError, atomic_write_bytes, atomic_write_text, sha256_file
 from common.privacy_policy import normalize_vault_relative
 from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.page_policy import derive_page_policy
 from wiki.source_provenance import SourceProvenanceError, SourceProvenanceResolver, source_path_key
-from wiki.wiki_io import split_frontmatter
+from wiki.wiki_io import render_page, split_frontmatter
 from wiki.wiki_paths import ADMIN_PLANS_DIR, MIGRATIONS_DIR
 
 
@@ -119,20 +118,21 @@ class ProvenanceMigrationService:
                 if current_hashes != desired_hashes:
                     updated_frontmatter = dict(frontmatter)
                     updated_frontmatter["source_hashes"] = desired_hashes
-                    rendered = _render_page(updated_frontmatter, body)
+                    rendered = render_page(updated_frontmatter, body)
                     atomic_write_text(target, rendered)
                     written_pages.append(page_path)
                 else:
                     rendered = original.decode("utf-8")
+                policy = derive_page_policy(frontmatter)
                 dependency.update_page(
                     page_path,
                     sha256_file(target),
                     desired_hashes,
-                    generated=bool(frontmatter.get("generated")),
-                    maintenance=_maintenance(frontmatter),
-                    lifecycle=_lifecycle(frontmatter),
-                    replaced_by=_optional_string(frontmatter.get("replaced_by")),
-                    freshness=_freshness(frontmatter),
+                    generated=policy.generated,
+                    maintenance=policy.maintenance,
+                    lifecycle=policy.lifecycle,
+                    replaced_by=policy.replaced_by,
+                    freshness=policy.freshness,
                 )
                 results.append(
                     {
@@ -438,43 +438,20 @@ def _string_map(value: object) -> dict[str, str]:
     return {str(key): str(item) for key, item in value.items()}
 
 
-def _render_page(frontmatter: Mapping[str, object], body: str) -> str:
-    yaml_text = yaml.safe_dump(dict(frontmatter), allow_unicode=True, sort_keys=False).strip()
-    body_text = body.strip()
-    return f"---\n{yaml_text}\n---\n\n{body_text}\n"
-
-
-def _maintenance(frontmatter: Mapping[str, object]) -> str:
-    return str(frontmatter.get("maintenance") or ("auto" if frontmatter.get("generated") else "manual"))
-
-
-def _lifecycle(frontmatter: Mapping[str, object]) -> str:
-    value = str(frontmatter.get("lifecycle") or "active")
-    return value if value in {"active", "stale", "review_required", "superseded", "deprecated", "archived"} else "review_required"
-
-
-def _freshness(frontmatter: Mapping[str, object]) -> str:
-    value = str(frontmatter.get("freshness") or "fresh")
-    return value if value in {"fresh", "stale", "review_required"} else "review_required"
-
-
-def _optional_string(value: object) -> str | None:
-    return str(value) if value not in (None, "") else None
-
-
 def _restore_projection(dependency: KnowledgeDependencies, page_path: str, projection: Mapping[str, object]) -> None:
     if projection.get("state") != "ready":
         dependency.remove_page(page_path)
         return
+    policy = derive_page_policy(projection)
     dependency.update_page(
         page_path,
         str(projection.get("page_hash", "")),
         _string_map(projection.get("edges")),
-        generated=bool(projection.get("generated")),
-        maintenance=str(projection.get("maintenance") or "manual"),
-        lifecycle=str(projection.get("lifecycle") or "active"),
-        replaced_by=_optional_string(projection.get("replaced_by")),
-        freshness=str(projection.get("freshness") or "fresh"),
+        generated=policy.generated,
+        maintenance=policy.maintenance,
+        lifecycle=policy.lifecycle,
+        replaced_by=policy.replaced_by,
+        freshness=policy.freshness,
     )
 
 
