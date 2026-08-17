@@ -84,7 +84,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 
 [query_recovery.py](src/retrieval/query_recovery.py) 是回退决策、阶梯、每页选择、打分组合与 envelope 装配的唯一 owner；其中 `assemble_recovery` 统一拥有命中统计、按页候选池和 context pack。新增回退分支应扩展 `FallbackPlan`/`RecoveryCondition`/该装配边界，不要在 query pipeline、MCP wrapper 或 telemetry 中复制一套状态逻辑。
 
-[retrieval_eval.py](src/retrieval/retrieval_eval.py) 的 `EvaluationRuntimeSnapshot`/`EvaluationQueryService` 是 engine、MCP 与 gold 评测的共同服务 seam。评测经 `query_telemetry` 只读接口取遥测、经注入 adapter 走 MCP 入口；`app.server` 只允许在 `default_mcp_entry_adapter()` 内惰性导入，评测模块顶层不得加载 server。MCP 入口只在请求局部 ContextVar 中注入不可变 tool resolution，不得修改 `server.CONFIG_REGISTRY`；`parse_evaluation_filters` 是公开过滤器解析 owner。评测必须保持只读，不创建/更新检索库，也不写入 telemetry。
+[retrieval_eval_dataset.py](src/retrieval/retrieval_eval_dataset.py) 是评测 JSONL/manifest schema、相关性标签和 public/legacy 过滤器投影的唯一 owner；解析函数不依赖 vault 或查询运行时。 [retrieval_eval_report.py](src/retrieval/retrieval_eval_report.py) 是 Recall/Precision/MRR/nDCG、slice/gate、pipeline 安全投影与 JSON/Markdown 报告输出的 owner。 [retrieval_eval.py](src/retrieval/retrieval_eval.py) 只保留 `EvaluationRuntimeSnapshot`、`EngineQueryAdapter`/`McpQueryAdapter`、`EvaluationQueryService` 和评测编排 seam。评测经 `query_telemetry` 只读接口取遥测、经注入 adapter 走 MCP 入口；`app.server` 只允许在 `default_mcp_entry_adapter()` 内惰性导入，评测模块顶层不得加载 server。MCP 入口只在请求局部 ContextVar 中注入不可变 tool resolution，不得修改 `server.CONFIG_REGISTRY`；`parse_evaluation_filters` 由 dataset owner 提供并由 eval 兼容导出。评测必须保持只读，不创建/更新检索库，也不写入 telemetry。
 
 [chat_memory.py](src/wiki/chat_memory.py) 提供不可变、脱敏的 chat source 持久化；`wiki_write_note` 通过 `chat_metadata`/`chat_derived`/`chat_sources` 参数写入 chat source。
 
@@ -121,7 +121,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 - CLI/runtime/config/provenance：`test_cli.py`、`test_runtime_config.py`、`test_runtime_provenance.py`、`test_readme_global_mcp_docs.py`
 - Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_atomic_file.py`、`test_page_mutation.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
 - MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_note_writer.py`、`test_ingest_service.py`
-- 查询/检索/向量/wikilink（`tests/retrieval/`）：`test_run_query_v2.py`、`test_query_pipeline.py`、`test_query_execution_context.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
+- 查询/检索/向量/wikilink（`tests/retrieval/`）：`test_run_query_v2.py`、`test_query_pipeline.py`、`test_query_execution_context.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_eval_dataset.py`、`test_retrieval_eval_report.py`、`test_retrieval_eval_service.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
 - 归档/辅助：`test_archive_lifecycle.py`、`test_git_utils.py`
 - 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`
 - repair/privacy/契约/catalog：`test_cli_repair.py`、`test_cli_repair_admin.py`、`test_page_repair.py`、`test_privacy_audit.py`、`test_provenance_migration.py`、`test_public_contracts.py`、`test_content_catalog.py`、`test_query_cancellation.py`、`test_query_execution_registry.py`、`test_spec_lint.py`（tests/tools/）
