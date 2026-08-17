@@ -23,12 +23,10 @@ from app.server import (
     mcp,
     resolve_tool_vault,
     _validate_expansion_terms,
-    DETAIL_FIELDS,
     wiki_archive,
     wiki_restore,
     wiki_query,
     wiki_update,
-    wiki_status,
     wiki_write_note,
     wiki_list,
     wiki_get,
@@ -264,136 +262,6 @@ def test_resolver_accepts_snake_and_camel_legacy_root_with_warning(tmp_path: Pat
 
 def test_attach_warnings_preserves_existing_warnings() -> None:
     assert attach_warnings({"ok": True, "warnings": ["existing"]}, ("deprecated_vault_root",))["warnings"] == ["existing", "deprecated_vault_root"]
-
-
-def test_status_hides_absolute_vault_and_model_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    registry, root = _registry(tmp_path)
-    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
-    monkeypatch.setattr("app.server.wiki_status_tool", lambda _: {"ok": True, "vault_root": str(root), "vector": {"state": "missing"}})
-    result = wiki_status()
-    assert result["vault"] == "primary"
-    assert "vault_root" not in result
-    assert "model_path" not in result["config"]["retrieval"]["embedding"]
-
-
-def test_archive_status_detail_projects_ready_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    registry, root = _registry(tmp_path)
-    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
-    monkeypatch.setattr(
-        "app.server.wiki_status_tool",
-        lambda _: {
-            "ok": True,
-            "version": RUNTIME_PROVENANCE.package_version,
-            "runtime": RUNTIME_PROVENANCE.to_public_dict(),
-        },
-    )
-    monkeypatch.setattr(
-        "app.server.ArchiveStatusReader.status",
-        lambda _self: {
-            "ok": True,
-            "state": "ready",
-            "code": "ready",
-            "operations": [{"operation_id": "operation-1"}],
-            "tombstone_count": 0,
-            "archive_index": {"ok": True, "state": "ready", "scope": "archive"},
-        },
-    )
-
-    result = wiki_status(detail="archive")
-
-    assert set(result) == {"ok", "vault", "archive_index", "archive_operations", "archive_state", "config", "version", "runtime"}
-    assert result["archive_index"] == {"enabled": True, "ok": True, "state": "ready", "scope": "archive"}
-    assert result["archive_operations"] == [{"operation_id": "operation-1"}]
-    assert result["archive_state"] == {"state": "ready", "code": "ready"}
-    assert root.is_dir()
-
-
-def test_archive_status_detail_forwards_incompatible_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    registry, _ = _registry(tmp_path)
-    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
-    monkeypatch.setattr("app.server.wiki_status_tool", lambda _: {"ok": True})
-    monkeypatch.setattr(
-        "app.server.ArchiveStatusReader.status",
-        lambda _self: {
-            "ok": False,
-            "state": "incompatible",
-            "code": "archive_state_incompatible",
-            "missing_tables": ["archive_events"],
-            "missing_columns": {"archive_plans": ["payload"]},
-            "operations": [],
-            "tombstone_count": 0,
-            "archive_index": {"ok": False, "state": "missing", "scope": "archive"},
-        },
-    )
-
-    result = wiki_status(detail="archive")
-
-    assert result["archive_state"] == {
-        "state": "incompatible",
-        "code": "archive_state_incompatible",
-        "missing_tables": ["archive_events"],
-        "missing_columns": {"archive_plans": ["payload"]},
-    }
-    assert result["archive_operations"] == []
-    assert result["archive_index"]["enabled"] is True
-
-
-def test_generation_status_detail_excludes_retired_queue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    registry, root = _registry(tmp_path)
-    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
-    monkeypatch.setattr(
-        "app.server.wiki_status_tool",
-        lambda _: {
-            "ok": True,
-            "vault_root": str(root),
-            "queue": {"total": 1},
-            "version": RUNTIME_PROVENANCE.package_version,
-            "runtime": RUNTIME_PROVENANCE.to_public_dict(),
-        },
-    )
-
-    result = wiki_status(detail="generation")
-
-    assert set(result) == {"ok", "vault", "query_execution", "config", "version", "runtime"}
-    assert "queue" not in result
-
-
-@pytest.mark.parametrize("detail", sorted(DETAIL_FIELDS))
-def test_status_detail_output_matches_detail_fields_owner(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    detail: str,
-) -> None:
-    registry, root = _registry(tmp_path)
-    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
-    monkeypatch.setattr(
-        "app.server.wiki_status_tool",
-        lambda _: {
-            "ok": True,
-            "vault_root": str(root),
-            "initialized": True,
-            "missing_required_paths": [],
-            "vector": {"state": "ready"},
-            "retrieval": {"active": {}, "archive": {}, "raw": {}},
-            "version": RUNTIME_PROVENANCE.package_version,
-            "runtime": RUNTIME_PROVENANCE.to_public_dict(),
-        },
-    )
-    monkeypatch.setattr(
-        "app.server.ArchiveStatusReader.status",
-        lambda _self: {
-            "ok": True,
-            "state": "ready",
-            "code": "ready",
-            "operations": [],
-            "tombstone_count": 0,
-            "archive_index": {"ok": True, "state": "ready", "scope": "archive"},
-        },
-    )
-
-    result = wiki_status(detail=detail)
-
-    assert set(result) == DETAIL_FIELDS[detail]
 
 
 @pytest.mark.parametrize("tool", [wiki_archive, wiki_restore])

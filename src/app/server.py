@@ -90,6 +90,41 @@ DETAIL_FIELDS: dict[str, frozenset[str]] = {
 }
 
 
+def assemble_vault_status(
+    base_status: Mapping[str, Any],
+    config_status: Mapping[str, Any],
+    archive_status: Mapping[str, Any],
+    execution_status: Mapping[str, Any],
+    detail: str,
+) -> dict[str, Any]:
+    """Assemble the public vault status from already-read status snapshots."""
+
+    status = dict(base_status)
+    status.pop("vault_root", None)
+    status["vault"] = config_status["logical_vault"]
+    status["config"] = config_status
+    archive_config = config_status["archive"]
+    status["archive_index"] = {
+        "enabled": archive_config["archive_index_enabled"],
+        **archive_status["archive_index"],
+    }
+    status["archive_operations"] = archive_status["operations"]
+    status["archive_state"] = {
+        "state": archive_status["state"],
+        "code": archive_status["code"],
+    }
+    if archive_status.get("missing_tables"):
+        status["archive_state"]["missing_tables"] = archive_status["missing_tables"]
+    if archive_status.get("missing_columns"):
+        status["archive_state"]["missing_columns"] = archive_status["missing_columns"]
+    status["query_execution"] = {
+        "active": execution_status["active"],
+        "pending": execution_status["pending"],
+    }
+    fields = DETAIL_FIELDS[detail]
+    return {key: value for key, value in status.items() if key in fields}
+
+
 class StrictMCPServer(MCPServer):
     """MCPServer with a privacy-safe rejection for unknown input fields."""
 
@@ -457,33 +492,16 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
     if detail not in DETAIL_FIELDS:
         return {"ok": False, "code": "invalid_status_detail", "error": "detail must be summary, indexes, generation, or archive"}
     resolution = _registered_resolution()
-    status = dict(wiki_status_tool(str(resolution.root)))
-    status.pop("vault_root", None)
-    status["vault"] = resolution.logical_name
-    status["config"] = CONFIG_REGISTRY.public_status(resolution.resolved)
+    base_status = wiki_status_tool(str(resolution.root))
+    config_status = CONFIG_REGISTRY.public_status(resolution.resolved)
     archive_status = ArchiveStatusReader(resolution.root).status()
-    status["archive_index"] = {"enabled": resolution.resolved.settings.archive.archive_index_enabled, **archive_status["archive_index"]}
-    status["archive_operations"] = archive_status["operations"]
-    status["archive_state"] = {
-        "state": archive_status["state"],
-        "code": archive_status["code"],
-    }
-    if archive_status.get("missing_tables"):
-        status["archive_state"]["missing_tables"] = archive_status["missing_tables"]
-    if archive_status.get("missing_columns"):
-        status["archive_state"]["missing_columns"] = archive_status["missing_columns"]
     execution = resolution.resolved.settings.retrieval.execution
     execution_status = _query_registry(
         vault_key=f"{resolution.logical_name}:{resolution.root}",
         max_concurrency=execution.max_concurrency,
         cancel_grace_seconds=execution.cancel_grace_seconds,
     ).status()
-    status["query_execution"] = {
-        "active": execution_status["active"],
-        "pending": execution_status["pending"],
-    }
-    fields = DETAIL_FIELDS[detail]
-    return {key: value for key, value in status.items() if key in fields}
+    return assemble_vault_status(base_status, config_status, archive_status, execution_status, detail)
 
 
 @_register(
