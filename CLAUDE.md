@@ -66,6 +66,8 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 [query_execution_context.py](src/retrieval/query_execution_context.py) 是单次 Query V2 执行状态、raw/fallback 分支迁移和冻结 `outcome()` 视图的唯一 owner。
 
+[query_recall_policy.py](src/retrieval/query_recall_policy.py) 是 Query V2 召回与回退启发式的唯一 owner：意图分类、查询扩展、relaxed/raw 候选、coverage 合并、自适应扩展和步骤计数均由此模块提供；execution context 只负责状态编排，不复制这些策略。
+
 candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/candidate_items.py) 模块。
 
 [graph_retrieval.py](src/retrieval/graph_retrieval.py) 提供 Query V2 共用的 wikilink、shared source、common neighbor、same type 有界图扩展；[vector_index.py](src/retrieval/vector_index.py) 提供 `VectorRecord`、`vector_index_records` 及显式向量生命周期所需的索引记录回退。v1 的 `src/wiki/wiki_query.py` 私有查询引擎已删除，不要重新引入第二套检索入口。

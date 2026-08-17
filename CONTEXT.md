@@ -56,13 +56,17 @@ _避免使用_：强制终止、进程隔离、仅停止等待
 `src/retrieval/query_snapshot.py` 为一次查询捕获的不可变 active/raw 页面 metadata、provenance 与候选视图；同一调用的过滤、向量、图扩展、发现和 fallback 必须复用对应快照，不重新读取可能漂移的检索 store。
 _避免使用_：实时 store、全文正文、查询执行上下文
 
+**召回策略（Query Recall Policy）**：
+`src/retrieval/query_recall_policy.py` 是 Query V2 召回与回退启发式策略的唯一 owner，持有意图分类、查询扩展、relaxed/raw 候选生成、coverage 合并、自适应扩展和结构化步骤计数；它只复用检索 store、不可变快照、协作式取消和 recovery primitive，不持有可变执行状态或 outcome 冻结逻辑。
+_避免使用_：查询执行上下文、查询流水线编排、重复实现回退策略
+
 **查询回退（Fallback）**：
-`src/retrieval/query_recovery.py` 中的回退计划、条件和 `assemble_recovery` 负责主召回不足时的有界分支选择及最终 fallback envelope 装配；它不持有查询 store、取消器或执行上下文的可变状态。
-_避免使用_：全库扫描、重建索引、查询执行上下文
+`src/retrieval/query_recovery.py` 中的回退计划、条件、阶梯、每页选择和 `assemble_recovery` 负责主召回不足时的有界分支选择及最终 fallback envelope 装配；召回候选和 coverage/扩展启发式由 `query_recall_policy.py` 提供，recovery 不持有查询 store、取消器或执行上下文的可变状态。
+_避免使用_：全库扫描、重建索引、查询执行上下文、策略副本
 
 **查询执行上下文（QueryExecutionContext）**：
-`src/retrieval/query_execution_context.py` 中的 `QueryExecutionContext` 是一次 Query V2 调用的可变执行状态 owner，持有本次查询的 root、检索 store、取消状态、执行 status，以及按需创建并记忆化的 raw store 与 raw snapshot；它承接 fallback、发现和 batch 阶段的状态迁移。raw 分支把 raw index 规范化为 `fresh`、`stale`、`missing`，在 `coverage`、`all_coverage` 和 `raw_zero` 分支中按候选结果迁移 selected、recovery/context_items、命中计数、warning、词法模式与 coverage 标记；非 fresh 状态使用空 raw snapshot，不伪造 raw 候选。`outcome()` 只发布一次递归冻结的 `QueryExecutionOutcome` 只读视图，并在发布后封存上下文，不是公开响应对象本身。
-_避免使用_：紧凑正文、context pack、检索结果
+`src/retrieval/query_execution_context.py` 中的 `QueryExecutionContext` 是一次 Query V2 调用的可变执行状态 owner，持有本次查询的 root、检索 store、取消状态、执行 status，以及按需创建并记忆化的 raw store 与 raw snapshot；它只编排并承接 fallback、发现和 batch 阶段的状态迁移，召回策略委托给 `query_recall_policy.py`。raw 分支把 raw index 规范化为 `fresh`、`stale`、`missing`，在 `coverage`、`all_coverage` 和 `raw_zero` 分支中迁移 selected、recovery/context_items、命中计数、warning、词法模式与 coverage 标记；非 fresh 状态使用空 raw snapshot，不伪造 raw 候选。`outcome()` 只发布一次递归冻结的 `QueryExecutionOutcome` 只读视图，并在发布后封存上下文，不是公开响应对象本身。
+_避免使用_：召回/扩展启发式、紧凑正文、context pack、检索结果
 
 **Context Pack（紧凑正文）**：
 从已选 passage 投影出的有界正文集合与 token budget，供模型阅读；它只描述要发送的内容，不持有查询 store、取消器、raw 可用性或阶段编排状态。
