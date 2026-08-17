@@ -38,23 +38,15 @@ from retrieval.metadata_filters import page_matches_filters
 from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, vector_settings_from_embedding
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError
-from retrieval.query_execution_context import (
+from retrieval.query_execution_context import QueryExecutionContext
+from retrieval.query_recall_policy import (
     DEFAULT_TOP_K,
-    PASSAGE_PROBE_LIMIT as _PASSAGE_PROBE_LIMIT,
-    PASSAGE_SCAN_LIMIT as _PASSAGE_SCAN_LIMIT,
     RANKING_POLICY_VERSION,
     RRF_K,
-    QueryExecutionContext,
     adaptive_expand,
     classify_intent,
 )
 
-
-
-
-
-PASSAGE_SCAN_LIMIT = _PASSAGE_SCAN_LIMIT
-PASSAGE_PROBE_LIMIT = _PASSAGE_PROBE_LIMIT
 
 
 def _effective_scope(scope: str, intent: str) -> tuple[str, tuple[str, ...]]:
