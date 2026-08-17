@@ -136,6 +136,140 @@ class PageMutationError(ValueError):
         self.code = code
 
 
+@dataclass(frozen=True)
+class PlanResolution:
+    """One durable plan lookup result for the current orchestration call."""
+
+    operation: PageOperation | None = None
+    result: MutationResult | None = None
+
+
+class PlanLifecycle:
+    """Own the durable update-plan transitions without retaining session state."""
+
+    def __init__(self, store: PageOperationStore):
+        self._store = store
+
+    def resolve(self, plan_id: str | None, intent_hash: str | None, intended_hash: str) -> PlanResolution:
+        if plan_id is None:
+            return PlanResolution()
+
+        plan = self._store.get_plan(plan_id)
+        if plan is None:
+            return PlanResolution(result=MutationResult(ok=False, code="plan_unknown"))
+        if plan.state == "consumed":
+            if intent_hash != plan.intent_hash:
+                return PlanResolution(result=MutationResult(ok=False, code="plan_intent_drift"))
+            operation = self._store.get_operation(plan.operation_id) if plan.operation_id else None
+            return PlanResolution(
+                operation=operation,
+                result=MutationResult(
+                    ok=True,
+                    state="already_applied",
+                    operation_id=plan.operation_id,
+                    page_hash=plan.consumed_hash,
+                    repair_action=(
+                        "repair_page_operation"
+                        if operation is not None and operation.state != "completed"
+                        else None
+                    ),
+                    already_applied=True,
+                    stages=safe_stages_of(operation) if operation is not None else {},
+                ),
+            )
+        if plan_is_expired(plan.expires_at):
+            return PlanResolution(result=MutationResult(ok=False, code="plan_expired"))
+        if plan.state == "expired" or plan.state not in {"issued", "claimed"}:
+            return PlanResolution(
+                result=MutationResult(ok=False, code="plan_expired" if plan.state == "expired" else "plan_unknown")
+            )
+        if plan.state == "claimed":
+            if not plan.operation_id:
+                return PlanResolution(result=MutationResult(ok=False, code="plan_claimed"))
+            operation = self._store.get_operation(plan.operation_id)
+            if operation is None:
+                return PlanResolution(
+                    result=MutationResult(ok=False, code="plan_claimed", operation_id=plan.operation_id)
+                )
+            if operation.intended_hash != intended_hash:
+                return PlanResolution(
+                    result=MutationResult(ok=False, code="plan_intent_drift", operation_id=operation.operation_id)
+                )
+            if operation.state == "prepared":
+                return PlanResolution(
+                    result=MutationResult(ok=False, code="plan_claimed", operation_id=operation.operation_id)
+                )
+            return PlanResolution(operation=operation)
+        return PlanResolution()
+
+    def claim(
+        self,
+        plan_id: str | None,
+        operation: PageOperation,
+        page_path: str,
+        base_hash: str,
+        intent_hash: str,
+    ) -> MutationResult | None:
+        if plan_id is None:
+            return None
+        try:
+            self._store.claim_plan(
+                plan_id,
+                page_path=page_path,
+                base_hash=base_hash,
+                intent_hash=intent_hash,
+                operation_id=operation.operation_id,
+            )
+        except UpdatePlanError as exc:
+            self._mark_precommit_failure(operation.operation_id, exc.code)
+            return MutationResult(
+                ok=False,
+                state="failed_precommit",
+                code=exc.code,
+                operation_id=operation.operation_id,
+            )
+        return None
+
+    def consume(
+        self,
+        plan_id: str | None,
+        operation_id: str,
+        committed_hash: str,
+        intended_hash: str,
+    ) -> MutationResult | None:
+        if plan_id is None:
+            return None
+        page_hash = committed_hash or intended_hash
+        try:
+            self._store.consume_plan(
+                plan_id,
+                operation_id=operation_id,
+                committed_hash=page_hash,
+            )
+        except UpdatePlanError:
+            try:
+                self._store.set_operation_state(operation_id, "repair_pending", error_code="plan_consume_pending")
+            except PageOperationError:
+                pass
+            operation = self._store.get_operation(operation_id)
+            return MutationResult(
+                ok=True,
+                state="repair_pending",
+                code="plan_consume_pending",
+                operation_id=operation_id,
+                page_hash=page_hash,
+                repair_action="repair_page_operation",
+                stages=safe_stages_of(operation) if operation is not None else {},
+            )
+        return None
+
+    def _mark_precommit_failure(self, operation_id: str, code: str) -> None:
+        try:
+            self._store.set_operation_state(operation_id, "failed_precommit", error_code=code)
+        except PageOperationError:
+            pass
+
+
 class PageMutationCoordinator:
     """Serialize in-process page writers and persist recoverable stages."""
 
@@ -150,6 +284,7 @@ class PageMutationCoordinator:
     ):
         self.root = Path(vault_root).expanduser().resolve()
         self._store = store or PageOperationStore(self.root)
+        self._plan_lifecycle = PlanLifecycle(self._store)
 
     def prepare(
         self,
@@ -513,46 +648,10 @@ class PageMutationCoordinator:
     ) -> MutationResult:
         """Prepare, commit, project, and optionally consume one mutation plan."""
 
-        if plan_id is not None:
-            plan = self._store.get_plan(plan_id)
-            if plan is None:
-                return MutationResult(ok=False, code="plan_unknown")
-            if plan.state == "consumed":
-                if intent_hash != plan.intent_hash:
-                    return MutationResult(ok=False, code="plan_intent_drift")
-                operation = self._store.get_operation(plan.operation_id) if plan.operation_id else None
-                return self._mutation_result(
-                    {
-                        "ok": True,
-                        "state": "already_applied",
-                        "operation_id": plan.operation_id,
-                        "page_hash": plan.consumed_hash,
-                        "already_applied": True,
-                        **(
-                            {"repair_action": "repair_page_operation"}
-                            if operation is not None and operation.state != "completed"
-                            else {}
-                        ),
-                    },
-                    operation,
-                )
-            if plan_is_expired(plan.expires_at):
-                return MutationResult(ok=False, code="plan_expired")
-            if plan.state == "expired" or plan.state not in {"issued", "claimed"}:
-                return MutationResult(ok=False, code="plan_expired" if plan.state == "expired" else "plan_unknown")
-            if plan.state == "claimed" and plan.operation_id:
-                claimed = self._store.get_operation(plan.operation_id)
-                if claimed is None:
-                    return MutationResult(ok=False, code="plan_claimed", operation_id=plan.operation_id)
-                if claimed.intended_hash != intended_hash:
-                    return MutationResult(ok=False, code="plan_intent_drift", operation_id=claimed.operation_id)
-                if claimed.state == "prepared":
-                    return MutationResult(ok=False, code="plan_claimed", operation_id=claimed.operation_id)
-                operation = claimed
-            else:
-                operation = None
-        else:
-            operation = None
+        resolution = self._plan_lifecycle.resolve(plan_id, intent_hash, intended_hash)
+        if resolution.result is not None:
+            return resolution.result
+        operation = resolution.operation
 
         if operation_kind == "chat_source" and operation is None:
             existing = self._store.get_operation_by_request_key(request_key)
@@ -579,25 +678,17 @@ class PageMutationCoordinator:
             except PageOperationError as exc:
                 return MutationResult(ok=False, code=exc.code)
 
-        if plan_id is not None:
-            plan = self._store.get_plan(plan_id)
-            if plan is not None and plan.state == "issued":
-                try:
-                    self._store.claim_plan(
-                        plan_id,
-                        page_path=page_path,
-                        base_hash=base_hash or "",
-                        intent_hash=intent_hash or "",
-                        operation_id=operation.operation_id,
-                    )
-                except UpdatePlanError as exc:
-                    self._mark_precommit_failure(operation.operation_id, exc.code)
-                    return MutationResult(
-                        ok=False,
-                        state="failed_precommit",
-                        code=exc.code,
-                        operation_id=operation.operation_id,
-                    )
+        claim_failure = None
+        if resolution.operation is None:
+            claim_failure = self._plan_lifecycle.claim(
+                plan_id,
+                operation,
+                page_path,
+                base_hash or "",
+                intent_hash or "",
+            )
+        if claim_failure is not None:
+            return claim_failure
 
         projection = self._commit_with_projections(
             operation.operation_id,
@@ -607,29 +698,14 @@ class PageMutationCoordinator:
         if not projection.get("ok"):
             return self._mutation_result(projection, operation)
 
-        if plan_id is not None:
-            try:
-                self._store.consume_plan(
-                    plan_id,
-                    operation_id=operation.operation_id,
-                    committed_hash=str(projection.get("page_hash") or intended_hash),
-                )
-            except UpdatePlanError:
-                try:
-                    self._store.set_operation_state(operation.operation_id, "repair_pending", error_code="plan_consume_pending")
-                except PageOperationError:
-                    pass
-                return self._mutation_result(
-                    {
-                        "ok": True,
-                        "state": "repair_pending",
-                        "code": "plan_consume_pending",
-                        "operation_id": operation.operation_id,
-                        "page_hash": projection.get("page_hash") or intended_hash,
-                        "repair_action": "repair_page_operation",
-                    },
-                    operation,
-                )
+        consume_failure = self._plan_lifecycle.consume(
+            plan_id,
+            operation.operation_id,
+            str(projection.get("page_hash") or intended_hash),
+            intended_hash,
+        )
+        if consume_failure is not None:
+            return consume_failure
         return self._mutation_result(projection, operation)
 
     def _mutation_result(
