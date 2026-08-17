@@ -100,6 +100,7 @@ _避免使用_：事实源、原始数据、正式知识
 
 **投影 profile（Projection Profile）**：
 某类字节变更必须追上的有序派生投影清单，按变更 kind（正式页面提交、raw source 摄入、chat source、admin 改写、归档）区分；它是"字节变了要追什么投影"的唯一答案来源，不持有投影执行器、operation journal 或修复状态。
+纯 registry 与阶段别名由 `src/wiki/projection_profile.py` 持有；page mutation、ingest、archive、provenance/privacy admin 各自把阶段名绑定到本地执行器，不跨边界共享执行状态。
 _避免使用_：投影执行器、投影状态机、全量重建指令
 
 **新鲜度（Freshness）**：
