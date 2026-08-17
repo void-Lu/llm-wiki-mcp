@@ -23,6 +23,15 @@ from retrieval.query_recovery import (
     select_best_per_page,
 )
 from retrieval.query_snapshot import QueryCorpusSnapshot
+from retrieval.query_shared import (
+    QueryFilters,
+    eligible,
+    heading,
+    is_retired_source_namespace,
+    is_source_index,
+    matches_request,
+    probe_hit,
+)
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.metadata_filters import page_matches_filters
@@ -36,15 +45,8 @@ from retrieval.query_execution_context import (
     RANKING_POLICY_VERSION,
     RRF_K,
     QueryExecutionContext,
-    QueryFilters,
     adaptive_expand,
     classify_intent,
-    eligible,
-    heading,
-    is_retired_source_namespace,
-    is_source_index,
-    matches_request,
-    probe_hit,
 )
 
 
