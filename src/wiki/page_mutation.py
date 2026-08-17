@@ -163,24 +163,6 @@ def safe_stages_of(operation: PageOperation) -> dict[str, dict[str, object]]:
     return {name: PageOperationStore.safe_stage_record(record) for name, record in operation.stages.items()}
 
 
-def stage_result_of(result: MutationResult, stage: str) -> dict[str, object] | None:
-    """Compatibility shim; new consumers call ``MutationResult.stage_result``."""
-
-    return result.stage_result(stage)
-
-
-def dependency_projection_of(result: MutationResult) -> dict[str, object]:
-    """Compatibility shim; new consumers call ``MutationResult.dependency_projection``."""
-
-    return result.dependency_projection()
-
-
-def retrieval_index_of(result: MutationResult) -> dict[str, object] | None:
-    """Compatibility shim; new consumers call ``MutationResult.retrieval_index``."""
-
-    return result.retrieval_index()
-
-
 class PageMutationError(ValueError):
     """Stable failure from the page mutation coordinator."""
 
@@ -922,9 +904,6 @@ __all__ = [
     "PageMutationCoordinator",
     "PageMutationError",
     "Projection",
-    "dependency_projection_of",
     "plan_intent_hash",
-    "retrieval_index_of",
     "safe_stages_of",
-    "stage_result_of",
 ]
