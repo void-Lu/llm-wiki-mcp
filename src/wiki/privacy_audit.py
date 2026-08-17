@@ -18,9 +18,11 @@ from uuid import uuid4
 
 from common.privacy_policy import LocatorError, PrivacyPolicy, field_class, redact_storage_value
 from common.redaction import count_redaction_categories, redact_sensitive_text
+from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.atomic_file import AtomicFileError, atomic_write_bytes, atomic_write_text, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_policy import derive_page_policy
+from wiki.projection_profile import projection_stages
 from wiki.wiki_io import render_page, split_frontmatter
 from wiki.wiki_paths import ADMIN_PLANS_DIR, KNOWLEDGE_DEPENDENCIES_DB, PRIVACY_AUDIT_DIR
 
@@ -179,6 +181,7 @@ class PrivacyAuditService:
         if db_path.is_file():
             dependency = KnowledgeDependencies(self.root)
         results: list[dict[str, object]] = []
+        warnings: list[dict[str, str]] = []
         try:
             for entry in entries:
                 page_path = str(entry.get("page_path", ""))
@@ -209,7 +212,9 @@ class PrivacyAuditService:
                 original = originals[page_path]
                 transformed = _transform_text(original.decode("utf-8"), filename_map)
                 target = targets[page_path]
-                if transformed.encode("utf-8") != original or target != self._page_file(page_path):
+                source = self._page_file(page_path)
+                renamed = target != source
+                if transformed.encode("utf-8") != original or renamed:
                     atomic_write_bytes(target, transformed.encode("utf-8"))
                     written_targets.append(target)
                 after_hash = sha256_file(target)
@@ -229,8 +234,15 @@ class PrivacyAuditService:
                     )
                     if target != self._page_file(page_path):
                         dependency.remove_page(page_path)
-                if target != self._page_file(page_path):
-                    self._page_file(page_path).unlink()
+                if renamed:
+                    source.unlink()
+                warning = self._refresh_retrieval(
+                    target,
+                    page_path,
+                    old_page_path=page_path if renamed else None,
+                )
+                if warning is not None:
+                    warnings.append(warning)
                 results.append(
                     {
                         "page_path": page_path,
@@ -253,9 +265,13 @@ class PrivacyAuditService:
                 "entries": results,
                 "writes": len(written_targets),
                 "history_written": False,
+                "warnings": warnings,
             }
             atomic_write_text(audit_path, json.dumps(audit, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            return {"ok": True, "plan_id": plan_id, "applied": True, "writes": len(written_targets), "history_written": False, "entries": results}
+            response = {"ok": True, "plan_id": plan_id, "applied": True, "writes": len(written_targets), "history_written": False, "entries": results}
+            if warnings:
+                response["warnings"] = warnings
+            return response
         except Exception as exc:
             rollback_errors = _rollback(self.root, originals, targets, written_targets, projections, dependency)
             rollback_audit = {
@@ -268,6 +284,7 @@ class PrivacyAuditService:
                 "rollback_errors": rollback_errors,
                 "entries": results,
                 "history_written": False,
+                "warnings": warnings,
             }
             try:
                 atomic_write_text(audit_path, json.dumps(rollback_audit, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
@@ -281,6 +298,34 @@ class PrivacyAuditService:
                 "writes": 0,
                 "error_code": _stable_error_code(exc),
             }
+
+    def _refresh_retrieval(
+        self,
+        target: Path,
+        page_path: str,
+        *,
+        old_page_path: str | None = None,
+    ) -> dict[str, str] | None:
+        """按 admin profile 刷新 active retrieval，失败只留下审计 warning。"""
+
+        for stage in projection_stages("privacy"):
+            if stage != "retrieval":
+                continue
+            store = RetrievalIndexStore(self.root, scope="active")
+            try:
+                result = store.update_page_from_file(target)
+            except Exception as exc:
+                return _projection_warning(page_path, exc)
+            if result.get("ok") is not True or result.get("state") == "rebuild_required":
+                return _projection_warning(page_path, result)
+            if old_page_path is not None:
+                try:
+                    deleted = store.delete_page(old_page_path)
+                except Exception as exc:
+                    return _projection_warning(page_path, exc)
+                if deleted.get("ok") is False and deleted.get("code") != "index_missing":
+                    return _projection_warning(page_path, deleted)
+        return None
 
     def _iter_page_files(self) -> Iterable[Path]:
         wiki_root = self.root / "wiki"
@@ -475,6 +520,23 @@ def _stable_error_code(exc: Exception) -> str:
     if isinstance(exc, (PrivacyAuditError, AtomicFileError)):
         return getattr(exc, "code", "privacy_audit_failed")
     return "privacy_audit_failed"
+
+
+def _projection_warning(page_path: str, result_or_error: object) -> dict[str, str]:
+    """把索引失败压缩为稳定 code 与安全短消息，不携带原始异常。"""
+
+    raw_code = getattr(result_or_error, "code", None)
+    if isinstance(result_or_error, Mapping):
+        raw_code = result_or_error.get("code")
+    code = str(raw_code or "retrieval_projection_failed")
+    if re.fullmatch(r"[a-z][a-z0-9_]*", code) is None:
+        code = "retrieval_projection_failed"
+    return {
+        "page_path": page_path,
+        "stage": "retrieval",
+        "code": code,
+        "message": "retrieval projection was not refreshed",
+    }
 
 
 def _safe_hash(path: Path) -> str | None:

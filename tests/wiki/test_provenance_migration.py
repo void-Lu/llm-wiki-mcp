@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import cast
 
@@ -9,6 +10,7 @@ import yaml
 import wiki.provenance_migration as migration
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.provenance_migration import ProvenanceMigrationService
+from retrieval.retrieval_index import RetrievalIndexStore
 
 
 def _write_page(root: Path, relative: str, frontmatter: dict[str, object], body: str = "正文") -> Path:
@@ -108,3 +110,54 @@ def test_provenance_partial_failure_restores_all_pages(tmp_path: Path, monkeypat
     assert applied["ok"] is False
     assert applied["rolled_back"] is True
     assert [page.read_bytes() for page in pages] == originals
+
+
+def test_provenance_apply_refreshes_active_retrieval_after_page_write(tmp_path: Path, monkeypatch) -> None:
+    source_path, _ = _source(tmp_path)
+    _write_page(tmp_path, "wiki/concepts/migrate.md", {"sources": [source_path]})
+    store = RetrievalIndexStore(tmp_path)
+    store.build(store.iter_vault_pages())
+    plan = ProvenanceMigrationService(tmp_path).plan("wiki/concepts/migrate.md")
+    calls: list[str] = []
+    original = migration.RetrievalIndexStore.update_page_from_file
+
+    def record(self, target, **kwargs):
+        calls.append(Path(target).relative_to(tmp_path).as_posix())
+        return original(self, target, **kwargs)
+
+    monkeypatch.setattr(migration.RetrievalIndexStore, "update_page_from_file", record)
+    applied = ProvenanceMigrationService(tmp_path).apply(str(plan["plan_id"]))
+
+    assert applied["ok"] is True
+    assert calls == ["wiki/concepts/migrate.md"]
+    assert "warnings" not in applied
+    audit_path = tmp_path / ".llm-wiki/migrations" / f"{plan['plan_id']}.audit.json"
+    assert json.loads(audit_path.read_text(encoding="utf-8"))["warnings"] == []
+
+
+def test_provenance_retrieval_failure_is_a_safe_nonfatal_audit_warning(tmp_path: Path, monkeypatch) -> None:
+    source_path, _ = _source(tmp_path)
+    page = _write_page(tmp_path, "wiki/concepts/migrate.md", {"sources": [source_path]})
+    plan = ProvenanceMigrationService(tmp_path).plan("wiki/concepts/migrate.md")
+
+    def fail(_self, _target, **_kwargs):
+        raise RuntimeError("C:/private/source/secret-token")
+
+    monkeypatch.setattr(migration.RetrievalIndexStore, "update_page_from_file", fail)
+    applied = ProvenanceMigrationService(tmp_path).apply(str(plan["plan_id"]))
+
+    assert applied["ok"] is True
+    warnings = cast(list[dict[str, str]], applied["warnings"])
+    assert warnings == [
+        {
+            "page_path": "wiki/concepts/migrate.md",
+            "stage": "retrieval",
+            "code": "retrieval_projection_failed",
+            "message": "retrieval projection was not refreshed",
+        }
+    ]
+    assert page.read_text(encoding="utf-8").count("source_hashes:") == 1
+    audit_path = tmp_path / ".llm-wiki/migrations" / f"{plan['plan_id']}.audit.json"
+    audit_text = audit_path.read_text(encoding="utf-8")
+    assert "secret-token" not in audit_text
+    assert json.loads(audit_text)["warnings"] == warnings

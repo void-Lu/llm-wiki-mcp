@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, cast
+import json
 
 import wiki.privacy_audit as audit_module
 from wiki.privacy_audit import PrivacyAuditService
+from retrieval.retrieval_index import RetrievalIndexStore
 
 
 def _page(root: Path, relative: str, title: str = "安全标题", body: str = "正文") -> Path:
@@ -99,3 +101,52 @@ def test_privacy_partial_failure_rolls_back_all_pages(tmp_path: Path, monkeypatc
     assert applied["ok"] is False
     assert applied["rolled_back"] is True
     assert [page.read_bytes() for page in pages] == originals
+
+
+def test_privacy_apply_refreshes_active_retrieval_after_page_write(tmp_path: Path, monkeypatch) -> None:
+    _page(tmp_path, "wiki/concepts/privacy.md", body="owner@example.com")
+    store = RetrievalIndexStore(tmp_path)
+    store.build(store.iter_vault_pages())
+    plan = PrivacyAuditService(tmp_path).plan()
+    calls: list[str] = []
+    original = audit_module.RetrievalIndexStore.update_page_from_file
+
+    def record(self, target, **kwargs):
+        calls.append(Path(target).relative_to(tmp_path).as_posix())
+        return original(self, target, **kwargs)
+
+    monkeypatch.setattr(audit_module.RetrievalIndexStore, "update_page_from_file", record)
+    applied = PrivacyAuditService(tmp_path).apply(str(plan["plan_id"]))
+
+    assert applied["ok"] is True
+    assert calls == ["wiki/concepts/privacy.md"]
+    assert "warnings" not in applied
+    audit_path = tmp_path / ".llm-wiki/privacy-audit" / f"{plan['plan_id']}.audit.json"
+    assert json.loads(audit_path.read_text(encoding="utf-8"))["warnings"] == []
+
+
+def test_privacy_retrieval_failure_is_a_safe_nonfatal_audit_warning(tmp_path: Path, monkeypatch) -> None:
+    page = _page(tmp_path, "wiki/concepts/privacy.md", body="owner@example.com")
+    plan = PrivacyAuditService(tmp_path).plan()
+
+    def fail(_self, _target, **_kwargs):
+        raise RuntimeError("C:/private/source/secret-token")
+
+    monkeypatch.setattr(audit_module.RetrievalIndexStore, "update_page_from_file", fail)
+    applied = PrivacyAuditService(tmp_path).apply(str(plan["plan_id"]))
+
+    assert applied["ok"] is True
+    warnings = cast(list[dict[str, str]], applied["warnings"])
+    assert warnings == [
+        {
+            "page_path": "wiki/concepts/privacy.md",
+            "stage": "retrieval",
+            "code": "retrieval_projection_failed",
+            "message": "retrieval projection was not refreshed",
+        }
+    ]
+    assert "owner@example.com" not in page.read_text(encoding="utf-8")
+    audit_path = tmp_path / ".llm-wiki/privacy-audit" / f"{plan['plan_id']}.audit.json"
+    audit_text = audit_path.read_text(encoding="utf-8")
+    assert "secret-token" not in audit_text
+    assert json.loads(audit_text)["warnings"] == warnings

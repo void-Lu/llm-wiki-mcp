@@ -16,10 +16,12 @@ import re
 from typing import Iterable, Mapping
 from uuid import uuid4
 
+from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.atomic_file import AtomicFileError, atomic_write_bytes, atomic_write_text, sha256_file
 from common.privacy_policy import normalize_vault_relative
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_policy import derive_page_policy
+from wiki.projection_profile import projection_stages
 from wiki.source_provenance import SourceProvenanceError, SourceProvenanceResolver, source_path_key
 from wiki.wiki_io import render_page, split_frontmatter
 from wiki.wiki_paths import ADMIN_PLANS_DIR, MIGRATIONS_DIR
@@ -105,6 +107,7 @@ class ProvenanceMigrationService:
         written_pages: list[str] = []
         dependency = KnowledgeDependencies(self.root)
         results: list[dict[str, object]] = []
+        warnings: list[dict[str, str]] = []
         try:
             for item in applyable:
                 page_path = str(item["page_path"])
@@ -134,6 +137,9 @@ class ProvenanceMigrationService:
                     replaced_by=policy.replaced_by,
                     freshness=policy.freshness,
                 )
+                warning = self._refresh_retrieval(target, page_path)
+                if warning is not None:
+                    warnings.append(warning)
                 results.append(
                     {
                         "page_path": page_path,
@@ -152,9 +158,10 @@ class ProvenanceMigrationService:
                 "rolled_back": False,
                 "entries": results,
                 "writes": len(written_pages),
+                "warnings": warnings,
             }
             atomic_write_text(audit_path, json.dumps(audit, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            return {
+            response = {
                 "ok": True,
                 "plan_id": plan_id,
                 "applied": True,
@@ -162,6 +169,9 @@ class ProvenanceMigrationService:
                 "skipped": len(entries) - len(applyable),
                 "entries": results,
             }
+            if warnings:
+                response["warnings"] = warnings
+            return response
         except Exception as exc:
             rollback_errors = self._rollback(written_pages, originals, projections, dependency)
             rollback_audit = {
@@ -173,6 +183,7 @@ class ProvenanceMigrationService:
                 "error_code": _stable_error_code(exc),
                 "rollback_errors": rollback_errors,
                 "entries": results,
+                "warnings": warnings,
             }
             try:
                 atomic_write_text(audit_path, json.dumps(rollback_audit, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
@@ -186,6 +197,20 @@ class ProvenanceMigrationService:
                 "writes": 0,
                 "error_code": _stable_error_code(exc),
             }
+
+    def _refresh_retrieval(self, target: Path, page_path: str) -> dict[str, str] | None:
+        """按 admin profile 增量刷新页面；索引故障不回滚页面事实。"""
+
+        for stage in projection_stages("provenance"):
+            if stage != "retrieval":
+                continue
+            try:
+                result = RetrievalIndexStore(self.root, scope="active").update_page_from_file(target)
+            except Exception as exc:
+                return _projection_warning(page_path, exc)
+            if result.get("ok") is not True or result.get("state") == "rebuild_required":
+                return _projection_warning(page_path, result)
+        return None
 
     def _iter_page_files(self) -> Iterable[Path]:
         wiki_root = self.root / "wiki"
@@ -471,6 +496,23 @@ def _stable_error_code(exc: Exception) -> str:
     if isinstance(exc, (ProvenanceMigrationError, SourceProvenanceError, AtomicFileError)):
         return getattr(exc, "code", "migration_failed")
     return "migration_failed"
+
+
+def _projection_warning(page_path: str, result_or_error: object) -> dict[str, str]:
+    """把索引失败压缩为稳定 code 与安全短消息，不携带原始异常。"""
+
+    raw_code = getattr(result_or_error, "code", None)
+    if isinstance(result_or_error, Mapping):
+        raw_code = result_or_error.get("code")
+    code = str(raw_code or "retrieval_projection_failed")
+    if re.fullmatch(r"[a-z][a-z0-9_]*", code) is None:
+        code = "retrieval_projection_failed"
+    return {
+        "page_path": page_path,
+        "stage": "retrieval",
+        "code": code,
+        "message": "retrieval projection was not refreshed",
+    }
 
 
 __all__ = ["ProvenanceMigrationError", "ProvenanceMigrationService"]
