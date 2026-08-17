@@ -7,11 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from wiki.page_mutation import PageMutationCoordinator, PlanLifecycle
+from wiki.page_mutation import PageMutationCoordinator, PlanIntent, PlanLifecycle, plan_intent_hash
 from wiki.page_operation_store import PageOperationStore, UpdatePlanError
 
 
 PAGE_PATH = "wiki/concepts/general/plan.md"
+PLAN_INTENT = PlanIntent(body="new", frontmatter={})
 
 
 def _hash(value: str) -> str:
@@ -20,8 +21,9 @@ def _hash(value: str) -> str:
 
 def _issued_plan(tmp_path: Path) -> tuple[PageOperationStore, PlanLifecycle, str, str, str]:
     store = PageOperationStore(tmp_path)
-    plan = store.issue_plan(PAGE_PATH, _hash("old"), "intent")
-    return store, PlanLifecycle(store), plan.plan_id, _hash("old"), _hash("new")
+    lifecycle = PlanLifecycle(store)
+    plan = lifecycle.issue(PAGE_PATH, _hash("old"), PLAN_INTENT)
+    return store, lifecycle, plan.plan_id, _hash("old"), _hash("new")
 
 
 def _claimed_operation(
@@ -35,7 +37,7 @@ def _claimed_operation(
         base_hash=base_hash,
         intended_hash=intended_hash,
     )
-    assert lifecycle.claim(plan_id, operation, PAGE_PATH, base_hash, "intent") is None
+    assert lifecycle.claim(plan_id, operation, PAGE_PATH, base_hash, plan_intent_hash(PAGE_PATH, base_hash, PLAN_INTENT)) is None
     return store, lifecycle, plan_id, operation.operation_id, base_hash, intended_hash
 
 
@@ -52,7 +54,7 @@ def test_plan_lifecycle_resolve_table(tmp_path: Path, case: str, expected_code: 
     store, lifecycle, plan_id, base_hash, intended_hash = _issued_plan(tmp_path)
 
     if case == "unknown":
-        resolution = lifecycle.resolve("missing", "intent", intended_hash)
+        resolution = lifecycle.resolve("missing", page_path=PAGE_PATH, base_hash=base_hash, intended_hash=intended_hash, intent=PLAN_INTENT)
     elif case == "expired":
         connection = sqlite3.connect(store.path)
         connection.execute(
@@ -61,7 +63,7 @@ def test_plan_lifecycle_resolve_table(tmp_path: Path, case: str, expected_code: 
         )
         connection.commit()
         connection.close()
-        resolution = lifecycle.resolve(plan_id, "intent", intended_hash)
+        resolution = lifecycle.resolve(plan_id, page_path=PAGE_PATH, base_hash=base_hash, intended_hash=intended_hash, intent=PLAN_INTENT)
     elif case == "claimed_prepared":
         operation = store.create_operation(
             request_key="prepared-operation",
@@ -70,8 +72,8 @@ def test_plan_lifecycle_resolve_table(tmp_path: Path, case: str, expected_code: 
             base_hash=base_hash,
             intended_hash=intended_hash,
         )
-        assert lifecycle.claim(plan_id, operation, PAGE_PATH, base_hash, "intent") is None
-        resolution = lifecycle.resolve(plan_id, "intent", intended_hash)
+        assert lifecycle.claim(plan_id, operation, PAGE_PATH, base_hash, plan_intent_hash(PAGE_PATH, base_hash, PLAN_INTENT)) is None
+        resolution = lifecycle.resolve(plan_id, page_path=PAGE_PATH, base_hash=base_hash, intended_hash=intended_hash, intent=PLAN_INTENT)
     else:
         operation = store.create_operation(
             request_key="consumed-operation",
@@ -80,9 +82,15 @@ def test_plan_lifecycle_resolve_table(tmp_path: Path, case: str, expected_code: 
             base_hash=base_hash,
             intended_hash=intended_hash,
         )
-        assert lifecycle.claim(plan_id, operation, PAGE_PATH, base_hash, "intent") is None
+        assert lifecycle.claim(plan_id, operation, PAGE_PATH, base_hash, plan_intent_hash(PAGE_PATH, base_hash, PLAN_INTENT)) is None
         assert lifecycle.consume(plan_id, operation.operation_id, intended_hash, intended_hash) is None
-        resolution = lifecycle.resolve(plan_id, "changed", intended_hash)
+        resolution = lifecycle.resolve(
+            plan_id,
+            page_path=PAGE_PATH,
+            base_hash=base_hash,
+            intended_hash=intended_hash,
+            intent=PlanIntent(body="changed", frontmatter={}),
+        )
 
     assert resolution.result is not None
     assert resolution.result.code == expected_code
@@ -97,10 +105,10 @@ def test_plan_lifecycle_claimed_recovery_table(
     operation_state: str,
     expected_code: str | None,
 ) -> None:
-    store, lifecycle, plan_id, operation_id, _, intended_hash = _claimed_operation(tmp_path)
+    store, lifecycle, plan_id, operation_id, base_hash, intended_hash = _claimed_operation(tmp_path)
     store.set_operation_state(operation_id, operation_state)
 
-    resolution = lifecycle.resolve(plan_id, "intent", intended_hash)
+    resolution = lifecycle.resolve(plan_id, page_path=PAGE_PATH, base_hash=base_hash, intended_hash=intended_hash, intent=PLAN_INTENT)
 
     if expected_code is None:
         assert resolution.result is None
@@ -116,18 +124,20 @@ def test_plan_lifecycle_issued_claimed_consumed_and_replay(tmp_path: Path) -> No
     store, lifecycle, plan_id, operation_id, base_hash, intended_hash = _claimed_operation(tmp_path)
     store.set_operation_state(operation_id, "page_committed")
 
-    resolved = lifecycle.resolve(plan_id, "intent", intended_hash)
+    resolved = lifecycle.resolve(plan_id, page_path=PAGE_PATH, base_hash=base_hash, intended_hash=intended_hash, intent=PLAN_INTENT)
     assert resolved.result is None
     assert resolved.operation is not None
     assert resolved.operation.operation_id == operation_id
     assert lifecycle.consume(plan_id, operation_id, intended_hash, intended_hash) is None
     assert store.get_plan(plan_id).state == "consumed"
 
-    replay = lifecycle.resolve(plan_id, "intent", intended_hash)
+    replay = lifecycle.resolve(plan_id, page_path=PAGE_PATH, base_hash=base_hash, intended_hash=intended_hash, intent=PLAN_INTENT)
     assert replay.result is not None
     assert replay.result.state == "already_applied"
     assert replay.result.already_applied is True
     assert replay.result.page_hash == intended_hash
+    assert replay.consumed_base_applied is True
+    assert replay.base_hash == base_hash
 
 
 @pytest.mark.parametrize(
@@ -191,11 +201,11 @@ def test_plan_lifecycle_reads_durable_state_without_session_cache(tmp_path: Path
         base_hash=base_hash,
         intended_hash=intended_hash,
     )
-    assert first.claim(plan_id, operation, PAGE_PATH, base_hash, "intent") is None
+    assert first.claim(plan_id, operation, PAGE_PATH, base_hash, plan_intent_hash(PAGE_PATH, base_hash, PLAN_INTENT)) is None
     store.set_operation_state(operation.operation_id, "completed")
 
     second = PlanLifecycle(store)
-    resolution = second.resolve(plan_id, "intent", intended_hash)
+    resolution = second.resolve(plan_id, page_path=PAGE_PATH, base_hash=base_hash, intended_hash=intended_hash, intent=PLAN_INTENT)
 
     assert resolution.result is None
     assert resolution.operation is not None
@@ -207,9 +217,9 @@ def test_chat_source_plan_replay_keeps_operation_idempotency_separate(tmp_path: 
     page.parent.mkdir(parents=True)
     page.write_text("old", encoding="utf-8")
     base_hash = _hash("old")
-    intended_hash = _hash("new")
     store = PageOperationStore(tmp_path)
-    plan = store.issue_plan(page.relative_to(tmp_path).as_posix(), base_hash, "intent")
+    lifecycle = PlanLifecycle(store)
+    plan = lifecycle.issue(page.relative_to(tmp_path).as_posix(), base_hash, PLAN_INTENT)
     coordinator = PageMutationCoordinator(tmp_path, store=store)
 
     first = coordinator.write_and_project(
@@ -217,22 +227,20 @@ def test_chat_source_plan_replay_keeps_operation_idempotency_separate(tmp_path: 
         operation_kind="chat_source",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan.plan_id,
-        intent_hash="intent",
+        plan_intent=PLAN_INTENT,
     )
     replay = coordinator.write_and_project(
         request_key=plan.plan_id,
         operation_kind="chat_source",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan.plan_id,
-        intent_hash="intent",
+        plan_intent=PLAN_INTENT,
     )
 
     assert first.ok is True

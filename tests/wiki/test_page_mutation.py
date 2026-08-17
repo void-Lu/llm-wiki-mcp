@@ -8,7 +8,9 @@ import pytest
 
 from wiki.page_mutation import (
     MutationResult,
+    PlanIntent,
     PageMutationCoordinator,
+    plan_intent_hash,
     safe_stages_of,
 )
 from wiki.knowledge_dependencies import KnowledgeDependencies
@@ -203,8 +205,13 @@ def _plan_inputs(tmp_path: Path) -> tuple[PageMutationCoordinator, PageOperation
     text = "new"
     intended_hash = sha256(text.encode()).hexdigest()
     store = PageOperationStore(tmp_path)
-    plan = store.issue_plan(page.relative_to(tmp_path).as_posix(), base_hash, "intent")
-    return PageMutationCoordinator(tmp_path, store=store), store, page, plan.plan_id, base_hash, intended_hash
+    coordinator = PageMutationCoordinator(tmp_path, store=store)
+    plan = coordinator.issue_plan(
+        page_path=page.relative_to(tmp_path).as_posix(),
+        base_hash=base_hash,
+        intent=PlanIntent(body=text, frontmatter={}),
+    )
+    return coordinator, store, page, plan.plan_id, base_hash, intended_hash
 
 
 def test_write_and_project_plan_claims_consumes_and_returns_safe_stages(tmp_path: Path) -> None:
@@ -214,11 +221,10 @@ def test_write_and_project_plan_claims_consumes_and_returns_safe_stages(tmp_path
         operation_kind="update",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan_id,
-        intent_hash="intent",
+        plan_intent=PlanIntent(body="new", frontmatter={}),
     )
     assert result.ok is True
     assert result.state == "completed"
@@ -321,7 +327,11 @@ def test_write_and_project_claimed_prepared_plan_is_not_replayed(tmp_path: Path)
         plan_id,
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intent_hash="intent",
+        intent_hash=plan_intent_hash(
+            page.relative_to(tmp_path).as_posix(),
+            base_hash,
+            PlanIntent(body="new", frontmatter={}),
+        ),
         operation_id=operation.operation_id,
     )
     result = coordinator.write_and_project(
@@ -329,11 +339,10 @@ def test_write_and_project_claimed_prepared_plan_is_not_replayed(tmp_path: Path)
         operation_kind="update",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan_id,
-        intent_hash="intent",
+        plan_intent=PlanIntent(body="new", frontmatter={}),
     )
     assert result.code == "plan_claimed"
     assert result.operation_id == operation.operation_id
@@ -350,25 +359,27 @@ def test_write_and_project_rejects_expired_and_intent_drift(tmp_path: Path) -> N
         operation_kind="update",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan_id,
-        intent_hash="intent",
+        plan_intent=PlanIntent(body="new", frontmatter={}),
     )
     assert expired.code == "plan_expired"
 
-    fresh = store.issue_plan(page.relative_to(tmp_path).as_posix(), base_hash, "intent")
+    fresh = coordinator.issue_plan(
+        page_path=page.relative_to(tmp_path).as_posix(),
+        base_hash=base_hash,
+        intent=PlanIntent(body="new", frontmatter={}),
+    )
     drift = coordinator.write_and_project(
         request_key=fresh.plan_id,
         operation_kind="update",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=fresh.plan_id,
-        intent_hash="changed",
+        plan_intent=PlanIntent(body="changed", frontmatter={}),
     )
     assert drift.code == "plan_intent_drift"
 
@@ -380,11 +391,10 @@ def test_write_and_project_claim_failure_marks_operation_failed_precommit(tmp_pa
         operation_kind="update",
         page_path="wiki/concepts/other.md",
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan_id,
-        intent_hash="intent",
+        plan_intent=PlanIntent(body="new", frontmatter={}),
     )
     assert result.code == "plan_intent_drift"
     operation = store.get_operation_by_request_key(plan_id)
@@ -399,11 +409,10 @@ def test_write_and_project_consumed_replay_exposes_repair_action(tmp_path: Path)
         operation_kind="update",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan_id,
-        intent_hash="intent",
+        plan_intent=PlanIntent(body="new", frontmatter={}),
     )
     assert first.ok
     operation = store.get_operation(first.operation_id)
@@ -414,11 +423,10 @@ def test_write_and_project_consumed_replay_exposes_repair_action(tmp_path: Path)
         operation_kind="update",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan_id,
-        intent_hash="intent",
+        plan_intent=PlanIntent(body="new", frontmatter={}),
     )
     assert replay.already_applied is True
     assert replay.repair_action == "repair_page_operation"
@@ -437,11 +445,10 @@ def test_write_and_project_plan_consume_failure_is_repair_pending(tmp_path: Path
         operation_kind="update",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=base_hash,
-        intended_hash=intended_hash,
         text="new",
         expected_hash=base_hash,
         plan_id=plan_id,
-        intent_hash="intent",
+        plan_intent=PlanIntent(body="new", frontmatter={}),
     )
     assert result.ok is True
     assert result.state == "repair_pending"
@@ -453,14 +460,12 @@ def test_write_and_project_chat_source_replays_existing_request(tmp_path: Path) 
     page = tmp_path / "raw/sources/chat/2026/08/13/session/revision-000001.md"
     page.parent.mkdir(parents=True)
     text = "raw"
-    intended_hash = sha256(text.encode()).hexdigest()
     coordinator = PageMutationCoordinator(tmp_path)
     first = coordinator.write_and_project(
         request_key="chat:session:hash",
         operation_kind="chat_source",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=None,
-        intended_hash=intended_hash,
         text=text,
     )
     second = coordinator.write_and_project(
@@ -468,7 +473,6 @@ def test_write_and_project_chat_source_replays_existing_request(tmp_path: Path) 
         operation_kind="chat_source",
         page_path=page.relative_to(tmp_path).as_posix(),
         base_hash=None,
-        intended_hash=intended_hash,
         text=text,
     )
     assert first.ok and second.ok

@@ -9,11 +9,13 @@ from pathlib import Path
 import threading
 from typing import Any, Callable, Mapping
 
+import yaml
+
 from common.privacy_policy import normalize_vault_relative
 from wiki.atomic_file import AtomicFileError, atomic_write_text, current_fault, sha256_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_policy import derive_page_policy
-from wiki.page_operation_store import PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
+from wiki.page_operation_store import PageOperation, PageOperationError, PageOperationStore, UpdatePlan, UpdatePlanError, plan_is_expired
 from wiki.projection_profile import projection_stages
 from wiki.wiki_index import refresh_navigation
 from wiki.wiki_io import read_markdown_page
@@ -24,6 +26,22 @@ from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_e
 
 
 Projection = Callable[[], Mapping[str, object] | None]
+
+
+@dataclass(frozen=True)
+class PlanIntent:
+    """The domain inputs whose normalized shape is protected by an update plan."""
+
+    body: str
+    frontmatter: Mapping[str, Any]
+
+
+def plan_intent_hash(page_path: str, base_hash: str, intent: PlanIntent) -> str:
+    """Derive the stable plan intent without exposing a raw hash parameter to writers."""
+
+    dumped = yaml.safe_dump(dict(intent.frontmatter), sort_keys=True, allow_unicode=True)
+    payload = "\0".join((page_path, base_hash, intent.body, dumped))
+    return sha256(payload.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -178,6 +196,10 @@ class PlanResolution:
 
     operation: PageOperation | None = None
     result: MutationResult | None = None
+    intent_hash: str | None = None
+    base_hash: str | None = None
+    consumed_plan: bool = False
+    consumed_base_applied: bool = False
 
 
 class PlanLifecycle:
@@ -186,16 +208,36 @@ class PlanLifecycle:
     def __init__(self, store: PageOperationStore):
         self._store = store
 
-    def resolve(self, plan_id: str | None, intent_hash: str | None, intended_hash: str) -> PlanResolution:
+    def issue(self, page_path: str, base_hash: str, intent: PlanIntent, *, ttl_seconds: int = 300) -> UpdatePlan:
+        """Issue a plan while keeping its intent serialization inside the lifecycle owner."""
+
+        return self._store.issue_plan(page_path, base_hash, plan_intent_hash(page_path, base_hash, intent), ttl_seconds=ttl_seconds)
+
+    def resolve(
+        self,
+        plan_id: str | None,
+        *,
+        page_path: str,
+        base_hash: str | None,
+        intended_hash: str,
+        intent: PlanIntent | None,
+    ) -> PlanResolution:
+        candidate_intent = plan_intent_hash(page_path, base_hash, intent) if base_hash and intent is not None else None
         if plan_id is None:
-            return PlanResolution()
+            return PlanResolution(intent_hash=candidate_intent, base_hash=base_hash)
 
         plan = self._store.get_plan(plan_id)
         if plan is None:
-            return PlanResolution(result=MutationResult(ok=False, code="plan_unknown"))
+            return PlanResolution(result=MutationResult(ok=False, code="plan_unknown"), intent_hash=candidate_intent, base_hash=base_hash)
         if plan.state == "consumed":
-            if intent_hash != plan.intent_hash:
-                return PlanResolution(result=MutationResult(ok=False, code="plan_intent_drift"))
+            consumed_intent = plan_intent_hash(plan.page_path, plan.base_hash, intent) if intent is not None else None
+            if consumed_intent != plan.intent_hash:
+                return PlanResolution(
+                    result=MutationResult(ok=False, code="plan_intent_drift"),
+                    intent_hash=consumed_intent,
+                    base_hash=plan.base_hash,
+                    consumed_plan=True,
+                )
             operation = self._store.get_operation(plan.operation_id) if plan.operation_id else None
             return PlanResolution(
                 operation=operation,
@@ -212,31 +254,43 @@ class PlanLifecycle:
                     already_applied=True,
                     stages=safe_stages_of(operation) if operation is not None else {},
                 ),
+                intent_hash=consumed_intent,
+                base_hash=plan.base_hash,
+                consumed_plan=True,
+                consumed_base_applied=True,
             )
         if plan_is_expired(plan.expires_at):
-            return PlanResolution(result=MutationResult(ok=False, code="plan_expired"))
+            return PlanResolution(result=MutationResult(ok=False, code="plan_expired"), intent_hash=candidate_intent, base_hash=base_hash)
         if plan.state == "expired" or plan.state not in {"issued", "claimed"}:
             return PlanResolution(
-                result=MutationResult(ok=False, code="plan_expired" if plan.state == "expired" else "plan_unknown")
+                result=MutationResult(ok=False, code="plan_expired" if plan.state == "expired" else "plan_unknown"),
+                intent_hash=candidate_intent,
+                base_hash=base_hash,
             )
         if plan.state == "claimed":
             if not plan.operation_id:
-                return PlanResolution(result=MutationResult(ok=False, code="plan_claimed"))
+                return PlanResolution(result=MutationResult(ok=False, code="plan_claimed"), intent_hash=candidate_intent, base_hash=base_hash)
             operation = self._store.get_operation(plan.operation_id)
             if operation is None:
                 return PlanResolution(
-                    result=MutationResult(ok=False, code="plan_claimed", operation_id=plan.operation_id)
+                    result=MutationResult(ok=False, code="plan_claimed", operation_id=plan.operation_id),
+                    intent_hash=candidate_intent,
+                    base_hash=base_hash,
                 )
             if operation.intended_hash != intended_hash:
                 return PlanResolution(
-                    result=MutationResult(ok=False, code="plan_intent_drift", operation_id=operation.operation_id)
+                    result=MutationResult(ok=False, code="plan_intent_drift", operation_id=operation.operation_id),
+                    intent_hash=candidate_intent,
+                    base_hash=base_hash,
                 )
             if operation.state == "prepared":
                 return PlanResolution(
-                    result=MutationResult(ok=False, code="plan_claimed", operation_id=operation.operation_id)
+                    result=MutationResult(ok=False, code="plan_claimed", operation_id=operation.operation_id),
+                    intent_hash=candidate_intent,
+                    base_hash=base_hash,
                 )
-            return PlanResolution(operation=operation)
-        return PlanResolution()
+            return PlanResolution(operation=operation, intent_hash=candidate_intent, base_hash=base_hash)
+        return PlanResolution(intent_hash=candidate_intent, base_hash=base_hash)
 
     def claim(
         self,
@@ -322,6 +376,18 @@ class PageMutationCoordinator:
         self._store = store or PageOperationStore(self.root)
         self._log_store = WikiLogStore(self.root, operation_store=self._store)
         self._plan_lifecycle = PlanLifecycle(self._store)
+
+    def issue_plan(
+        self,
+        *,
+        page_path: str,
+        base_hash: str,
+        intent: PlanIntent,
+        ttl_seconds: int = 300,
+    ) -> UpdatePlan:
+        """Issue one update plan through the lifecycle owner."""
+
+        return self._plan_lifecycle.issue(page_path, base_hash, intent, ttl_seconds=ttl_seconds)
 
     def prepare(
         self,
@@ -736,15 +802,30 @@ class PageMutationCoordinator:
         operation_kind: str,
         page_path: str,
         base_hash: str | None,
-        intended_hash: str,
         text: str,
         expected_hash: str | None = None,
         plan_id: str | None = None,
-        intent_hash: str | None = None,
+        plan_intent: PlanIntent | None = None,
     ) -> MutationResult:
-        """Prepare, commit, project, and optionally consume one mutation plan."""
+        """Prepare, commit, project, and optionally consume one mutation plan.
 
-        resolution = self._plan_lifecycle.resolve(plan_id, intent_hash, intended_hash)
+        ``request_key`` remains a compatibility seam for the current formal/chat
+        callers; C5 owns moving its kind-specific derivation into adapters.
+        """
+
+        intended_hash = sha256(text.encode("utf-8")).hexdigest()
+        resolution = self._plan_lifecycle.resolve(
+            plan_id,
+            page_path=page_path,
+            base_hash=base_hash,
+            intended_hash=intended_hash,
+            intent=plan_intent,
+        )
+        if not resolution.consumed_plan:
+            if base_hash is not None and expected_hash is None:
+                return MutationResult(ok=False, code="expected_hash_required")
+            if base_hash is not None and expected_hash != base_hash:
+                return MutationResult(ok=False, code="expected_hash_mismatch")
         if resolution.result is not None:
             return resolution.result
         operation = resolution.operation
@@ -774,7 +855,7 @@ class PageMutationCoordinator:
                 operation,
                 page_path,
                 base_hash or "",
-                intent_hash or "",
+                resolution.intent_hash or "",
             )
         if claim_failure is not None:
             return claim_failure
@@ -907,10 +988,14 @@ def _sources(frontmatter: Mapping[str, Any]) -> list[str]:
 
 __all__ = [
     "MutationResult",
+    "PlanIntent",
+    "PlanLifecycle",
+    "PlanResolution",
     "PageMutationCoordinator",
     "PageMutationError",
     "Projection",
     "dependency_projection_of",
+    "plan_intent_hash",
     "retrieval_index_of",
     "safe_stages_of",
     "stage_result_of",
