@@ -1,17 +1,17 @@
 from pathlib import Path
 
-from retrieval.query_pipeline import (
+from retrieval.query_pipeline import run_query_v2
+from retrieval.query_cancellation import QueryCancellationContext
+import retrieval.query_execution_context as query_execution_context_module
+from retrieval.query_execution_context import (
     AdaptiveCandidateScorePolicy,
     QueryFilters,
     _adaptive_expand,
     _adaptive_select_candidates,
     _merge_coverage_items,
     _uncovered_latin_terms,
-    QueryExecutionContext,
     probe_hit,
-    run_query_v2,
 )
-from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
 from retrieval.vector_index import vector_index_records
@@ -532,14 +532,16 @@ def test_coverage_fusion_uses_effective_rrf_k() -> None:
 
 
 def test_entity_batch_uses_passed_snapshot_without_metadata_reload(monkeypatch) -> None:
-    import retrieval.query_pipeline as module
-
     pages = ({"path": "wiki/entities/auth.md", "frontmatter": {"type": "entity"}, "title": "N/auth"},)
     snapshot = QueryCorpusSnapshot("active", pages, {"wiki/entities/auth.md": {"type": "entity"}}, {})
     store = object()
 
-    monkeypatch.setattr(module, "_store_metadata", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("metadata must come from snapshot")))
-    specs = module._entity_store_specs(
+    monkeypatch.setattr(
+        query_execution_context_module,
+        "_store_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("metadata must come from snapshot")),
+    )
+    specs = query_execution_context_module._entity_store_specs(
         Path("."),
         store,  # type: ignore[arg-type]
         "knowledge",
@@ -601,173 +603,6 @@ def test_v2_raw_fallback_creates_one_raw_store_per_query(tmp_path: Path, monkeyp
 
     assert result["results"]
     assert raw_store_inits == 1
-
-
-def test_query_execution_context_runs_parameterized_raw_branches(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
-    create_wiki_root(root)
-    raw = root / "raw/sources/file/default/evidence.md"
-    raw.parent.mkdir(parents=True, exist_ok=True)
-    raw.write_text(
-        "---\ntitle: Retrieval Evidence\n---\n\nRAG LLM access reports evidence.",
-        encoding="utf-8",
-    )
-    refresh_indexes(root)
-
-    store = RetrievalIndexStore(root)
-    cancellation = QueryCancellationContext.unbounded()
-    context = QueryExecutionContext(root, store, cancellation, store.status())
-    context.recovery = query_pipeline_module.assemble_recovery(
-        [],
-        condition=query_pipeline_module.DEFAULT_RECOVERY_CONDITION,
-        candidates=[],
-        store=store,
-        cancellation=cancellation,
-    )
-
-    coverage_plan = query_pipeline_module.plan_fallback(
-        query_pipeline_module.FallbackState(
-            has_primary_recall=True,
-            effective_scope="knowledge",
-            uncovered_latin_terms=("rag",),
-            wiki_relaxed_answered=False,
-            raw_available="unknown",
-            relaxed_available=False,
-        )
-    )
-    assert coverage_plan is not None and coverage_plan.branch == "coverage"
-    coverage = context._run_raw_branch(
-        branch="coverage",
-        question="RAG",
-        project=None,
-        filters=QueryFilters(),
-        top_k=2,
-        extra_terms=[],
-        term_variants={},
-        uncovered_latin_terms=("rag",),
-        effective_rrf_k=query_pipeline_module.RRF_K,
-        selected=[],
-        candidate_pool=[],
-        plan=coverage_plan,
-        lexical_mode="strict",
-        coverage_fallback=False,
-    )
-
-    all_coverage_plan = query_pipeline_module.plan_fallback(
-        query_pipeline_module.FallbackState(
-            has_primary_recall=False,
-            effective_scope="all",
-            uncovered_latin_terms=("llm",),
-            wiki_relaxed_answered=True,
-            raw_available="unknown",
-            relaxed_available=True,
-        )
-    )
-    assert all_coverage_plan is not None and all_coverage_plan.branch == "all_coverage"
-    all_coverage = context._run_raw_branch(
-        branch="all_coverage",
-        question="LLM",
-        project=None,
-        filters=QueryFilters(),
-        top_k=2,
-        extra_terms=["retrieval"],
-        term_variants={"llm": ["LLM"]},
-        uncovered_latin_terms=("llm",),
-        effective_rrf_k=query_pipeline_module.RRF_K,
-        selected=[],
-        candidate_pool=[],
-        plan=all_coverage_plan,
-        lexical_mode="relaxed",
-        coverage_fallback=False,
-    )
-
-    raw_zero_plan = query_pipeline_module.plan_fallback(
-        query_pipeline_module.FallbackState(
-            has_primary_recall=False,
-            effective_scope="knowledge",
-            uncovered_latin_terms=(),
-            wiki_relaxed_answered=False,
-            raw_available="unknown",
-            relaxed_available=False,
-        )
-    )
-    assert raw_zero_plan is not None and raw_zero_plan.branch == "raw_zero"
-    raw_zero = context._run_raw_branch(
-        branch="raw_zero",
-        question="access reports",
-        project=None,
-        filters=QueryFilters(),
-        top_k=2,
-        extra_terms=[],
-        term_variants={},
-        uncovered_latin_terms=(),
-        effective_rrf_k=query_pipeline_module.RRF_K,
-        selected=[],
-        candidate_pool=[],
-        plan=raw_zero_plan,
-        lexical_mode="strict",
-        coverage_fallback=False,
-    )
-
-    expected_path = "raw/sources/file/default/evidence.md"
-    assert coverage.selected[0]["hit"].page_path == expected_path
-    assert all_coverage.selected[0]["hit"].page_path == expected_path
-    assert raw_zero.selected[0]["hit"].page_path == expected_path
-    assert coverage.recovery.fallback["reasons"] == ["wiki_primary_missing_latin_coverage"]
-    assert all_coverage.recovery.fallback["reasons"] == ["wiki_primary_missing_latin_coverage"]
-    assert raw_zero.recovery.fallback["reasons"] == ["wiki_zero_results"]
-
-
-def test_query_execution_context_memoizes_raw_store_and_snapshot(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
-    create_wiki_root(root)
-    raw = root / "raw/sources/file/default/evidence.txt"
-    raw.parent.mkdir(parents=True, exist_ok=True)
-    raw.write_text("memoized raw snapshot marker", encoding="utf-8")
-    refresh_indexes(root)
-
-    store = RetrievalIndexStore(root)
-    context = QueryExecutionContext(root, store, QueryCancellationContext.unbounded(), store.status())
-    raw_store = context.get_raw_store()
-    first = context.capture_raw_snapshot()
-    second = context.capture_raw_snapshot()
-
-    assert raw_store is context.get_raw_store()
-    assert first is second
-    assert first.scope == "raw"
-    assert first.pages
-
-
-def test_query_execution_context_normalizes_raw_availability_to_three_states(tmp_path: Path) -> None:
-    fresh_root = tmp_path / "fresh"
-    create_wiki_root(fresh_root)
-    fresh_file = fresh_root / "raw/sources/file/default/fresh.txt"
-    fresh_file.parent.mkdir(parents=True, exist_ok=True)
-    fresh_file.write_text("fresh raw marker", encoding="utf-8")
-    refresh_indexes(fresh_root)
-    fresh_store = RetrievalIndexStore(fresh_root)
-    fresh_context = QueryExecutionContext(
-        fresh_root,
-        fresh_store,
-        QueryCancellationContext.unbounded(),
-        fresh_store.status(),
-    )
-    assert fresh_context.raw_availability() == "fresh"
-
-    stale_store = fresh_context.get_raw_store()
-    stale_store.mark_stale()
-    assert fresh_context.raw_availability() == "stale"
-
-    missing_root = tmp_path / "missing"
-    create_wiki_root(missing_root)
-    missing_store = RetrievalIndexStore(missing_root)
-    missing_context = QueryExecutionContext(
-        missing_root,
-        missing_store,
-        QueryCancellationContext.unbounded(),
-        missing_store.status(),
-    )
-    assert missing_context.raw_availability() == "missing"
 
 
 def test_v2_wiki_relaxed_recall_does_not_open_raw_store(tmp_path: Path, monkeypatch) -> None:
@@ -1521,7 +1356,7 @@ def test_adaptive_expand_applies_global_score_floor() -> None:
         35.0,
         33.8,
     ]
-    assert query_pipeline_module.MAX_ADAPTIVE_SCORE_RATIO == 0.7
+    assert query_execution_context_module.MAX_ADAPTIVE_SCORE_RATIO == 0.7
 
 
 def test_v2_adaptive_expand_budget_scales_with_returned_count(tmp_path: Path) -> None:
@@ -1815,7 +1650,7 @@ def test_v2_batch_does_not_recurse_into_a_third_query_stage(tmp_path: Path, monk
     _write(root, "wiki/entities/n-search.md", "N/search", "N/search API reference", type="entity")
     refresh_indexes(root)
 
-    original_batch = query_pipeline_module._run_entity_batch
+    original_batch = query_execution_context_module._run_entity_batch
     batch_calls = 0
     active = False
 
@@ -1829,7 +1664,7 @@ def test_v2_batch_does_not_recurse_into_a_third_query_stage(tmp_path: Path, monk
         finally:
             active = False
 
-    monkeypatch.setattr(query_pipeline_module, "_run_entity_batch", guarded_batch)
+    monkeypatch.setattr(query_execution_context_module, "_run_entity_batch", guarded_batch)
     result = run_query_v2(root, "Catalog", retrieval_mode="lexical")
 
     assert batch_calls == 1

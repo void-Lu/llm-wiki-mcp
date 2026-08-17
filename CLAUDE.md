@@ -62,6 +62,8 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 [query_pipeline.py](src/retrieval/query_pipeline.py) 是唯一查询引擎入口（Query V2）：passage FTS/vector 召回 → RRF 融合 → 有界强-seed 图扩展 → 上下文预算裁剪，并将紧凑正文直接放入结果项；MCP 工具 `wiki_query` 只负责公共边界与运行时配置解析。
 
+[query_execution_context.py](src/retrieval/query_execution_context.py) 是单次 Query V2 执行状态、raw/fallback 分支迁移和冻结 `outcome()` 视图的唯一 owner。
+
 candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/candidate_items.py) 模块。
 
 [graph_retrieval.py](src/retrieval/graph_retrieval.py) 提供 Query V2 共用的 wikilink、shared source、common neighbor、same type 有界图扩展；[vector_index.py](src/retrieval/vector_index.py) 提供 `VectorRecord`、`vector_index_records` 及显式向量生命周期所需的索引记录回退。v1 的 `src/wiki/wiki_query.py` 私有查询引擎已删除，不要重新引入第二套检索入口。
@@ -117,7 +119,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 - CLI/runtime/config/provenance：`test_cli.py`、`test_runtime_config.py`、`test_runtime_provenance.py`、`test_readme_global_mcp_docs.py`
 - Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_atomic_file.py`、`test_page_mutation.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_wiki_files.py`
 - MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_note_writer.py`、`test_ingest_service.py`
-- 查询/检索/向量/wikilink：`test_run_query_v2.py`、`test_query_pipeline.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
+- 查询/检索/向量/wikilink：`test_run_query_v2.py`、`test_query_pipeline.py`、`test_query_execution_context.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
 - 归档/辅助：`test_archive_lifecycle.py`、`test_git_utils.py`
 - 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`
 - repair/privacy/契约/catalog：`test_cli_repair.py`、`test_cli_repair_admin.py`、`test_page_repair.py`、`test_privacy_audit.py`、`test_provenance_migration.py`、`test_public_contracts.py`、`test_content_catalog.py`、`test_query_cancellation.py`、`test_query_execution_registry.py`、`test_spec_lint.py`（tests/tools/）

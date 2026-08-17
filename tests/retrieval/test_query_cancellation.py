@@ -5,7 +5,8 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext
-from retrieval.query_pipeline import _store_metadata, run_query_v2
+from retrieval.query_execution_context import _store_metadata
+from retrieval.query_pipeline import run_query_v2
 from retrieval.query_snapshot import QueryCorpusSnapshot
 
 
