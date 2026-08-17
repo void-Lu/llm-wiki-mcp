@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import codecs
 import os
-import shutil
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 import tempfile
+
+from wiki.atomic_file import atomic_write_bytes
 
 
 TEXT_SOURCE_SUFFIXES = frozenset(
@@ -97,24 +98,11 @@ class IngestSnapshot:
         if not self._owned_temp or not self.temp_path.exists():
             raise IngestSnapshotError("snapshot_already_committed")
         destination = Path(target)
-        target_temporary: Path | None = None
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            fd, temporary_name = tempfile.mkstemp(prefix=".llm-wiki-target-", suffix=".tmp", dir=destination.parent)
-            target_temporary = Path(temporary_name)
-            with self.temp_path.open("rb") as source_handle, os.fdopen(fd, "wb") as target_handle:
-                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
-                target_handle.flush()
-                os.fsync(target_handle.fileno())
-            os.replace(target_temporary, destination)
-        except OSError as exc:
-            _unlink_quietly(target_temporary)
+            atomic_write_bytes(destination, self.temp_path.read_bytes())
+        except Exception as exc:
             self.cleanup()
             raise IngestSnapshotError("snapshot_write_failed") from exc
-        except Exception:
-            _unlink_quietly(target_temporary)
-            self.cleanup()
-            raise IngestSnapshotError("snapshot_write_failed")
         _unlink_quietly(self.temp_path)
         self._owned_temp = False
 

@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from wiki.atomic_file import fault_context
 from wiki.ingest_service import ingest_file
 from wiki.ingest_snapshot import IngestSnapshotError, IngestSnapshotter
 
@@ -113,3 +114,23 @@ def test_ingest_source_delete_during_read_is_zero_target_write(tmp_path: Path, m
     assert result["ok"] is False
     assert result["code"] == "source_changed_during_read"
     assert not (tmp_path / "vault").exists()
+
+
+def test_ingest_raw_source_replace_fault_reaches_atomic_barrier(tmp_path: Path) -> None:
+    source = tmp_path / "source.md"
+    source.write_bytes(b"content")
+    target = tmp_path / "vault/raw/sources/file/default/source/source.md"
+    reached: list[str] = []
+
+    def fault(stage: str) -> None:
+        reached.append(stage)
+        if stage == "replace":
+            raise RuntimeError("injected replace fault")
+
+    with fault_context(fault):
+        result = ingest_file(vault_root=tmp_path / "vault", source_path=source, source_name="source")
+
+    assert result["ok"] is False
+    assert result["code"] == "snapshot_write_failed"
+    assert "replace" in reached
+    assert not target.exists()
