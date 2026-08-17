@@ -16,7 +16,7 @@ from wiki.page_policy import derive_page_policy
 from wiki.page_operation_store import PAGE_STAGES, PageOperation, PageOperationError, PageOperationStore, UpdatePlanError, plan_is_expired
 from wiki.wiki_index import refresh_navigation
 from wiki.wiki_io import read_markdown_page
-from wiki.wiki_log import append_log_entry
+from wiki.wiki_log import WikiLogStore, append_log_entry
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_overview import refresh_overview
 from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
@@ -284,6 +284,7 @@ class PageMutationCoordinator:
     ):
         self.root = Path(vault_root).expanduser().resolve()
         self._store = store or PageOperationStore(self.root)
+        self._log_store = WikiLogStore(self.root, operation_store=self._store)
         self._plan_lifecycle = PlanLifecycle(self._store)
 
     def prepare(
@@ -518,6 +519,7 @@ class PageMutationCoordinator:
                     status="ok",
                     operation_id=operation.operation_id,
                 ),
+                log_store=self._log_store,
             )
 
         return {
@@ -587,6 +589,7 @@ class PageMutationCoordinator:
                     status="ok",
                     operation_id=operation.operation_id,
                 ),
+                log_store=self._log_store,
             )
 
         return {

@@ -437,6 +437,16 @@ class PageOperationStore:
             )
             return self._load_with_connection(connection, operation_id)
 
+    def is_stage_succeeded(self, operation_id: str, stage: str) -> bool:
+        """Return whether one journal stage has durably completed."""
+
+        if stage not in PAGE_STAGES:
+            raise PageOperationError("stage_invalid")
+        operation = self.get_operation(operation_id)
+        if operation is None:
+            return False
+        return operation.stages.get(stage, {}).get("state") == "succeeded"
+
     def pending_operations(self) -> list[PageOperation]:
         with self._connection() as connection:
             rows = connection.execute(

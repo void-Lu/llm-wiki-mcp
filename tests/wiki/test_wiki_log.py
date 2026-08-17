@@ -12,7 +12,8 @@ from wiki.atomic_file import AtomicFileError, fault_context
 from wiki.wiki_limits import HARD_PAGE_BYTES, TARGET_PAGE_BYTES, partition_rendered_units, utf8_size
 from wiki.wiki_limits import split_text_by_utf8
 from wiki.wiki_io import split_frontmatter
-from wiki.wiki_log import append_log_entry, read_recent_log_entries
+from wiki.page_operation_store import PageOperationStore
+from wiki.wiki_log import WikiLogStore, append_log_entry, read_recent_log_entries
 from wiki.wiki_models import WikiLogEntry
 from wiki.wiki_paths import create_wiki_root
 
@@ -351,8 +352,7 @@ def test_operation_index_rebuilds_once_and_deduplicates_after_restart(tmp_path: 
     manifest = root / ".llm-wiki/log-operation-index.json"
     assert json.loads(manifest.read_text(encoding="utf-8"))["operation_ids"] == ["operation-001"]
 
-    wiki_log._OPERATION_INDEX_CACHE.clear()
-    duplicate = append_log_entry(root, entry)
+    duplicate = append_log_entry(root, entry, log_store=WikiLogStore(root))
     assert duplicate["deduplicated"] is True
     assert "operation_index_rebuilt" not in duplicate
     assert (root / "wiki/log.md").read_text(encoding="utf-8").count("- operation_id: operation-001") == 1
@@ -362,8 +362,6 @@ def test_operation_index_normal_append_does_not_scan_archive_volumes(tmp_path: P
     root = tmp_path / "vault"
     create_wiki_root(root)
     append_log_entry(root, WikiLogEntry(operation="update", title="First", operation_id="operation-002"))
-    wiki_log._OPERATION_INDEX_CACHE.clear()
-
     def fail_scan(_root: Path) -> set[str]:
         raise AssertionError("normal append must load the manifest instead of scanning archives")
 
@@ -380,8 +378,6 @@ def test_corrupt_operation_index_rebuilds_from_active_and_archived_logs(tmp_path
     entry = WikiLogEntry(operation="update", title="Corruptible", operation_id="operation-004")
     append_log_entry(root, entry)
     (root / ".llm-wiki/log-operation-index.json").write_text("{not json", encoding="utf-8")
-    wiki_log._OPERATION_INDEX_CACHE.clear()
-
     result = append_log_entry(root, entry)
 
     assert result["deduplicated"] is True
@@ -400,7 +396,6 @@ def test_operation_index_rebuild_finds_ids_in_rotated_archive(tmp_path: Path, mo
     assert "Archived" not in (root / "wiki/log.md").read_text(encoding="utf-8")
 
     (root / ".llm-wiki/log-operation-index.json").unlink()
-    wiki_log._OPERATION_INDEX_CACHE.clear()
     result = append_log_entry(root, first)
 
     assert result["deduplicated"] is True
@@ -410,7 +405,8 @@ def test_operation_index_rebuild_finds_ids_in_rotated_archive(tmp_path: Path, mo
 def test_operation_index_manifest_failure_rebuilds_after_log_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
-    wiki_log._write_operation_index(root, set())
+    log_store = WikiLogStore(root)
+    wiki_log._write_operation_index(root, set(), log_store=log_store)
     original_atomic_write_text = wiki_log.atomic_write_text
 
     def fail_manifest(target: str | Path, text: str):
@@ -421,13 +417,60 @@ def test_operation_index_manifest_failure_rebuilds_after_log_write(tmp_path: Pat
     monkeypatch.setattr(wiki_log, "atomic_write_text", fail_manifest)
     entry = WikiLogEntry(operation="update", title="Manifest fault", operation_id="operation-005")
     with pytest.raises(AtomicFileError) as error:
-        append_log_entry(root, entry)
+        append_log_entry(root, entry, log_store=log_store)
     assert error.value.code == "injected_manifest_failure"
     assert (root / "wiki/log.md").read_text(encoding="utf-8").count("- operation_id: operation-005") == 1
 
     monkeypatch.setattr(wiki_log, "atomic_write_text", original_atomic_write_text)
-    wiki_log._OPERATION_INDEX_CACHE.clear()
-    retry = append_log_entry(root, entry)
+    retry = append_log_entry(root, entry, log_store=log_store)
     assert retry["deduplicated"] is True
     assert retry["operation_index_rebuilt"] is True
     assert (root / "wiki/log.md").read_text(encoding="utf-8").count("- operation_id: operation-005") == 1
+
+
+def test_operation_journal_audit_stage_is_primary_over_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    store = PageOperationStore(root)
+    operation = store.create_operation(
+        request_key="journal-primary",
+        operation_kind="update",
+        page_path="wiki/concepts/general/page.md",
+        base_hash="base",
+        intended_hash="intended",
+        operation_id="operation-journal-primary",
+    )
+    store.record_stage(operation.operation_id, "audit_log", "succeeded", result={"ok": True})
+    manifest = root / ".llm-wiki/log-operation-index.json"
+    manifest.write_text("{not json", encoding="utf-8")
+
+    result = append_log_entry(
+        root,
+        WikiLogEntry(operation="update", title="Journal primary", operation_id=operation.operation_id),
+        operation_store=store,
+    )
+
+    assert result["deduplicated"] is True
+    assert manifest.read_text(encoding="utf-8") == "{not json"
+
+
+def test_operation_journal_repair_uses_manifest_as_history_fallback(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    entry = WikiLogEntry(operation="update", title="Repair fallback", operation_id="operation-repair-fallback")
+    append_log_entry(root, entry)
+    store = PageOperationStore(root)
+    operation = store.create_operation(
+        request_key="journal-repair",
+        operation_kind="update",
+        page_path="wiki/concepts/general/page.md",
+        base_hash="base",
+        intended_hash="intended",
+        operation_id=entry.operation_id,
+    )
+    store.record_stage(operation.operation_id, "audit_log", "failed", code="audit_log_failed")
+
+    result = append_log_entry(root, entry, operation_store=store)
+
+    assert result["deduplicated"] is True
+    assert (root / "wiki/log.md").read_text(encoding="utf-8").count("- operation_id: operation-repair-fallback") == 1

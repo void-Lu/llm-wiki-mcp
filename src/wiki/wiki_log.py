@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
+from typing import Protocol
 
 from common.redaction import redact_sensitive_text
 from common.privacy_policy import LocatorError, normalize_vault_relative
@@ -31,24 +32,86 @@ _ARCHIVE_HEADER = "---\ntype: log_archive\ngenerated: true\narchived: true\n---\
 _ARCHIVE_NAVIGATION_INDEX = "archives/log/index.md"
 _OPERATION_INDEX_SCHEMA_VERSION = 1
 _OPERATION_ID_RE = re.compile(r"^- operation_id:\s*(\S+)\s*$")
-_OPERATION_INDEX_CACHE: dict[Path, set[str]] = {}
-_OPERATION_INDEX_FORCE_REBUILD: set[Path] = set()
-_OPERATION_INDEX_LOCK = RLock()
+
+
+class _OperationJournal(Protocol):
+    def is_stage_succeeded(self, operation_id: str, stage: str) -> bool: ...
+
+
+class WikiLogStore:
+    """Hold one vault's log index state and optional operation journal seam."""
+
+    def __init__(
+        self,
+        vault_root: str | Path,
+        *,
+        operation_store: _OperationJournal | None = None,
+    ) -> None:
+        self.root = Path(vault_root).expanduser().resolve()
+        self.operation_store = operation_store
+        self._operation_index_cache: set[str] | None = None
+        self._operation_index_force_rebuild = False
+        self._operation_index_lock = RLock()
+
+    def is_operation_logged(self, operation_id: str) -> tuple[bool, bool]:
+        """Check journal audit state first, then the historical manifest."""
+
+        if self.operation_store is not None and self.operation_store.is_stage_succeeded(operation_id, "audit_log"):
+            return True, False
+        operation_ids, rebuilt = self.load_operation_index()
+        return operation_id in operation_ids, rebuilt
+
+    def load_operation_index(self) -> tuple[set[str], bool]:
+        with self._operation_index_lock:
+            if self._operation_index_cache is not None and not self._operation_index_force_rebuild:
+                return self._operation_index_cache, False
+            force_rebuild = self._operation_index_force_rebuild
+            self._operation_index_force_rebuild = False
+            operation_ids = None if force_rebuild else _read_operation_index(self.root / LOG_OPERATION_INDEX)
+            rebuilt = operation_ids is None
+            if rebuilt:
+                self._operation_index_force_rebuild = True
+                operation_ids = _scan_operation_ids(self.root)
+                self.write_operation_index(operation_ids)
+            self._operation_index_cache = operation_ids
+            return operation_ids, rebuilt
+
+    def write_operation_index(self, operation_ids: set[str]) -> None:
+        payload = {
+            "schema_version": _OPERATION_INDEX_SCHEMA_VERSION,
+            "operation_ids": sorted(operation_ids),
+        }
+        atomic_write_text(self.root / LOG_OPERATION_INDEX, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        with self._operation_index_lock:
+            self._operation_index_cache = set(operation_ids)
+            self._operation_index_force_rebuild = False
+
+    def force_operation_index_rebuild(self) -> None:
+        with self._operation_index_lock:
+            self._operation_index_cache = None
+            self._operation_index_force_rebuild = True
 
 
 def append_log_entry(
     vault_root: str | Path,
     entry: WikiLogEntry,
+    *,
+    operation_store: _OperationJournal | None = None,
+    log_store: WikiLogStore | None = None,
 ) -> dict[str, object]:
     """Append one complete log record while keeping every generated log bounded."""
 
-    root = Path(vault_root)
+    root = Path(vault_root).expanduser().resolve()
+    state = log_store or WikiLogStore(root, operation_store=operation_store)
+    if state.root != root:
+        raise ValueError("log store root does not match vault root")
+    if operation_store is not None and state.operation_store is None:
+        state.operation_store = operation_store
     log_path = root / "wiki" / "log.md"
-    operation_index: set[str] | None = None
     operation_index_rebuilt = False
     if entry.operation_id:
-        operation_index, operation_index_rebuilt = _load_operation_index(root)
-        if entry.operation_id in operation_index:
+        logged, operation_index_rebuilt = state.is_operation_logged(entry.operation_id)
+        if logged:
             result: dict[str, object] = {"ok": True, "path": "wiki/log.md", "deduplicated": True}
             if operation_index_rebuilt:
                 result["operation_index_rebuilt"] = True
@@ -85,12 +148,11 @@ def append_log_entry(
         if archived_paths or not (root / ARCHIVES_LOG_DIR / "index.md").exists():
             _write_archive_index(root)
         if entry.operation_id:
-            assert operation_index is not None
-            operation_index = {*operation_index, entry.operation_id}
-            _write_operation_index(root, operation_index)
+            operation_ids, _ = state.load_operation_index()
+            state.write_operation_index({*operation_ids, entry.operation_id})
     except Exception:
         if entry.operation_id:
-            _force_operation_index_rebuild(root)
+            state.force_operation_index_rebuild()
         raise
     return {
         "ok": True,
@@ -151,28 +213,27 @@ def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: st
     return "\n".join(lines)
 
 
-def _operation_logged(root: Path, operation_id: str) -> bool:
+def _operation_logged(
+    root: Path,
+    operation_id: str,
+    *,
+    operation_store: _OperationJournal | None = None,
+    log_store: WikiLogStore | None = None,
+) -> bool:
     """Check the vault-local operation index without scanning archive volumes."""
 
-    operation_ids, _rebuilt = _load_operation_index(root)
-    return operation_id in operation_ids
+    state = log_store or WikiLogStore(root, operation_store=operation_store)
+    logged, _rebuilt = state.is_operation_logged(operation_id)
+    return logged
 
 
-def _load_operation_index(root: Path) -> tuple[set[str], bool]:
-    root = root.expanduser().resolve()
-    with _OPERATION_INDEX_LOCK:
-        if root in _OPERATION_INDEX_CACHE and root not in _OPERATION_INDEX_FORCE_REBUILD:
-            return _OPERATION_INDEX_CACHE[root], False
-        force_rebuild = root in _OPERATION_INDEX_FORCE_REBUILD
-        _OPERATION_INDEX_FORCE_REBUILD.discard(root)
-        manifest = root / LOG_OPERATION_INDEX
-        operation_ids = None if force_rebuild else _read_operation_index(manifest)
-        rebuilt = operation_ids is None
-        if rebuilt:
-            operation_ids = _scan_operation_ids(root)
-            _write_operation_index(root, operation_ids)
-        _OPERATION_INDEX_CACHE[root] = operation_ids
-        return operation_ids, rebuilt
+def _load_operation_index(
+    root: Path,
+    *,
+    log_store: WikiLogStore | None = None,
+) -> tuple[set[str], bool]:
+    state = log_store or WikiLogStore(root)
+    return state.load_operation_index()
 
 
 def _read_operation_index(path: Path) -> set[str] | None:
@@ -208,23 +269,16 @@ def _scan_operation_ids(root: Path) -> set[str]:
 def _write_operation_index(
     root: Path,
     operation_ids: set[str],
+    *,
+    log_store: WikiLogStore | None = None,
 ) -> None:
-    path = root / LOG_OPERATION_INDEX
-    payload = {
-        "schema_version": _OPERATION_INDEX_SCHEMA_VERSION,
-        "operation_ids": sorted(operation_ids),
-    }
-    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-    with _OPERATION_INDEX_LOCK:
-        _OPERATION_INDEX_CACHE[root.expanduser().resolve()] = operation_ids
-        _OPERATION_INDEX_FORCE_REBUILD.discard(root.expanduser().resolve())
+    state = log_store or WikiLogStore(root)
+    state.write_operation_index(operation_ids)
 
 
-def _force_operation_index_rebuild(root: Path) -> None:
-    with _OPERATION_INDEX_LOCK:
-        root = root.expanduser().resolve()
-        _OPERATION_INDEX_CACHE.pop(root, None)
-        _OPERATION_INDEX_FORCE_REBUILD.add(root)
+def _force_operation_index_rebuild(root: Path, *, log_store: WikiLogStore | None = None) -> None:
+    state = log_store or WikiLogStore(root)
+    state.force_operation_index_rebuild()
 
 
 def _render_archive_detail(block: str) -> str:
