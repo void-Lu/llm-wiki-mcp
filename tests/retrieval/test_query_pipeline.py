@@ -6,7 +6,7 @@ import retrieval.query_execution_context as query_execution_context_module
 from retrieval.query_execution_context import (
     AdaptiveCandidateScorePolicy,
     QueryFilters,
-    _adaptive_expand,
+    adaptive_expand,
     _adaptive_select_candidates,
     _merge_coverage_items,
     _uncovered_latin_terms,
@@ -200,7 +200,7 @@ def test_v2_raw_scope_skips_vector_and_graph_stages(tmp_path: Path, monkeypatch)
     def fail_graph(*_args, **_kwargs):
         raise AssertionError("raw scope must not expand Wiki graph")
 
-    monkeypatch.setattr(query_pipeline_module, "_vector_hits", fail_vector)
+    monkeypatch.setattr("retrieval.query_pipeline._vector_hits", fail_vector)
     monkeypatch.setattr(query_pipeline_module, "_graph_expand", fail_graph)
 
     result = run_query_v2(root, "raw-only stage sentinel", scope="raw", retrieval_mode="hybrid")
@@ -349,8 +349,7 @@ def test_v2_coverage_recovery_merges_raw_evidence_when_primary_misses_latin_term
     active_hit = RetrievalIndexStore(root).search_fts("invoice")[0]
 
     monkeypatch.setattr(
-        query_pipeline_module,
-        "_vector_hits",
+        "retrieval.query_pipeline._vector_hits",
         lambda *_args, **_kwargs: ({active_hit.passage_id: (1, 0.99)}, []),
     )
     result = run_query_v2(
@@ -383,8 +382,7 @@ def test_v2_coverage_keeps_primary_results_when_raw_does_not_cover_gap(tmp_path:
     refresh_indexes(root)
     active_hit = RetrievalIndexStore(root).search_fts("invoice")[0]
     monkeypatch.setattr(
-        query_pipeline_module,
-        "_vector_hits",
+        "retrieval.query_pipeline._vector_hits",
         lambda *_args, **_kwargs: ({active_hit.passage_id: (1, 0.99)}, []),
     )
 
@@ -1340,7 +1338,7 @@ def test_adaptive_expand_applies_global_score_floor() -> None:
         )
     ]
 
-    selected = _adaptive_expand(ranked, base_top_k=10)
+    selected = adaptive_expand(ranked, base_top_k=10)
 
     assert [item["score"] for item in selected] == [
         48.2,

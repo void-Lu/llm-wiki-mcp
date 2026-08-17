@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast
@@ -9,12 +10,16 @@ from typing import Any, Literal, Mapping, cast
 from retrieval.body_budget import result_floor_budget
 from retrieval.candidate_items import candidate_item
 from retrieval.context_packer import ContextPassage, pack_context
+from retrieval.graph_retrieval import QueryCandidate, apply_graph_expansion, build_graph
+from retrieval.lexical_analyzer import has_qualified_identifier
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_recovery import (
     DEFAULT_RECOVERY_CONDITION,
+    LadderStep,
     assemble_recovery,
     fallback_envelope,
     fusion_score,
+    search_ladder,
     select_best_per_page,
 )
 from retrieval.query_snapshot import QueryCorpusSnapshot
@@ -22,6 +27,8 @@ from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.metadata_filters import page_matches_filters
 from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
+from retrieval.vector_index import VectorIndexError, VectorIndexStore, vector_settings_from_embedding
+from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError
 from retrieval.query_execution_context import (
     DEFAULT_TOP_K,
     PASSAGE_PROBE_LIMIT as _PASSAGE_PROBE_LIMIT,
@@ -30,37 +37,250 @@ from retrieval.query_execution_context import (
     RRF_K,
     QueryExecutionContext,
     QueryFilters,
-    _adaptive_expand,
-    _citation_metadata,
-    _effective_rrf_k,
-    _eligible,
-    _effective_scope,
-    _graph_expand,
-    _heading,
-    _matches_request,
-    _stage_one_fts_hits,
-    _thaw_value,
-    _title_candidates,
+    adaptive_expand,
     classify_intent,
-    _vector_hits as _context_vector_hits,
+    eligible,
+    heading,
+    is_retired_source_namespace,
+    is_source_index,
+    matches_request,
     probe_hit,
 )
-from retrieval.vector_provider import LocalBgeM3Provider
+
+
+
 
 
 PASSAGE_SCAN_LIMIT = _PASSAGE_SCAN_LIMIT
 PASSAGE_PROBE_LIMIT = _PASSAGE_PROBE_LIMIT
 
 
-def _vector_hits(*args: Any, **kwargs: Any) -> tuple[dict[str, tuple[int, float]], list[str]]:
-    """Keep the legacy pipeline patch seam while delegating to the context owner."""
+def _effective_scope(scope: str, intent: str) -> tuple[str, tuple[str, ...]]:
+    if scope not in {"auto", "knowledge", "history", "all", "archive", "raw"}:
+        raise ValueError("scope must be auto, knowledge, history, all, archive, or raw")
+    if scope == "auto":
+        return ("history" if intent == "history" else "knowledge"), (("history_intent",) if intent == "history" else ())
+    return scope, ()
 
-    return _context_vector_hits(
-        *args,
-        provider_factory=LocalBgeM3Provider,
-        **kwargs,
+
+def _citation_metadata(hit: PassageHit, provenance: dict[str, dict[str, str]]) -> dict[str, str]:
+    """Expose the minimum traceability fields for low-authority chat evidence."""
+    if hit.corpus != "history" and hit.source_kind not in {"raw_chat", "legacy_chatlog"}:
+        return {}
+    return {
+        key: value
+        for key, value in provenance.get(hit.page_path, {}).items()
+        if key in {"session_id", "occurred_at", "project", "content_hash"} and value
+    }
+
+
+def _effective_rrf_k(embedding: EmbeddingSettings | None) -> int:
+    """Resolve one query invocation's immutable RRF scale."""
+
+    value = getattr(embedding, "rrf_k", RRF_K)
+    return value if isinstance(value, int) and value > 0 else RRF_K
+
+
+def _title_candidates(
+    store: RetrievalIndexStore,
+    metadata: dict[str, dict[str, Any]],
+    question: str,
+    *,
+    scope: str,
+    project: str | None,
+    filters: QueryFilters,
+    limit: int = 10,
+    snapshot: QueryCorpusSnapshot | None = None,
+    cancellation: QueryCancellationContext | None = None,
+) -> list[PassageHit]:
+    """Add bounded title/provenance signals from existing DB projections."""
+    terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", question) if len(term) > 1}
+    if not terms:
+        return []
+    candidates: list[tuple[int, str]] = []
+    pages = snapshot.pages if snapshot is not None else store.page_candidates()
+    for index, page in enumerate(pages):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=16, stage="snapshot")
+        path = str(page["path"])
+        frontmatter = metadata.get(path, {})
+        title_terms = {term.casefold() for term in re.findall(r"[\w一-鿿]+", str(page["title"])) if len(term) > 1}
+        sources = frontmatter.get("sources") or ()
+        source_values = sources if isinstance(sources, (list, tuple)) else [sources]
+        provenance_terms = {
+            term.casefold()
+            for value in source_values
+            if isinstance(value, str)
+            for term in re.findall(r"[\w一-鿿]+", value)
+            if len(term) > 1
+        }
+        overlap = len(terms & (title_terms | provenance_terms))
+        if not overlap:
+            continue
+        probe = probe_hit(
+            path,
+            str(page["title"]),
+            corpus=str(page.get("corpus") or "active"),
+            authority=str(page.get("authority") or ""),
+            source_kind=str(page.get("source_kind") or ""),
+        )
+        if eligible(probe, metadata, scope=scope) and matches_request(probe, metadata, project=project, filters=filters):
+            candidates.append((overlap, path))
+    paths = [path for _overlap, path in sorted(candidates, key=lambda item: (-item[0], item[1]))[:limit]]
+    return store.passages_for_pages(paths, limit_per_page=1)
+
+
+def _vector_hits(
+    root: Path,
+    question: str,
+    embedding: EmbeddingSettings | None,
+    *,
+    scope: str,
+    allowed_paths: set[str] | None = None,
+    cancellation: QueryCancellationContext | None = None,
+    provider_factory: Any | None = None,
+) -> tuple[dict[str, tuple[int, float]], list[str]]:
+    if cancellation is not None:
+        cancellation.checkpoint("vector")
+    if embedding is None or not embedding.enabled or scope in {"archive", "raw"}:
+        return {}, []
+    try:
+        settings = vector_settings_from_embedding(root, embedding)
+        store = VectorIndexStore(root, settings.index_path)
+        status = store.status()
+        if not status.get("ok") or status.get("state") != "fresh":
+            return {}, [str(status.get("code") or "index_stale")]
+        if settings.model_path is None:
+            return {}, ["model_missing"]
+        provider_type = provider_factory or LocalBgeM3Provider
+        provider = provider_type(
+            settings.model_path,
+            device=settings.device,
+            batch_size=settings.batch_size,
+            max_sequence_length=settings.max_sequence_length,
+        )
+        store.validate_provider(provider.identity(), include_raw_sources=False)
+        results = store.search(
+            provider.embed_query(question, context=cancellation),
+            allowed_paths=allowed_paths,
+            limit=settings.candidate_limit,
+        )
+        if cancellation is not None:
+            cancellation.checkpoint("vector")
+        return {
+            result.passage_id: (result.rank, result.score)
+            for result in results
+            if result.score >= settings.min_vector_score and result.passage_id
+        }, []
+    except (VectorIndexError, VectorProviderError) as exc:
+        return {}, [exc.code]
+
+
+def _graph_expand(
+    root: Path,
+    store: RetrievalIndexStore,
+    metadata: dict[str, dict[str, Any]],
+    *,
+    scope: str,
+    project: str | None,
+    filters: QueryFilters,
+    seed_scores: dict[str, float],
+    debug: bool,
+    snapshot: QueryCorpusSnapshot | None = None,
+    cancellation: QueryCancellationContext | None = None,
+) -> tuple[dict[str, QueryCandidate], list[PassageHit]]:
+    """Reuse the legacy bounded expander over DB projections, never files.
+
+    The expander owns the existing two-hop, fan-out and score-cap behaviour;
+    this adapter only supplies its already-filtered candidate boundary.
+    """
+    if scope in {"archive", "raw"} or not seed_scores:
+        return {}, []
+    candidates: list[QueryCandidate] = []
+    pages = snapshot.pages if snapshot is not None else store.page_candidates()
+    for index, page in enumerate(pages):
+        if cancellation is not None:
+            cancellation.checkpoint_batch(index, every=16, stage="graph")
+        path = str(page["path"])
+        frontmatter = metadata.get(path, {})
+        probe = probe_hit(
+            path,
+            str(page["title"]),
+            corpus=str(page.get("corpus") or "active"),
+            authority=str(page.get("authority") or ""),
+            source_kind=str(page.get("source_kind") or ""),
+        )
+        lifecycle = str(frontmatter.get("lifecycle") or frontmatter.get("lifecycle_status") or "active")
+        if (
+            not path.startswith("wiki/")
+            or is_retired_source_namespace(path)
+            or lifecycle in {"superseded", "deprecated", "archived"}
+            or is_source_index(path, frontmatter)
+            or not eligible(probe, metadata, scope=scope)
+            or not matches_request(probe, metadata, project=project, filters=filters)
+        ):
+            continue
+        candidates.append(
+            QueryCandidate(
+                path=root / path,
+                rel=path,
+                title=str(page["title"]),
+                body=str(page["body"]),
+                frontmatter=dict(frontmatter),
+            )
+        )
+    by_path = {candidate.rel: candidate for candidate in candidates}
+    scored = {path: by_path[path] for path in seed_scores if path in by_path}
+    for path, candidate in scored.items():
+        candidate.keyword_score = seed_scores[path]
+        candidate.fusion_score = seed_scores[path]
+    if not scored:
+        return {}, []
+    apply_graph_expansion(scored, candidates, build_graph(root, candidates), max_graph_hops=2, collect_reasons=debug)
+    added = [path for path in scored if path not in seed_scores]
+    return scored, store.passages_for_pages(added, limit_per_page=1)
+
+
+def _stage_one_fts_hits(
+    store: RetrievalIndexStore,
+    question: str,
+    *,
+    effective_scope: str,
+    project: str | None,
+    filters: QueryFilters,
+) -> tuple[list[PassageHit], str, int]:
+    """Run stage-one lexical recall, including raw qualified aliases directly."""
+
+    common_kwargs = {
+        "project": project,
+        "page_type": filters.type,
+        "tags": list(filters.tags),
+    }
+    steps: list[LadderStep] = [LadderStep("strict", "strict", question, common_kwargs)]
+    if effective_scope == "raw" and has_qualified_identifier(question):
+        steps.append(LadderStep("qualified_code", "qualified_code", question, common_kwargs))
+    counts: dict[str, int] = {}
+    hits, mode = search_ladder(
+        store,
+        steps=steps,
+        merge="merge_by_passage",
+        limit=50,
+        swallow_index_errors=False,
+        counts=counts,
     )
+    return hits, mode, counts.get("qualified_code", 0)
 
+
+def _thaw_value(value: Any) -> Any:
+    """Copy an immutable outcome projection back into public JSON containers."""
+
+    if isinstance(value, Mapping):
+        return {key: _thaw_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_value(item) for item in value]
+    if isinstance(value, frozenset):
+        return {_thaw_value(item) for item in value}
+    return value
 
 
 def run_query_v2(
@@ -166,7 +386,7 @@ def run_query_v2(
             page_path=str(item.get("path") or ""),
         ):
             continue
-        if not _eligible(
+        if not eligible(
             probe_hit(
                 str(item["path"]),
                 str(item["title"]),
@@ -188,7 +408,7 @@ def run_query_v2(
     ranked: dict[str, dict[str, Any]] = {}
     for rank, hit in enumerate(fts, 1):
         cancellation.checkpoint_batch(rank - 1, every=16, stage="fts")
-        if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
+        if not eligible(hit, metadata, scope=effective_scope) or not matches_request(hit, metadata, project=project, filters=filters):
             continue
         item = ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0, fts_rank=rank))
         item["fts_rank"] = rank
@@ -197,7 +417,7 @@ def run_query_v2(
     # available without adding query-time corpus reads.
     for index, hit in enumerate(store.load_passages(vector)):
         cancellation.checkpoint_batch(index, every=16, stage="vector")
-        if not _eligible(hit, metadata, scope=effective_scope) or not _matches_request(hit, metadata, project=project, filters=filters):
+        if not eligible(hit, metadata, scope=effective_scope) or not matches_request(hit, metadata, project=project, filters=filters):
             continue
         ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0))
     # A title-only match is deliberately not primary retrieval.  A generic
@@ -269,7 +489,7 @@ def run_query_v2(
     for index in range(0, len(scored), 16):
         cancellation.checkpoint_batch(index, every=16, stage="context")
     selected = select_best_per_page(scored)
-    selected = _adaptive_expand(selected, top_k)
+    selected = adaptive_expand(selected, top_k)
     recovery = assemble_recovery(
         selected,
         condition=DEFAULT_RECOVERY_CONDITION,
@@ -338,7 +558,7 @@ def run_query_v2(
         ContextPassage(
             item["hit"].passage_id,
             item["hit"].page_path,
-            _heading(item["hit"]),
+            heading(item["hit"]),
             item["hit"].text,
             item["score"],
             "raw_evidence" if item["hit"].source_kind == "raw" else "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge",
@@ -375,7 +595,7 @@ def run_query_v2(
         result: dict[str, Any] = {
             "citation": citation,
             "path": hit.page_path,
-            "heading": _heading(hit),
+            "heading": heading(hit),
             "score": item["score"],
             "scores": {"fts": hit.score, "vector": item["vector_score"], "rrf": item["rrf"], "graph": item["graph_score"]},
             "source_kind": hit.source_kind,
