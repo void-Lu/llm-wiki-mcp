@@ -5,7 +5,6 @@ from __future__ import annotations
 import difflib
 import hashlib
 from pathlib import Path
-import secrets
 from typing import Any, Mapping
 
 from wiki.page_mutation import PageMutationCoordinator, PlanIntent, plan_intent_hash
@@ -60,11 +59,16 @@ def preview_update(
     violations = _locked_violations(fm, incoming)
     removed_sources = set(_sources(fm)) - set(_sources(incoming)) if "sources" in incoming else set()
     current_hash = sha256_file(target)
+    coordinator = PageMutationCoordinator(root)
     try:
-        plan = PageMutationCoordinator(root).issue_plan(
+        plan = coordinator.issue_plan(
             page_path=page_path,
             base_hash=current_hash,
-            intent=PlanIntent(body=incoming_body, frontmatter=incoming),
+            intent=coordinator.build_plan_intent(
+                operation_kind="update",
+                body=incoming_body,
+                frontmatter=incoming,
+            ),
         )
     except UpdatePlanError as exc:
         return {"ok": False, "code": exc.code}
@@ -145,14 +149,17 @@ def apply_update(
     updated_hash = _digest(prepared.text)
     coordinator = PageMutationCoordinator(root)
     mutation = coordinator.write_and_project(
-        request_key=plan_id or f"body:{secrets.token_urlsafe(18)}",
         operation_kind="update",
         page_path=page_path,
         base_hash=current_hash,
         text=prepared.text,
         expected_hash=expected_hash,
         plan_id=plan_id,
-        plan_intent=PlanIntent(body=incoming_body, frontmatter=incoming),
+        plan_intent=coordinator.build_plan_intent(
+            operation_kind="update",
+            body=incoming_body,
+            frontmatter=incoming,
+        ),
     )
     mutation_dict = mutation.to_dict()
     if not mutation.ok:

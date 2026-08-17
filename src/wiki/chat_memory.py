@@ -124,8 +124,6 @@ class ChatMemoryService:
                 return self._project_existing_revision(
                     latest_path,
                     latest.frontmatter,
-                    redacted_metadata,
-                    redacted_hash,
                 )
             parent_body = latest.body
             append_only = redacted_transcript.startswith(parent_body) and len(redacted_transcript) > len(parent_body)
@@ -158,10 +156,8 @@ class ChatMemoryService:
         if "project" in redacted_metadata:
             frontmatter["project"] = redacted_metadata["project"]
         serialized = self._serialize(frontmatter, redacted_transcript)
-        request_key = self._request_key(str(redacted_metadata["session_id"]), redacted_hash)
         try:
             result = self.coordinator.write_and_project(
-                request_key=request_key,
                 operation_kind="chat_source",
                 page_path=relative.as_posix(),
                 base_hash=None,
@@ -178,22 +174,12 @@ class ChatMemoryService:
         self,
         path: Path,
         frontmatter: Mapping[str, Any],
-        metadata: Mapping[str, Any],
-        redacted_hash: str,
     ) -> dict[str, Any]:
         """Recover/project a durable revision without creating another file."""
 
         current_hash = sha256_file(path)
-        request_key = self._request_key(str(metadata["session_id"]), redacted_hash)
         try:
-            result = self.coordinator.write_and_project(
-                request_key=request_key,
-                operation_kind="chat_source",
-                page_path=path.relative_to(self.root).as_posix(),
-                base_hash=current_hash,
-                text=path.read_text(encoding="utf-8"),
-                expected_hash=current_hash,
-            )
+            result = self.coordinator.project_existing(path.relative_to(self.root).as_posix(), current_hash)
         except ValueError as exc:
             raise ChatMemoryError(str(getattr(exc, "code", "chat_source_recovery_failed")), "chat source recovery could not be completed") from exc
         if not result.ok:
@@ -214,10 +200,6 @@ class ChatMemoryService:
             response["failed_stage"] = result.failed_stage
         response["index"] = result.index_response()
         return response
-
-    @staticmethod
-    def _request_key(session_id: str, redacted_hash: str) -> str:
-        return f"chat:{session_id}:{redacted_hash}"
 
     def provenance(self, sources: object) -> dict[str, Any]:
         if not isinstance(sources, list) or not sources:
