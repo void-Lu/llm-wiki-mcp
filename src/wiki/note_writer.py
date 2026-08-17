@@ -8,6 +8,7 @@ from typing import Any
 from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
 from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_policy import provenance_status, stamp_page_policy
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import WikiPathError, create_wiki_root, resolve_within_root, safe_segment, slug, translate_path_error
@@ -277,6 +278,11 @@ def save_obsidian_note(
             frontmatter["sources"] = source_paths
             frontmatter["source_hashes"] = source_hashes
     try:
+        policy_stamp = stamp_page_policy(frontmatter, source_hashes=source_hashes)
+    except (TypeError, ValueError) as exc:
+        return _error("invalid_page_policy", str(exc))
+    frontmatter.update(policy_stamp)
+    try:
         create_wiki_root(root)
     except OSError:
         return _error("write_failed", "wiki root could not be prepared")
@@ -315,8 +321,8 @@ def save_obsidian_note(
         "wikilink_target": name[:-3] if name.endswith(".md") else name,
         "normalized_wikilinks": normalized_wikilink_count,
         "broken_wikilinks": broken_wikilinks,
-        "provenance_status": "verified" if resolved_sources else "provenance_unverified",
-        "freshness": "fresh" if resolved_sources else "review_required",
+        "provenance_status": provenance_status(policy_stamp),
+        "freshness": str(policy_stamp["freshness"]),
         "dependency_projection": dependency_projection,
     }
     if projection_result.repair_action:

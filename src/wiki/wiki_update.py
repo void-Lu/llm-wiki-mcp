@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from wiki.page_mutation import PageMutationCoordinator, PlanIntent, plan_intent_hash
 from wiki.atomic_file import sha256_file
 from wiki.page_operation_store import UpdatePlanError
+from wiki.page_policy import provenance_status, stamp_page_policy
 from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
@@ -129,14 +130,16 @@ def apply_update(
         final["generated"] = existing["generated"]
         final["maintenance"] = "manual"
         final.setdefault("generation_provenance", {key: existing.get(key) for key in ("prompt_version", "schema_version", "source_hash") if key in existing})
+    stamp_source_hashes: Mapping[str, object] | None = None
     if resolved_sources is not None:
         final["sources"] = [source.relative_path for source in resolved_sources]
         final["source_hashes"] = source_hash_map(resolved_sources)
-        final["provenance_unverified"] = False
-        final["freshness"] = "fresh"
-    elif not _stored_source_hashes(existing):
-        final["provenance_unverified"] = True
-        final["freshness"] = "review_required"
+        stamp_source_hashes = final["source_hashes"]
+    try:
+        policy_stamp = stamp_page_policy(final, source_hashes=stamp_source_hashes)
+    except (TypeError, ValueError) as exc:
+        return _attach_related_page_skips({"ok": False, "code": "invalid_page_policy", "error": str(exc)}, related_pages, related_pages_skipped)
+    final.update(policy_stamp)
     title = str(final.get("title") or target.stem)
     try:
         prepared = prepare_wiki_page(
@@ -178,7 +181,7 @@ def apply_update(
     dependency_projection = mutation.dependency_projection()
     navigation = mutation.stage_result("navigation")
     retrieval_index = mutation.retrieval_index()
-    result = {"ok": True, "state": mutation.state or "completed", "action": "apply", "page_path": page_path, "operation_id": mutation.operation_id, "hash": updated_hash, "page_hash": mutation.page_hash or updated_hash, "navigation": navigation, "retrieval_index": retrieval_index, "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "dependency_projection": dependency_projection, "provenance_status": "verified" if _stored_source_hashes(final) else "provenance_unverified", "freshness": str(final.get("freshness") or "review_required")}
+    result = {"ok": True, "state": mutation.state or "completed", "action": "apply", "page_path": page_path, "operation_id": mutation.operation_id, "hash": updated_hash, "page_hash": mutation.page_hash or updated_hash, "navigation": navigation, "retrieval_index": retrieval_index, "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "dependency_projection": dependency_projection, "provenance_status": provenance_status(policy_stamp), "freshness": str(policy_stamp["freshness"])}
     if mutation.repair_action:
         result["repair_action"] = mutation.repair_action
     if mutation.failed_stage:
@@ -225,13 +228,6 @@ def _prepare_incoming_sources(
     prepared["sources"] = [source.relative_path for source in resolved]
     prepared["source_hashes"] = source_hash_map(resolved)
     return prepared, resolved, None
-
-
-def _stored_source_hashes(frontmatter: Mapping[str, Any]) -> dict[str, str]:
-    value = frontmatter.get("source_hashes")
-    if not isinstance(value, Mapping):
-        return {}
-    return {str(key): str(item) for key, item in value.items() if str(key) and str(item)}
 
 
 def _with_reference_section(

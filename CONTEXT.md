@@ -108,7 +108,7 @@ _避免使用_：投影执行器、投影状态机、全量重建指令
 _避免使用_：来源验证状态、正确性、可信度、生命周期
 
 **页面策略（Page Policy）**：
-`src/wiki/page_policy.py` 中 frozen 的 `PagePolicy` 与纯函数 `derive_page_policy` 是 frontmatter 派生策略的单一 owner，统一产生 `freshness`、`maintenance`、`lifecycle`、`generated` 与 `replaced_by`；该模块不执行 I/O。非法 `lifecycle` 不向正式页面投影抛出异常，而是归一为 `review_required`；依赖存储层自己的 fail-closed 校验仍保持不变。
+`src/wiki/page_policy.py` 中 frozen 的 `PagePolicy` 与纯函数 `derive_page_policy`/`derive` 是 frontmatter 读侧派生策略的单一 owner；写侧 `stamp_page_policy`（`stamp` 为兼容短别名）统一产生可持久化的 `freshness` 与 `provenance_unverified`。stamp 只校验而不接管调用方拥有的 `maintenance`/`replaced_by`，该模块不执行 I/O。非法 `lifecycle` 不向正式页面投影抛出异常，而是归一为 `review_required`；依赖存储层自己的 fail-closed 校验仍保持不变。
 _避免使用_：页面提交、操作状态、索引状态
 
 **PlanLifecycle**：

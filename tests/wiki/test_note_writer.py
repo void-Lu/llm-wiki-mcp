@@ -281,6 +281,8 @@ def test_frontmatter_fixed_fields_and_old_fields_absent(vault: Path):
     assert "custom" in tags
     assert frontmatter["related_objects"] == ["salesorder"]
     assert frontmatter["related_scripts"] == ["customscript_sync"]
+    assert frontmatter["provenance_unverified"] is True
+    assert frontmatter["freshness"] == "review_required"
     assert "related_records" not in text
     assert "related_script_ids" not in text
     assert "Body" in body
@@ -396,6 +398,8 @@ def test_related_pages_and_raw_sources_are_written_with_verified_provenance(vaul
     frontmatter, body = _frontmatter_and_body(path)
     assert frontmatter["sources"] == ["raw/sources/reference.txt"]
     assert frontmatter["source_hashes"] == {"raw/sources/reference.txt": sha256(b"raw").hexdigest()}
+    assert frontmatter["provenance_unverified"] is False
+    assert frontmatter["freshness"] == "fresh"
     assert "## 参考来源" in body
     assert "[[wiki/concepts/related|Related Page]]" in body
     assert result["related_pages_skipped"][0]["reason"] == "raw_source_use_sources"

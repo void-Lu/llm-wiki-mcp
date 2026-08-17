@@ -21,8 +21,11 @@ def test_preview_apply_cas_and_generated_becomes_manual(tmp_path) -> None:
     preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "new", {"sources": ["raw/sources/a.md"]})
     assert preview["ok"] and preview["plan_id"]
     assert apply_update(tmp_path, "wiki/concepts/general/a.md", "new", incoming_frontmatter={"sources": ["raw/sources/a.md"]}, plan_id=preview["plan_id"], expected_hash=preview["current_hash"])["ok"]
-    assert "maintenance: manual" in page.read_text(encoding="utf-8")
-    assert "source_hashes:" in page.read_text(encoding="utf-8")
+    written_frontmatter = yaml.safe_load(page.read_text(encoding="utf-8").split("---", 2)[1])
+    assert written_frontmatter["maintenance"] == "manual"
+    assert written_frontmatter["source_hashes"] == {"raw/sources/a.md": sha256(b"raw evidence").hexdigest()}
+    assert written_frontmatter["provenance_unverified"] is False
+    assert written_frontmatter["freshness"] == "fresh"
     assert apply_update(tmp_path, "wiki/concepts/general/a.md", "bad", incoming_frontmatter={"concept_id": "other"})["code"] == "locked_field"
 
 
