@@ -58,7 +58,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - [wiki_io.py](src/wiki/wiki_io.py) 的 `refresh_page_retrieval` 与 chat projection 只调用 RetrievalIndexStore 的单页 `update_page`；删除/改名使用对应增量操作。`refresh_navigation` 只维护导航页；[wiki_index.py](src/wiki/wiki_index.py) 的 `rebuild_retrieval_index`/`refresh_indexes` 只用于显式初始化、CLI/admin 或兼容测试，普通 MCP 写入不得隐式全量建库。索引缺失或不兼容时返回 `rebuild_required` 和 `rebuild_retrieval_index` repair action。
 - 归档在 [archive_service.py](src/archive/archive_service.py)：`wiki_archive`/`wiki_restore` 只公开 `plan|apply`；purge、recover、rebuild-index 和 migration 只保留在 CLI/admin 边界。
 - 隐私审计在 [privacy_audit.py](src/wiki/privacy_audit.py)：CLI `repair privacy-audit` 提供 `plan/apply`，默认阻断未审批的 filename/wikilink 变更（CAS + rollback）；脱敏/locator 策略在 [privacy_policy.py](src/common/privacy_policy.py)。
-- 页面写入经 [atomic_file.py](src/wiki/atomic_file.py) 原子写（CAS）；CLI `repair` 边界（`page-operation`/`provenance`/`privacy-audit` 的 plan/apply）由 [page_repair.py](src/wiki/page_repair.py)、[page_operation_store.py](src/wiki/page_operation_store.py)、[provenance_migration.py](src/wiki/provenance_migration.py) 支撑。
+- 页面写入经 [atomic_file.py](src/wiki/atomic_file.py) 原子写（CAS）；CLI `repair page-operation` 由 [page_repair.py](src/wiki/page_repair.py)/[page_operation_store.py](src/wiki/page_operation_store.py) 支撑，`provenance`/`privacy-audit` 的 admin 维护 plan/apply/逐页 CAS/补偿审计由 [repair_plan.py](src/wiki/repair_plan.py) 统一 owner，领域差异仍在 [provenance_migration.py](src/wiki/provenance_migration.py) 与 [privacy_audit.py](src/wiki/privacy_audit.py) 的回调内；admin 页面路径使用 `wiki_paths.admin_wiki_page_file`，不接入 PageMutationCoordinator 或 archive plan journal。
 
 ### 查询与图谱能力
 

@@ -91,7 +91,7 @@ _避免使用_：写入失败、页面回滚、未提交
 _避免使用_：内容摘要、页面 hash、无限期 token
 
 **维护计划（Repair Plan）**：
-CLI/admin 边界签发的限时、单次使用批量维护许可，绑定页面集合与各页基线 hash，经 CAS 逐页执行并留下可回滚的审计记录；它与更新计划、归档计划介质和生命周期不同，互不通用。
+CLI/admin 边界签发的限时、单次使用批量维护许可，绑定页面集合与各页基线 hash，经 CAS 逐页执行并留下可回滚的审计记录；它与更新计划、归档计划介质和生命周期不同，互不通用。计划/审计与逐页 CAS、补偿回滚骨架由 `src/wiki/repair_plan.py` 唯一持有；`src/wiki/provenance_migration.py` 与 `src/wiki/privacy_audit.py` 只注入领域分类和写入/投影回调，admin 路径由 `src/wiki/wiki_paths.py:admin_wiki_page_file` 持有。
 _避免使用_：更新计划、归档计划、无限期批量许可
 
 **派生投影（Derived Projection）**：
