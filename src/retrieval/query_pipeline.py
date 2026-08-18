@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast
+from typing import Any, Literal, Mapping, Sequence, cast
 
 from retrieval.body_budget import result_floor_budget
 from retrieval.candidate_items import candidate_item
@@ -38,7 +39,9 @@ from retrieval.metadata_filters import page_matches_filters
 from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
 from retrieval.query_quality_policy import (
     GATE_FAIL_OPEN_ERROR,
+    GATE_WOULD_SUPPRESS_ALL,
     QUALITY_POLICY_VERSION,
+    QualityGateResult,
     build_candidate_features,
     evaluate_quality_gate,
     is_gate_reason_code,
@@ -57,6 +60,15 @@ from retrieval.query_recall_policy import (
 
 
 _QUALITY_GATE_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+ENFORCED_RANKING_POLICY_VERSION = f"{RANKING_POLICY_VERSION}-quality-gate"
+
+
+@dataclass(frozen=True)
+class _QualityGateEvaluation:
+    """The bounded public summary plus the private decisions for projection."""
+
+    summary: dict[str, Any]
+    result: QualityGateResult | None
 
 
 def _quality_gate_branch(*, coverage_fallback: bool, fallback_level: str, lexical_mode: str) -> str | None:
@@ -69,7 +81,7 @@ def _quality_gate_branch(*, coverage_fallback: bool, fallback_level: str, lexica
     return None
 
 
-def _quality_gate_summary(
+def _quality_gate_evaluation(
     candidates: tuple[Mapping[str, Any], ...],
     *,
     settings: QualityGateSettings | None,
@@ -78,8 +90,8 @@ def _quality_gate_summary(
     fallback_level: str,
     coverage_fallback: bool,
     lexical_mode: str,
-) -> dict[str, Any] | None:
-    """Run the pure gate after outcome freeze and project only bounded counters."""
+) -> _QualityGateEvaluation | None:
+    """Run the pure gate after outcome freeze and keep decisions private."""
 
     if settings is None or settings.mode == "off":
         return None
@@ -98,19 +110,22 @@ def _quality_gate_summary(
         lexical_mode=lexical_mode,
     )
 
-    def fail_open() -> dict[str, Any]:
-        return {
-            "policy_version": policy_version,
-            "mode": settings.mode,
-            "status": "gate_unavailable",
-            "candidate_count": len(candidates),
-            "accepted_count": len(candidates),
-            "rejected_count": 0,
-            "score_family_counts": {},
-            "reason_counts": {GATE_FAIL_OPEN_ERROR: 1},
-            "low_sample_buckets": [],
-            "fail_open": True,
-        }
+    def fail_open() -> _QualityGateEvaluation:
+        return _QualityGateEvaluation(
+            {
+                "policy_version": policy_version,
+                "mode": settings.mode,
+                "status": "gate_unavailable",
+                "candidate_count": len(candidates),
+                "accepted_count": len(candidates),
+                "rejected_count": 0,
+                "score_family_counts": {},
+                "reason_counts": {GATE_FAIL_OPEN_ERROR: 1},
+                "low_sample_buckets": [],
+                "fail_open": True,
+            },
+            None,
+        )
 
     try:
         features = build_candidate_features(
@@ -136,12 +151,14 @@ def _quality_gate_summary(
             for value in summary.low_sample_buckets
             if isinstance(value, str) and _QUALITY_GATE_SAFE_TOKEN.fullmatch(value)
         ][:32]
-        return {
+        public_summary: dict[str, Any] = {
             "policy_version": policy_version,
             "mode": settings.mode,
-            # Enforce projection is intentionally deferred to task 06.  Keep
-            # the calculation shadow-only while preserving the configured mode.
-            "status": "gate_shadow",
+            "status": (
+                "gate_shadow"
+                if settings.mode == "shadow" or summary.fail_open
+                else "gate_enforced"
+            ),
             "candidate_count": int(summary.candidate_count),
             "accepted_count": int(summary.accepted_count),
             "rejected_count": int(summary.rejected_count),
@@ -150,8 +167,78 @@ def _quality_gate_summary(
             "low_sample_buckets": low_sample_buckets,
             "fail_open": bool(summary.fail_open),
         }
+        if summary.calibration_revision:
+            public_summary["calibration_revision"] = summary.calibration_revision
+        if summary.threshold_selection_counts:
+            public_summary["selection_counts"] = {
+                str(key): int(value)
+                for key, value in summary.threshold_selection_counts.items()
+                if key in {"exact", "backoff", "fail_open"}
+                and type(value) is int
+                and value >= 0
+            }
+        return _QualityGateEvaluation(public_summary, result)
     except Exception:
         return fail_open()
+
+
+def _quality_gate_summary(
+    candidates: tuple[Mapping[str, Any], ...],
+    *,
+    settings: QualityGateSettings | None,
+    effective_scope: str,
+    retrieval_mode: str,
+    fallback_level: str,
+    coverage_fallback: bool,
+    lexical_mode: str,
+) -> dict[str, Any] | None:
+    """Compatibility wrapper for callers that only need the safe summary."""
+
+    evaluation = _quality_gate_evaluation(
+        candidates,
+        settings=settings,
+        effective_scope=effective_scope,
+        retrieval_mode=retrieval_mode,
+        fallback_level=fallback_level,
+        coverage_fallback=coverage_fallback,
+        lexical_mode=lexical_mode,
+    )
+    return evaluation.summary if evaluation is not None else None
+
+
+def _normalise_gate_path(value: object) -> str:
+    return str(value or "").replace("\\", "/").casefold()
+
+
+def _accepted_selected(
+    selected: Sequence[Mapping[str, Any]],
+    result: QualityGateResult,
+) -> list[dict[str, Any]]:
+    """Project decisions back onto the already page-deduplicated selection."""
+
+    accepted_paths = {
+        decision.feature.normalized_page_path
+        for decision in result.accepted
+    }
+    return [
+        dict(item)
+        for item in selected
+        if _normalise_gate_path(item["hit"].page_path) in accepted_paths
+    ]
+
+
+def _mark_gate_all_rejected(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Record an all-rejected observation while preserving the baseline."""
+
+    result = dict(summary)
+    reason_counts = dict(summary.get("reason_counts", {}))
+    reason_counts[GATE_WOULD_SUPPRESS_ALL] = (
+        int(reason_counts.get(GATE_WOULD_SUPPRESS_ALL, 0)) + 1
+    )
+    result["status"] = "gate_all_rejected"
+    result["reason_counts"] = dict(sorted(reason_counts.items()))
+    result["fail_open"] = True
+    return result
 
 
 
@@ -636,7 +723,7 @@ def run_query_v2(
     outcome = execution.outcome()
     fallback_value = outcome.recovery.fallback
     fallback_level = str(fallback_value.get("level") or "none") if isinstance(fallback_value, Mapping) else "none"
-    quality_gate_summary = _quality_gate_summary(
+    quality_gate_evaluation = _quality_gate_evaluation(
         outcome.selected,
         settings=quality_gate,
         effective_scope=effective_scope,
@@ -645,7 +732,26 @@ def run_query_v2(
         coverage_fallback=outcome.coverage_fallback,
         lexical_mode=outcome.lexical_mode,
     )
-    selected = _thaw_value(outcome.selected)
+    baseline_selected = _thaw_value(outcome.selected)
+    selected = baseline_selected
+    enforce_projection_changed = False
+    if (
+        quality_gate_evaluation is not None
+        and quality_gate is not None
+        and quality_gate.mode == "enforce"
+        and quality_gate_evaluation.result is not None
+    ):
+        gate_result = quality_gate_evaluation.result
+        if not gate_result.summary.fail_open:
+            accepted_selected = _accepted_selected(baseline_selected, gate_result)
+            if baseline_selected and not accepted_selected:
+                quality_gate_evaluation = _QualityGateEvaluation(
+                    _mark_gate_all_rejected(quality_gate_evaluation.summary),
+                    gate_result,
+                )
+            elif accepted_selected != baseline_selected:
+                selected = accepted_selected
+                enforce_projection_changed = True
     context_items = _thaw_value(outcome.context_items)
     recovery = outcome.recovery
     raw_fts_hits = outcome.raw_fts_hits
@@ -689,11 +795,29 @@ def run_query_v2(
         for item in packed.get("passages", [])
         if isinstance(item, dict)
     ]
-    contains_raw = any(item["hit"].source_kind == "raw" for item in selected)
+    # Corpus/authority telemetry describes the frozen retrieval outcome, not
+    # the later public admission projection.
+    contains_raw = any(item["hit"].source_kind == "raw" for item in baseline_selected)
     # Recovery owns the final fallback envelope as well as the intermediate
     # context state.  Keep the public payload projection here, but do not
     # reconstruct level/reasons/path allowlists a second time.
     fallback_payload = _thaw_value(recovery.fallback)
+    if enforce_projection_changed and isinstance(fallback_payload, dict):
+        accepted_raw_paths = {
+            _normalise_gate_path(item["hit"].page_path)
+            for item in selected
+            if item["hit"].source_kind == "raw"
+        }
+        allowed_source_paths = fallback_payload.get("allowed_source_paths")
+        if isinstance(allowed_source_paths, list):
+            fallback_payload = {
+                **fallback_payload,
+                "allowed_source_paths": [
+                    path
+                    for path in allowed_source_paths
+                    if _normalise_gate_path(path) in accepted_raw_paths
+                ],
+            }
     def _result_item(item: dict[str, Any], *, citation: str, include_content: bool) -> dict[str, Any]:
         hit = item["hit"]
         result_metadata = (
@@ -740,7 +864,11 @@ def run_query_v2(
     if raw_index_warning:
         warnings = list(dict.fromkeys([*warnings, raw_index_warning]))
     pipeline: dict[str, Any] = {
-        "ranking_version": RANKING_POLICY_VERSION,
+        "ranking_version": (
+            ENFORCED_RANKING_POLICY_VERSION
+            if enforce_projection_changed
+            else RANKING_POLICY_VERSION
+        ),
         "scope": scope,
         "corpus": "raw" if contains_raw else "archive" if effective_scope == "archive" else "active",
         "authority": "active:formal>project>raw_chat;fallback:wiki_relaxed>raw",
@@ -755,16 +883,16 @@ def run_query_v2(
             "relaxed_fts_hits": relaxed_fts_hits,
             "raw_fts_hits": raw_fts_hits,
             "vector_hits": len(vector),
-            "graph_hits": sum(1 for item in selected if item["graph_score"] > 0),
-            "selected": len(selected),
+            "graph_hits": sum(1 for item in baseline_selected if item["graph_score"] > 0),
+            "selected": len(baseline_selected),
             "returned": len(results),
             "additional": len(additional_results),
         },
         "warnings": warnings,
         "fallback": fallback_payload,
     }
-    if quality_gate_summary is not None:
-        pipeline["quality_gate"] = quality_gate_summary
+    if quality_gate_evaluation is not None:
+        pipeline["quality_gate"] = quality_gate_evaluation.summary
     if discovery_requested or discovery_entities or discovery_source_items:
         pipeline["discovery"] = discovery
     if batch_payload.get("status") != "not_triggered":
@@ -789,7 +917,7 @@ def run_query_v2(
                 "fusion_source": item.get("fusion_source"),
                 "fusion_local_position": item.get("fusion_local_position"),
             }
-            for item in selected
+            for item in baseline_selected
         ]
     cancellation.checkpoint("telemetry")
     elapsed = (time.perf_counter() - started) * 1_000
@@ -798,7 +926,7 @@ def run_query_v2(
             question=question,
             scope=scope,
             project=project,
-            passage_ids=[item["hit"].passage_id for item in selected],
+            passage_ids=[item["hit"].passage_id for item in baseline_selected],
             fallback_level=str(fallback_payload["level"]),
             token_count=int(packed["budget"]["used"]),
             latency_ms=elapsed,

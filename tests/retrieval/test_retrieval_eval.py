@@ -172,6 +172,7 @@ def test_v2_evaluator_reads_existing_passage_store_without_telemetry_write(tmp_p
     report = run_retrieval_evaluation(vault, dataset, measure_context_budget=False)
     assert report["metadata"]["parameters"]["query_version"] == "v2"
     assert report["metrics"]["recall_at_k_macro"] == 1.0
+    assert report["metadata"]["ranking"]["version"] == report["cases"][0]["pipeline"]["ranking_version"]
     assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
 
 

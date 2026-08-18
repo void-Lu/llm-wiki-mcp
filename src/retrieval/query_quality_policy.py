@@ -48,6 +48,11 @@ GATE_REJECT_RAW_NO_COVERAGE = "gate_reject_raw_no_coverage"
 GATE_REJECT_GRAPH_ONLY_WEAK = "gate_reject_graph_only_weak"
 GATE_REJECT_LOW_CONFIDENCE = "gate_reject_low_confidence"
 
+# This is an envelope-level observation rather than a candidate decision.  It
+# still belongs to the stable gate vocabulary so the report owner can retain
+# it without allowing arbitrary diagnostic text through the whitelist.
+GATE_WOULD_SUPPRESS_ALL = "gate_would_suppress_all"
+
 GATE_FAIL_OPEN_LOW_SAMPLE = "gate_fail_open_low_sample"
 GATE_FAIL_OPEN_POLICY_MISSING = "gate_fail_open_policy_missing"
 GATE_FAIL_OPEN_ERROR = "gate_fail_open_error"
@@ -82,11 +87,11 @@ FAIL_OPEN_REASON_CODES = frozenset(
     }
 )
 GATE_REASON_CODES = frozenset(
-    {*KEEP_REASON_CODES, *REJECT_REASON_CODES, *FAIL_OPEN_REASON_CODES}
+    {*KEEP_REASON_CODES, *REJECT_REASON_CODES, *FAIL_OPEN_REASON_CODES, GATE_WOULD_SUPPRESS_ALL}
 )
 
 QUALITY_POLICY_VERSION = "query-quality-policy-v0"
-_SNAKE_CASE_REASON = re.compile(r"^gate_(?:keep|reject|fail_open)_[a-z0-9_]+$")
+_SNAKE_CASE_REASON = re.compile(r"^gate_(?:keep|reject|fail_open|would)_[a-z0-9_]+$")
 _CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uff00-\uffef]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _VALID_SCOPES = frozenset({"knowledge", "history", "all", "archive", "raw"})
@@ -534,7 +539,17 @@ def build_candidate_features(
             if margin is None or margin == 0.0:
                 margin = None if next_score is None else round(feature.score - next_score, 12)
             rank = feature.branch_rank or position
-            derived[index] = replace(feature, branch_rank=rank, branch_margin=margin)
+            derived[index] = replace(
+                feature,
+                branch_rank=rank,
+                branch_margin=margin,
+                # The first page in each branch is protected from an
+                # enforce projection unless an explicit policy decision says
+                # otherwise.  Keeping this in the pure feature builder makes
+                # the rescue rule available to both Query V2 and calibration
+                # replay without duplicating it in the pipeline.
+                top1_rescue=feature.top1_rescue or position == 1,
+            )
     return tuple(feature for feature in derived if feature is not None)
 
 
@@ -903,6 +918,7 @@ __all__ = [
     "GATE_REJECT_RAW_NO_COVERAGE",
     "GATE_REJECT_SCORE_CLIFF",
     "GATE_REJECT_SCORE_FLOOR",
+    "GATE_WOULD_SUPPRESS_ALL",
     "GateCandidateDecision",
     "GateSummary",
     "KEEP_REASON_CODES",

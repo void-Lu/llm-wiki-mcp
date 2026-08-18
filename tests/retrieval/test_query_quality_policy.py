@@ -23,6 +23,7 @@ from retrieval.query_quality_policy import (
     GATE_REJECT_RAW_NO_COVERAGE,
     GATE_REJECT_SCORE_CLIFF,
     GATE_REJECT_SCORE_FLOOR,
+    GATE_WOULD_SUPPRESS_ALL,
     KEEP_REASON_CODES,
     REJECT_REASON_CODES,
     SCORE_FAMILIES,
@@ -225,5 +226,6 @@ def test_reject_and_fail_open_reason_skeletons_are_frozen() -> None:
         *KEEP_REASON_CODES,
         *REJECT_REASON_CODES,
         *FAIL_OPEN_REASON_CODES,
+        GATE_WOULD_SUPPRESS_ALL,
     }
     assert all(is_gate_reason_code(code) for code in GATE_REASON_CODES)

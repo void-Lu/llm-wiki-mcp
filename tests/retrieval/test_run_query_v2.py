@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, run_query_v2
+from retrieval.query_quality_policy import (
+    GATE_REJECT_SCORE_FLOOR,
+    GATE_WOULD_SUPPRESS_ALL,
+    QualityGateResult,
+    evaluate_quality_gate,
+)
 import retrieval.query_pipeline as query_pipeline_module
 from retrieval.vector_index import VectorIndexStore, vector_index_records
 from retrieval.vector_provider import DeterministicFakeProvider
@@ -25,6 +32,37 @@ def _without_quality_gate(result: dict[str, object]) -> dict[str, object]:
         **result,
         "pipeline": {key: value for key, value in pipeline.items() if key != "quality_gate"},
     }
+
+
+def _gate_result_with_acceptance(
+    result: QualityGateResult,
+    accepted_indexes: set[int],
+) -> QualityGateResult:
+    decisions = tuple(
+        replace(
+            decision,
+            accepted=index in accepted_indexes,
+            reason_code=(
+                decision.reason_code
+                if index in accepted_indexes
+                else GATE_REJECT_SCORE_FLOOR
+            ),
+        )
+        for index, decision in enumerate(result.decisions)
+    )
+    accepted = tuple(decision for decision in decisions if decision.accepted)
+    rejected = tuple(decision for decision in decisions if not decision.accepted)
+    reason_counts: dict[str, int] = {}
+    for decision in decisions:
+        reason_counts[decision.reason_code] = reason_counts.get(decision.reason_code, 0) + 1
+    summary = replace(
+        result.summary,
+        accepted_count=len(accepted),
+        rejected_count=len(rejected),
+        reason_counts=reason_counts,
+        fail_open=False,
+    )
+    return QualityGateResult(decisions, accepted, rejected, summary)
 
 
 def test_quality_gate_off_is_field_identical_and_shadow_only_extends_pipeline(tmp_path: Path) -> None:
@@ -84,7 +122,8 @@ def test_quality_gate_off_is_field_identical_and_shadow_only_extends_pipeline(tm
     )
     assert _without_quality_gate(enforce) == baseline
     assert enforce["pipeline"]["quality_gate"]["mode"] == "enforce"
-    assert enforce["pipeline"]["quality_gate"]["status"] == "gate_shadow"
+    assert enforce["pipeline"]["quality_gate"]["status"] == "gate_enforced"
+    assert enforce["pipeline"]["ranking_version"] == baseline["pipeline"]["ranking_version"]
 
 
 def test_quality_gate_exception_fails_open_without_changing_public_envelope(tmp_path: Path, monkeypatch) -> None:
@@ -111,6 +150,179 @@ def test_quality_gate_exception_fails_open_without_changing_public_envelope(tmp_
     assert shadow["pipeline"]["quality_gate"]["status"] == "gate_unavailable"
     assert shadow["pipeline"]["quality_gate"]["fail_open"] is True
     assert shadow["pipeline"]["quality_gate"]["reason_counts"] == {"gate_fail_open_error": 1}
+
+
+def test_quality_gate_enforce_projects_accepted_pages_and_bumps_ranking_version(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    for index in range(4):
+        _write(
+            root,
+            f"wiki/concepts/gate-{index}.md",
+            f"Gate {index}",
+            "shared enforce sentinel " * 3,
+            type="concept",
+        )
+    refresh_indexes(root)
+    telemetry = TelemetrySettings(enabled=False)
+    baseline = run_query_v2(
+        root,
+        "shared enforce sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+    )
+    baseline_paths = [item["path"] for item in baseline["results"] + baseline["additional_results"]]
+    assert len(baseline_paths) >= 3
+
+    def reject_second_and_tail(features, *, policy_version):
+        result = evaluate_quality_gate(features, policy_version=policy_version)
+        return _gate_result_with_acceptance(result, {0, 2})
+
+    monkeypatch.setattr(query_pipeline_module, "evaluate_quality_gate", reject_second_and_tail)
+    shadow = run_query_v2(
+        root,
+        "shared enforce sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="shadow"),
+    )
+    off = run_query_v2(
+        root,
+        "shared enforce sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="off"),
+    )
+    assert _without_quality_gate(shadow) == baseline
+    assert off == baseline
+    assert shadow["pipeline"]["ranking_version"] == baseline["pipeline"]["ranking_version"]
+
+    enforced = run_query_v2(
+        root,
+        "shared enforce sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="enforce"),
+    )
+
+    assert [item["path"] for item in enforced["results"]] == [baseline_paths[0]]
+    assert [item["path"] for item in enforced["additional_results"]] == [baseline_paths[2]]
+    assert enforced["pipeline"]["quality_gate"]["status"] == "gate_enforced"
+    assert enforced["pipeline"]["quality_gate"]["accepted_count"] == 2
+    assert enforced["pipeline"]["quality_gate"]["rejected_count"] >= 1
+    assert enforced["pipeline"]["ranking_version"] != baseline["pipeline"]["ranking_version"]
+    assert enforced["pipeline"]["fallback"] == baseline["pipeline"]["fallback"]
+    for key in ("scope", "corpus", "authority", "coverage"):
+        assert enforced["pipeline"][key] == baseline["pipeline"][key]
+    assert enforced["pipeline"]["counters"]["selected"] == baseline["pipeline"]["counters"]["selected"]
+    assert enforced["pipeline"]["counters"]["graph_hits"] == baseline["pipeline"]["counters"]["graph_hits"]
+    assert enforced["results"][0]["citation"] == "[1]"
+    assert enforced["additional_results"][0]["citation"] == "[2]"
+
+    enforced_with_context = run_query_v2(
+        root,
+        "shared enforce sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        include_context_pack=True,
+        quality_gate=QualityGateSettings(mode="enforce"),
+    )
+    assert [item["path"] for item in enforced_with_context["results"]] == [baseline_paths[0]]
+    assert enforced_with_context["results"][0]["content"]
+
+
+def test_quality_gate_enforce_all_rejected_fails_open_with_stable_observation(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    for index in range(2):
+        _write(
+            root,
+            f"wiki/concepts/reject-{index}.md",
+            f"Reject {index}",
+            "all rejected sentinel",
+            type="concept",
+        )
+    refresh_indexes(root)
+    telemetry = TelemetrySettings(enabled=False)
+    baseline = run_query_v2(
+        root,
+        "all rejected sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+    )
+
+    def reject_everything(features, *, policy_version):
+        result = evaluate_quality_gate(features, policy_version=policy_version)
+        return _gate_result_with_acceptance(result, set())
+
+    monkeypatch.setattr(query_pipeline_module, "evaluate_quality_gate", reject_everything)
+    enforced = run_query_v2(
+        root,
+        "all rejected sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="enforce"),
+    )
+
+    assert enforced["results"] == baseline["results"]
+    assert enforced["additional_results"] == baseline["additional_results"]
+    assert enforced["pipeline"]["fallback"] == baseline["pipeline"]["fallback"]
+    assert enforced["pipeline"]["ranking_version"] == baseline["pipeline"]["ranking_version"]
+    assert enforced["pipeline"]["quality_gate"]["status"] == "gate_all_rejected"
+    assert enforced["pipeline"]["quality_gate"]["fail_open"] is True
+    assert enforced["pipeline"]["quality_gate"]["reason_counts"][GATE_WOULD_SUPPRESS_ALL] == 1
+    assert "insufficient_evidence" not in json.dumps(enforced, ensure_ascii=False)
+
+
+def test_quality_gate_enforce_restricts_raw_allowed_source_paths(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw_root = root / "raw/sources/references"
+    raw_root.mkdir(parents=True, exist_ok=True)
+    for index in range(3):
+        (raw_root / f"raw-{index}.md").write_text(
+            "raw enforce sentinel\n",
+            encoding="utf-8",
+        )
+    refresh_indexes(root)
+    telemetry = TelemetrySettings(enabled=False)
+    baseline = run_query_v2(
+        root,
+        "raw enforce sentinel",
+        top_k=2,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+    )
+    assert baseline["pipeline"]["fallback"]["level"] == "raw"
+    allowed_before = baseline["pipeline"]["fallback"]["allowed_source_paths"]
+    assert len(allowed_before) >= 2
+
+    def keep_first_only(features, *, policy_version):
+        result = evaluate_quality_gate(features, policy_version=policy_version)
+        return _gate_result_with_acceptance(result, {0})
+
+    monkeypatch.setattr(query_pipeline_module, "evaluate_quality_gate", keep_first_only)
+    enforced = run_query_v2(
+        root,
+        "raw enforce sentinel",
+        top_k=2,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="enforce"),
+    )
+
+    accepted_path = enforced["results"][0]["path"]
+    assert [item["path"] for item in enforced["additional_results"]] == []
+    assert enforced["pipeline"]["fallback"]["level"] == "raw"
+    assert enforced["pipeline"]["fallback"]["reasons"] == baseline["pipeline"]["fallback"]["reasons"]
+    assert enforced["pipeline"]["fallback"]["allowed_source_paths"] == [accepted_path]
 
 
 def test_wiki_query_finds_keyword_matches_and_returns_citations(tmp_path: Path):

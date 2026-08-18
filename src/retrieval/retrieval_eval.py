@@ -351,6 +351,24 @@ def vault_fingerprint(vault_root: str | Path) -> dict[str, Any]:
     return {"algorithm": "sha256(path\\0content_sha256)", "value": digest.hexdigest(), "file_count": count}
 
 
+def _evaluation_ranking_version(cases: Sequence[Mapping[str, Any]]) -> str:
+    """Use the public pipeline identity actually observed by the evaluator."""
+
+    versions: set[str] = set()
+    for case in cases:
+        pipeline = case.get("pipeline")
+        if not isinstance(pipeline, Mapping):
+            continue
+        value = pipeline.get("ranking_version")
+        if isinstance(value, str) and value:
+            versions.add(value)
+    if len(versions) == 1:
+        return next(iter(versions))
+    if len(versions) > 1:
+        return "mixed-ranking-versions"
+    return RANKING_POLICY_VERSION
+
+
 def run_retrieval_evaluation(
     vault_root: str | Path,
     dataset: RetrievalEvalDataset,
@@ -605,6 +623,7 @@ def run_retrieval_evaluation(
         if key in gate_identity:
             metadata_quality_gate[key] = gate_identity[key]
 
+    ranking_version = _evaluation_ranking_version(cases)
     report = {
         "schema_version": RETRIEVAL_EVAL_SCHEMA_VERSION,
         "metadata": {
@@ -615,7 +634,7 @@ def run_retrieval_evaluation(
             "abstention_threshold": dataset.manifest.abstention_threshold,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "runtime_provenance": RUNTIME_PROVENANCE.to_public_dict(),
-            "ranking": {"version": RANKING_POLICY_VERSION},
+            "ranking": {"version": ranking_version},
             "experiment": _normalise_experiment_metadata(experiment_metadata),
             "parameters": {
                 "top_k": top_k,
