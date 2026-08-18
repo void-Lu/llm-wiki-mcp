@@ -8,18 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 常用命令
 
-- 安装/同步开发环境：`uv sync --extra dev`
-- 运行全部测试：`uv run pytest`
-- 运行单个测试文件：`uv run pytest tests/retrieval/test_run_query_v2.py`
-- 运行单个测试函数：`uv run pytest tests/retrieval/test_run_query_v2.py::test_function_name -v`
-- 启动 MCP server：`uv run llm-wiki-mcp-server`、`uv run llm-wiki-mcp server` 或 `uv run python -m app.server`
 - CLI 初始化 vault：`uv run llm-wiki-mcp init --vault <name> --root <path> --default`
 - CLI 查看状态：`uv run llm-wiki-mcp status`
 - CLI 检查/构建/更新检索库：`uv run llm-wiki-mcp index status|build|update --vault <path> [--scope active|raw|archive]`
 - CLI 修复/审计（admin）：`uv run llm-wiki-mcp repair page-operation|provenance|privacy-audit <plan|apply> --vault <name>`
 - 本机 `uv run pytest` 若报 `uv trampoline failed to canonicalize script path`，改用 `uv run python -m pytest`（已验证可用）。
 
-项目使用 `uv.lock` 管理开发环境。Ruff 配置在 pyproject.toml（`select = ["E9", "F"]`），运行 `uv run ruff check src/`；完成前至少运行相关 `uv run pytest`，较大改动运行全量 `uv run pytest` 和 `uv run ruff check src/`。
+完成前至少运行相关 `uv run pytest`；较大改动运行全量 `uv run pytest` 和 `uv run ruff check src/`。
 
 ## 架构总览
 
@@ -27,14 +22,14 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### MCP 工具入口层
 
-[server.py](src/app/server.py) 用 MCP Python SDK 2.x 的 `MCPServer` 注册所有公开工具，薄封装后委托到业务模块。人工笔记公开入口是 `wiki_write_note`；旧 `save_obsidian_note` 不应再注册。新增或调整 MCP 工具时，通常需要同时改：
+[server.py](src/app/server.py) 用 MCP Python SDK 2.x 的 `MCPServer` 注册所有公开工具，薄封装后委托到业务模块。人工笔记公开入口是 `wiki_write_note`。新增或调整 MCP 工具时，通常需要同时改：
 
 1. 业务模块中的纯函数实现。
 2. [server.py](src/app/server.py) 的 tool wrapper / `@mcp.tool()` 注册。
 3. [README.md](README.md) 的工具说明（如果公开行为变化）。
 4. [tests/app/test_server_tools.py](tests/app/test_server_tools.py) 和对应业务测试。
 
-注册工具清单（9 个）：`wiki_status`、`wiki_list`（metadata-only catalog）、`wiki_get`（opaque `content_ref` 精确读取）、`wiki_ingest`、`wiki_write_note`、`wiki_update`、`wiki_query`、`wiki_archive`、`wiki_restore`。`wiki_generation` worker 工具不再注册；init/config、retrieval-eval、vector/index 生命周期、archive admin、repair/privacy admin 和 migration 只保留在 CLI 边界。
+注册工具清单以 `server.py` 的 `@mcp.tool()` 注册表为准。init/config、retrieval-eval、vector/index 生命周期、archive admin、repair/privacy admin 和 migration 只保留在 CLI 边界。
 
 [public_contracts.py](src/app/public_contracts.py) 定义稳定公开契约 `PublicResult`/`PublicError`（含 `correlation_id`）；[server.py](src/app/server.py) 所有工具经统一 `_register` 注册，入参 schema 为 `extra="forbid"` 严格模式。
 
@@ -42,8 +37,8 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 - `vault_root` 解析优先级在 [runtime_config.py](src/runtime/runtime_config.py)：工具参数 > `LLM_WIKI_VAULT_ROOT` > 全局 `config.yaml` 的 `default_vault`。
 - 跨平台配置/数据目录在 [platform_paths.py](src/runtime/platform_paths.py)，测试通过 [tests/conftest.py](tests/conftest.py) 自动隔离这些环境变量。
-- Wiki 目录创建、path segment 校验、slug 规则、路径错误翻译表与物理逃逸校验由 [wiki_paths.py](src/wiki/wiki_paths.py) 单一持有，核心入口为 `safe_segment`/`slug`/`translate_path_error`/`resolve_within_root`。外部 Obsidian root 固定包含 `purpose.md`、`schema.md`、`raw/sources/{projects,file,references,chat}/`、`raw/assets/`、`wiki/index.md`、`wiki/log.md`、`wiki/overview.md`、`wiki/projects/`、`wiki/concepts/`、`wiki/entities/`、`archives/log.md`、`archives/bundles/`、`.obsidian/`、`.llm-wiki/state.sqlite3`；`wiki/archives/` 是已退役的历史路径，不由新运行时创建。`note_writer` 通过 `lowercase=False`、`fallback=""`、`ascii_punctuation=True` 的显式参数保持旧人工笔记文件名兼容；现有文件不自动迁移。
-- `raw/sources/` 是来源事实层；`wiki_ingest` 只复制明确文件并同步检索投影。`wiki/` 是可读 Markdown 层；`wiki/sources/` 命名空间已退役，一次性归档工具已完成使命并删除，活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes` 溯源。
+- Wiki 目录创建、path segment 校验、slug 规则、路径错误翻译表与物理逃逸校验由 [wiki_paths.py](src/wiki/wiki_paths.py) 单一持有，核心入口为 `safe_segment`/`slug`/`translate_path_error`/`resolve_within_root`。外部 Obsidian root 的固定目录清单由 [wiki_paths.py](src/wiki/wiki_paths.py) 单一持有；`note_writer` 通过 `lowercase=False`、`fallback=""`、`ascii_punctuation=True` 的显式参数保持旧人工笔记文件名兼容；现有文件不自动迁移。
+- `raw/sources/` 是来源事实层；`wiki_ingest` 只复制明确文件并同步检索投影。`wiki/` 是可读 Markdown 层；活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes` 溯源。
 - Markdown/frontmatter 读写、覆盖保护和脱敏在 [wiki_io.py](src/wiki/wiki_io.py)。生成页只能覆盖 `generated: true` 页面；人工页不能被静默覆盖。
 
 ### 写入与维护流水线
@@ -63,7 +58,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### 查询与图谱能力
 
-[query_pipeline.py](src/retrieval/query_pipeline.py) 是唯一查询引擎入口（Query V2）：passage FTS/vector 召回 → RRF 融合 → 有界强-seed 图扩展 → 上下文预算裁剪，并将紧凑正文直接放入结果项；MCP 工具 `wiki_query` 只负责公共边界与运行时配置解析。
+[query_pipeline.py](src/retrieval/query_pipeline.py) 是唯一查询引擎入口（Query V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack，并将紧凑正文直接放入结果项；MCP 工具 `wiki_query` 只负责公共边界与运行时配置解析。
 
 [query_execution_context.py](src/retrieval/query_execution_context.py) 是单次 Query V2 执行状态、raw/fallback 分支迁移和冻结 `outcome()` 视图的唯一 owner。
 
@@ -73,15 +68,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 
 [graph_retrieval.py](src/retrieval/graph_retrieval.py) 提供 Query V2 共用的 wikilink、shared source、common neighbor、same type 有界图扩展；[vector_index.py](src/retrieval/vector_index.py) 提供 `VectorRecord`、`vector_index_records` 及显式向量生命周期所需的索引记录回退。v1 的 `src/wiki/wiki_query.py` 私有查询引擎已删除，不要重新引入第二套检索入口。
 
-[wikilinks.py](src/wiki/wikilinks.py) 提供 wikilink 格式化和解析工具函数：`format_wikilink`（含表格内 `\| 转义）、`normalize_wikilink_targets`（小写化 + 表格别名处理）、`wikilink_targets`、`split_wikilink_inner`、`table_wikilink_alias_pipe_lines` 等。query、update 等模块统一使用此模块处理 wikilink，不内嵌正则。
-
-[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、版本与运行身份。MCP 工具为 `wiki_status`。
-
-[content_catalog.py](src/wiki/content_catalog.py)（含 [catalog_cursor.py](src/wiki/catalog_cursor.py)、[content_reference.py](src/wiki/content_reference.py)）是 `wiki_list`/`wiki_get` 的只读 catalog 后端：metadata 分页 + opaque `content_ref`，不读正文。
-
-[wiki_models.py](src/wiki/wiki_models.py) 定义核心数据结构 `WikiPage`、`WikiLogEntry`。
-
-[query_pipeline.py](src/retrieval/query_pipeline.py) 是查询引擎核心（V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack。支持 `expansion_terms` 模糊词扩展和 `filters` 元数据过滤（含 `path_prefix`，见 [metadata_filters.py](src/retrieval/metadata_filters.py)）；查询经 [query_cancellation.py](src/retrieval/query_cancellation.py) 协作式取消与有界并发。`note_type`/`noteType` 合并保持 canonical 优先、falsy 回退和双空报错，不能抽象为 aliases；过滤器的 MCP 边界与目录层防御性规范化契约见 `metadata_filters.py` 模块文档。
+Query V2 支持 `expansion_terms` 模糊词扩展和 `filters` 元数据过滤（含 `path_prefix`，见 [metadata_filters.py](src/retrieval/metadata_filters.py)）；查询经 [query_cancellation.py](src/retrieval/query_cancellation.py) 协作式取消与有界并发。`note_type`/`noteType` 合并保持 canonical 优先、falsy 回退和双空报错，不能抽象为 aliases；过滤器的 MCP 边界与目录层防御性规范化契约见 `metadata_filters.py` 模块文档。
 
 [query_snapshot.py](src/retrieval/query_snapshot.py) 的 `QueryCorpusSnapshot` 为每次查询捕获 active/raw store 的不可变页面 metadata、provenance 和 candidate 视图；discovery、过滤、向量、图扩展和回退必须复用该快照，不能在同一请求内重复读取漂移的 store 状态。
 
@@ -89,17 +76,21 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 
 [retrieval_eval_dataset.py](src/retrieval/retrieval_eval_dataset.py) 是评测 JSONL/manifest schema、相关性标签和 public/legacy 过滤器投影的唯一 owner；解析函数不依赖 vault 或查询运行时。 [retrieval_eval_report.py](src/retrieval/retrieval_eval_report.py) 是 Recall/Precision/MRR/nDCG、slice/gate、pipeline 安全投影与 JSON/Markdown 报告输出的 owner。 [retrieval_eval.py](src/retrieval/retrieval_eval.py) 只保留 `EvaluationRuntimeSnapshot`、`EngineQueryAdapter`/`McpQueryAdapter`、`EvaluationQueryService` 和评测编排 seam。评测经 `query_telemetry` 只读接口取遥测、经注入 adapter 走 MCP 入口；`app.server` 只允许在 `default_mcp_entry_adapter()` 内惰性导入，评测模块顶层不得加载 server。MCP 入口只在请求局部 ContextVar 中注入不可变 tool resolution，不得修改 `server.CONFIG_REGISTRY`；`parse_evaluation_filters` 由 dataset owner 提供并由 eval 兼容导出。评测必须保持只读，不创建/更新检索库，也不写入 telemetry。
 
-[chat_memory.py](src/wiki/chat_memory.py) 提供不可变、脱敏的 chat source 持久化；`wiki_write_note` 通过 `chat_metadata`/`chat_derived`/`chat_sources` 参数写入 chat source。
-
 [lexical_analyzer.py](src/retrieval/lexical_analyzer.py) 提供 FTS 和检索共用的词法归一化（Latin/CJK 分词、停用词、编辑距离）。
 
-[runtime_provenance.py](src/runtime/runtime_provenance.py) 提供服务器版本与运行身份快照，用于 `wiki_status` 和 MCP 握手。
+[wikilinks.py](src/wiki/wikilinks.py) 提供 wikilink 格式化和解析工具函数。query、update 等模块统一使用此模块处理 wikilink，不内嵌正则。
+
+[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、版本与运行身份。MCP 工具为 `wiki_status`。
+
+[content_catalog.py](src/wiki/content_catalog.py)（含 [catalog_cursor.py](src/wiki/catalog_cursor.py)、[content_reference.py](src/wiki/content_reference.py)）是 `wiki_list`/`wiki_get` 的只读 catalog 后端：metadata 分页 + opaque `content_ref`，不读正文。
+
+[chat_memory.py](src/wiki/chat_memory.py) 提供不可变、脱敏的 chat source 持久化；`wiki_write_note` 通过 `chat_metadata`/`chat_derived`/`chat_sources` 参数写入 chat source。
 
 [wiki_limits.py](src/wiki/wiki_limits.py) 定义页面/日志/导航条目字节上限（HARD_PAGE_BYTES=200_000 等）。
 
-[git_utils.py](src/common/git_utils.py) 提供 `get_git_commit`、`get_git_revision`、`get_git_dirty`、`is_git_dirty`、`get_git_branch` 等零外部依赖 git 辅助函数，用于 runtime provenance。
+[runtime_provenance.py](src/runtime/runtime_provenance.py) 提供服务器版本与运行身份快照，用于 `wiki_status` 和 MCP 握手。
 
-归档相关模块：`archive_models.py` 定义 bundle/plan/tombstone 数据，`archive_manifest.py` 负责 manifest 哈希与校验，`archive_planner.py` 生成归档计划，`archive_migration.py` 处理 legacy migration，`archive_service.py` 是 MCP/CLI 的公开服务边界。
+[git_utils.py](src/common/git_utils.py) 提供零外部依赖的 git 辅助函数，用于 runtime provenance。
 
 旧的 `context_budget.py`、`page_merge.py`、`wiki_dedup.py`、`wiki_delete.py`、`wiki_enrich.py`、`wiki_gap.py`、`wiki_ingest.py`、`wiki_insights.py`、`wiki_lint.py`、`wiki_repair.py`、`wiki_research.py`、`wiki_source_index.py`、`wiki_synthesis.py`、`wiki_verify.py`、`wiki_batch.py`、`pipeline_detector.py`、`louvain.py` 已删除；不要重新注册这些模块或 MCP 工具。
 
@@ -120,14 +111,7 @@ candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/can
 
 ## 测试定位
 
-测试文件按功能包分组，命令为 `uv run pytest tests/<package>/test_<module>.py`：
-- CLI/runtime/config/provenance：`test_cli.py`、`test_runtime_config.py`、`test_runtime_provenance.py`、`test_readme_global_mcp_docs.py`
-- Wiki 基础设施：`test_wiki_paths.py`、`test_wiki_io.py`、`test_atomic_file.py`、`test_page_mutation.py`、`test_wiki_index.py`、`test_wiki_overview.py`、`test_wiki_log.py`、`test_log_volume.py`、`test_wiki_files.py`
-- MCP 工具注册与业务入口：`test_server_tools.py`、`test_wiki_update.py`、`test_note_writer.py`、`test_ingest_service.py`
-- 查询/检索/向量/wikilink（`tests/retrieval/`）：`test_run_query_v2.py`、`test_query_pipeline.py`、`test_query_execution_context.py`、`test_query_recovery.py`、`test_retrieval_eval.py`、`test_retrieval_eval_dataset.py`、`test_retrieval_eval_report.py`、`test_retrieval_eval_service.py`、`test_retrieval_index.py`、`test_vector_index.py`、`test_vector_passage_v2.py`、`test_vector_provider.py`、`test_wiki_ingest_normalize.py`、`test_wikilinks.py`
-- 归档/辅助：`test_archive_lifecycle.py`、`test_git_utils.py`
-- 通用支撑：`test_concept_registry.py`、`test_knowledge_dependencies.py`、`test_context_packer.py`、`test_passage_chunker.py`、`test_content_redaction.py`、`test_query_telemetry.py`、`test_lexical_analyzer.py`、`test_chat_memory.py`、`test_build_backend.py`
-- repair/privacy/契约/catalog：`test_cli_repair.py`、`test_cli_repair_admin.py`、`test_page_repair.py`、`test_privacy_audit.py`、`test_provenance_migration.py`、`test_public_contracts.py`、`test_content_catalog.py`、`test_query_cancellation.py`、`test_query_execution_registry.py`、`test_spec_lint.py`（tests/tools/）
+测试按功能包分组于 `tests/`，文件名与被测模块对应；单测试命令为 `uv run pytest tests/<package>/test_<module>.py`。
 
 ## Agent skills
 
