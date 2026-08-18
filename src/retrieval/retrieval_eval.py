@@ -44,14 +44,16 @@ from retrieval.retrieval_eval_report import (
     _pipeline_summary,
     _result_summary,
     calculate_ranking_metrics,
+    calculate_quality_gate_metrics,
     evaluate_retrieval_gate,
+    quality_gate_report_identity,
     percentile_95,
     safe_report_identity,
     write_retrieval_eval_report,
 )
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.vector_index import parse_vector_settings
-from runtime.runtime_config import EmbeddingSettings, TelemetrySettings, VaultSettings
+from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings, VaultSettings
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from wiki.wiki_paths import filesystem_path
 
@@ -131,12 +133,19 @@ class EvaluationRuntimeSnapshot:
     mcp_resolution: Any | None = None
 
     @classmethod
-    def lexical_only(cls, vault_root: str | Path) -> "EvaluationRuntimeSnapshot":
+    def lexical_only(
+        cls,
+        vault_root: str | Path,
+        *,
+        quality_gate: QualityGateSettings | None = None,
+    ) -> "EvaluationRuntimeSnapshot":
         root = filesystem_path(vault_root)
         settings = replace(
             VaultSettings(name=root.name, root=root),
             telemetry=TelemetrySettings(enabled=False),
         )
+        if quality_gate is not None:
+            settings = replace(settings, quality_gate=quality_gate)
         return cls(root=root, logical_name=root.name, settings=settings)
 
     @classmethod
@@ -145,12 +154,15 @@ class EvaluationRuntimeSnapshot:
         vault_root: str | Path,
         *,
         adapter: McpEntryAdapter | None = None,
+        quality_gate: QualityGateSettings | None = None,
     ) -> "EvaluationRuntimeSnapshot":
         """只解析一次 MCP settings，并冻结本地 telemetry-off 副本。"""
 
         active_adapter = adapter or default_mcp_entry_adapter()
         resolution = _resolve_mcp_vault(active_adapter, vault_root)
         settings = resolution.resolved.settings
+        if quality_gate is not None:
+            settings = replace(settings, quality_gate=quality_gate)
         if not settings.retrieval.lexical_enabled or settings.retrieval.embedding.enabled:
             raise RetrievalEvalError("mcp_not_lexical", "the selected vault MCP configuration is not lexical-only")
         frozen_settings = replace(settings, telemetry=TelemetrySettings(enabled=False))
@@ -353,6 +365,7 @@ def run_retrieval_evaluation(
     query_version: str = "v2",
     scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"] | None = None,
     entrypoint: Literal["engine", "mcp"] = "engine",
+    quality_gate: QualityGateSettings | None = None,
 ) -> dict[str, Any]:
     """通过统一 query service 运行只读评测，保留既有报告形状。"""
 
@@ -393,6 +406,7 @@ def run_retrieval_evaluation(
         query_version=query_version,
         scope=_case_scope(first, scope),
         entrypoint=entrypoint,
+        quality_gate=quality_gate,
     )
 
     cases: list[dict[str, Any]] = []
@@ -430,6 +444,7 @@ def run_retrieval_evaluation(
                 query_version=query_version,
                 scope=case_scope,
                 entrypoint=entrypoint,
+                quality_gate=quality_gate,
             )
             elapsed_ms = (time.perf_counter() - started) * 1_000
             latency_samples.append(elapsed_ms)
@@ -481,6 +496,7 @@ def run_retrieval_evaluation(
                 query_version=query_version,
                 scope=case_scope,
                 entrypoint=entrypoint,
+                quality_gate=quality_gate,
             )
             raw_budget = context_result.get("budget") or context_result.get("context_pack", {}).get("budget", {})
             budget = dict(raw_budget)
@@ -493,6 +509,10 @@ def run_retrieval_evaluation(
             packed_token_samples.append(used)
 
         pipeline = _pipeline_summary(result.get("pipeline", {}))
+        quality_gate_observation = _quality_gate_observation(
+            result.get("pipeline", {}),
+            configured=quality_gate,
+        )
         fallback = pipeline.get("fallback", {}) if isinstance(pipeline, Mapping) else {}
         fallback_level = str(fallback.get("level", "legacy")) if isinstance(fallback, Mapping) else "legacy"
         if fallback_level not in {"none", "legacy"}:
@@ -511,6 +531,7 @@ def run_retrieval_evaluation(
             vector_config=vector_config,
             query_version=query_version,
             entrypoint=entrypoint,
+            quality_gate=quality_gate,
         )
         for item in diagnosis:
             category = str(item.get("category", "unknown"))
@@ -534,6 +555,7 @@ def run_retrieval_evaluation(
                 "tags": list(case.tags),
                 "filters": case.filters,
                 "scope": case_scope,
+                "relevant": [{"path": item.path, "grade": item.grade} for item in case.relevant],
                 "ranked_paths": ranked_paths,
                 "ranking_runs": rankings,
                 "latency_ms": [item["latency_ms"] for item in query_runs],
@@ -548,6 +570,7 @@ def run_retrieval_evaluation(
                 "warning_count": pipeline.get("warning_count", 0),
                 "result_summary": [_result_summary(item) for item in result["results"]],
                 "diagnosis": diagnosis,
+                "quality_gate_observation": quality_gate_observation,
             }
         )
 
@@ -563,7 +586,26 @@ def run_retrieval_evaluation(
         index_after,
     )
 
-    return {
+    gate_configured = (
+        {"mode": quality_gate.mode, "policy_version": quality_gate.policy_version}
+        if quality_gate is not None and quality_gate.mode in {"shadow", "enforce"}
+        else None
+    )
+    gate_metrics = calculate_quality_gate_metrics(
+        cases,
+        top_k=top_k,
+        gate_enabled=gate_configured is not None or any(case.get("quality_gate_observation") is not None for case in cases),
+    )
+    gate_identity = quality_gate_report_identity(cases, configured=gate_configured)
+    metadata_quality_gate: dict[str, Any] = {
+        "status": gate_identity["status"],
+        "enabled": gate_identity["enabled"],
+    }
+    for key in ("mode", "gate_policy_version", "gate_config_hash", "calibration_revision"):
+        if key in gate_identity:
+            metadata_quality_gate[key] = gate_identity[key]
+
+    report = {
         "schema_version": RETRIEVAL_EVAL_SCHEMA_VERSION,
         "metadata": {
             "dataset_id": dataset.manifest.dataset_id,
@@ -598,6 +640,7 @@ def run_retrieval_evaluation(
             },
             "vault_fingerprint": vault_fingerprint_after,
             "side_effects": side_effects,
+            "quality_gate": metadata_quality_gate,
         },
         "metrics": {
             "recall_at_k_macro": _mean_or_none(recall_values),
@@ -634,9 +677,75 @@ def run_retrieval_evaluation(
                 "violations": budget_violations,
                 "within_budget": not budget_violations,
             },
+            "quality_gate": gate_metrics,
+            "false_suppression": gate_metrics["false_suppression"],
+            "false_suppression_rate": gate_metrics["false_suppression_rate"],
+            "would_accept": gate_metrics["would_accept"],
+            "would_accept_rate": gate_metrics["would_accept_rate"],
+            "rank_churn": gate_metrics["rank_churn"],
+            "gate_reason_counts": gate_metrics["reason_counts"],
+            "gate_score_family_counts": gate_metrics["score_family_counts"],
         },
         "cases": cases,
     }
+    for key in ("gate_policy_version", "gate_config_hash"):
+        if key in gate_identity:
+            report["metadata"][key] = gate_identity[key]
+    return report
+
+
+def _quality_gate_observation(
+    pipeline: object,
+    *,
+    configured: QualityGateSettings | None,
+) -> dict[str, Any] | None:
+    """保留评测所需的 shadow 摘要，详细决策只留在内存。"""
+
+    raw_pipeline = pipeline if isinstance(pipeline, Mapping) else {}
+    raw_gate = raw_pipeline.get("quality_gate")
+    if not isinstance(raw_gate, Mapping):
+        if configured is None or configured.mode not in {"shadow", "enforce"}:
+            return None
+        return {
+            "available": False,
+            "mode": configured.mode,
+            "policy_version": configured.policy_version,
+        }
+
+    observation: dict[str, Any] = {"available": True}
+    for key in (
+        "mode",
+        "policy_version",
+        "calibration_revision",
+        "config_hash",
+        "status",
+        "candidate_count",
+        "accepted_count",
+        "rejected_count",
+        "fail_open",
+    ):
+        if key in raw_gate:
+            observation[key] = raw_gate[key]
+    for key in ("reason_counts", "score_family_counts"):
+        value = raw_gate.get(key)
+        if isinstance(value, Mapping):
+            observation[key] = dict(value)
+
+    # Future adapters may expose page-level decisions.  They are intentionally
+    # kept only in the internal case view so report output remains path-free.
+    for key in ("decisions", "candidate_decisions"):
+        value = raw_gate.get(key)
+        if isinstance(value, (Mapping, list, tuple)):
+            observation[key] = value
+    for key in ("accepted_paths", "rejected_paths", "accepted_pages", "rejected_pages"):
+        value = raw_gate.get(key)
+        if isinstance(value, (list, tuple)):
+            observation[key] = list(value)
+
+    if configured is not None and configured.mode in {"shadow", "enforce"}:
+        observation.setdefault("mode", configured.mode)
+        observation.setdefault("policy_version", configured.policy_version)
+    return observation
 
 
 def _diagnose_case(
@@ -650,6 +759,7 @@ def _diagnose_case(
     vector_config: Mapping[str, Any] | None,
     query_version: str,
     entrypoint: Literal["engine", "mcp"],
+    quality_gate: QualityGateSettings | None,
 ) -> list[dict[str, Any]]:
     """使用有界 top-40 只读 query 解释遗漏，不改变主评测指标。"""
 
@@ -667,6 +777,7 @@ def _diagnose_case(
             query_version=query_version,
             scope=scope,
             entrypoint=entrypoint,
+            quality_gate=quality_gate,
         )
         diagnostic_paths = [str(item["path"]) for item in diagnostic_result.get("results", [])]
     except RetrievalEvalError as exc:
@@ -721,8 +832,13 @@ def _run_case(
     query_version: str,
     scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
     entrypoint: Literal["engine", "mcp"],
+    quality_gate: QualityGateSettings | None = None,
 ) -> dict[str, Any]:
-    runtime = EvaluationRuntimeSnapshot.from_mcp_vault(root) if entrypoint == "mcp" else EvaluationRuntimeSnapshot.lexical_only(root)
+    runtime = (
+        EvaluationRuntimeSnapshot.from_mcp_vault(root, quality_gate=quality_gate)
+        if entrypoint == "mcp"
+        else EvaluationRuntimeSnapshot.lexical_only(root, quality_gate=quality_gate)
+    )
     request = EvaluationQueryRequest(
         case=case,
         top_k=top_k,

@@ -40,6 +40,7 @@ from retrieval.retrieval_eval import (
 from retrieval.vector_index import VectorIndexStore, vector_index_records
 from retrieval.retrieval_index import RetrievalIndexStore
 from archive.archive_service import ArchiveService
+from runtime.runtime_config import QualityGateSettings
 from wiki.wiki_paths import filesystem_path
 from retrieval.vector_provider import DeterministicFakeProvider
 from tests.helpers import write_test_page
@@ -496,6 +497,37 @@ def test_fixture_evaluation_is_deterministic_and_reports_all_required_metrics(tm
     del legacy_report["metadata"]["ranking"]
     legacy_output = write_retrieval_eval_report(legacy_report, tmp_path / "legacy-reports")
     assert "legacy-unversioned" in Path(legacy_output["markdown"]).read_text(encoding="utf-8")
+
+
+def test_shadow_evaluation_reports_gate_identity_and_metrics_without_changing_legacy_fp(tmp_path: Path) -> None:
+    vault = _copy_vault(tmp_path)
+    _build_passage_store(vault)
+    dataset = load_retrieval_dataset(_copy_dataset(tmp_path))
+
+    report = run_retrieval_evaluation(
+        vault,
+        dataset,
+        measure_context_budget=False,
+        quality_gate=QualityGateSettings(mode="shadow"),
+    )
+
+    quality_gate = report["metrics"]["quality_gate"]
+    metadata_gate = report["metadata"]["quality_gate"]
+    assert quality_gate["enabled"] is True
+    assert quality_gate["status"] in {"proven", "unproven"}
+    assert metadata_gate["gate_policy_version"] == "query-quality-policy-v0"
+    assert len(metadata_gate["gate_config_hash"]) == 64
+    assert report["metadata"]["gate_config_hash"] == metadata_gate["gate_config_hash"]
+    assert report["metrics"]["no_answer_false_positive_rate"] == 0.0
+    assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
+
+    output = write_retrieval_eval_report(report, tmp_path / "shadow-reports")
+    json_report = Path(output["json"]).read_text(encoding="utf-8")
+    markdown_report = Path(output["markdown"]).read_text(encoding="utf-8")
+    assert '"quality_gate"' in json_report
+    assert "质量门禁观测" in markdown_report
+    assert '"query"' not in json_report
+    assert '"ranked_paths"' not in json_report
 
 
 def test_mcp_entrypoint_uses_public_lexical_contract_without_vector_hits(tmp_path: Path) -> None:

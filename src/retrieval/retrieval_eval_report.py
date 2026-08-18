@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
 import statistics
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -19,7 +21,10 @@ from retrieval.query_quality_policy import SCORE_FAMILIES, is_gate_reason_code, 
 
 __all__ = [
     "calculate_ranking_metrics",
+    "calculate_quality_gate_metrics",
     "evaluate_retrieval_gate",
+    "quality_gate_config_hash",
+    "quality_gate_report_identity",
     "percentile_95",
     "safe_report_identity",
     "write_retrieval_eval_report",
@@ -95,6 +100,31 @@ def safe_report_identity(report: Mapping[str, Any]) -> dict[str, Any]:
         version = ranking.get("version")
         if isinstance(version, str) and version:
             identity["ranking_version"] = version
+    runtime = metadata.get("runtime_provenance")
+    if isinstance(runtime, Mapping):
+        safe_runtime: dict[str, Any] = {}
+        for name in ("package_version", "revision", "revision_source"):
+            value = runtime.get(name)
+            if isinstance(value, str) and value and _safe_identity_token(value):
+                safe_runtime[name] = value
+        dirty = runtime.get("dirty")
+        if isinstance(dirty, bool) or dirty is None:
+            safe_runtime["dirty"] = dirty
+        if safe_runtime:
+            identity["runtime_provenance"] = safe_runtime
+
+    quality_gate = metadata.get("quality_gate")
+    if isinstance(quality_gate, Mapping):
+        policy_version = quality_gate.get("policy_version")
+        config_hash = quality_gate.get("config_hash")
+        if isinstance(policy_version, str) and _safe_identity_token(policy_version):
+            identity["gate_policy_version"] = policy_version
+        if isinstance(config_hash, str) and _safe_identity_token(config_hash):
+            identity["gate_config_hash"] = config_hash
+    for name in ("gate_policy_version", "gate_config_hash"):
+        value = metadata.get(name)
+        if isinstance(value, str) and _safe_identity_token(value):
+            identity[name] = value
     return identity
 
 
@@ -143,7 +173,7 @@ def evaluate_retrieval_gate(
     baseline_identity = safe_report_identity(baseline)
     candidate_fingerprint = candidate_identity.get("vault_fingerprint")
     baseline_fingerprint = baseline_identity.get("vault_fingerprint")
-    for name, candidate_value, baseline_value in (
+    identity_pairs = [
         ("dataset_id", candidate_identity.get("dataset_id"), baseline_identity.get("dataset_id")),
         ("dataset_revision", candidate_identity.get("dataset_revision"), baseline_identity.get("dataset_revision")),
         (
@@ -152,14 +182,43 @@ def evaluate_retrieval_gate(
             baseline_fingerprint.get("value") if isinstance(baseline_fingerprint, Mapping) else None,
         ),
         ("ranking_version", candidate_identity.get("ranking_version"), baseline_identity.get("ranking_version")),
-    ):
+        ("runtime_provenance", candidate_identity.get("runtime_provenance"), baseline_identity.get("runtime_provenance")),
+        ("gate_policy_version", candidate_identity.get("gate_policy_version"), baseline_identity.get("gate_policy_version")),
+        ("gate_config_hash", candidate_identity.get("gate_config_hash"), baseline_identity.get("gate_config_hash")),
+    ]
+    candidate_gate_declared = isinstance(candidate_metadata.get("quality_gate"), Mapping) or any(
+        name in candidate_metadata for name in ("gate_policy_version", "gate_config_hash")
+    )
+    baseline_gate_declared = isinstance(baseline_metadata.get("quality_gate"), Mapping) or any(
+        name in baseline_metadata for name in ("gate_policy_version", "gate_config_hash")
+    )
+    identity_mismatch = False
+    for name, candidate_value, baseline_value in identity_pairs:
+        # Legacy reports predate the gate/runtime identity fields. Preserve
+        # their comparison compatibility when both sides omit a new field;
+        # a one-sided or unequal value is still unproven.
+        if name == "runtime_provenance" and candidate_value is None and baseline_value is None:
+            continue
+        if name in {"gate_policy_version", "gate_config_hash"} and candidate_value is None and baseline_value is None:
+            if not (candidate_gate_declared or baseline_gate_declared):
+                continue
+        passed = bool(candidate_value) and candidate_value == baseline_value
         add_check(
             name,
-            bool(candidate_value) and candidate_value == baseline_value,
+            passed,
             actual=candidate_value,
             expected=baseline_value,
             reason="baseline_identity_mismatch" if candidate_value != baseline_value else None,
         )
+        identity_mismatch = identity_mismatch or not passed
+
+    if identity_mismatch:
+        return {
+            "passed": False,
+            "status": "unproven",
+            "reason": "baseline_identity_mismatch",
+            "checks": checks,
+        }
 
     candidate_parameters = candidate_metadata.get("parameters")
     if not isinstance(candidate_parameters, Mapping):
@@ -286,9 +345,31 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         "## Case 摘要",
         "",
     ]
+    gate_metrics = metrics.get("quality_gate")
+    if isinstance(gate_metrics, Mapping):
+        false_suppression = gate_metrics.get("false_suppression")
+        would_accept = gate_metrics.get("would_accept")
+        rank_churn = gate_metrics.get("rank_churn")
+        lines.extend(
+            [
+                "## 质量门禁观测",
+                "",
+                f"- 状态：`{gate_metrics.get('status', 'unknown')}`",
+                f"- False suppression：{_format_metric(false_suppression.get('rate') if isinstance(false_suppression, Mapping) else None)}",
+                f"- No-answer would_accept：{_format_metric(would_accept.get('rate') if isinstance(would_accept, Mapping) else None)}",
+                f"- Rank churn top-1 flip：{_format_metric(rank_churn.get('top1_flip_rate') if isinstance(rank_churn, Mapping) else None)}",
+                f"- Rank churn top-k Jaccard：{_format_metric(rank_churn.get('top_k_jaccard') if isinstance(rank_churn, Mapping) else None)}",
+                f"- Reason code 分桶：{gate_metrics.get('reason_counts', {})}",
+                f"- Score family 分桶：{gate_metrics.get('score_family_counts', {})}",
+                "",
+            ]
+        )
     for case in safe_report["cases"]:
-        first_path = case["ranked_paths"][0] if case["ranked_paths"] else "（无结果）"
-        lines.append(f"- `{case['id']}`：首项 `{first_path}`；过滤器 {'通过' if case['filter_correct'] else '失败'}")
+        case_metrics = case.get("metrics") if isinstance(case.get("metrics"), Mapping) else {}
+        lines.append(
+            f"- `{case['id']}`：过滤器 {'通过' if case.get('filter_correct') else '失败'}；"
+            f"Recall {_format_metric(case_metrics.get('recall') if isinstance(case_metrics, Mapping) else None)}"
+        )
     gate = safe_report.get("gate")
     if isinstance(gate, Mapping):
         lines.extend(
@@ -314,15 +395,68 @@ def _sanitise_report_for_output(report: Mapping[str, Any]) -> dict[str, Any]:
         raise RetrievalEvalError("report_invalid", "retrieval evaluation report must be an object")
     cases = safe_report.get("cases")
     if isinstance(cases, list):
+        safe_cases: list[dict[str, Any]] = []
         for case in cases:
             if not isinstance(case, dict):
                 continue
             pipeline_value = case.get("pipeline", {})
             pipeline = dict(pipeline_value) if _has_pipeline_summary_shape(pipeline_value) else _project_pipeline(pipeline_value)
-            case["pipeline"] = pipeline
-            case["warnings"] = []
-            case["warning_count"] = pipeline.get("warning_count", 0)
+            safe_case: dict[str, Any] = {}
+            case_id = case.get("id")
+            if not isinstance(case_id, str) or not _safe_identity_token(case_id):
+                continue
+            safe_case["id"] = case_id
+            for key in ("answerable", "no_answer_false_positive", "filter_correct"):
+                value = case.get(key)
+                if type(value) is bool:
+                    safe_case[key] = value
+            for key in ("language", "scope"):
+                value = case.get(key)
+                if _safe_identity_token(value):
+                    safe_case[key] = value
+            top_score = _finite_number(case.get("top_score"))
+            if top_score is not None:
+                safe_case["top_score"] = top_score
+            tags = case.get("tags")
+            if isinstance(tags, list):
+                safe_case["tags"] = [tag for tag in tags if _safe_identity_token(tag)][:32]
+            for key in ("metrics", "metrics_by_k", "context_budget"):
+                value = case.get(key)
+                if isinstance(value, Mapping):
+                    safe_case[key] = _project_safe_output_value(value)
+            safe_case["pipeline"] = pipeline
+            safe_case["warnings"] = []
+            safe_case["warning_count"] = pipeline.get("warning_count", 0)
+            safe_cases.append(safe_case)
+        safe_report["cases"] = safe_cases
     return safe_report
+
+
+def _project_safe_output_value(value: object, *, depth: int = 0) -> Any:
+    """递归保留指标所需的有限标量，丢弃字符串形式的路径/正文。"""
+
+    if depth > 6:
+        return None
+    if value is None or type(value) is bool:
+        return value
+    if _finite_number(value) is not None:
+        return value
+    if isinstance(value, str):
+        return value if _safe_identity_token(value) else None
+    if isinstance(value, Mapping):
+        projected: dict[str, Any] = {}
+        blocked_keys = frozenset({"body", "content", "excerpt", "path", "query", "question", "text"})
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+            if not _safe_identity_token(key) or str(key) in blocked_keys:
+                continue
+            projected_item = _project_safe_output_value(item, depth=depth + 1)
+            if isinstance(item, str) and projected_item is None:
+                continue
+            projected[str(key)] = projected_item
+        return projected
+    if isinstance(value, list):
+        return [_project_safe_output_value(item, depth=depth + 1) for item in value[:64]]
+    return None
 
 
 def _calculate_metrics_by_k(
@@ -351,7 +485,13 @@ def _build_slice_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[s
             scope = pipeline.get("scope")
             if isinstance(scope, str) and scope:
                 buckets.setdefault(f"scope:{scope}", []).append(case)
+            fallback = pipeline.get("fallback")
+            if isinstance(fallback, Mapping):
+                level = fallback.get("level")
+                if isinstance(level, str) and level:
+                    buckets.setdefault(f"fallback:{level}", []).append(case)
 
+    gate_enabled = any(_quality_gate_observation(case) is not None for case in cases)
     result: dict[str, dict[str, Any]] = {}
     for name, bucket in sorted(buckets.items()):
         ranking_metrics: list[Mapping[str, Any]] = []
@@ -372,7 +512,371 @@ def _build_slice_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[s
             "no_answer_false_positive_rate": _mean_or_none([1.0 if case.get("no_answer_false_positive") else 0.0 for case in no_answer]),
             "p95_latency_ms": percentile_95([float(value) for case in bucket for value in case.get("latency_ms", [])]),
         }
+        gate_metrics = calculate_quality_gate_metrics(bucket, gate_enabled=gate_enabled)
+        result[name]["quality_gate"] = {
+            "status": gate_metrics["status"],
+            "false_suppression_rate": gate_metrics["false_suppression_rate"],
+            "would_accept_rate": gate_metrics["would_accept_rate"],
+            "top1_flip_rate": gate_metrics["rank_churn"]["top1_flip_rate"],
+            "top_k_jaccard": gate_metrics["rank_churn"]["top_k_jaccard"],
+            "reason_counts": gate_metrics["reason_counts"],
+            "score_family_counts": gate_metrics["score_family_counts"],
+        }
     return result
+
+
+_GATE_IDENTITY_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_GATE_MAX_BUCKETS = 64
+
+
+def _safe_identity_token(value: object) -> bool:
+    return isinstance(value, str) and bool(_GATE_IDENTITY_TOKEN.fullmatch(value))
+
+
+def _bounded_gate_counts(value: object, *, kind: str) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    validator = is_gate_reason_code if kind == "reason" else is_score_family
+    counts: dict[str, int] = {}
+    for key, raw_count in value.items():
+        if validator(key) and type(raw_count) is int and raw_count >= 0:
+            counts[str(key)] = raw_count
+    return dict(sorted(counts.items())[:_GATE_MAX_BUCKETS])
+
+
+def _quality_gate_observation(case: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    for key in ("quality_gate_observation", "gate_observation", "shadow_observation"):
+        value = case.get(key)
+        if isinstance(value, Mapping):
+            return value
+    pipeline = case.get("pipeline")
+    if isinstance(pipeline, Mapping):
+        value = pipeline.get("quality_gate")
+        if isinstance(value, Mapping):
+            return value
+    return None
+
+
+def _case_paths(case: Mapping[str, Any]) -> list[str]:
+    raw_paths = case.get("ranked_paths")
+    if not isinstance(raw_paths, list):
+        summaries = case.get("result_summary")
+        raw_paths = [item.get("path") for item in summaries if isinstance(item, Mapping)] if isinstance(summaries, list) else []
+    return list(dict.fromkeys(path for path in raw_paths if isinstance(path, str) and path))
+
+
+def _case_grades(case: Mapping[str, Any]) -> dict[str, int] | None:
+    raw_relevant = case.get("relevant", case.get("relevance"))
+    if not isinstance(raw_relevant, (list, tuple)):
+        return None
+    grades: dict[str, int] = {}
+    for item in raw_relevant:
+        if not isinstance(item, Mapping):
+            return None
+        path = item.get("path")
+        grade = item.get("grade")
+        if not isinstance(path, str) or not path or type(grade) is not int or grade not in {1, 2, 3}:
+            return None
+        grades[path] = grade
+    return grades
+
+
+def _decision_mapping(observation: Mapping[str, Any], baseline_paths: Sequence[str]) -> dict[str, Mapping[str, Any]] | None:
+    """Resolve optional in-memory page decisions without persisting their paths."""
+
+    decisions: dict[str, Mapping[str, Any]] = {}
+
+    def add(path: object, accepted: object, raw: Mapping[str, Any] | None = None) -> None:
+        if not isinstance(path, str) or not path or not isinstance(accepted, bool):
+            return
+        decisions[path] = {
+            "accepted": accepted,
+            "reason_code": raw.get("reason_code", raw.get("reason")) if raw else None,
+            "score_family": raw.get("score_family", raw.get("family")) if raw else None,
+        }
+
+    raw_decisions = observation.get("decisions", observation.get("candidate_decisions"))
+    if isinstance(raw_decisions, Mapping):
+        for path, raw in raw_decisions.items():
+            if isinstance(raw, Mapping):
+                add(path, raw.get("accepted"), raw)
+            else:
+                add(path, raw)
+    elif isinstance(raw_decisions, (list, tuple)):
+        for index, raw in enumerate(raw_decisions):
+            if not isinstance(raw, Mapping):
+                continue
+            path = raw.get("path", raw.get("page_path"))
+            if path is None:
+                rank = raw.get("rank", raw.get("position"))
+                if type(rank) is int and 1 <= rank <= len(baseline_paths):
+                    path = baseline_paths[rank - 1]
+            add(path, raw.get("accepted"), raw)
+
+    accepted_paths = observation.get("accepted_paths", observation.get("accepted_pages"))
+    if isinstance(accepted_paths, (list, tuple)):
+        for path in accepted_paths:
+            add(path, True)
+    rejected_paths = observation.get("rejected_paths", observation.get("rejected_pages"))
+    if isinstance(rejected_paths, (list, tuple)):
+        for path in rejected_paths:
+            add(path, False)
+
+    if baseline_paths and all(path in decisions for path in baseline_paths):
+        return {path: decisions[path] for path in baseline_paths}
+    if not baseline_paths and isinstance(observation, Mapping):
+        return {}
+
+    candidate_count = observation.get("candidate_count")
+    accepted_count = observation.get("accepted_count")
+    rejected_count = observation.get("rejected_count")
+    if observation.get("fail_open") is True or (
+        type(candidate_count) is int
+        and type(accepted_count) is int
+        and type(rejected_count) is int
+        and candidate_count >= 0
+        and candidate_count >= len(baseline_paths)
+        and accepted_count == candidate_count
+        and rejected_count == 0
+    ):
+        return {path: {"accepted": True, "reason_code": None, "score_family": None} for path in baseline_paths}
+    return None
+
+
+def _gate_observation_counts(observation: Mapping[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+    reason_counts = _bounded_gate_counts(observation.get("reason_counts"), kind="reason")
+    family_counts = _bounded_gate_counts(observation.get("score_family_counts"), kind="family")
+    decisions = observation.get("decisions", observation.get("candidate_decisions"))
+    if isinstance(decisions, (list, tuple)):
+        use_decision_reasons = not reason_counts
+        use_decision_families = not family_counts
+        for item in decisions:
+            if not isinstance(item, Mapping):
+                continue
+            reason = item.get("reason_code", item.get("reason"))
+            family = item.get("score_family", item.get("family"))
+            if use_decision_reasons and is_gate_reason_code(reason):
+                reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+            if use_decision_families and is_score_family(family):
+                family_counts[str(family)] = family_counts.get(str(family), 0) + 1
+    return dict(sorted(reason_counts.items())[:_GATE_MAX_BUCKETS]), dict(sorted(family_counts.items())[:_GATE_MAX_BUCKETS])
+
+
+def quality_gate_config_hash(config: Mapping[str, Any]) -> str:
+    """Return a deterministic, path-free hash for gate configuration identity."""
+
+    canonical: dict[str, Any] = {}
+    for key in ("mode", "policy_version", "calibration_revision"):
+        value = config.get(key)
+        if isinstance(value, str) and _safe_identity_token(value):
+            canonical[key] = value
+    encoded = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def quality_gate_report_identity(
+    cases: Sequence[Mapping[str, Any]],
+    *,
+    configured: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the report-level gate identity from bounded shadow observations."""
+
+    observations = [observation for case in cases if (observation := _quality_gate_observation(case)) is not None]
+    configured_mode = configured.get("mode") if isinstance(configured, Mapping) else None
+    if not observations and configured_mode not in {"shadow", "enforce"}:
+        return {"status": "not_enabled", "enabled": False}
+    policies = {
+        str(value.get("policy_version"))
+        for value in observations
+        if isinstance(value.get("policy_version"), str) and _safe_identity_token(value.get("policy_version"))
+    }
+    modes = {
+        str(value.get("mode"))
+        for value in observations
+        if value.get("mode") in {"shadow", "enforce"}
+    }
+    revisions = {
+        str(value.get("calibration_revision"))
+        for value in observations
+        if isinstance(value.get("calibration_revision"), str) and _safe_identity_token(value.get("calibration_revision"))
+    }
+    if isinstance(configured, Mapping):
+        if isinstance(configured.get("policy_version"), str) and _safe_identity_token(configured.get("policy_version")):
+            policies.add(str(configured["policy_version"]))
+        if configured.get("mode") in {"shadow", "enforce"}:
+            modes.add(str(configured["mode"]))
+        if isinstance(configured.get("calibration_revision"), str) and _safe_identity_token(configured.get("calibration_revision")):
+            revisions.add(str(configured["calibration_revision"]))
+    policy_version = next(iter(policies)) if len(policies) == 1 else None
+    mode = next(iter(modes)) if len(modes) == 1 else None
+    calibration_revision = next(iter(revisions)) if len(revisions) == 1 else None
+    explicit_hashes = {
+        str(value.get("config_hash"))
+        for value in observations
+        if isinstance(value.get("config_hash"), str) and _safe_identity_token(value.get("config_hash"))
+    }
+    if isinstance(configured, Mapping) and isinstance(configured.get("config_hash"), str) and _safe_identity_token(configured.get("config_hash")):
+        explicit_hashes.add(str(configured["config_hash"]))
+    config_hash = next(iter(explicit_hashes)) if len(explicit_hashes) == 1 else None
+    if config_hash is None and policy_version is not None and mode is not None and len(policies) == len(modes) == 1 and len(revisions) <= 1:
+        config_hash = quality_gate_config_hash(
+            {"mode": mode, "policy_version": policy_version, "calibration_revision": calibration_revision or ""}
+        )
+    observation_unavailable = any(observation.get("available") is False for observation in observations)
+    complete = (
+        policy_version is not None
+        and config_hash is not None
+        and len(policies) <= 1
+        and len(modes) <= 1
+        and len(revisions) <= 1
+        and not observation_unavailable
+    )
+    result: dict[str, Any] = {
+        "status": "proven" if complete else "unproven",
+        "enabled": True,
+    }
+    if mode is not None:
+        result["mode"] = mode
+    if policy_version is not None:
+        result["gate_policy_version"] = policy_version
+    if config_hash is not None:
+        result["gate_config_hash"] = config_hash
+    if calibration_revision is not None:
+        result["calibration_revision"] = calibration_revision
+    return result
+
+
+def calculate_quality_gate_metrics(
+    cases: Sequence[Mapping[str, Any]],
+    *,
+    top_k: int = 10,
+    gate_enabled: bool | None = None,
+) -> dict[str, Any]:
+    """Compare page-deduped public results with in-memory shadow decisions."""
+
+    observations = [_quality_gate_observation(case) for case in cases]
+    enabled = bool(gate_enabled) if gate_enabled is not None else any(observation is not None for observation in observations)
+    if not enabled:
+        return {
+            "status": "not_enabled",
+            "enabled": False,
+            "false_suppression": None,
+            "false_suppression_rate": None,
+            "would_accept": None,
+            "would_accept_rate": None,
+            "rank_churn": {"top1_flip_rate": None, "top_k_jaccard": None, "compared_case_count": 0, "top_k": top_k},
+            "reason_counts": {},
+            "score_family_counts": {},
+            "gate_reason_counts": {},
+            "gate_score_family_counts": {},
+        }
+
+    unavailable = False
+    acceptable_total = acceptable_suppressed = 0
+    grade_one_total = grade_one_suppressed = 0
+    no_answer_total = no_answer_accepted = 0
+    top1_flips = 0
+    jaccards: list[float] = []
+    compared_cases = 0
+    reason_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
+
+    for case, observation in zip(cases, observations):
+        baseline_paths = _case_paths(case)
+        if observation is None:
+            unavailable = True
+            decisions: dict[str, Mapping[str, Any]] | None = None
+        else:
+            if observation.get("available") is False:
+                unavailable = True
+            decisions = _decision_mapping(observation, baseline_paths)
+            if decisions is None:
+                unavailable = True
+        if observation is not None:
+            case_reasons, case_families = _gate_observation_counts(observation)
+            for key, value in case_reasons.items():
+                reason_counts[key] = reason_counts.get(key, 0) + value
+            for key, value in case_families.items():
+                family_counts[key] = family_counts.get(key, 0) + value
+        if decisions is None:
+            continue
+
+        projected_paths = [path for path in baseline_paths if decisions.get(path, {}).get("accepted") is True]
+        grades = _case_grades(case)
+        if grades is None and case.get("answerable") is True:
+            unavailable = True
+        if grades is not None:
+            for path in baseline_paths:
+                grade = grades.get(path)
+                if grade is None:
+                    continue
+                accepted = decisions[path].get("accepted") is True
+                if grade >= 2:
+                    acceptable_total += 1
+                    acceptable_suppressed += int(not accepted)
+                elif grade == 1:
+                    grade_one_total += 1
+                    grade_one_suppressed += int(not accepted)
+
+        if case.get("answerable") is False:
+            no_answer_total += 1
+            no_answer_accepted += int(bool(projected_paths))
+
+        if baseline_paths:
+            compared_cases += 1
+            top1_flips += int(not projected_paths or projected_paths[0] != baseline_paths[0])
+        baseline_top_k = set(baseline_paths[:top_k])
+        projected_top_k = set(projected_paths[:top_k])
+        union = baseline_top_k | projected_top_k
+        jaccards.append(len(baseline_top_k & projected_top_k) / len(union) if union else 1.0)
+
+    status = "unproven" if unavailable else "proven"
+    false_status = "unproven" if unavailable or acceptable_total == 0 else "proven"
+    would_status = "unproven" if unavailable or no_answer_total == 0 else "proven"
+    churn_status = "unproven" if unavailable or not jaccards else "proven"
+    false_rate = acceptable_suppressed / acceptable_total if false_status == "proven" else None
+    grade_one_rate = grade_one_suppressed / grade_one_total if grade_one_total else None
+    would_rate = no_answer_accepted / no_answer_total if would_status == "proven" else None
+    top1_rate = top1_flips / compared_cases if churn_status == "proven" and compared_cases else None
+    jaccard = statistics.fmean(jaccards) if churn_status == "proven" else None
+    false_suppression = {
+        "rate": false_rate,
+        "suppressed_acceptable_count": acceptable_suppressed,
+        "acceptable_page_count": acceptable_total,
+        "grade_1_rate": grade_one_rate,
+        "grade_1_suppressed_count": grade_one_suppressed,
+        "grade_1_page_count": grade_one_total,
+        "status": false_status,
+    }
+    would_accept = {
+        "rate": would_rate,
+        "accepted_case_count": no_answer_accepted,
+        "no_answer_case_count": no_answer_total,
+        "status": would_status,
+    }
+    rank_churn = {
+        "top1_flip_rate": top1_rate,
+        "top_k_jaccard": jaccard,
+        "top1_flip_count": top1_flips,
+        "compared_case_count": compared_cases,
+        "top_k": top_k,
+        "status": churn_status,
+    }
+    bounded_reasons = dict(sorted(reason_counts.items())[:_GATE_MAX_BUCKETS])
+    bounded_families = dict(sorted(family_counts.items())[:_GATE_MAX_BUCKETS])
+    return {
+        "status": status,
+        "enabled": True,
+        "false_suppression": false_suppression,
+        "false_suppression_rate": false_rate,
+        "would_accept": would_accept,
+        "would_accept_rate": would_rate,
+        "rank_churn": rank_churn,
+        "reason_counts": bounded_reasons,
+        "score_family_counts": bounded_families,
+        "gate_reason_counts": bounded_reasons,
+        "gate_score_family_counts": bounded_families,
+    }
 
 
 def _pipeline_summary(pipeline: object) -> dict[str, Any]:
@@ -385,6 +889,7 @@ _QUALITY_GATE_SUMMARY_KEYS = frozenset(
     {
         "policy_version",
         "calibration_revision",
+        "config_hash",
         "mode",
         "status",
         "candidate_count",
@@ -434,7 +939,7 @@ def _project_quality_gate(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     summary: dict[str, Any] = {}
-    for key in ("policy_version", "calibration_revision", "status"):
+    for key in ("policy_version", "calibration_revision", "config_hash", "status"):
         token = _safe_quality_gate_token(value.get(key))
         if token is not None:
             summary[key] = token
@@ -700,7 +1205,10 @@ def _has_pipeline_summary_shape(value: object) -> bool:
         for key in ("policy_version", "status"):
             if _safe_quality_gate_token(quality_gate.get(key)) is None:
                 return False
-        if "calibration_revision" in quality_gate and _safe_quality_gate_token(quality_gate.get("calibration_revision")) is None:
+        if any(
+            key in quality_gate and _safe_quality_gate_token(quality_gate.get(key)) is None
+            for key in ("calibration_revision", "config_hash")
+        ):
             return False
         if quality_gate.get("mode") not in {"shadow", "enforce"}:
             return False
@@ -769,8 +1277,9 @@ def _median(values: Sequence[int]) -> float | None:
     return float(ordered[middle]) if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
 
-def _format_metric(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.4f}"
+def _format_metric(value: object) -> str:
+    number = _finite_number(value)
+    return "N/A" if number is None else f"{number:.4f}"
 
 
 def _normalise_experiment_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
