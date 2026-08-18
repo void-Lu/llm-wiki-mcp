@@ -179,7 +179,7 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 旧版 CodeGraph 摄入留下的内容已由用户在真实 vault 中完成迁移；退役清理命令已删除，
 无需再次运行存量清理。
 
-`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测检索契约，输出 JSON 与 Markdown 报告。当前查询契约是 V2，`--query-version` 仅接受 `v2`；默认 `--entrypoint engine --retrieval-mode lexical`，不创建、不更新也不调用 vector/Embedding。需要验证 MCP 公共边界时使用 `--entrypoint mcp`，该入口会拒绝非词法配置，并覆盖 `project`、`type`、`tags`、`path_prefix`、空结果和错误契约。`--scope` 控制 V2 corpus。报告包含 Recall、Precision、MRR、nDCG（@1/@3/@5/@10）、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。传入 `--baseline-report <retrieval-eval.json>` 可执行冻结基线 gate：Recall/nDCG 回退不超过 0.02、过滤器 100%、无答案误命中率不超过 0.05、P95 增长不超过 10%，且词法-only 与 context budget 检查通过。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
+`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测检索契约，输出 JSON 与 Markdown 报告。当前查询契约是 V2，`--query-version` 仅接受 `v2`；默认 `--entrypoint engine --retrieval-mode lexical`，不创建、不更新也不调用 vector/Embedding。需要验证 MCP 公共边界时使用 `--entrypoint mcp`，该入口会拒绝非词法配置，并覆盖 `project`、`type`、`tags`、`path_prefix`、空结果和错误契约。`--scope` 控制 V2 corpus。报告包含 Recall、Precision、MRR、nDCG（@1/@3/@5/@10）、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。传入 `--baseline-report <retrieval-eval.json>` 可执行冻结基线 gate：Recall/nDCG 回退不超过 0.02、过滤器 100%、无答案误命中率不超过 0.05、P95 增长不超过 10%，且词法-only 与 context budget 检查通过。若评测样本带有质量门禁观测，报告还会输出 false suppression、no-answer `would_accept`、rank churn 和 reason/score-family 分桶；identity 或最小样本不满足时状态保持 `unproven`。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
 
 仓库内 `tests/fixtures/retrieval/` 只用于 CI 的确定性框架验证，报告不能当作生产 vault 基线。真实 vault 评测只需提供 vault 根目录、版本化 JSONL/manifest 和相对路径标注；不要提交正文、绝对路径或敏感日志。没有冻结真实数据集时，baseline gate 应标记为 `unproven`，而不是虚构生产结论。
 
@@ -208,6 +208,16 @@ wiki_query(
 ```
 
 Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，在每个物理 store 上先捕获一次不可变 `QueryCorpusSnapshot`，再做 passage FTS/vector 召回、RRF 融合和有界强-seed graph 扩展排序；退役的 `wiki/sources`、superseded 与 deprecated 页面不会进入 active 正文。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
+
+### Query V2 质量门禁
+
+Query V2 在完整回退、按页去重之后、公开结果和 context 投影之前执行可选的 page-level 规则质量门禁。门禁配置属于 runtime snapshot，不加入 `wiki_query` 公共参数；当前默认模式为 `off`。
+
+- `off`：公共响应与 baseline 保持一致。
+- `shadow`：记录有界的 `pipeline.quality_gate` 摘要（模式、状态、数量、score family/reason 分桶等），不改变公共结果；摘要不包含 query 正文、页面路径或正文内容。
+- `enforce`：只保留门禁接受的页面，同时保持原顺序和分页切片；若会把非空 baseline 全部过滤掉，则 fail-open 返回 baseline，并记录 `gate_would_suppress_all`。
+
+当前 holdout 证据不足，正式状态为 `unproven`，生产默认保持 `off`/`shadow`，不会因为评测样本不足自动启用 `enforce`。门禁不改变 `no_results`、`discovery_only`、index unavailable 或取消/超时的既有语义，也不引入 `insufficient_evidence` 公共结果码。
 
 查询引擎固定为 V2；配置中的 `retrieval.query_version` 仅保留明确的 `v2` 值，旧 `v1` 配置会在启动解码时拒绝。若旧客户端只需要旧响应字段，可使用 `retrieval.context.response_mode=legacy`，它只适配已经完成的 V2 结果，不会切换检索引擎。
 

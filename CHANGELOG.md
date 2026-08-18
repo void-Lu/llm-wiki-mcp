@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-08-18 — Query V2 规则质量门禁
+
+- 新增 Query V2 page-level 规则质量门禁，支持 runtime snapshot 下的 `off`、`shadow`、`enforce` 三态；shadow 不改变公共结果，enforce 全拒绝时 fail-open 返回 baseline 并记录 `gate_would_suppress_all`。
+- 新增按 score family/分桶校准、阈值 backoff、质量门禁评测指标、ranking/config identity 与 JSON/Markdown 安全投影；评测 identity 或样本证据不足时保持 `unproven`。
+- 当前 holdout 不满足正式放行条件，生产默认保持 `off`/`shadow`；不新增 `insufficient_evidence` 公共结果码，不改变 no-results、discovery-only、index unavailable、取消/超时语义。
+
 ## 2026-08-14 — 退役清理工具完成
 
 - `wiki_ingest` 删除 `superseded_jobs`，保留 `stale_pages` 与 `generation`；`wiki_status` 删除 `queue`。
