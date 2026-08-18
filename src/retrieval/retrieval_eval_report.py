@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from retrieval.retrieval_eval_dataset import Relevance, RetrievalEvalError
-from retrieval.query_quality_policy import is_gate_reason_code, is_score_family
+from retrieval.query_quality_policy import SCORE_FAMILIES, is_gate_reason_code, is_score_family
 
 
 __all__ = [
@@ -384,6 +384,23 @@ def _pipeline_summary(pipeline: object) -> dict[str, Any]:
 _QUALITY_GATE_SUMMARY_KEYS = frozenset(
     {
         "policy_version",
+        "calibration_revision",
+        "mode",
+        "status",
+        "candidate_count",
+        "accepted_count",
+        "rejected_count",
+        "score_family_counts",
+        "reason_counts",
+        "selection_counts",
+        "low_sample_buckets",
+        "fail_open",
+    }
+)
+_QUALITY_GATE_COUNT_KEYS = ("candidate_count", "accepted_count", "rejected_count")
+_REQUIRED_QUALITY_GATE_KEYS = frozenset(
+    {
+        "policy_version",
         "mode",
         "status",
         "candidate_count",
@@ -395,7 +412,6 @@ _QUALITY_GATE_SUMMARY_KEYS = frozenset(
         "fail_open",
     }
 )
-_QUALITY_GATE_COUNT_KEYS = ("candidate_count", "accepted_count", "rejected_count")
 
 
 def _safe_quality_gate_token(value: object) -> str | None:
@@ -406,11 +422,19 @@ def _safe_quality_gate_token(value: object) -> str | None:
     return value
 
 
+def _safe_quality_gate_bucket(value: object) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 160:
+        return None
+    if not all(character.isalnum() or character in {"_", ".", ":", "-", "|", "*"} for character in value):
+        return None
+    return value
+
+
 def _project_quality_gate(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     summary: dict[str, Any] = {}
-    for key in ("policy_version", "status"):
+    for key in ("policy_version", "calibration_revision", "status"):
         token = _safe_quality_gate_token(value.get(key))
         if token is not None:
             summary[key] = token
@@ -427,7 +451,7 @@ def _project_quality_gate(value: object) -> dict[str, Any]:
         summary["score_family_counts"] = {
             str(key): count
             for key, count in family_counts.items()
-            if is_score_family(key) and type(count) is int and count >= 0
+            if key in SCORE_FAMILIES and type(count) is int and count >= 0
         }
 
     reason_counts = value.get("reason_counts")
@@ -438,12 +462,20 @@ def _project_quality_gate(value: object) -> dict[str, Any]:
             if is_gate_reason_code(key) and type(count) is int and count >= 0
         }
 
+    selection_counts = value.get("selection_counts")
+    if isinstance(selection_counts, Mapping):
+        summary["selection_counts"] = {
+            str(key): count
+            for key, count in selection_counts.items()
+            if key in {"exact", "backoff", "fail_open"} and type(count) is int and count >= 0
+        }
+
     low_sample_buckets = value.get("low_sample_buckets")
     if isinstance(low_sample_buckets, list):
         summary["low_sample_buckets"] = [
             token
             for item in low_sample_buckets[:32]
-            if (token := _safe_quality_gate_token(item)) is not None
+            if (token := _safe_quality_gate_bucket(item)) is not None
         ]
     fail_open = value.get("fail_open")
     if isinstance(fail_open, bool):
@@ -662,12 +694,14 @@ def _has_pipeline_summary_shape(value: object) -> bool:
     if quality_gate is not None:
         if not isinstance(quality_gate, Mapping) or not set(quality_gate).issubset(_QUALITY_GATE_SUMMARY_KEYS):
             return False
-        required_quality_gate_keys = _QUALITY_GATE_SUMMARY_KEYS
+        required_quality_gate_keys = _REQUIRED_QUALITY_GATE_KEYS
         if not required_quality_gate_keys.issubset(quality_gate):
             return False
         for key in ("policy_version", "status"):
             if _safe_quality_gate_token(quality_gate.get(key)) is None:
                 return False
+        if "calibration_revision" in quality_gate and _safe_quality_gate_token(quality_gate.get("calibration_revision")) is None:
+            return False
         if quality_gate.get("mode") not in {"shadow", "enforce"}:
             return False
         if any(type(quality_gate.get(key)) is not int or quality_gate[key] < 0 for key in _QUALITY_GATE_COUNT_KEYS):
@@ -684,9 +718,18 @@ def _has_pipeline_summary_shape(value: object) -> bool:
             for key, item in reason_counts.items()
         ):
             return False
+        selection_counts = quality_gate.get("selection_counts")
+        if selection_counts is not None and (
+            not isinstance(selection_counts, Mapping)
+            or any(
+                key not in {"exact", "backoff", "fail_open"} or type(item) is not int or item < 0
+                for key, item in selection_counts.items()
+            )
+        ):
+            return False
         low_sample_buckets = quality_gate.get("low_sample_buckets")
         if not isinstance(low_sample_buckets, list) or len(low_sample_buckets) > 32 or any(
-            _safe_quality_gate_token(item) is None for item in low_sample_buckets
+            _safe_quality_gate_bucket(item) is None for item in low_sample_buckets
         ):
             return False
         if not isinstance(quality_gate.get("fail_open"), bool):

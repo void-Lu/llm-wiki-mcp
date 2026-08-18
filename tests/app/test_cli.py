@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.cli import main
+from app.cli import _build_parser, main
 from archive.archive_schema import ARCHIVE_TABLE_DDL
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import RetrievalIndexStore
@@ -59,6 +59,55 @@ def test_init_writes_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert output["storage_id"]
     assert not {"data_root", "user_data_root", "vault_data_root", "vault_storage_dir", "chroma_path", "manifest_path", "embedding_cache_path", "model_cache_path", "vault_storage_id"} & output.keys()
     assert output["sources_config_exists"] is True
+
+
+def test_quality_gate_calibrate_is_registered_as_an_admin_boundary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    dataset = tmp_path / "calibration.jsonl"
+    manifest = tmp_path / "calibration.manifest.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "feature": {
+                    "page_path": "wiki/example.md",
+                    "score_family": "main_rrf",
+                    "score": 1.0,
+                    "source_kind": "wiki",
+                    "effective_scope": "knowledge",
+                    "language_bucket": "latin",
+                    "retrieval_mode": "lexical",
+                },
+                "accepted": True,
+                "query_id": "q1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest.write_text(
+        json.dumps(
+            {
+                "dataset_id": "calibration",
+                "revision": "rev-1",
+                "vault_fingerprint": {"status": "unproven", "reason": "fixture"},
+                "ranking_policy_version": "query-v2-passage-rrf-10",
+                "runtime_provenance": {"package_version": "test", "revision": "runtime"},
+                "feature_schema_hash": "query-quality-feature-v1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parser = _build_parser()
+    parsed = parser.parse_args(["quality-gate", "calibrate", "--dataset", str(dataset), "--output-dir", str(tmp_path / "out")])
+    assert parsed.command == "quality-gate"
+    assert parsed.quality_gate_action == "calibrate"
+
+    exit_code = main(["quality-gate", "calibrate", "--dataset", str(dataset), "--output-dir", str(tmp_path / "out")])
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["unproven"] is True
+    assert all("\\" not in name and "/" not in name for name in output["reports"].values())
 
 
 def test_status_reads_same_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]):

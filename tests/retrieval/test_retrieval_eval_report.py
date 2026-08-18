@@ -124,6 +124,74 @@ def test_report_owner_redacts_evidence_at_output_boundary(tmp_path: Path) -> Non
     }
 
 
+def test_report_owner_projects_quality_gate_whitelist_without_paths_or_query(tmp_path: Path) -> None:
+    report = {
+        "metadata": {
+            "dataset_id": "fixture",
+            "dataset_revision": "rev-1",
+            "parameters": {"top_k": 1},
+            "vault_fingerprint": {"value": "digest", "file_count": 1},
+            "runtime_provenance": {"package_version": "test", "revision": "runtime"},
+            "ranking": {"version": "ranking-v1"},
+            "query_v2": {},
+        },
+        "metrics": {
+            "recall_at_k_macro": 1.0,
+            "precision_at_k_macro": 1.0,
+            "mrr_at_k_macro": 1.0,
+            "ndcg_at_k_macro": 1.0,
+            "no_answer_false_positive_rate": 0.0,
+            "filter_correctness": 1.0,
+            "p95_latency_ms": 1.0,
+            "context_budget": {"within_budget": True},
+        },
+        "cases": [
+            {
+                "id": "case",
+                "ranked_paths": [],
+                "filter_correct": True,
+                "pipeline": {
+                    "quality_gate": {
+                        "policy_version": "query-quality-policy-v0",
+                        "calibration_revision": "cal-1",
+                        "mode": "shadow",
+                        "status": "gate_shadow",
+                        "candidate_count": 2,
+                        "accepted_count": 2,
+                        "rejected_count": 0,
+                        "score_family_counts": {"main_rrf": 2, "not-a-family": 99},
+                        "reason_counts": {"gate_keep_default": 2, "secret reason": 99},
+                        "selection_counts": {"backoff": 2, "other": 99},
+                        "low_sample_buckets": ["main_rrf|knowledge|latin|lexical|wiki", "path/secret"],
+                        "fail_open": True,
+                        "query": "secret query",
+                    },
+                    "discovery": {"query": "secret query"},
+                },
+            }
+        ],
+    }
+
+    output = write_retrieval_eval_report(report, tmp_path / "reports")
+    rendered = json.loads(Path(output["json"]).read_text(encoding="utf-8"))
+    quality_gate = rendered["cases"][0]["pipeline"]["quality_gate"]
+    assert quality_gate == {
+        "accepted_count": 2,
+        "candidate_count": 2,
+        "calibration_revision": "cal-1",
+        "fail_open": True,
+        "low_sample_buckets": ["main_rrf|knowledge|latin|lexical|wiki"],
+        "mode": "shadow",
+        "policy_version": "query-quality-policy-v0",
+        "reason_counts": {"gate_keep_default": 2},
+        "rejected_count": 0,
+        "score_family_counts": {"main_rrf": 2},
+        "selection_counts": {"backoff": 2},
+        "status": "gate_shadow",
+    }
+    assert "secret query" not in Path(output["json"]).read_text(encoding="utf-8")
+
+
 def test_report_owner_gate_requires_frozen_identity() -> None:
     baseline = {
         "metadata": {

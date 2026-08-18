@@ -574,6 +574,69 @@ class GateSummary:
     low_sample_buckets: tuple[str, ...] = ()
     fail_open: bool = False
     policy_version: str = QUALITY_POLICY_VERSION
+    calibration_revision: str = ""
+    threshold_selection_counts: Mapping[str, int] = MappingProxyType({})
+
+
+@dataclass(frozen=True)
+class QualityThresholdView:
+    """A parsed, branch-relative threshold view supplied by calibration.
+
+    The policy module deliberately owns only this small input contract.  The
+    calibration artifact, its file format, and its loader live in a separate
+    module so the v0 policy remains usable without any artifact or IO
+    dependency.  ``score_ratio`` is relative to the selected score family;
+    this type intentionally has no absolute score floor.
+    """
+
+    bucket_key: str = ""
+    score_ratio: float | None = None
+    margin: float | None = None
+    term_coverage: float | None = None
+    sample_count: int | None = None
+    backoff_depth: int = 0
+    selection: Literal["exact", "backoff", "fail_open"] = "exact"
+    fail_open: bool = False
+    fail_open_reason: str | None = None
+    low_sample_buckets: tuple[str, ...] = ()
+    policy_version: str = QUALITY_POLICY_VERSION
+    calibration_revision: str = ""
+
+    def __post_init__(self) -> None:
+        for name, value, minimum, maximum in (
+            ("score_ratio", self.score_ratio, 0.0, 1.0),
+            ("term_coverage", self.term_coverage, 0.0, 1.0),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not minimum <= float(value) <= maximum
+            ):
+                raise ValueError(f"{name} must be between {minimum} and {maximum}")
+        if self.margin is not None and (
+            isinstance(self.margin, bool)
+            or not isinstance(self.margin, (int, float))
+            or not math.isfinite(float(self.margin))
+            or float(self.margin) < 0
+        ):
+            raise ValueError("margin must be a finite non-negative number")
+        if self.sample_count is not None and (type(self.sample_count) is not int or self.sample_count < 0):
+            raise ValueError("sample_count must be a non-negative integer")
+        if type(self.backoff_depth) is not int or self.backoff_depth < 0:
+            raise ValueError("backoff_depth must be a non-negative integer")
+        if self.selection not in {"exact", "backoff", "fail_open"}:
+            raise ValueError("selection must be exact, backoff, or fail_open")
+        if self.fail_open_reason is not None and self.fail_open_reason not in FAIL_OPEN_REASON_CODES:
+            raise ValueError("fail_open_reason is not a stable fail-open reason code")
+
+    @property
+    def available(self) -> bool:
+        """Whether this view contains an enforceable threshold set."""
+
+        return not self.fail_open and any(
+            value is not None for value in (self.score_ratio, self.margin, self.term_coverage)
+        )
 
 
 @dataclass(frozen=True)
@@ -617,26 +680,163 @@ def _count_values(values: Iterable[str]) -> Mapping[str, int]:
     return MappingProxyType(dict(sorted(counts.items())))
 
 
+def _threshold_view_for(
+    threshold_view: object,
+    feature: CandidateFeature,
+    *,
+    index: int | None = None,
+) -> QualityThresholdView | None:
+    """Resolve one candidate's view without importing the calibration owner."""
+
+    if isinstance(threshold_view, QualityThresholdView):
+        return threshold_view
+    if (
+        index is not None
+        and isinstance(threshold_view, Sequence)
+        and not isinstance(threshold_view, (str, bytes, bytearray, Mapping))
+        and index < len(threshold_view)
+    ):
+        resolved = threshold_view[index]
+        return resolved if isinstance(resolved, QualityThresholdView) else None
+    resolver = getattr(threshold_view, "for_feature", None)
+    if callable(resolver):
+        try:
+            resolved = resolver(feature)
+        except Exception:
+            return None
+        return resolved if isinstance(resolved, QualityThresholdView) else None
+    resolver = getattr(threshold_view, "resolve", None)
+    if callable(resolver):
+        try:
+            resolved = resolver(feature)
+        except Exception:
+            return None
+        return resolved if isinstance(resolved, QualityThresholdView) else None
+    if isinstance(threshold_view, Mapping):
+        keys = (
+            feature.normalized_page_path,
+            feature.page_path,
+            feature.score_family,
+        )
+        for key in keys:
+            resolved = threshold_view.get(key)
+            if isinstance(resolved, QualityThresholdView):
+                return resolved
+    return None
+
+
+def _threshold_group(feature: CandidateFeature, view: QualityThresholdView | None) -> tuple[str, ...]:
+    if view is not None and view.bucket_key:
+        return ("bucket", view.bucket_key)
+    return (
+        "feature",
+        feature.score_family,
+        feature.effective_scope,
+        feature.source_kind,
+        feature.language_bucket,
+        feature.retrieval_mode,
+    )
+
+
+def _threshold_decision(
+    feature: CandidateFeature,
+    view: QualityThresholdView | None,
+    peak_score: float,
+) -> tuple[bool, str]:
+    """Apply only branch-relative threshold signals supplied by a view."""
+
+    if view is None:
+        return True, _keep_reason(feature)
+    if view.fail_open:
+        return True, view.fail_open_reason or GATE_FAIL_OPEN_POLICY_MISSING
+
+    # Strong evidence and the first result remain protected.  The later
+    # enforce rollout can tighten this rule only after holdout evidence exists;
+    # the v0 policy must not turn a calibration defect into an empty result.
+    if feature.exact_signal or feature.identifier_signal or feature.phrase_signal or feature.top1_rescue:
+        return True, _keep_reason(feature)
+
+    if view.score_ratio is not None and peak_score > 0:
+        ratio = feature.score / peak_score
+        if not math.isfinite(ratio) or ratio < view.score_ratio:
+            return False, GATE_REJECT_SCORE_FLOOR
+    if view.margin is not None and feature.branch_margin is not None and feature.branch_margin < view.margin:
+        return False, GATE_REJECT_SCORE_CLIFF
+    if view.term_coverage is not None and feature.term_coverage < view.term_coverage:
+        if feature.independent_signal_count < 2:
+            return False, GATE_REJECT_LOW_CONFIDENCE
+    if feature.score_family == "raw_recovery" and view.term_coverage is not None:
+        if feature.term_coverage <= 0 and feature.independent_signal_count == 0:
+            return False, GATE_REJECT_RAW_NO_COVERAGE
+    if feature.score_family == "graph_extension" and feature.independent_signal_count == 0:
+        # Graph-only candidates are intentionally retained until an explicit
+        # rollout policy decides otherwise; a threshold view alone is not that
+        # evidence.
+        return True, GATE_KEEP_GRAPH_SUPPORTED
+    return True, _keep_reason(feature)
+
+
 def evaluate_quality_policy(
     features: Sequence[CandidateFeature],
     *,
     policy_version: str = QUALITY_POLICY_VERSION,
+    threshold_view: object | None = None,
 ) -> QualityGateResult:
-    """执行 v0 keep-all 策略；不实现任何阈值或跨 family 比较。"""
+    """执行纯策略；没有 threshold view 时保持 v0 keep-all 兼容。"""
 
-    decisions = tuple(
-        GateCandidateDecision(feature, True, _keep_reason(feature))
-        for feature in features
+    views = tuple(
+        (
+            None
+            if threshold_view is None
+            else _threshold_view_for(threshold_view, feature, index=index)
+            or QualityThresholdView(
+                selection="fail_open",
+                fail_open=True,
+                fail_open_reason=GATE_FAIL_OPEN_POLICY_MISSING,
+                policy_version=policy_version,
+            )
+        )
+        for index, feature in enumerate(features)
     )
-    accepted = decisions
-    rejected: tuple[GateCandidateDecision, ...] = ()
+    peaks: dict[tuple[str, ...], float] = {}
+    for feature, view in zip(features, views):
+        group = _threshold_group(feature, view)
+        if math.isfinite(feature.score):
+            peaks[group] = max(peaks.get(group, float("-inf")), feature.score)
+    decisions = tuple(
+        GateCandidateDecision(feature, *_threshold_decision(feature, view, peaks.get(_threshold_group(feature, view), 0.0)))
+        for feature, view in zip(features, views)
+    )
+    accepted = tuple(decision for decision in decisions if decision.accepted)
+    rejected = tuple(decision for decision in decisions if not decision.accepted)
+    fail_open_views = tuple(view for view in views if view is not None and view.fail_open)
+    low_sample_buckets = tuple(
+        sorted({bucket for view in fail_open_views for bucket in view.low_sample_buckets})
+    )
+    fail_open = bool(fail_open_views)
+    if fail_open:
+        policy_version = next(
+            (view.policy_version for view in fail_open_views if view.policy_version),
+            policy_version,
+        )
+    calibration_revision = next(
+        (view.calibration_revision for view in views if view is not None and view.calibration_revision),
+        "",
+    )
+    threshold_selection_counts = _count_values(
+        view.selection for view in views if view is not None
+    )
     summary = GateSummary(
         candidate_count=len(decisions),
         accepted_count=len(accepted),
-        rejected_count=0,
+        rejected_count=len(rejected),
         score_family_counts=_count_values(feature.score_family for feature in features),
         reason_counts=_count_values(decision.reason_code for decision in decisions),
+        low_sample_buckets=low_sample_buckets,
+        fail_open=fail_open,
         policy_version=policy_version,
+        calibration_revision=calibration_revision,
+        threshold_selection_counts=threshold_selection_counts,
     )
     return QualityGateResult(decisions, accepted, rejected, summary)
 
@@ -645,10 +845,11 @@ def evaluate_quality_gate(
     features: Sequence[CandidateFeature],
     *,
     policy_version: str = QUALITY_POLICY_VERSION,
+    threshold_view: object | None = None,
 ) -> QualityGateResult:
-    """对外语义别名：当前实现仍是 keep-all，供后续消费方复用。"""
+    """对外语义别名；可选 view 不改变无 view 的 keep-all 行为。"""
 
-    return evaluate_quality_policy(features, policy_version=policy_version)
+    return evaluate_quality_policy(features, policy_version=policy_version, threshold_view=threshold_view)
 
 
 def evaluate_candidates(
@@ -663,8 +864,9 @@ def evaluate_candidates(
     fallback_level: str | None = None,
     fallback_reason: str | None = None,
     query_terms: Sequence[str] = (),
+    threshold_view: object | None = None,
 ) -> QualityGateResult:
-    """便捷 seam：一次提取冻结特征并执行 keep-all 策略。"""
+    """便捷 seam：一次提取冻结特征并执行纯策略。"""
 
     features = build_candidate_features(
         candidates,
@@ -677,7 +879,7 @@ def evaluate_candidates(
         fallback_reason=fallback_reason,
         query_terms=query_terms,
     )
-    return evaluate_quality_policy(features, policy_version=policy_version)
+    return evaluate_quality_policy(features, policy_version=policy_version, threshold_view=threshold_view)
 
 
 __all__ = [
@@ -706,6 +908,7 @@ __all__ = [
     "KEEP_REASON_CODES",
     "QUALITY_POLICY_VERSION",
     "QualityGateResult",
+    "QualityThresholdView",
     "REJECT_REASON_CODES",
     "SCORE_FAMILIES",
     "ScoreFamily",

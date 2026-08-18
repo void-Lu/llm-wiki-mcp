@@ -16,6 +16,15 @@ from retrieval.retrieval_eval import (
     run_retrieval_evaluation,
     write_retrieval_eval_report,
 )
+from retrieval.query_quality_calibration import (
+    DEFAULT_MINIMUM_SAMPLE_COUNT,
+    CalibrationGenerationError,
+    generate_calibration_artifact,
+    identity_from_manifest,
+    load_calibration_observations,
+    read_json_object,
+    write_calibration_outputs,
+)
 from retrieval.retrieval_gold import RetrievalGoldError, finalize_retrieval_gold, sample_retrieval_gold
 from runtime.runtime_config import ConfigRegistry, ResolvedVault, RuntimeConfig, RuntimeConfigError, VaultSettings, resolve_runtime_config, vault_storage_id, write_global_config
 from retrieval.query_pipeline import DEFAULT_TOP_K
@@ -143,6 +152,16 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluation_parser.add_argument("--baseline-report", help="Optional frozen retrieval-eval.json used for the regression gate.")
     evaluation_parser.add_argument("--vector-model-path", help="Required local BGE-M3 directory for vector or hybrid evaluation.")
     evaluation_parser.add_argument("--vector-index-path", help="Optional vault-relative vector index directory for vector or hybrid evaluation.")
+
+    quality_gate_parser = subparsers.add_parser("quality-gate", help="Offline quality-gate calibration administration.")
+    quality_gate_actions = quality_gate_parser.add_subparsers(dest="quality_gate_action", required=True)
+    calibrate_parser = quality_gate_actions.add_parser("calibrate", help="Generate a branch-relative calibration artifact and report.")
+    calibrate_parser.add_argument("--dataset", required=True, help="Frozen calibration/shadow JSONL input (not sent to Query V2).")
+    calibrate_parser.add_argument("--observations", help="Optional shadow decision JSONL; defaults to --dataset.")
+    calibrate_parser.add_argument("--manifest", help="Frozen dataset manifest; defaults to <dataset-stem>.manifest.json when present.")
+    calibrate_parser.add_argument("--output-dir", required=True, help="Directory for the artifact and safe calibration reports.")
+    calibrate_parser.add_argument("--calibration-revision", default="calibration-unproven", help="Artifact calibration revision label.")
+    calibrate_parser.add_argument("--minimum-sample-count", type=int, default=DEFAULT_MINIMUM_SAMPLE_COUNT, help=f"Minimum samples per bucket (default: {DEFAULT_MINIMUM_SAMPLE_COUNT}).")
 
     gold_sample_parser = subparsers.add_parser("retrieval-gold-sample", help="Create a redacted read-only telemetry annotation template.")
     gold_sample_parser.add_argument("--vault", required=True, help="Path to the vault whose telemetry is sampled read-only.")
@@ -336,6 +355,34 @@ def _run_retrieval_eval(args: argparse.Namespace) -> int:
     return 0 if not args.baseline_report or report["gate"]["passed"] else 2
 
 
+def _run_quality_gate_calibrate(args: argparse.Namespace) -> int:
+    dataset_path = Path(args.dataset).expanduser()
+    manifest_path = Path(args.manifest).expanduser() if args.manifest else dataset_path.with_suffix(".manifest.json")
+    if not manifest_path.is_file():
+        raise CalibrationGenerationError("identity_missing", "a frozen dataset manifest is required for calibration")
+    identity = identity_from_manifest(read_json_object(manifest_path))
+    observations_path = Path(args.observations).expanduser() if args.observations else dataset_path
+    observations = load_calibration_observations(observations_path)
+    result = generate_calibration_artifact(
+        observations,
+        identity=identity,
+        calibration_revision=args.calibration_revision,
+        minimum_sample_count=args.minimum_sample_count,
+    )
+    reports = write_calibration_outputs(result, args.output_dir)
+    _print_json(
+        {
+            "ok": True,
+            "status": result.report["status"],
+            "unproven": result.report["unproven"],
+            "observation_count": result.report["observation_count"],
+            "bucket_count": result.report["bucket_count"],
+            "reports": {name: Path(path).name for name, path in reports.items()},
+        }
+    )
+    return 0
+
+
 def _run_retrieval_gold_sample(args: argparse.Namespace) -> int:
     result = sample_retrieval_gold(
         args.vault,
@@ -502,6 +549,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_config(args)
         if args.command == "retrieval-eval":
             return _run_retrieval_eval(args)
+        if args.command == "quality-gate" and args.quality_gate_action == "calibrate":
+            return _run_quality_gate_calibrate(args)
         if args.command == "retrieval-gold-sample":
             return _run_retrieval_gold_sample(args)
         if args.command == "retrieval-gold-finalize":
@@ -518,6 +567,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_json(_error_payload(exc.code, str(exc), config_path=exc.config_path))
         return 2
     except RetrievalEvalError as exc:
+        _print_json(_error_payload(exc.code, str(exc)))
+        return 2
+    except CalibrationGenerationError as exc:
         _print_json(_error_payload(exc.code, str(exc)))
         return 2
     except RetrievalGoldError as exc:
