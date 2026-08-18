@@ -4,8 +4,6 @@ __pycache__
 .vscode/
 *.egg-info/
 rag/
-docs/plan/
-docs/superpowers/
 .agents
 .claude
 .codegraph
@@ -18,7 +16,6 @@ docs/superpowers/
 .venv
 .vscode
 dist
-docs
 scripts
 src/__pycache__
 src/llm_wiki_mcp.egg-info
@@ -26,3 +23,5 @@ tests/__pycache__
 tests/fixtures
 build
 .tmp
+docs/*
+!docs/adr/
