@@ -642,6 +642,7 @@ def _run_wiki_query(
             hard_budget_tokens=settings.context.hard_budget_tokens,
             embedding=settings.embedding,
             telemetry=resolution.resolved.settings.telemetry,
+            quality_gate=resolution.resolved.settings.quality_gate,
             lexical_enabled=settings.lexical_enabled,
             retrieval_mode=retrieval_mode,
             expansion_terms=expansion_terms,

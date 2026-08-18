@@ -14,6 +14,8 @@ from runtime.platform_paths import global_config_path
 
 VAULT_ROOT_ENV = "LLM_WIKI_VAULT_ROOT"
 CONFIG_SCHEMA_VERSION = 1
+QUALITY_GATE_MODES = ("off", "shadow", "enforce")
+DEFAULT_QUALITY_POLICY_VERSION = "query-quality-policy-v0"
 
 # The runtime decoder and the deprecated vector_config compatibility decoder
 # consume this table. Changing it changes both parsing chains together and
@@ -63,6 +65,14 @@ class QueryExecutionSettings:
 
 
 @dataclass(frozen=True)
+class QualityGateSettings:
+    """Typed, immutable rollout settings for the query quality gate."""
+
+    mode: Literal["off", "shadow", "enforce"] = "off"
+    policy_version: str = DEFAULT_QUALITY_POLICY_VERSION
+
+
+@dataclass(frozen=True)
 class RetrievalSettings:
     lexical_enabled: bool = True
     query_version: Literal["v2"] = "v2"
@@ -101,6 +111,7 @@ class VaultSettings:
     privacy: PrivacySettings = PrivacySettings()
     telemetry: TelemetrySettings = TelemetrySettings()
     archive: ArchiveSettings = ArchiveSettings()
+    quality_gate: QualityGateSettings = QualityGateSettings()
 
 
 @dataclass(frozen=True)
@@ -215,6 +226,14 @@ def _number(
     return float(value)
 
 
+def _safe_version(value: object, default: str, name: str, path: Path) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value):
+        raise RuntimeConfigError(f"{name} must be a safe version identifier", code="invalid_config", config_path=path)
+    return value
+
+
 def _decode_embedding(value: object, path: Path) -> EmbeddingSettings:
     raw = _mapping(value or {}, "embedding", path)
     _unknown_keys(raw, {"enabled", "provider", "model_path", "device", "batch_size", "max_sequence_length", "candidate_limit", "rrf_k", "min_vector_score"}, "embedding", path)
@@ -250,7 +269,7 @@ def _decode_embedding(value: object, path: Path) -> EmbeddingSettings:
 
 def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     raw = _mapping(value, f"vaults.{name}", path)
-    _unknown_keys(raw, {"root", "retrieval", "privacy", "telemetry", "archive"}, f"vaults.{name}", path)
+    _unknown_keys(raw, {"root", "retrieval", "privacy", "telemetry", "archive", "quality_gate"}, f"vaults.{name}", path)
     root = raw.get("root")
     if not isinstance(root, str) or not root:
         raise RuntimeConfigError(f"vaults.{name}.root is required", code="invalid_config", config_path=path)
@@ -282,6 +301,17 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     _unknown_keys(telemetry_raw, {"enabled", "retention_days", "store_query_body"}, "telemetry", path)
     archive_raw = _mapping(raw.get("archive", {}), "archive", path)
     _unknown_keys(archive_raw, {"archive_index_enabled", "index_snapshot_ttl_days", "automatic_purge", "purge_after_days"}, "archive", path)
+    quality_gate_raw = _mapping(raw.get("quality_gate", {}), "quality_gate", path)
+    _unknown_keys(quality_gate_raw, {"mode", "policy_version"}, "quality_gate", path)
+    quality_gate_mode = quality_gate_raw.get("mode", "off")
+    if quality_gate_mode not in QUALITY_GATE_MODES:
+        raise RuntimeConfigError("quality_gate.mode is invalid", code="invalid_config", config_path=path)
+    quality_gate_policy_version = _safe_version(
+        quality_gate_raw.get("policy_version"),
+        DEFAULT_QUALITY_POLICY_VERSION,
+        "quality_gate.policy_version",
+        path,
+    )
     purge_after = archive_raw.get("purge_after_days")
     if purge_after is not None:
         purge_after = _integer(purge_after, 1, 1, 36_500, "archive.purge_after_days", path)
@@ -316,6 +346,10 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
             index_snapshot_ttl_days=_integer(archive_raw.get("index_snapshot_ttl_days"), 7, 0, 365, "archive.index_snapshot_ttl_days", path),
             automatic_purge=_bool(archive_raw.get("automatic_purge"), False, "archive.automatic_purge", path),
             purge_after_days=purge_after,
+        ),
+        quality_gate=QualityGateSettings(
+            mode=quality_gate_mode,
+            policy_version=quality_gate_policy_version,
         ),
     )
 
@@ -409,11 +443,12 @@ class ConfigRegistry:
             "privacy": {"credential_redaction_enabled": settings.privacy.credential_redaction_enabled, "redaction_rule_version": settings.privacy.redaction_rule_version, "pii_policy": settings.privacy.pii_policy},
             "telemetry": {"enabled": settings.telemetry.enabled, "retention_days": settings.telemetry.retention_days, "store_query_body": settings.telemetry.store_query_body},
             "archive": {"archive_index_enabled": settings.archive.archive_index_enabled, "index_snapshot_ttl_days": settings.archive.index_snapshot_ttl_days, "automatic_purge": settings.archive.automatic_purge, "purge_configured": settings.archive.purge_after_days is not None},
+            "quality_gate": {"mode": settings.quality_gate.mode, "policy_version": settings.quality_gate.policy_version},
             "restart_required_for_changes": True,
         }
 
 
-def write_global_config(config_path: str | Path | None, *, vault_name: str, vault_root: str | Path, make_default: bool = True, retrieval: Mapping[str, Any] | None = None, privacy: Mapping[str, Any] | None = None, telemetry: Mapping[str, Any] | None = None, archive: Mapping[str, Any] | None = None, tool_profile: Literal["core", "worker"] | None = None) -> Path:
+def write_global_config(config_path: str | Path | None, *, vault_name: str, vault_root: str | Path, make_default: bool = True, retrieval: Mapping[str, Any] | None = None, privacy: Mapping[str, Any] | None = None, telemetry: Mapping[str, Any] | None = None, archive: Mapping[str, Any] | None = None, quality_gate: Mapping[str, Any] | None = None, tool_profile: Literal["core", "worker"] | None = None) -> Path:
     path = _resolved_path(config_path) if config_path is not None else global_config_path()
     raw = load_global_config(path)
     # Validate existing state before extending it; this prevents a CLI write from preserving invalid YAML.
@@ -424,7 +459,7 @@ def write_global_config(config_path: str | Path | None, *, vault_name: str, vaul
         raise RuntimeConfigError("vaults must be an object", code="invalid_config", config_path=path)
     entry: dict[str, Any] = dict(vaults.get(vault_name) or {})
     entry["root"] = str(_resolve_required_absolute_path(vault_root, description="vault root"))
-    for key, value in (("retrieval", retrieval), ("privacy", privacy), ("telemetry", telemetry), ("archive", archive)):
+    for key, value in (("retrieval", retrieval), ("privacy", privacy), ("telemetry", telemetry), ("archive", archive), ("quality_gate", quality_gate)):
         if value is not None:
             entry[key] = _merge_mapping(entry.get(key), value)
     vaults[vault_name] = entry

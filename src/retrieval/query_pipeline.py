@@ -35,7 +35,15 @@ from retrieval.query_shared import (
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.metadata_filters import page_matches_filters
-from runtime.runtime_config import EmbeddingSettings, TelemetrySettings
+from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
+from retrieval.query_quality_policy import (
+    GATE_FAIL_OPEN_ERROR,
+    QUALITY_POLICY_VERSION,
+    build_candidate_features,
+    evaluate_quality_gate,
+    is_gate_reason_code,
+    is_score_family,
+)
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, vector_settings_from_embedding
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError
 from retrieval.query_execution_context import QueryExecutionContext
@@ -46,6 +54,104 @@ from retrieval.query_recall_policy import (
     adaptive_expand,
     classify_intent,
 )
+
+
+_QUALITY_GATE_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
+def _quality_gate_branch(*, coverage_fallback: bool, fallback_level: str, lexical_mode: str) -> str | None:
+    if coverage_fallback:
+        return "coverage"
+    if lexical_mode in {"relaxed", "wiki_relaxed", "active_relaxed"}:
+        return "wiki_relaxed"
+    if fallback_level == "raw" or lexical_mode.startswith("raw"):
+        return "raw"
+    return None
+
+
+def _quality_gate_summary(
+    candidates: tuple[Mapping[str, Any], ...],
+    *,
+    settings: QualityGateSettings | None,
+    effective_scope: str,
+    retrieval_mode: str,
+    fallback_level: str,
+    coverage_fallback: bool,
+    lexical_mode: str,
+) -> dict[str, Any] | None:
+    """Run the pure gate after outcome freeze and project only bounded counters."""
+
+    if settings is None or settings.mode == "off":
+        return None
+    if settings.mode not in {"shadow", "enforce"}:
+        return None
+
+    policy_version_value = settings.policy_version
+    policy_version = (
+        policy_version_value
+        if isinstance(policy_version_value, str) and _QUALITY_GATE_SAFE_TOKEN.fullmatch(policy_version_value)
+        else QUALITY_POLICY_VERSION
+    )
+    branch = _quality_gate_branch(
+        coverage_fallback=coverage_fallback,
+        fallback_level=fallback_level,
+        lexical_mode=lexical_mode,
+    )
+
+    def fail_open() -> dict[str, Any]:
+        return {
+            "policy_version": policy_version,
+            "mode": settings.mode,
+            "status": "gate_unavailable",
+            "candidate_count": len(candidates),
+            "accepted_count": len(candidates),
+            "rejected_count": 0,
+            "score_family_counts": {},
+            "reason_counts": {GATE_FAIL_OPEN_ERROR: 1},
+            "low_sample_buckets": [],
+            "fail_open": True,
+        }
+
+    try:
+        features = build_candidate_features(
+            candidates,
+            effective_scope=effective_scope,
+            retrieval_mode=retrieval_mode,
+            branch=branch,
+        )
+        result = evaluate_quality_gate(features, policy_version=policy_version)
+        summary = result.summary
+        score_family_counts = {
+            str(key): int(value)
+            for key, value in summary.score_family_counts.items()
+            if is_score_family(key) and type(value) is int and value >= 0
+        }
+        reason_counts = {
+            str(key): int(value)
+            for key, value in summary.reason_counts.items()
+            if is_gate_reason_code(key) and type(value) is int and value >= 0
+        }
+        low_sample_buckets = [
+            value[:64]
+            for value in summary.low_sample_buckets
+            if isinstance(value, str) and _QUALITY_GATE_SAFE_TOKEN.fullmatch(value)
+        ][:32]
+        return {
+            "policy_version": policy_version,
+            "mode": settings.mode,
+            # Enforce projection is intentionally deferred to task 06.  Keep
+            # the calculation shadow-only while preserving the configured mode.
+            "status": "gate_shadow",
+            "candidate_count": int(summary.candidate_count),
+            "accepted_count": int(summary.accepted_count),
+            "rejected_count": int(summary.rejected_count),
+            "score_family_counts": score_family_counts,
+            "reason_counts": reason_counts,
+            "low_sample_buckets": low_sample_buckets,
+            "fail_open": bool(summary.fail_open),
+        }
+    except Exception:
+        return fail_open()
 
 
 
@@ -288,6 +394,7 @@ def run_query_v2(
     hard_budget_tokens: int = 16_000,
     embedding: EmbeddingSettings | None = None,
     telemetry: TelemetrySettings | None = None,
+    quality_gate: QualityGateSettings | None = None,
     debug: bool = False,
     include_context_pack: bool = True,
     lexical_enabled: bool = True,
@@ -527,6 +634,17 @@ def run_query_v2(
         confirmation_token=confirmation_token,
     )
     outcome = execution.outcome()
+    fallback_value = outcome.recovery.fallback
+    fallback_level = str(fallback_value.get("level") or "none") if isinstance(fallback_value, Mapping) else "none"
+    quality_gate_summary = _quality_gate_summary(
+        outcome.selected,
+        settings=quality_gate,
+        effective_scope=effective_scope,
+        retrieval_mode=retrieval_mode,
+        fallback_level=fallback_level,
+        coverage_fallback=outcome.coverage_fallback,
+        lexical_mode=outcome.lexical_mode,
+    )
     selected = _thaw_value(outcome.selected)
     context_items = _thaw_value(outcome.context_items)
     recovery = outcome.recovery
@@ -645,6 +763,8 @@ def run_query_v2(
         "warnings": warnings,
         "fallback": fallback_payload,
     }
+    if quality_gate_summary is not None:
+        pipeline["quality_gate"] = quality_gate_summary
     if discovery_requested or discovery_entities or discovery_source_items:
         pipeline["discovery"] = discovery
     if batch_payload.get("status") != "not_triggered":

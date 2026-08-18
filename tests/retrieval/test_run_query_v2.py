@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, run_query_v2
 import retrieval.query_pipeline as query_pipeline_module
 from retrieval.vector_index import VectorIndexStore, vector_index_records
 from retrieval.vector_provider import DeterministicFakeProvider
-from runtime.runtime_config import EmbeddingSettings
+from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
 from tests.helpers import write_test_page
 from wiki.wiki_index import refresh_indexes
 from wiki.wiki_paths import create_wiki_root
@@ -15,6 +16,101 @@ from wiki.wiki_paths import create_wiki_root
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
     data = {"title": title, "generated": bool(frontmatter.pop("generated", True)), **frontmatter}
     write_test_page(root, path, data, body)
+
+
+def _without_quality_gate(result: dict[str, object]) -> dict[str, object]:
+    pipeline = result.get("pipeline")
+    assert isinstance(pipeline, dict)
+    return {
+        **result,
+        "pipeline": {key: value for key, value in pipeline.items() if key != "quality_gate"},
+    }
+
+
+def test_quality_gate_off_is_field_identical_and_shadow_only_extends_pipeline(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice.md", "Invoice Approval", "invoice approval workflow", type="concept")
+    _write(root, "wiki/concepts/noise.md", "Unrelated", "unrelated reference", type="concept")
+    refresh_indexes(root)
+    telemetry = TelemetrySettings(enabled=False)
+
+    baseline = run_query_v2(root, "invoice approval", retrieval_mode="lexical", telemetry=telemetry)
+    off = run_query_v2(
+        root,
+        "invoice approval",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="off"),
+    )
+    shadow = run_query_v2(
+        root,
+        "invoice approval",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="shadow"),
+    )
+
+    assert off == baseline
+    assert _without_quality_gate(shadow) == baseline
+    quality_gate = shadow["pipeline"]["quality_gate"]
+    assert set(quality_gate) == {
+        "policy_version",
+        "mode",
+        "status",
+        "candidate_count",
+        "accepted_count",
+        "rejected_count",
+        "score_family_counts",
+        "reason_counts",
+        "low_sample_buckets",
+        "fail_open",
+    }
+    assert quality_gate["mode"] == "shadow"
+    assert quality_gate["status"] == "gate_shadow"
+    assert quality_gate["candidate_count"] == quality_gate["accepted_count"] + quality_gate["rejected_count"]
+    assert quality_gate["candidate_count"] == shadow["pipeline"]["counters"]["selected"]
+    assert len(quality_gate["score_family_counts"]) <= 5
+    assert len(quality_gate["reason_counts"]) <= quality_gate["candidate_count"]
+    assert "invoice" not in json.dumps(quality_gate, ensure_ascii=False)
+    assert "wiki/" not in json.dumps(quality_gate, ensure_ascii=False)
+
+    enforce = run_query_v2(
+        root,
+        "invoice approval",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="enforce"),
+    )
+    assert _without_quality_gate(enforce) == baseline
+    assert enforce["pipeline"]["quality_gate"]["mode"] == "enforce"
+    assert enforce["pipeline"]["quality_gate"]["status"] == "gate_shadow"
+
+
+def test_quality_gate_exception_fails_open_without_changing_public_envelope(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice.md", "Invoice Approval", "invoice approval workflow", type="concept")
+    refresh_indexes(root)
+    telemetry = TelemetrySettings(enabled=False)
+    baseline = run_query_v2(root, "invoice approval", retrieval_mode="lexical", telemetry=telemetry)
+
+    def fail_features(*_args, **_kwargs):
+        raise RuntimeError("gate test failure")
+
+    monkeypatch.setattr(query_pipeline_module, "build_candidate_features", fail_features)
+    shadow = run_query_v2(
+        root,
+        "invoice approval",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="shadow"),
+    )
+
+    assert _without_quality_gate(shadow) == baseline
+    assert shadow["pipeline"]["quality_gate"]["status"] == "gate_unavailable"
+    assert shadow["pipeline"]["quality_gate"]["fail_open"] is True
+    assert shadow["pipeline"]["quality_gate"]["reason_counts"] == {"gate_fail_open_error": 1}
 
 
 def test_wiki_query_finds_keyword_matches_and_returns_citations(tmp_path: Path):

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from retrieval.retrieval_eval_dataset import Relevance, RetrievalEvalError
+from retrieval.query_quality_policy import is_gate_reason_code, is_score_family
 
 
 __all__ = [
@@ -380,6 +381,76 @@ def _pipeline_summary(pipeline: object) -> dict[str, Any]:
     return _project_pipeline(pipeline)
 
 
+_QUALITY_GATE_SUMMARY_KEYS = frozenset(
+    {
+        "policy_version",
+        "mode",
+        "status",
+        "candidate_count",
+        "accepted_count",
+        "rejected_count",
+        "score_family_counts",
+        "reason_counts",
+        "low_sample_buckets",
+        "fail_open",
+    }
+)
+_QUALITY_GATE_COUNT_KEYS = ("candidate_count", "accepted_count", "rejected_count")
+
+
+def _safe_quality_gate_token(value: object) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        return None
+    if not all(character.isalnum() or character in {"_", ".", ":", "-"} for character in value):
+        return None
+    return value
+
+
+def _project_quality_gate(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    summary: dict[str, Any] = {}
+    for key in ("policy_version", "status"):
+        token = _safe_quality_gate_token(value.get(key))
+        if token is not None:
+            summary[key] = token
+    mode = value.get("mode")
+    if mode in {"shadow", "enforce"}:
+        summary["mode"] = mode
+    for key in _QUALITY_GATE_COUNT_KEYS:
+        count = value.get(key)
+        if type(count) is int and count >= 0:
+            summary[key] = count
+
+    family_counts = value.get("score_family_counts")
+    if isinstance(family_counts, Mapping):
+        summary["score_family_counts"] = {
+            str(key): count
+            for key, count in family_counts.items()
+            if is_score_family(key) and type(count) is int and count >= 0
+        }
+
+    reason_counts = value.get("reason_counts")
+    if isinstance(reason_counts, Mapping):
+        summary["reason_counts"] = {
+            str(key): count
+            for key, count in reason_counts.items()
+            if is_gate_reason_code(key) and type(count) is int and count >= 0
+        }
+
+    low_sample_buckets = value.get("low_sample_buckets")
+    if isinstance(low_sample_buckets, list):
+        summary["low_sample_buckets"] = [
+            token
+            for item in low_sample_buckets[:32]
+            if (token := _safe_quality_gate_token(item)) is not None
+        ]
+    fail_open = value.get("fail_open")
+    if isinstance(fail_open, bool):
+        summary["fail_open"] = fail_open
+    return summary
+
+
 def _project_pipeline(pipeline: object) -> dict[str, Any]:
     if not isinstance(pipeline, Mapping):
         return {}
@@ -473,6 +544,10 @@ def _project_pipeline(pipeline: object) -> dict[str, Any]:
         if safe_batch:
             summary["batch"] = safe_batch
 
+    quality_gate = _project_quality_gate(pipeline.get("quality_gate"))
+    if quality_gate:
+        summary["quality_gate"] = quality_gate
+
     warnings = pipeline.get("warnings")
     vector_warnings = pipeline.get("stage_1_5_vector_warnings")
     warning_count = 0
@@ -496,6 +571,7 @@ _PIPELINE_SUMMARY_KEYS = frozenset(
         "fallback",
         "coverage",
         "batch",
+        "quality_gate",
         "warning_count",
     }
 )
@@ -581,6 +657,39 @@ def _has_pipeline_summary_shape(value: object) -> bool:
             not isinstance(batch_counters, Mapping)
             or any(type(item) is not int and not (isinstance(item, float) and math.isfinite(item)) for item in batch_counters.values())
         ):
+            return False
+    quality_gate = value.get("quality_gate")
+    if quality_gate is not None:
+        if not isinstance(quality_gate, Mapping) or not set(quality_gate).issubset(_QUALITY_GATE_SUMMARY_KEYS):
+            return False
+        required_quality_gate_keys = _QUALITY_GATE_SUMMARY_KEYS
+        if not required_quality_gate_keys.issubset(quality_gate):
+            return False
+        for key in ("policy_version", "status"):
+            if _safe_quality_gate_token(quality_gate.get(key)) is None:
+                return False
+        if quality_gate.get("mode") not in {"shadow", "enforce"}:
+            return False
+        if any(type(quality_gate.get(key)) is not int or quality_gate[key] < 0 for key in _QUALITY_GATE_COUNT_KEYS):
+            return False
+        family_counts = quality_gate.get("score_family_counts")
+        if not isinstance(family_counts, Mapping) or any(
+            not is_score_family(key) or type(item) is not int or item < 0
+            for key, item in family_counts.items()
+        ):
+            return False
+        reason_counts = quality_gate.get("reason_counts")
+        if not isinstance(reason_counts, Mapping) or any(
+            not is_gate_reason_code(key) or type(item) is not int or item < 0
+            for key, item in reason_counts.items()
+        ):
+            return False
+        low_sample_buckets = quality_gate.get("low_sample_buckets")
+        if not isinstance(low_sample_buckets, list) or len(low_sample_buckets) > 32 or any(
+            _safe_quality_gate_token(item) is None for item in low_sample_buckets
+        ):
+            return False
+        if not isinstance(quality_gate.get("fail_open"), bool):
             return False
     return True
 

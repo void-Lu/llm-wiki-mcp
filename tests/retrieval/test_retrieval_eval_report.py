@@ -82,6 +82,21 @@ def test_report_owner_redacts_evidence_at_output_boundary(tmp_path: Path) -> Non
                     "discovery": {"evidence": {"excerpt": "secret"}},
                     "confirmation_token": "secret-token",
                     "fallback": {"level": "raw", "reasons": ["safe_reason", "contains spaces"]},
+                    "quality_gate": {
+                        "policy_version": "query-quality-policy-v0",
+                        "mode": "shadow",
+                        "status": "gate_shadow",
+                        "candidate_count": 2,
+                        "accepted_count": 2,
+                        "rejected_count": 0,
+                        "score_family_counts": {"main_rrf": 2, "C:\\secret": 9},
+                        "reason_counts": {"gate_keep_default": 2, "query secret": 9},
+                        "low_sample_buckets": ["score_family:main_rrf", "C:\\secret"],
+                        "fail_open": False,
+                        "path": "C:\\secret\\candidate.md",
+                        "query": "secret query",
+                        "body": "secret passage",
+                    },
                 },
             }
         ],
@@ -95,6 +110,18 @@ def test_report_owner_redacts_evidence_at_output_boundary(tmp_path: Path) -> Non
     assert "safe_reason" in text
     assert "contains spaces" not in text
     assert json.loads(text)["cases"][0]["pipeline"]["retrieval_mode"] == "lexical"
+    assert json.loads(text)["cases"][0]["pipeline"]["quality_gate"] == {
+        "policy_version": "query-quality-policy-v0",
+        "mode": "shadow",
+        "status": "gate_shadow",
+        "candidate_count": 2,
+        "accepted_count": 2,
+        "rejected_count": 0,
+        "score_family_counts": {"main_rrf": 2},
+        "reason_counts": {"gate_keep_default": 2},
+        "low_sample_buckets": ["score_family:main_rrf"],
+        "fail_open": False,
+    }
 
 
 def test_report_owner_gate_requires_frozen_identity() -> None:

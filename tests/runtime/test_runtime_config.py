@@ -8,6 +8,7 @@ import yaml
 
 from runtime.runtime_config import (
     ConfigRegistry,
+    QualityGateSettings,
     RuntimeConfigError,
     _normalize_storage_hash_path,
     resolve_runtime_config,
@@ -245,6 +246,34 @@ def test_registry_decodes_profiles_and_redacts_public_status(tmp_path: Path) -> 
     assert resolved.settings.retrieval.execution.max_concurrency == 4
     assert "execution" not in status["retrieval"]
     assert status["archive"]["automatic_purge"] is False
+    assert status["quality_gate"] == {
+        "mode": "off",
+        "policy_version": "query-quality-policy-v0",
+    }
+
+
+def test_registry_decodes_quality_gate_into_immutable_snapshot(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path / "vault")
+    config_path = tmp_path / "config.yaml"
+    write_global_config(
+        config_path,
+        vault_name="primary",
+        vault_root=vault,
+        quality_gate={"mode": "shadow", "policy_version": "policy-v1"},
+    )
+
+    registry = ConfigRegistry.from_file(config_path)
+    resolved = registry.resolve_vault()
+
+    assert resolved.settings.quality_gate == QualityGateSettings(mode="shadow", policy_version="policy-v1")
+    assert registry.public_status(resolved)["quality_gate"] == {
+        "mode": "shadow",
+        "policy_version": "policy-v1",
+    }
+    with pytest.raises((AttributeError, TypeError)):
+        resolved.settings.quality_gate.mode = "off"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        registry.config.vaults["other"] = resolved.settings  # type: ignore[index]
 
 
 def test_registry_decodes_trusted_query_execution_bounds_without_public_exposure(tmp_path: Path) -> None:
@@ -287,6 +316,9 @@ def test_registry_decodes_trusted_query_execution_bounds_without_public_exposure
         ({"privacy": {"redaction_rule_version": "token=secret"}}, "invalid_config"),
         ({"telemetry": {"retention_days": 0}}, "invalid_config"),
         ({"telemetry": {"store_query_body": True}}, "invalid_config"),
+        ({"quality_gate": {"unknown": True}}, "unknown_config_field"),
+        ({"quality_gate": {"mode": "on"}}, "invalid_config"),
+        ({"quality_gate": {"policy_version": "token=secret"}}, "invalid_config"),
     ],
 )
 def test_registry_rejects_unknown_unsafe_and_out_of_range_profile_fields(tmp_path: Path, patch: dict[str, object], code: str) -> None:

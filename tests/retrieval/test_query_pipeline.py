@@ -8,7 +8,7 @@ from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
 from retrieval.vector_index import vector_index_records
 import retrieval.query_pipeline as query_pipeline_module
-from runtime.runtime_config import EmbeddingSettings
+from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
 from tests.helpers import write_test_page
 from wiki.wiki_paths import create_wiki_root
 from wiki.wiki_index import refresh_indexes
@@ -20,6 +20,15 @@ from wiki.wiki_index import refresh_indexes
 
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
     write_test_page(root, path, {"title": title, "generated": True, **frontmatter}, body)
+
+
+def _without_quality_gate(result: dict[str, object]) -> dict[str, object]:
+    pipeline = result.get("pipeline")
+    assert isinstance(pipeline, dict)
+    return {
+        **result,
+        "pipeline": {key: value for key, value in pipeline.items() if key != "quality_gate"},
+    }
 
 
 def test_probe_hit_is_an_empty_eligibility_probe() -> None:
@@ -284,6 +293,46 @@ def test_v2_raw_scope_index_unavailable_uses_structured_index_response(tmp_path:
     }
 
 
+def test_v2_shadow_preserves_no_results_and_index_unavailable_semantics(tmp_path: Path) -> None:
+    root = tmp_path / "no-result-vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/known.md", "Known topic", "A known indexed topic.", type="concept")
+    refresh_indexes(root)
+    telemetry = TelemetrySettings(enabled=False)
+
+    baseline = run_query_v2(root, "unmatched retrieval sentinel", retrieval_mode="lexical", telemetry=telemetry)
+    shadow = run_query_v2(
+        root,
+        "unmatched retrieval sentinel",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="shadow"),
+    )
+
+    assert baseline["code"] == shadow["code"] == "no_results"
+    assert _without_quality_gate(shadow) == baseline
+    assert shadow["pipeline"]["quality_gate"]["candidate_count"] == 0
+
+    unavailable_root = tmp_path / "unavailable-vault"
+    create_wiki_root(unavailable_root)
+    _write(unavailable_root, "wiki/concepts/known.md", "Known topic", "A known indexed topic.", type="concept")
+    refresh_indexes(unavailable_root)
+    RetrievalIndexStore(unavailable_root).path.unlink()
+
+    unavailable_baseline = run_query_v2(unavailable_root, "known topic", retrieval_mode="lexical", telemetry=telemetry)
+    unavailable_shadow = run_query_v2(
+        unavailable_root,
+        "known topic",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="shadow"),
+    )
+
+    assert unavailable_baseline["code"] == unavailable_shadow["code"] == "index_missing"
+    assert unavailable_shadow == unavailable_baseline
+    assert "quality_gate" not in unavailable_shadow["pipeline"]
+
+
 
 
 
@@ -340,6 +389,57 @@ def test_v2_raw_fallback_creates_one_raw_store_per_query(tmp_path: Path, monkeyp
     result = run_query_v2(root, "access reports", retrieval_mode="lexical")
 
     assert result["results"]
+    assert raw_store_inits == 1
+
+
+def test_v2_shadow_reuses_frozen_snapshots_and_does_not_repeat_fts_or_raw_store(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("---\ntitle: Reports Help\n---\n\nAccess reports from the Reports menu.", encoding="utf-8")
+    refresh_indexes(root)
+
+    original_capture = QueryCorpusSnapshot.capture
+    snapshot_captures = 0
+
+    def count_snapshot_capture(cls, store, *, cancellation):
+        nonlocal snapshot_captures
+        snapshot_captures += 1
+        return original_capture(store, cancellation=cancellation)
+
+    monkeypatch.setattr(QueryCorpusSnapshot, "capture", classmethod(count_snapshot_capture))
+    original_init = RetrievalIndexStore.__init__
+    raw_store_inits = 0
+
+    def count_raw_store_init(self: RetrievalIndexStore, *args, **kwargs) -> None:
+        nonlocal raw_store_inits
+        if kwargs.get("scope") == "raw":
+            raw_store_inits += 1
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(RetrievalIndexStore, "__init__", count_raw_store_init)
+    original_stage = query_pipeline_module._stage_one_fts_hits
+    fts_stage_calls = 0
+
+    def count_fts_stage(*args, **kwargs):
+        nonlocal fts_stage_calls
+        fts_stage_calls += 1
+        return original_stage(*args, **kwargs)
+
+    monkeypatch.setattr(query_pipeline_module, "_stage_one_fts_hits", count_fts_stage)
+    result = run_query_v2(
+        root,
+        "access reports",
+        retrieval_mode="lexical",
+        telemetry=TelemetrySettings(enabled=False),
+        quality_gate=QualityGateSettings(mode="shadow"),
+    )
+
+    assert result["results"]
+    assert result["pipeline"]["quality_gate"]["candidate_count"] == result["pipeline"]["counters"]["selected"]
+    assert snapshot_captures == 2  # active + the one lazy raw recovery snapshot
+    assert fts_stage_calls == 1
     assert raw_store_inits == 1
 
 
@@ -993,6 +1093,41 @@ def test_v2_discovers_structured_qualified_entities_and_batches_in_discovery_ord
     ]
     assert all(item["primary"]["context"] for item in batch["entities"])
     assert all(item["primary"]["path"] != "wiki/concepts/module-catalog.md" for item in batch["entities"])
+
+
+def test_v2_shadow_preserves_discovery_only_and_batch_payload(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    catalog = root / "raw/sources/references/module-catalog.md"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "# SuiteScript Module Catalog\n\n"
+        "- N/auth Authentication module\n"
+        "- N/search Search module\n",
+        encoding="utf-8",
+    )
+    for name in ("auth", "search"):
+        (catalog.parent / f"n-{name}.md").write_text(
+            f"# N/{name}\n\nN/{name} API reference", encoding="utf-8"
+        )
+    refresh_indexes(root)
+    telemetry = TelemetrySettings(enabled=False)
+
+    baseline = run_query_v2(root, "列出 N/*", scope="raw", retrieval_mode="lexical", telemetry=telemetry)
+    shadow = run_query_v2(
+        root,
+        "列出 N/*",
+        scope="raw",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="shadow"),
+    )
+
+    assert baseline["code"] == shadow["code"] == "discovery_only"
+    assert _without_quality_gate(shadow) == baseline
+    assert shadow["pipeline"]["quality_gate"]["candidate_count"] == 0
+    assert shadow["pipeline"]["discovery"] == baseline["pipeline"]["discovery"]
+    assert shadow["pipeline"]["batch"] == baseline["pipeline"]["batch"]
 
 
 def test_v2_batch_does_not_recurse_into_a_third_query_stage(tmp_path: Path, monkeypatch) -> None:
