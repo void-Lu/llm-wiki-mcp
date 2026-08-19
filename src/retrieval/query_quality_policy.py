@@ -14,6 +14,8 @@ import re
 from types import MappingProxyType
 from typing import Any, Literal, TypeGuard
 
+from retrieval.candidate_items import CANDIDATE_CORE_KEYS, FUSION_KEYS
+
 
 ScoreFamily = Literal[
     "main_rrf",
@@ -95,6 +97,8 @@ _SNAKE_CASE_REASON = re.compile(r"^gate_(?:keep|reject|fail_open|would)_[a-z0-9_
 _CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uff00-\uffef]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _VALID_SCOPES = frozenset({"knowledge", "history", "all", "archive", "raw"})
+_CANONICAL_CANDIDATE_KEYS = CANDIDATE_CORE_KEYS | FUSION_KEYS
+_HIT_KEYS = frozenset({"authority", "corpus", "page_path", "score", "source_kind", "text", "title"})
 
 
 def is_score_family(value: object) -> TypeGuard[ScoreFamily]:
@@ -111,19 +115,31 @@ def is_gate_reason_code(value: object) -> bool:
 
 def _read(value: object, key: str, default: Any = None) -> Any:
     if isinstance(value, Mapping):
-        return value.get(key, default)
-    return getattr(value, key, default)
+        return value.get(key, default) if key in _CANONICAL_CANDIDATE_KEYS else default
+    if isinstance(value, CandidateFeature):
+        return getattr(value, key, default)
+    return default
 
 
 def _hit(candidate: object) -> object:
     return _read(candidate, "hit")
 
 
+def _read_hit(value: object, key: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(key, default) if key in _HIT_KEYS else default
+    if isinstance(value, CandidateFeature):
+        return getattr(value, key, default)
+    if key in _HIT_KEYS:
+        return getattr(value, key, default)
+    return default
+
+
 def _candidate_or_hit(candidate: object, key: str, default: Any = None) -> Any:
     value = _read(candidate, key, None)
     if value is not None:
         return value
-    return _read(_hit(candidate), key, default)
+    return _read_hit(_hit(candidate), key, default)
 
 
 def _number(value: object, default: float = 0.0) -> float:
@@ -162,37 +178,18 @@ def _normalized_path(value: object) -> str:
 def _page_path(candidate: object) -> str:
     path = _candidate_or_hit(candidate, "page_path", None)
     if not path:
-        path = _read(candidate, "path", None)
-    if not path:
-        path = _read(_hit(candidate), "path", None)
-    if not path:
         raise ValueError("candidate page_path is required")
     return str(path).replace("\\", "/")
 
 
 def _candidate_keys(candidate: object) -> set[str]:
     if isinstance(candidate, Mapping):
-        return {str(key) for key in candidate}
+        return {str(key) for key in candidate if str(key) in _CANONICAL_CANDIDATE_KEYS}
     return set()
 
 
 def _branch_name(candidate: object, branch: str | None) -> str:
-    if branch:
-        return branch.casefold()
-    for key in ("branch", "fallback_branch", "recovery_branch", "score_branch"):
-        value = _read(candidate, key, None)
-        if isinstance(value, str) and value.strip():
-            return value.casefold()
-    fallback_reason = _read(candidate, "fallback_reason", "")
-    if isinstance(fallback_reason, str):
-        lowered = fallback_reason.casefold()
-        if "relaxed" in lowered:
-            return "wiki_relaxed"
-        if "coverage" in lowered:
-            return "coverage"
-        if "raw" in lowered:
-            return "raw"
-    return ""
+    return branch.casefold() if branch else ""
 
 
 def derive_score_family(candidate: Mapping[str, Any] | object, *, branch: str | None = None) -> ScoreFamily:
@@ -217,16 +214,7 @@ def derive_score_family(candidate: Mapping[str, Any] | object, *, branch: str | 
         return "raw_recovery"
 
     keys = _candidate_keys(candidate)
-    coverage_keys = {
-        "coverage_terms",
-        "coverage_ratio",
-        "source_local_rank",
-        "source_local_rrf",
-        "fusion_score",
-        "fusion_source",
-        "fusion_local_position",
-    }
-    if keys & coverage_keys:
+    if keys & FUSION_KEYS:
         return "coverage_fusion"
 
     graph_score = _number(_read(candidate, "graph_score", 0.0))
@@ -255,7 +243,7 @@ def resolve_effective_scope(
 ) -> str:
     """Resolve the internal scope without treating public ``auto`` as a bucket."""
 
-    internal = effective_scope or _read(candidate, "effective_scope", None) or _read(candidate, "internal_scope", None)
+    internal = effective_scope or _read(candidate, "effective_scope", None)
     if isinstance(internal, str) and internal.casefold() in _VALID_SCOPES:
         return internal.casefold()
     requested = scope.casefold()
@@ -274,42 +262,28 @@ def _fallback_fields(
     fallback_level: str | None,
     fallback_reason: str | None,
 ) -> tuple[str, str]:
-    fallback = _read(candidate, "fallback", None)
     level = fallback_level or _read(candidate, "fallback_level", None)
     reason = fallback_reason or _read(candidate, "fallback_reason", None)
-    reasons = _read(candidate, "fallback_reasons", None)
-    if isinstance(fallback, Mapping):
-        level = level or fallback.get("level")
-        reason = reason or fallback.get("reason")
-        reasons = reasons or fallback.get("reasons")
     if not level:
         source_kind = str(_candidate_or_hit(candidate, "source_kind", "")).casefold()
         level = "raw" if source_kind == "raw" else "none"
-    if not reason and isinstance(reasons, Sequence) and not isinstance(reasons, (str, bytes)):
-        reason = next((str(item) for item in reasons if str(item).strip()), "")
     return str(level), str(reason or "")
 
 
 def _coverage(candidate: object, query_terms: Sequence[str]) -> tuple[float, tuple[str, ...]]:
-    raw_terms = _read(candidate, "covered_terms", None)
+    raw_terms = _read(candidate, "coverage_terms", None)
     if raw_terms is None:
-        raw_terms = _read(candidate, "coverage_terms", None)
+        raw_terms = _read(candidate, "covered_terms", None)
     covered = tuple(sorted({str(term).casefold() for term in raw_terms or () if str(term).strip()}))
-    ratio = _read(candidate, "term_coverage", None)
+    ratio = _read(candidate, "coverage_ratio", None)
     if ratio is None:
-        ratio = _read(candidate, "coverage_ratio", None)
-    if ratio is None:
-        ratio = _read(candidate, "coverage", None)
-    if isinstance(ratio, Mapping):
-        ratio = ratio.get("ratio", ratio.get("coverage_ratio"))
+        ratio = _read(candidate, "term_coverage", None)
     if ratio is None and query_terms:
         normalized_terms = {str(term).casefold() for term in query_terms if str(term).strip()}
         if covered:
             ratio = len(normalized_terms & set(covered)) / max(len(normalized_terms), 1)
         else:
-            raw_uncovered = _read(candidate, "uncovered_terms", ())
-            uncovered = {str(term).casefold() for term in raw_uncovered or ()}
-            ratio = 1.0 - len(uncovered & normalized_terms) / max(len(normalized_terms), 1)
+            ratio = 0.0
     value = min(max(_number(ratio), 0.0), 1.0)
     return value, covered
 
@@ -334,20 +308,12 @@ def _language_bucket(candidate: object, explicit: str | None) -> str:
 
 
 def _signal_values(candidate: object) -> tuple[bool, bool, bool, bool, tuple[str, ...]]:
-    exact = _truthy(_read(candidate, "exact_signal", _read(candidate, "exact_match", _read(candidate, "exact", False))))
-    identifier = _truthy(
-        _read(
-            candidate,
-            "identifier_signal",
-            _read(candidate, "qualified_identifier", _read(candidate, "identifier", False)),
-        )
-    )
-    phrase = _truthy(
-        _read(candidate, "phrase_signal", _read(candidate, "phrase_match", _read(candidate, "identifier_phrase", False)))
-    )
-    title = _truthy(_read(candidate, "title_signal", _read(candidate, "title_match", False)))
+    exact = _truthy(_read(candidate, "exact", False))
+    identifier = _truthy(_read(candidate, "identifier_signal", False))
+    phrase = _truthy(_read(candidate, "phrase_signal", False))
+    title = _truthy(_read(candidate, "title_signal", False))
     if not title:
-        title = _positive_int(_read(candidate, "title_rank", None)) is not None or _number(_read(candidate, "title_overlap", 0.0)) > 0
+        title = _positive_int(_read(candidate, "title_rank", None)) is not None
 
     signals: list[str] = []
     for name, present in (
@@ -361,7 +327,7 @@ def _signal_values(candidate: object) -> tuple[bool, bool, bool, bool, tuple[str
         ("exact", exact),
         ("identifier", identifier),
         ("phrase", phrase),
-        ("coverage", _number(_read(candidate, "coverage_ratio", 0.0)) > 0),
+        ("coverage", _number(_read(candidate, "coverage_ratio", _read(candidate, "term_coverage", 0.0))) > 0),
         ("graph", _number(_read(candidate, "graph_score", 0.0)) > 0),
     ):
         if present:
@@ -376,7 +342,7 @@ def _signal_values(candidate: object) -> tuple[bool, bool, bool, bool, tuple[str
 
 
 def _candidate_rank(candidate: object) -> int | None:
-    for key in ("branch_rank", "branch_local_rank", "local_rank", "source_local_rank"):
+    for key in ("branch_rank", "source_local_rank"):
         rank = _positive_int(_read(candidate, key, None))
         if rank is not None:
             return rank
@@ -698,46 +664,17 @@ def _count_values(values: Iterable[str]) -> Mapping[str, int]:
 def _threshold_view_for(
     threshold_view: object,
     feature: CandidateFeature,
-    *,
-    index: int | None = None,
 ) -> QualityThresholdView | None:
-    """Resolve one candidate's view without importing the calibration owner."""
+    """Resolve one candidate through the calibration load-view protocol."""
 
-    if isinstance(threshold_view, QualityThresholdView):
-        return threshold_view
-    if (
-        index is not None
-        and isinstance(threshold_view, Sequence)
-        and not isinstance(threshold_view, (str, bytes, bytearray, Mapping))
-        and index < len(threshold_view)
-    ):
-        resolved = threshold_view[index]
-        return resolved if isinstance(resolved, QualityThresholdView) else None
     resolver = getattr(threshold_view, "for_feature", None)
-    if callable(resolver):
-        try:
-            resolved = resolver(feature)
-        except Exception:
-            return None
-        return resolved if isinstance(resolved, QualityThresholdView) else None
-    resolver = getattr(threshold_view, "resolve", None)
-    if callable(resolver):
-        try:
-            resolved = resolver(feature)
-        except Exception:
-            return None
-        return resolved if isinstance(resolved, QualityThresholdView) else None
-    if isinstance(threshold_view, Mapping):
-        keys = (
-            feature.normalized_page_path,
-            feature.page_path,
-            feature.score_family,
-        )
-        for key in keys:
-            resolved = threshold_view.get(key)
-            if isinstance(resolved, QualityThresholdView):
-                return resolved
-    return None
+    if not callable(resolver):
+        return None
+    try:
+        resolved = resolver(feature)
+    except Exception:
+        return None
+    return resolved if isinstance(resolved, QualityThresholdView) else None
 
 
 def _threshold_group(feature: CandidateFeature, view: QualityThresholdView | None) -> tuple[str, ...]:
@@ -803,7 +740,7 @@ def evaluate_quality_policy(
         (
             None
             if threshold_view is None
-            else _threshold_view_for(threshold_view, feature, index=index)
+            else _threshold_view_for(threshold_view, feature)
             or QualityThresholdView(
                 selection="fail_open",
                 fail_open=True,

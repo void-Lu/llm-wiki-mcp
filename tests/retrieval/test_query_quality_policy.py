@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from retrieval.query_quality_policy import (
     CandidateFeature,
     FAIL_OPEN_REASON_CODES,
@@ -57,7 +59,7 @@ def test_score_family_derivation_covers_the_five_branches() -> None:
             "main_rrf",
         ),
         (
-            {"hit": _hit("wiki/relaxed.md"), "score": 2.0, "fts_rank": 1, "branch": "wiki_relaxed"},
+            {"hit": _hit("wiki/relaxed.md"), "score": 2.0, "fts_rank": 1},
             "wiki_relaxed",
         ),
         (
@@ -81,7 +83,10 @@ def test_score_family_derivation_covers_the_five_branches() -> None:
         ),
     )
 
-    assert tuple(family for candidate, family in cases if derive_score_family(candidate)) == SCORE_FAMILIES
+    assert tuple(
+        derive_score_family(candidate, branch="wiki_relaxed" if family == "wiki_relaxed" else None)
+        for candidate, family in cases
+    ) == SCORE_FAMILIES
 
 
 def test_auto_scope_uses_internal_effective_scope() -> None:
@@ -90,23 +95,59 @@ def test_auto_scope_uses_internal_effective_scope() -> None:
             "hit": _hit("wiki/history.md"),
             "score": 1.0,
             "fts_rank": 1,
-            "scope": "auto",
-            "effective_scope": "history",
         },
         scope="auto",
+        effective_scope="history",
     )
 
     assert feature.effective_scope == "history"
     assert feature.effective_scope != "auto"
 
 
+def test_mapping_feature_extraction_ignores_legacy_candidate_aliases() -> None:
+    legacy = extract_candidate_feature(
+        {
+            "hit": _hit("wiki/legacy.md"),
+            "score": 1.0,
+            "exact_match": True,
+            "score_family": "graph_extension",
+            "branch": "wiki_relaxed",
+            "local_rank": 1,
+            "fallback_reason": "raw recovery",
+            "coverage": {"ratio": 1.0},
+            "uncovered_terms": [],
+        }
+    )
+    assert legacy.score_family == "main_rrf"
+    assert legacy.exact_signal is False
+    assert legacy.branch_rank is None
+    assert legacy.fallback_level == "none"
+    assert legacy.term_coverage == 0.0
+    with pytest.raises(ValueError, match="page_path is required"):
+        extract_candidate_feature({"hit": {"path": "wiki/legacy-path.md"}, "score": 1.0})
+
+    canonical = extract_candidate_feature(
+        {
+            "hit": _hit("wiki/canonical.md"),
+            "score": 1.0,
+            "fts_rank": 1,
+            "exact": True,
+            "coverage_ratio": 0.5,
+        }
+    )
+    assert canonical.score_family == "coverage_fusion"
+    assert canonical.exact_signal is True
+    assert canonical.term_coverage == 0.5
+
+
 def test_branch_local_rank_margin_uses_normalized_path_for_ties() -> None:
     features = build_candidate_features(
         (
-            {"hit": _hit("wiki/Z-page.md"), "score": 5.0, "branch": "wiki_relaxed"},
-            {"hit": _hit("wiki/a-page.md"), "score": 5.0, "branch": "wiki_relaxed"},
-            {"hit": _hit("wiki/tail.md"), "score": 3.0, "branch": "wiki_relaxed"},
-        )
+            {"hit": _hit("wiki/Z-page.md"), "score": 5.0},
+            {"hit": _hit("wiki/a-page.md"), "score": 5.0},
+            {"hit": _hit("wiki/tail.md"), "score": 3.0},
+        ),
+        branch="wiki_relaxed",
     )
 
     by_path = {feature.page_path: feature for feature in features}
