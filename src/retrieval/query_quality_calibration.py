@@ -162,6 +162,7 @@ class CalibrationIdentity:
             return raw
         data = _mapping(raw, code="artifact_identity_invalid", message="identity must be an object")
         ranking = data.get("ranking_policy_version", data.get("ranking_version"))
+        vault_fingerprint = data.get("vault_fingerprint")
         return cls(
             dataset_id=_nonempty(data.get("dataset_id"), code="artifact_identity_invalid", message="identity.dataset_id is required"),
             dataset_revision=_nonempty(
@@ -169,8 +170,8 @@ class CalibrationIdentity:
                 code="artifact_identity_invalid",
                 message="identity.dataset_revision is required",
             ),
-            vault_fingerprint=data.get("vault_fingerprint")
-            if isinstance(data.get("vault_fingerprint"), (str, Mapping))
+            vault_fingerprint=vault_fingerprint
+            if isinstance(vault_fingerprint, (str, Mapping))
             else (_raise_identity("identity.vault_fingerprint is required")),
             ranking_policy_version=_nonempty(
                 ranking,
