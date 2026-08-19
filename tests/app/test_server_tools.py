@@ -174,6 +174,29 @@ def test_mcp_client_protocol_calls_status_and_query(monkeypatch: pytest.MonkeyPa
     anyio.run(assert_protocol_calls)
 
 
+def test_wiki_status_does_not_materialize_query_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, _ = _registry(tmp_path)
+    monkeypatch.setattr(server_module, "CONFIG_REGISTRY", registry)
+    monkeypatch.setattr(server_module, "_QUERY_REGISTRIES", {})
+    monkeypatch.setattr(
+        server_module,
+        "wiki_status_tool",
+        lambda _: {
+            "ok": True,
+            "vault": "primary",
+            "initialized": True,
+            "missing_required_paths": [],
+            "version": RUNTIME_PROVENANCE.package_version,
+            "runtime": RUNTIME_PROVENANCE.to_public_dict(),
+        },
+    )
+
+    result = server_module.wiki_status(vault="primary")
+
+    assert result["query_execution"] == {"active": 0, "pending": 0}
+    assert server_module._QUERY_REGISTRIES == {}
+
+
 def test_no_results_adapter_does_not_override_discovery_outcome() -> None:
     payload = {
         "ok": True,

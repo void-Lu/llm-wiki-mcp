@@ -30,7 +30,9 @@ from runtime.runtime_provenance import RUNTIME_PROVENANCE
 from wiki.wiki_files import wiki_status as run_wiki_status
 from wiki.ingest_service import ingest_file as run_ingest_file
 from retrieval.query_cancellation import QueryCancelled, QueryCancellationContext, QueryExecutionRegistry
-from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, run_query_v2
+from retrieval.query_pipeline import run_query_v2
+from retrieval.query_recall_policy import DEFAULT_TOP_K
+from retrieval.query_shared import QueryFilters
 from retrieval.query_telemetry import QueryTelemetry
 from wiki.content_catalog import (
     DEFAULT_BODY_BUDGET,
@@ -496,11 +498,10 @@ def wiki_status(detail: str = "summary", vault: str | None = None, vault_root: s
     config_status = CONFIG_REGISTRY.public_status(resolution.resolved)
     archive_status = ArchiveStatusReader(resolution.root).status()
     execution = resolution.resolved.settings.retrieval.execution
-    execution_status = _query_registry(
-        vault_key=f"{resolution.logical_name}:{resolution.root}",
-        max_concurrency=execution.max_concurrency,
-        cancel_grace_seconds=execution.cancel_grace_seconds,
-    ).status()
+    registry_key = (f"{resolution.logical_name}:{resolution.root}", execution.max_concurrency, execution.cancel_grace_seconds)
+    with _QUERY_REGISTRY_LOCK:
+        registry = _QUERY_REGISTRIES.get(registry_key)
+    execution_status = registry.status() if registry is not None else {"active": 0, "pending": 0}
     return assemble_vault_status(base_status, config_status, archive_status, execution_status, detail)
 
 
