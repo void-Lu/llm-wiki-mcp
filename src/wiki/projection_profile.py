@@ -7,7 +7,7 @@ repair 状态或 vault I/O。各调用方按这里返回的阶段名绑定自己
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Final, Literal, Mapping
+from typing import Final, Iterable, Literal, Mapping
 
 
 ProjectionStage = Literal[
@@ -93,6 +93,30 @@ def projection_profiles() -> Mapping[str, tuple[ProjectionStage, ...]]:
     return PROJECTION_PROFILES
 
 
+def assert_operation_stage_parity(operation_kinds: Iterable[str]) -> None:
+    """断言 durable write kind 全部使用 formal journal 阶段。
+
+    调用方传入真实 write adapter registry 的 operation kinds；这样 profile
+    owner 不依赖 adapter 模块，同时仍通过同一 registry 校验 alias 和 canonical kind。
+    """
+
+    expected = projection_stages("formal")
+    for operation_kind in sorted(set(operation_kinds)):
+        canonical = _KIND_ALIASES.get(operation_kind, operation_kind)
+        try:
+            actual = projection_stages(operation_kind)
+        except ProjectionProfileError as exc:
+            raise AssertionError(
+                f"write kind {operation_kind!r} (canonical {canonical!r}) is not registered; "
+                f"expected formal PAGE_STAGES {expected!r}"
+            ) from exc
+        if actual != expected:
+            raise AssertionError(
+                f"write kind {operation_kind!r} (canonical {canonical!r}) has stages {actual!r}; "
+                f"expected formal PAGE_STAGES {expected!r}"
+            )
+
+
 __all__ = [
     "FORMAL_PROJECTION_STAGES",
     "INGEST_CHAT_PROJECTION_STAGES",
@@ -102,6 +126,7 @@ __all__ = [
     "ProjectionProfileError",
     "ProjectionStage",
     "RETRIEVAL_ONLY_PROJECTION_STAGES",
+    "assert_operation_stage_parity",
     "projection_profiles",
     "projection_stages",
 ]
