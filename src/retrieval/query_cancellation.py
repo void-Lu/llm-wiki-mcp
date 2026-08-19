@@ -11,21 +11,6 @@ import time
 from typing import Any, Literal
 from uuid import uuid4
 
-QueryStage = Literal[
-    "queued",
-    "status",
-    "metadata",
-    "fts",
-    "vector",
-    "ranking",
-    "graph",
-    "fallback",
-    "context",
-    "telemetry",
-    "completed",
-]
-
-
 class QueryCancelled(RuntimeError):
     """Raised at a cooperative checkpoint; never claims a thread was killed."""
 
@@ -48,7 +33,7 @@ class QueryCancellationContext:
 
     deadline: float
     cancel_event: threading.Event = field(default_factory=threading.Event)
-    stage: QueryStage | str = "queued"
+    stage: str = "queued"
     clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
     on_cancel: Callable[[QueryCancelled], None] | None = field(default=None, repr=False, compare=False)
     _reason: str = field(default="", init=False, repr=False)
@@ -312,5 +297,4 @@ __all__ = [
     "QueryCancelled",
     "QueryCapacityError",
     "QueryExecutionRegistry",
-    "QueryStage",
 ]
