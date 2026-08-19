@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import json
 import re
 from types import MappingProxyType
 from typing import Any, Literal
@@ -34,8 +35,14 @@ PASSAGE_PROBE_LIMIT = 20
 DISCOVERY_CANDIDATE_LIMIT = 240
 DISCOVERY_PAGE_LIMIT = 32
 DISCOVERY_SOURCE_PAGE_LIMIT = 8
+PUBLIC_DISCOVERY_CANDIDATE_LIMIT = 40
+PUBLIC_DISCOVERY_BYTE_LIMIT = 128 * 1024
 _DISCOVERY_INTENT_RE = re.compile(
     r"(?:\blist\b|\ball\b|\beach\b|\bevery\b|\bvarious\b|\bdifferent\b|\btypes?\b|\bavailable\b|\bmodules?\b|\bcatalog\b|\bdirectory\b|\boverview\b|列出|有哪些|各|每|分别|类型|目录|模块|清单|列表)",
+    re.I,
+)
+_DISCOVERY_EXPLANATORY_RE = re.compile(
+    r"(?:\bwhat\s+is\b|\bexplain\b|\bdescribe\b|\bmeaning\b|是什么|何为|含义|解释|说明|介绍)",
     re.I,
 )
 _DISCOVERY_ANCHOR_STOPWORDS = frozenset(
@@ -224,9 +231,35 @@ def _discovery_candidate_for_fragment(fragment: str) -> list[tuple[str, tuple[st
 
 
 def discovery_requested(question: str) -> bool:
-    """Recognize listing/wildcard intent without widening ordinary queries."""
+    """Recognize generic listing intent without widening member queries."""
 
-    return bool(extract_namespace_wildcards(question) or _DISCOVERY_INTENT_RE.search(question))
+    wildcards = extract_namespace_wildcards(question)
+    if wildcards:
+        return not bool(_DISCOVERY_EXPLANATORY_RE.search(question))
+
+    identifiers = _explicit_qualified_identifiers(question)
+    if len(identifiers) == 1:
+        return False
+    return bool(_DISCOVERY_INTENT_RE.search(question))
+
+
+def _explicit_qualified_identifiers(question: str) -> set[str]:
+    """Return identifiers written with a visible namespace separator."""
+
+    return {
+        identifier.canonical_id
+        for identifier in extract_qualified_identifiers(question)
+        if identifier.raw_forms and re.search(r"[/\s_-]", identifier.raw_forms[0])
+    }
+
+
+def _discovery_suppressed(question: str) -> bool:
+    """Keep one explicit target or explanatory wildcard out of enumeration."""
+
+    wildcards = extract_namespace_wildcards(question)
+    if wildcards and _DISCOVERY_EXPLANATORY_RE.search(question):
+        return True
+    return len(_explicit_qualified_identifiers(question)) == 1
 
 
 def _discovery_anchor_query(question: str) -> str:
@@ -542,14 +575,101 @@ def _discover_enumerated_entities(
     discovery = {
         "triggered": bool(unique_candidates),
         "enumeration_evidence": bool(unique_candidates),
-        "candidate_entities": [_public_discovery_entity(entity) for entity in unique_candidates],
+        "candidate_entities": [],
         "source_pages": [path for path, _page, _entities in valid_pages],
     }
-    return discovery, unique_candidates if len(unique_candidates) >= 2 else []
+    return _public_discovery_projection(discovery, unique_candidates), unique_candidates if len(unique_candidates) >= 2 else []
 
 
 def _public_discovery_entity(entity: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in entity.items() if not key.startswith("_")}
+    evidence_value = entity.get("evidence")
+    evidence = evidence_value if isinstance(evidence_value, Mapping) else {}
+    aliases_value = entity.get("aliases", ())
+    aliases = (
+        [str(alias) for alias in aliases_value]
+        if isinstance(aliases_value, Sequence) and not isinstance(aliases_value, (str, bytes))
+        else []
+    )
+    return {
+        "canonical_id": str(entity.get("canonical_id", "")),
+        "aliases": aliases,
+        "evidence": {
+            "path": str(evidence.get("path", "")),
+            "heading": str(evidence.get("heading", "")),
+        },
+    }
+
+
+def _discovery_json_size(value: Mapping[str, Any]) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _public_discovery_projection(
+    discovery: Mapping[str, Any],
+    entities: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project discovery with deterministic count and byte bounds."""
+
+    public_entities = [_public_discovery_entity(entity) for entity in entities]
+    source_pages_value = discovery.get("source_pages", ())
+    source_pages: list[str] = []
+    if isinstance(source_pages_value, Sequence) and not isinstance(source_pages_value, (str, bytes)):
+        source_pages = list(dict.fromkeys(str(path) for path in source_pages_value))
+    base = {
+        key: value
+        for key, value in discovery.items()
+        if key not in {"candidate_entities", "source_pages", "total_count", "returned_count", "truncated"}
+    }
+    base["source_pages"] = source_pages
+    base["total_count"] = len(public_entities)
+    base["returned_count"] = 0
+    base["truncated"] = True
+
+    def payload(candidates: list[dict[str, Any]], truncated: bool) -> dict[str, Any]:
+        return {
+            **base,
+            "candidate_entities": candidates,
+            "returned_count": len(candidates),
+            "truncated": truncated,
+        }
+
+    while _discovery_json_size(payload([], True)) > PUBLIC_DISCOVERY_BYTE_LIMIT and source_pages:
+        source_pages.pop()
+        base["source_pages"] = source_pages
+    if _discovery_json_size(payload([], True)) > PUBLIC_DISCOVERY_BYTE_LIMIT:
+        base = {
+            key: value
+            for key, value in base.items()
+            if key in {"triggered", "enumeration_evidence", "requested", "reason", "total_count", "source_pages", "returned_count", "truncated"}
+        }
+
+    selected: list[dict[str, Any]] = []
+    truncated = False
+    for candidate in public_entities:
+        if len(selected) >= PUBLIC_DISCOVERY_CANDIDATE_LIMIT:
+            truncated = True
+            break
+        if _discovery_json_size(payload([*selected, candidate], True)) > PUBLIC_DISCOVERY_BYTE_LIMIT:
+            truncated = True
+            break
+        selected.append(candidate)
+    if public_entities and not selected:
+        first = public_entities[0]
+        minimal = {
+            "canonical_id": first["canonical_id"],
+            "evidence": first["evidence"],
+        }
+        if _discovery_json_size(payload([minimal], True)) <= PUBLIC_DISCOVERY_BYTE_LIMIT:
+            selected.append(minimal)
+        else:
+            selected.append({"canonical_id": first["canonical_id"]})
+        truncated = True
+    if len(selected) < len(public_entities):
+        truncated = True
+    result = payload(selected, truncated)
+    if not truncated:
+        result["truncated"] = False
+    return result
 
 
 def _constrain_discovery_entities(
@@ -561,7 +681,7 @@ def _constrain_discovery_entities(
 
     wildcards = extract_namespace_wildcards(question)
     if not wildcards:
-        return discovery, list(entities)
+        return _public_discovery_projection(discovery, entities), list(entities)
     prefixes = [item.prefix_segments for item in wildcards]
     constrained: list[dict[str, Any]] = []
     for entity in entities:
@@ -578,10 +698,12 @@ def _constrain_discovery_entities(
         **discovery,
         "triggered": len(constrained) >= 2,
         "enumeration_evidence": len(constrained) >= 2,
-        "candidate_entities": [_public_discovery_entity(entity) for entity in constrained],
         "source_pages": [path for path in discovery.get("source_pages", ()) if path in source_paths],
     }
-    return constrained_discovery, constrained if len(constrained) >= 2 else []
+    return _public_discovery_projection(
+        constrained_discovery,
+        constrained,
+    ), constrained if len(constrained) >= 2 else []
 
 
 def discover_catalog(
@@ -609,8 +731,17 @@ def discover_catalog(
 
     discovery_requested = discovery_requested_for(question)
     discovery_source_items: list[dict[str, Any]] = []
-    discovery, discovery_entities = _discover_enumerated_entities(selected, context_items)
-    discovery, discovery_entities = _constrain_discovery_entities(question, discovery, discovery_entities)
+    if not _discovery_suppressed(question):
+        discovery, discovery_entities = _discover_enumerated_entities(selected, context_items)
+        discovery, discovery_entities = _constrain_discovery_entities(question, discovery, discovery_entities)
+    else:
+        discovery = {
+            "triggered": False,
+            "enumeration_evidence": False,
+            "candidate_entities": [],
+            "source_pages": [],
+        }
+        discovery_entities = []
     if not discovery_entities and discovery_requested:
         metadata = metadata_from_snapshot(snapshot, cancellation)
         discovery_source_items = _discovery_source_items(
@@ -659,6 +790,16 @@ def discover_catalog(
     discovery["requested"] = discovery_requested
     if not discovery_entities:
         discovery["reason"] = "structured_enumeration_evidence_insufficient"
+    public_entities = discovery_entities
+    if not public_entities:
+        existing_candidates = discovery.get("candidate_entities", ())
+        if isinstance(existing_candidates, Sequence) and not isinstance(existing_candidates, (str, bytes)):
+            public_entities = [
+                candidate
+                for candidate in existing_candidates
+                if isinstance(candidate, Mapping)
+            ]
+    discovery = _public_discovery_projection(discovery, public_entities)
     return DiscoveryResult(
         discovery=_freeze(discovery),
         entities=tuple(_freeze(entity) for entity in discovery_entities),
@@ -677,6 +818,8 @@ __all__ = [
     "DISCOVERY_CANDIDATE_LIMIT",
     "DISCOVERY_PAGE_LIMIT",
     "DISCOVERY_SOURCE_PAGE_LIMIT",
+    "PUBLIC_DISCOVERY_BYTE_LIMIT",
+    "PUBLIC_DISCOVERY_CANDIDATE_LIMIT",
     "DiscoveryResult",
     "PASSAGE_PROBE_LIMIT",
     "PASSAGE_SCAN_LIMIT",

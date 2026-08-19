@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 常用命令
 
+- 同步开发/测试依赖：`uv sync --extra dev`
 - CLI 初始化 vault：`uv run llm-wiki-mcp init --vault <name> --root <path> --default`
 - CLI 查看状态：`uv run llm-wiki-mcp status`
 - CLI 检查/构建/更新检索库：`uv run llm-wiki-mcp index status|build|update --vault <path> [--scope active|raw|archive]`

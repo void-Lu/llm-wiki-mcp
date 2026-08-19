@@ -38,9 +38,10 @@ from wiki.content_catalog import (
     DEFAULT_BODY_BUDGET,
     DEFAULT_CATALOG_PAGE_SIZE,
     MAX_BODY_BUDGET,
+    MAX_TOTAL_BODY_BUDGET,
     ContentCatalogService,
 )
-from wiki.content_reference import ContentRefV1, ContentReferenceError
+from wiki.content_reference import ContentRefV1, ContentReferenceError, content_ref_for_query_hit
 from retrieval.metadata_filters import (
     QUERY_METADATA_FILTERS,
     SUPPORTED_METADATA_FILTERS,
@@ -354,6 +355,7 @@ def _register(
     filter_param: str | None = None,
     filter_allowed: frozenset[str] | None = None,
     budget_param: str | None = None,
+    total_budget_param: str | None = None,
 ) -> Any:
     """Register a tool and centralize its boundary normalization pipeline."""
 
@@ -365,6 +367,7 @@ def _register(
             filter_param=filter_param,
             filter_allowed=filter_allowed,
             budget_param=budget_param,
+            total_budget_param=total_budget_param,
         )
 
     alias_map = dict(aliases or {})
@@ -398,6 +401,11 @@ def _register(
             if isinstance(raw_budget, int) and raw_budget > MAX_BODY_BUDGET:
                 normalized[budget_param] = MAX_BODY_BUDGET
                 pending_warnings.append("body_budget_clamped")
+        if total_budget_param:
+            raw_total_budget = normalized.get(total_budget_param)
+            if isinstance(raw_total_budget, int) and raw_total_budget > MAX_TOTAL_BODY_BUDGET:
+                normalized[total_budget_param] = MAX_TOTAL_BODY_BUDGET
+                pending_warnings.append("total_body_budget_clamped")
 
         if content_ref_param and not normalized.get("vault") and not normalized.get("vault_root") and not normalized.get("vaultRoot"):
             inferred_vault = _infer_content_ref_vault(normalized.get(content_ref_param))
@@ -533,14 +541,21 @@ def wiki_list(
 
 
 @_register(
-    aliases={"contentRef": "content_ref", "includeBody": "include_body", "maxBytes": "max_bytes"},
+    aliases={
+        "contentRef": "content_ref",
+        "includeBody": "include_body",
+        "maxBytes": "max_bytes",
+        "maxTotalBytes": "max_total_bytes",
+    },
     content_ref_param="content_ref",
     budget_param="max_bytes",
+    total_budget_param="max_total_bytes",
 )
 def wiki_get(
     content_ref: str | None = None,
     include_body: bool = False,
     max_bytes: int = DEFAULT_BODY_BUDGET,
+    max_total_bytes: int | None = None,
     cursor: str | None = None,
     vault: str | None = None,
     vault_root: str | None = None,
@@ -548,18 +563,21 @@ def wiki_get(
     contentRef: str | None = None,
     includeBody: bool | None = None,
     maxBytes: int | None = None,
+    maxTotalBytes: int | None = None,
 ) -> dict[str, Any]:
-    """Read an opaque reference; body is opt-in and capped at the server budget."""
+    """Read an opaque reference with optional bounded automatic body paging."""
 
     if not content_ref:
         return {"ok": False, "code": "invalid_content_ref", "error": "content_ref is required"}
     resolution = _registered_resolution()
-    return ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).get_item(
-        content_ref,
-        include_body=include_body,
-        max_bytes=max_bytes,
-        cursor=cursor,
-    )
+    kwargs: dict[str, Any] = {
+        "include_body": include_body,
+        "max_bytes": max_bytes,
+        "cursor": cursor,
+    }
+    if max_total_bytes is not None:
+        kwargs["max_total_bytes"] = max_total_bytes
+    return ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).get_item(content_ref, **kwargs)
 
 
 QueryScope = Literal["auto", "knowledge", "history", "all", "archive", "raw"]
@@ -600,6 +618,86 @@ def _validate_expansion_terms(value: object) -> tuple[dict[str, list[str]] | Non
         if aliases:
             result[key] = aliases
     return result or None, None
+
+
+def _attach_content_ref(
+    item: Mapping[str, Any],
+    *,
+    logical_vault: str,
+    corpus: str | None,
+) -> dict[str, Any]:
+    projected = dict(item)
+    if projected.get("content_ref"):
+        return projected
+    path = projected.get("path")
+    if not isinstance(path, str):
+        return projected
+    content_ref = content_ref_for_query_hit(
+        logical_vault,
+        path=path,
+        source_kind=projected.get("source_kind") if isinstance(projected.get("source_kind"), str) else None,
+        corpus=projected.get("corpus") if isinstance(projected.get("corpus"), str) else corpus,
+    )
+    if content_ref is not None:
+        projected["content_ref"] = content_ref
+    return projected
+
+
+def _attach_query_content_refs(result: Mapping[str, Any], *, logical_vault: str) -> dict[str, Any]:
+    """Add canonical references to every public, readable query hit."""
+
+    projected = dict(result)
+    pipeline_value = projected.get("pipeline")
+    pipeline = dict(pipeline_value) if isinstance(pipeline_value, Mapping) else {}
+    pipeline_corpus = pipeline.get("corpus") if isinstance(pipeline.get("corpus"), str) else None
+
+    for field in ("results", "additional_results"):
+        collection = projected.get(field)
+        if isinstance(collection, list):
+            projected[field] = [
+                _attach_content_ref(item, logical_vault=logical_vault, corpus=pipeline_corpus)
+                if isinstance(item, Mapping)
+                else item
+                for item in collection
+            ]
+
+    batch_value = pipeline.get("batch")
+    if isinstance(batch_value, Mapping):
+        batch = dict(batch_value)
+        entities_value = batch.get("entities")
+        if isinstance(entities_value, list):
+            entities: list[Any] = []
+            for entity_value in entities_value:
+                if not isinstance(entity_value, Mapping):
+                    entities.append(entity_value)
+                    continue
+                entity = dict(entity_value)
+                primary = entity.get("primary")
+                if isinstance(primary, Mapping):
+                    entity["primary"] = _attach_content_ref(
+                        primary,
+                        logical_vault=logical_vault,
+                        corpus=pipeline_corpus,
+                    )
+                alternatives = entity.get("alternatives")
+                if isinstance(alternatives, list):
+                    entity["alternatives"] = [
+                        _attach_content_ref(
+                            alternative,
+                            logical_vault=logical_vault,
+                            corpus=pipeline_corpus,
+                        )
+                        if isinstance(alternative, Mapping)
+                        else alternative
+                        for alternative in alternatives
+                    ]
+                entities.append(entity)
+            batch["entities"] = entities
+        pipeline["batch"] = batch
+
+    if pipeline_value is not None:
+        projected["pipeline"] = pipeline
+    return projected
 
 
 def _run_wiki_query(
@@ -668,7 +766,7 @@ def _run_wiki_query(
                 worker_state="failed",
             )
         raise
-    return attach_no_results_outcome(result)
+    return attach_no_results_outcome(_attach_query_content_refs(result, logical_vault=resolution.logical_name))
 
 
 @_register(
@@ -683,7 +781,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
     ``path_prefix``/``pathPrefix`` (string, e.g.
     ``"wiki/concepts/netsuite-script-types/"``) to restrict results to a
     directory. Raw query results are relevance hits, not catalog existence
-    checks, and do not provide ``content_ref`` values for ``wiki_get``.
+    checks, and readable hits include canonical content_ref values for wiki_get.
 
     When the vault has no indexed answer, the response includes
     ``expansion_suggestions``: the Latin terms in the question that do not

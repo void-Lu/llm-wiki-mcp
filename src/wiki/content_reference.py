@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from pathlib import Path
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -17,6 +18,22 @@ _PREFIX = "cr1_"
 _LOGICAL_VAULT = re.compile(r"^[^/\\:\x00-\x1f]{1,128}$")
 _KINDS = frozenset({"page", "source", "asset"})
 _SCOPES = frozenset({"active", "raw", "archive"})
+_TEXT_SUFFIXES = frozenset(
+    {
+        ".csv",
+        ".html",
+        ".htm",
+        ".json",
+        ".log",
+        ".md",
+        ".rst",
+        ".text",
+        ".txt",
+        ".xml",
+        ".yaml",
+        ".yml",
+    }
+)
 
 
 class ContentReferenceError(ValueError):
@@ -109,6 +126,70 @@ class ContentRefV1:
         return self.encode()
 
 
+def content_kind_for_identity(identity: str) -> ObjectKind:
+    """Return the catalog kind for a normalized vault-relative identity."""
+
+    return "page" if Path(identity).suffix.casefold() in _TEXT_SUFFIXES else "asset"
+
+
+def content_scope_for_query_hit(
+    *,
+    path: str,
+    source_kind: str | None = None,
+    corpus: str | None = None,
+) -> StoreScope:
+    """Map a query hit to the physical catalog scope without path guessing."""
+
+    normalized = path.replace("\\", "/").casefold()
+    if source_kind == "raw" or corpus == "raw" or normalized.startswith("raw/"):
+        return "raw"
+    if source_kind == "archive" or corpus == "archive" or normalized.startswith("archives/"):
+        return "archive"
+    return "active"
+
+
+def content_ref_for_query_hit(
+    logical_vault: str,
+    *,
+    path: str,
+    source_kind: str | None = None,
+    corpus: str | None = None,
+) -> str | None:
+    """Build a canonical reference for a readable query hit.
+
+    Invalid or non-vault-relative paths are omitted instead of being guessed
+    into a different catalog entry.  The catalog remains the authority that
+    validates the returned reference at read time.
+    """
+
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        identity = _validate_identity(path)
+        scope = content_scope_for_query_hit(
+            path=identity,
+            source_kind=source_kind,
+            corpus=corpus,
+        )
+        return ContentRefV1(
+            logical_vault,
+            scope,
+            content_kind_for_identity(identity),
+            identity,
+        ).encode()
+    except (ContentReferenceError, TypeError, ValueError):
+        return None
+
+
 ContentReference = ContentRefV1
 
-__all__ = ["ContentRefV1", "ContentReference", "ContentReferenceError", "ObjectKind", "StoreScope"]
+__all__ = [
+    "ContentRefV1",
+    "ContentReference",
+    "ContentReferenceError",
+    "ObjectKind",
+    "StoreScope",
+    "content_kind_for_identity",
+    "content_ref_for_query_hit",
+    "content_scope_for_query_hit",
+]

@@ -1095,6 +1095,31 @@ def test_v2_discovers_structured_qualified_entities_and_batches_in_discovery_ord
     assert all(item["primary"]["path"] != "wiki/concepts/module-catalog.md" for item in batch["entities"])
 
 
+def test_v2_member_query_does_not_upgrade_to_unbounded_discovery(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/module-catalog.md",
+        "Module catalog",
+        "# Module catalog\n\n- N/auth Authentication API\n- N/search Search API\n- N/record Record API",
+        type="concept",
+    )
+    _write(
+        root,
+        "wiki/entities/n-record.md",
+        "N/record",
+        "# N/record\n\nMethods include create and update.",
+        type="entity",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "N/record 模块有哪些方法", retrieval_mode="lexical")
+
+    assert "discovery" not in result["pipeline"]
+    assert "batch" not in result["pipeline"]
+
+
 def test_v2_shadow_preserves_discovery_only_and_batch_payload(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

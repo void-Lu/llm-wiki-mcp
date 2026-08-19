@@ -13,7 +13,13 @@ from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_r
 from retrieval.metadata_filters import metadata_filter_fingerprint, normalize_metadata_filters
 from retrieval.retrieval_index import RetrievalIndexError, RetrievalIndexStore, eligible_path, page_from_file
 from wiki.catalog_cursor import CatalogCursor, CatalogCursorError, ContentBodyCursor
-from wiki.content_reference import ContentRefV1, ContentReferenceError, ObjectKind, StoreScope
+from wiki.content_reference import (
+    ContentRefV1,
+    ContentReferenceError,
+    ObjectKind,
+    StoreScope,
+    content_kind_for_identity,
+)
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_paths import filesystem_path
 
@@ -21,9 +27,8 @@ DEFAULT_CATALOG_PAGE_SIZE = 20
 MAX_CATALOG_PAGE_SIZE = 100
 DEFAULT_BODY_BUDGET = 16 * 1024
 MAX_BODY_BUDGET = DEFAULT_BODY_BUDGET
-_TEXT_SUFFIXES = frozenset({
-    ".csv", ".html", ".htm", ".json", ".log", ".md", ".rst", ".text", ".txt", ".xml", ".yaml", ".yml",
-})
+DEFAULT_TOTAL_BODY_BUDGET = 64 * 1024
+MAX_TOTAL_BODY_BUDGET = 256 * 1024
 
 
 class ContentCatalogError(RuntimeError):
@@ -105,7 +110,7 @@ def _int_field(row: Mapping[str, object], key: str) -> int:
 
 
 def _kind_for(identity: str) -> ObjectKind:
-    return "page" if Path(identity).suffix.casefold() in _TEXT_SUFFIXES else "asset"
+    return content_kind_for_identity(identity)
 
 
 def _utf8_prefix(value: str, budget: int) -> tuple[str, bool]:
@@ -207,6 +212,7 @@ class ContentCatalogService:
         include_body: bool = False,
         max_bytes: int = DEFAULT_BODY_BUDGET,
         cursor: str | None = None,
+        max_total_bytes: int | None = None,
     ) -> dict[str, object]:
         try:
             ref = ContentRefV1.decode(content_ref)
@@ -216,7 +222,9 @@ class ContentCatalogService:
             raise ContentCatalogError("content_ref_scope_mismatch", "content reference belongs to another vault")
         if max_bytes < 1 or max_bytes > MAX_BODY_BUDGET:
             raise ContentCatalogError("content_budget_exceeded", "body budget exceeds the server limit")
-        if cursor is not None and not include_body:
+        if max_total_bytes is not None and (max_total_bytes < 1 or max_total_bytes > MAX_TOTAL_BODY_BUDGET):
+            raise ContentCatalogError("content_budget_exceeded", "total body budget exceeds the server limit")
+        if cursor is not None and not include_body and max_total_bytes is None:
             raise ContentCatalogError("catalog_cursor_invalid", "body cursor requires include_body")
         if not eligible_path(ref.identity, scope=ref.scope):
             raise ContentCatalogError("content_ref_scope_mismatch", "content reference is outside its scope")
@@ -234,6 +242,13 @@ class ContentCatalogService:
         if item.content_ref != content_ref:
             raise ContentCatalogError("content_ref_scope_mismatch", "content reference is not canonical")
         result: dict[str, object] = {"ok": True, **item.to_dict(), "item": item.to_dict()}
+        if max_total_bytes is not None:
+            return self._get_total_body(
+                content_ref,
+                max_bytes=max_bytes,
+                cursor=cursor,
+                max_total_bytes=max_total_bytes,
+            )
         if not include_body:
             return result
         if ref.kind == "asset":
@@ -276,6 +291,71 @@ class ContentCatalogService:
             }
         )
         return result
+
+    def _get_total_body(
+        self,
+        content_ref: str,
+        *,
+        max_bytes: int,
+        cursor: str | None,
+        max_total_bytes: int,
+    ) -> dict[str, object]:
+        """Read ordered body pages while retaining the existing page contract."""
+
+        current_cursor = cursor
+        chunks: list[str] = []
+        first_page: dict[str, object] | None = None
+        redacted = False
+        body_bytes = 0
+        next_body_cursor: str | None = None
+        truncated = False
+
+        while True:
+            remaining = max_total_bytes - body_bytes
+            if remaining < 1:
+                truncated = True
+                next_body_cursor = current_cursor
+                break
+            page = self.get_item(
+                content_ref,
+                include_body=True,
+                max_bytes=min(max_bytes, remaining),
+                cursor=current_cursor,
+            )
+            if first_page is None:
+                first_page = dict(page)
+            fragment = str(page.get("body") or "")
+            chunks.append(fragment)
+            body_bytes += len(fragment.encode("utf-8"))
+            redacted = redacted or bool(page.get("redacted"))
+            candidate_cursor = page.get("next_body_cursor")
+            if not candidate_cursor:
+                next_body_cursor = None
+                truncated = False
+                break
+            if body_bytes >= max_total_bytes:
+                next_body_cursor = str(candidate_cursor)
+                truncated = True
+                break
+            candidate_cursor = str(candidate_cursor)
+            if candidate_cursor == current_cursor:
+                raise ContentCatalogError("catalog_cursor_stale", "body cursor did not advance")
+            current_cursor = candidate_cursor
+
+        if first_page is None:
+            raise ContentCatalogError("content_budget_too_small", "body budget cannot contain the next UTF-8 character")
+        first_page.update(
+            {
+                "body": "".join(chunks),
+                "body_bytes": body_bytes,
+                "truncated": truncated,
+                "next_body_cursor": next_body_cursor if truncated else None,
+                "redacted": redacted,
+                "redactions_applied": redacted,
+                "round_trip_safe": not redacted,
+            }
+        )
+        return first_page
 
     list = list_items
     get = get_item
@@ -414,6 +494,8 @@ __all__ = [
     "ContentCatalogService",
     "DEFAULT_BODY_BUDGET",
     "DEFAULT_CATALOG_PAGE_SIZE",
+    "DEFAULT_TOTAL_BODY_BUDGET",
     "MAX_BODY_BUDGET",
     "MAX_CATALOG_PAGE_SIZE",
+    "MAX_TOTAL_BODY_BUDGET",
 ]

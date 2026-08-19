@@ -14,7 +14,12 @@ from retrieval.metadata_filters import (
 )
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.catalog_cursor import ContentBodyCursor
-from wiki.content_catalog import MAX_BODY_BUDGET, ContentCatalogError, ContentCatalogService
+from wiki.content_catalog import (
+    MAX_BODY_BUDGET,
+    MAX_TOTAL_BODY_BUDGET,
+    ContentCatalogError,
+    ContentCatalogService,
+)
 from wiki.content_reference import ContentRefV1
 
 
@@ -83,6 +88,43 @@ def test_get_defaults_to_metadata_and_body_is_utf8_safe(tmp_path: Path) -> None:
     with pytest.raises(ContentCatalogError) as error:
         service.get_item(reference, include_body=True, max_bytes=1, cursor=emoji_cursor)
     assert error.value.code == "content_budget_too_small"
+
+
+def test_total_body_budget_auto_pages_and_preserves_legacy_single_page_behavior(tmp_path: Path) -> None:
+    _build_active(tmp_path)
+    page = tmp_path / "wiki" / "concepts" / "long.md"
+    page.write_text("---\ntype: concept\ntitle: Long\n---\n\n" + "0123456789" * 20, encoding="utf-8")
+    store = RetrievalIndexStore(tmp_path)
+    store.build(store.iter_vault_pages())
+    service = ContentCatalogService(tmp_path, logical_vault="primary")
+    items = cast(list[dict[str, object]], service.list_items()["items"])
+    item = next(item for item in items if item["identity"] == "wiki/concepts/long.md")
+    reference = str(item["content_ref"])
+
+    legacy = service.get_item(reference, include_body=True, max_bytes=7)
+    full = str(service.get_item(reference, include_body=True, max_bytes=MAX_BODY_BUDGET)["body"])
+    bounded = service.get_item(reference, max_bytes=7, max_total_bytes=25)
+    complete = service.get_item(reference, max_bytes=7, max_total_bytes=1000)
+    resumed = service.get_item(
+        reference,
+        max_bytes=7,
+        max_total_bytes=25,
+        cursor=str(bounded["next_body_cursor"]),
+    )
+
+    assert len(str(legacy["body"]).encode("utf-8")) <= 7
+    assert bounded["body"] == full[:25]
+    assert bounded["body_bytes"] == 25
+    assert bounded["truncated"] is True
+    assert bounded["next_body_cursor"]
+    assert resumed["body"] == full[25:50]
+    assert complete["body"] == full
+    assert complete["truncated"] is False
+    assert complete["next_body_cursor"] is None
+
+    with pytest.raises(ContentCatalogError) as error:
+        service.get_item(reference, max_total_bytes=MAX_TOTAL_BODY_BUDGET + 1)
+    assert error.value.code == "content_budget_exceeded"
 
 
 def test_domain_body_budget_remains_hard_limited(tmp_path: Path) -> None:

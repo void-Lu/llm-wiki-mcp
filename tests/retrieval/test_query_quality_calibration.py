@@ -162,7 +162,7 @@ def test_policy_threshold_view_is_optional_and_fail_open_keeps_original_candidat
 
     legacy = evaluate_quality_policy(features)
     assert legacy.accepted_features == features
-    views = resolve_threshold_views(artifact, features)
+    _views = resolve_threshold_views(artifact, features)
     calibrated = evaluate_quality_policy(
         features,
         threshold_view=CalibrationLoadView(artifact, "loaded"),

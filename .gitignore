@@ -23,5 +23,7 @@ tests/__pycache__
 tests/fixtures
 build
 .tmp
+docs/plan/
+docs/superpowers/
 docs/*
 !docs/adr/

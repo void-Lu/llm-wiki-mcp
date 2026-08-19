@@ -15,7 +15,7 @@ from mcp import Client
 from runtime.runtime_config import VAULT_ROOT_ENV, ConfigRegistry, RuntimeConfigError, write_global_config
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
 import app.server as server_module
-from wiki.content_catalog import MAX_BODY_BUDGET
+from wiki.content_catalog import MAX_BODY_BUDGET, MAX_TOTAL_BODY_BUDGET
 from wiki.content_reference import ContentRefV1
 from app.server import (
     attach_no_results_outcome,
@@ -234,10 +234,44 @@ def test_mcp_query_schema_accepts_raw_scope_and_forwards_it(monkeypatch: pytest.
             assert "raw" in scope_schema["enum"]
             query_result = await client.call_tool("wiki_query", {"vault": "primary", "question": "raw", "scope": "raw"})
             assert query_result.is_error is False
-            assert _tool_result_payload(query_result)["scope"] == "raw"
+            payload = _tool_result_payload(query_result)
+            assert payload["scope"] == "raw"
+            reference = ContentRefV1.decode(str(payload["results"][0]["content_ref"]))
+            assert reference.scope == "raw"
+            assert reference.identity == "raw/sources/references/raw.md"
 
     anyio.run(assert_protocol_contract)
     assert calls["scope"] == "raw"
+
+
+def test_query_public_projection_adds_refs_to_results_and_batch_hits() -> None:
+    payload = server_module._attach_query_content_refs(
+        {
+            "ok": True,
+            "results": [{"path": "wiki/concepts/page.md", "source_kind": "knowledge"}],
+            "additional_results": [{"path": "raw/sources/references/raw.md", "source_kind": "raw"}],
+            "pipeline": {
+                "corpus": "active",
+                "batch": {
+                    "entities": [
+                        {
+                            "primary": {"path": "wiki/entities/primary.md", "source_kind": "knowledge"},
+                            "alternatives": [{"path": "archives/bundles/a/b/archive/wiki/old.md", "source_kind": "archive"}],
+                        }
+                    ]
+                },
+                "discovery": {"candidate_entities": [{"canonical_id": "n/primary"}]},
+            },
+        },
+        logical_vault="primary",
+    )
+
+    assert ContentRefV1.decode(str(payload["results"][0]["content_ref"])).scope == "active"
+    assert ContentRefV1.decode(str(payload["additional_results"][0]["content_ref"])).scope == "raw"
+    batch_entity = payload["pipeline"]["batch"]["entities"][0]
+    assert ContentRefV1.decode(str(batch_entity["primary"]["content_ref"])).scope == "active"
+    assert ContentRefV1.decode(str(batch_entity["alternatives"][0]["content_ref"])).scope == "archive"
+    assert "content_ref" not in payload["pipeline"]["discovery"]["candidate_entities"][0]
 
 
 def test_wiki_query_rejects_invalid_scope() -> None:
@@ -528,7 +562,7 @@ def test_registry_exposes_strict_ingest_schema_and_tool_contract_annotations() -
             list_tool = tools["wiki_list"]
             get_tool = tools["wiki_get"]
             get_properties = get_tool.input_schema.get("properties", {})
-            assert {"content_ref", "contentRef"} <= set(get_properties)
+            assert {"content_ref", "contentRef", "max_total_bytes", "maxTotalBytes"} <= set(get_properties)
             assert {"store_scope", "storeScope", "page_size", "pageSize"} <= set(list_tool.input_schema.get("properties", {}))
             assert not get_tool.input_schema.get("required", [])
             assert "all" not in str(list_tool.input_schema)
@@ -594,6 +628,44 @@ def test_wiki_get_clamps_oversized_body_budget(monkeypatch: pytest.MonkeyPatch, 
     assert result["ok"] is True
     assert captured["max_bytes"] == MAX_BODY_BUDGET
     assert "body_budget_clamped" in result["warnings"]
+
+
+def test_wiki_get_forwards_and_clamps_total_body_budget_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    captured: dict[str, object] = {}
+
+    def fake_get(
+        self: object,
+        content_ref: str,
+        *,
+        include_body: object,
+        max_bytes: object,
+        cursor: object,
+        max_total_bytes: object,
+    ) -> dict[str, object]:
+        captured.update(
+            content_ref=content_ref,
+            include_body=include_body,
+            max_bytes=max_bytes,
+            max_total_bytes=max_total_bytes,
+        )
+        return {"ok": True, "content_ref": content_ref}
+
+    monkeypatch.setattr("app.server.ContentCatalogService.get_item", fake_get)
+
+    result = wiki_get(
+        contentRef="cr1_abc",
+        maxTotalBytes=MAX_TOTAL_BODY_BUDGET + 1,
+        vault_root=str(root),
+    )
+
+    assert result["ok"] is True
+    assert captured["max_total_bytes"] == MAX_TOTAL_BODY_BUDGET
+    assert "total_body_budget_clamped" in result["warnings"]
 
 
 def test_wiki_get_infers_configured_vault_from_content_ref(
