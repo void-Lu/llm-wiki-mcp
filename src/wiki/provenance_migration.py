@@ -126,11 +126,7 @@ class ProvenanceMigrationService:
             context.page_path,
             sha256_file(context.source),
             desired_hashes,
-            generated=policy.generated,
-            maintenance=policy.maintenance,
-            lifecycle=policy.lifecycle,
-            replaced_by=policy.replaced_by,
-            freshness=policy.freshness,
+            policy=policy,
         )
         warning = self._refresh_retrieval(context.source, context.page_path)
         if warning is not None:
@@ -350,11 +346,7 @@ def _restore_projection(dependency: KnowledgeDependencies, page_path: str, proje
         page_path,
         str(projection.get("page_hash", "")),
         string_map(projection.get("edges")),
-        generated=policy.generated,
-        maintenance=policy.maintenance,
-        lifecycle=policy.lifecycle,
-        replaced_by=policy.replaced_by,
-        freshness=policy.freshness,
+        policy=policy,
     )
 
 __all__ = ["AtomicFileError", "ProvenanceMigrationError", "ProvenanceMigrationService"]

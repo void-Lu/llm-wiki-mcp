@@ -9,7 +9,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Iterator, Iterable
 
-from wiki.page_policy import VALID_FRESHNESS, VALID_LIFECYCLE
+from wiki.page_policy import PagePolicy, VALID_FRESHNESS, VALID_LIFECYCLE
 from wiki.source_provenance import source_path_key
 from wiki.wiki_paths import KNOWLEDGE_DEPENDENCIES_DB
 
@@ -110,20 +110,16 @@ class KnowledgeDependencies:
         page_hash: str,
         sources: Mapping[str, str] | Iterable[object],
         *,
-        generated: bool,
-        maintenance: str = "auto",
-        lifecycle: str = "active",
-        replaced_by: str | None = None,
-        freshness: str = "fresh",
+        policy: PagePolicy,
     ) -> None:
-        if lifecycle not in VALID_LIFECYCLE:
+        if policy.lifecycle not in VALID_LIFECYCLE:
             raise ValueError("invalid lifecycle")
-        if lifecycle == "superseded" and not replaced_by:
+        if policy.lifecycle == "superseded" and not policy.replaced_by:
             raise ValueError("superseded pages require replaced_by")
-        if freshness not in VALID_FRESHNESS:
+        if policy.freshness not in VALID_FRESHNESS:
             raise ValueError("invalid freshness")
         with self._connection() as conn:
-            conn.execute("INSERT INTO knowledge_pages(path,page_hash,freshness,lifecycle,generated,maintenance,replaced_by,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET page_hash=excluded.page_hash,freshness=excluded.freshness,lifecycle=excluded.lifecycle,generated=excluded.generated,maintenance=excluded.maintenance,replaced_by=excluded.replaced_by,updated_at=excluded.updated_at", (path, page_hash, freshness, lifecycle, int(generated), maintenance, replaced_by, _now()))
+            conn.execute("INSERT INTO knowledge_pages(path,page_hash,freshness,lifecycle,generated,maintenance,replaced_by,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET page_hash=excluded.page_hash,freshness=excluded.freshness,lifecycle=excluded.lifecycle,generated=excluded.generated,maintenance=excluded.maintenance,replaced_by=excluded.replaced_by,updated_at=excluded.updated_at", (path, page_hash, policy.freshness, policy.lifecycle, int(policy.generated), policy.maintenance, policy.replaced_by, _now()))
             conn.execute("DELETE FROM source_edges WHERE page_path=?", (path,))
             conn.executemany(
                 "INSERT INTO source_edges(source_path,source_hash,page_path) VALUES(?,?,?)",
@@ -191,7 +187,14 @@ class KnowledgeDependencies:
             conn.execute("DELETE FROM source_edges")
             conn.execute("DELETE FROM knowledge_pages")
         for path, digest, sources, generated, maintenance, lifecycle, replaced_by in pages:
-            self.update_page(path, digest, sources, generated=generated, maintenance=maintenance, lifecycle=lifecycle, replaced_by=replaced_by)
+            policy = PagePolicy(
+                freshness="fresh",
+                maintenance=maintenance,
+                lifecycle=lifecycle,
+                generated=generated,
+                replaced_by=replaced_by,
+            )
+            self.update_page(path, digest, sources, policy=policy)
 
 
 def _source_edge_values(sources: Mapping[str, str] | Iterable[object]) -> list[tuple[str, str]]:

@@ -235,11 +235,7 @@ class PrivacyAuditService:
                 target.relative_to(self.root).as_posix(),
                 after_hash,
                 desired_hashes,
-                generated=policy.generated,
-                maintenance=policy.maintenance,
-                lifecycle=policy.lifecycle,
-                replaced_by=policy.replaced_by,
-                freshness=policy.freshness,
+                policy=policy,
             )
             if target != context.source:
                 dependency.remove_page(context.page_path)
@@ -398,11 +394,7 @@ def _restore_projection(
             page_path,
             str(projection.get("page_hash", "")),
             string_map(projection.get("edges")),
-            generated=policy.generated,
-            maintenance=policy.maintenance,
-            lifecycle=policy.lifecycle,
-            replaced_by=policy.replaced_by,
-            freshness=policy.freshness,
+            policy=policy,
         )
     else:
         dependency.remove_page(page_path)

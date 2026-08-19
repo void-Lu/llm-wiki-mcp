@@ -9,6 +9,7 @@ from archive.archive_migration import apply_legacy_migration, plan_legacy_migrat
 from archive.archive_schema import ARCHIVE_REQUIRED_COLUMNS, ARCHIVE_REQUIRED_TABLES, ARCHIVE_TABLE_DDL
 from archive.archive_service import ArchiveService
 from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.page_policy import PagePolicy
 from wiki.atomic_file import fault_context
 
 
@@ -113,7 +114,12 @@ def test_raw_active_dependency_blocks_unless_cascade(tmp_path: Path) -> None:
     raw = root / "raw/sources/file/proj/source.md"; raw.parent.mkdir(parents=True); raw.write_text("source", encoding="utf-8")
     _page(root, "wiki/concepts/example.md")
     deps = KnowledgeDependencies(root)
-    deps.update_page("wiki/concepts/example.md", "hash", {"raw/sources/file/proj/source.md": "hash"}, generated=True, lifecycle="deprecated")
+    deps.update_page(
+        "wiki/concepts/example.md",
+        "hash",
+        {"raw/sources/file/proj/source.md": "hash"},
+        policy=PagePolicy(freshness="fresh", maintenance="auto", lifecycle="deprecated", generated=True, replaced_by=None),
+    )
     service = ArchiveService(root)
     blocked = service.plan_archive("raw/sources/file/proj/source.md")
     assert blocked["ok"] is False and blocked["blockers"][0]["code"] == "archive_dependency_blocked"

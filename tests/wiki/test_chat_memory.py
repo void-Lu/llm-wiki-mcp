@@ -7,6 +7,7 @@ import pytest
 from wiki.atomic_file import AtomicFileError, atomic_write_text, fault_context
 from wiki.chat_memory import ChatMemoryError, ChatMemoryService
 from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.page_policy import PagePolicy
 from wiki.page_mutation import MutationResult
 from wiki.page_operation_store import PageOperationStore
 from retrieval.retrieval_index import RetrievalIndexStore
@@ -140,15 +141,13 @@ def test_new_chat_revision_marks_exact_session_dependents_by_maintenance_mode(tm
         "wiki/concepts/generated.md",
         "page-generated",
         {first["path"]: first_hash},
-        generated=True,
-        maintenance="auto",
+        policy=PagePolicy(freshness="fresh", maintenance="auto", lifecycle="active", generated=True, replaced_by=None),
     )
     deps.update_page(
         "wiki/concepts/manual.md",
         "page-manual",
         {first["path"]: first_hash},
-        generated=False,
-        maintenance="manual",
+        policy=PagePolicy(freshness="fresh", maintenance="manual", lifecycle="active", generated=False, replaced_by=None),
     )
 
     second = service.save(_transcript("\n\n## User\n\n新的 session marker。"), _metadata())

@@ -149,11 +149,7 @@ class FormalPageAdapter:
                 operation.page_path,
                 operation.intended_hash,
                 source_hashes,
-                generated=policy.generated,
-                maintenance=policy.maintenance,
-                lifecycle=policy.lifecycle,
-                replaced_by=policy.replaced_by,
-                freshness=policy.freshness,
+                policy=policy,
             )
             return {"ok": True, "state": "ready"}
 

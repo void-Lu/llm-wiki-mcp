@@ -4,6 +4,7 @@ import pytest
 
 from wiki.ingest_service import ingest_file
 from wiki.knowledge_dependencies import KnowledgeDependencies
+from wiki.page_policy import PagePolicy
 from retrieval.retrieval_index import RetrievalIndexStore
 
 
@@ -72,7 +73,7 @@ def test_modified_source_reports_stale_pages_and_generation_state(tmp_path: Path
         "wiki/concepts/manual.md",
         "page-hash",
         {source_path: source_hash},
-        generated=True,
+        policy=PagePolicy(freshness="fresh", maintenance="auto", lifecycle="active", generated=True, replaced_by=None),
     )
     source.write_text("new source", encoding="utf-8")
     result = ingest_file(vault_root=root, source_path=source, source_name="manual", project="finance")
