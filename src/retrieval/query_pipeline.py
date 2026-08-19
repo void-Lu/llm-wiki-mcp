@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-import time
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence, cast
+from typing import Any, Literal, cast
 
 from retrieval.body_budget import result_floor_budget
 from retrieval.candidate_items import candidate_item
@@ -31,7 +31,6 @@ from retrieval.query_shared import (
     matches_request,
     snapshot_page_eligible,
 )
-from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.query_quality_calibration import load_calibration_artifact_once
 from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
@@ -47,7 +46,11 @@ from retrieval.query_quality_policy import (
 )
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, vector_settings_from_embedding
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError
-from retrieval.query_execution_context import QueryExecutionContext
+from retrieval.query_execution_context import (
+    QueryExecutionContext,
+    QueryExecutionView,
+    QueryRequestView,
+)
 from retrieval.query_recall_policy import (
     DEFAULT_TOP_K,
     RANKING_POLICY_VERSION,
@@ -67,6 +70,23 @@ class _QualityGateEvaluation:
 
     summary: dict[str, Any]
     result: QualityGateResult | None
+
+
+@dataclass(frozen=True)
+class QueryTelemetryStats:
+    """Successful-query statistics handed to the server terminal owner."""
+
+    passage_ids: tuple[str, ...]
+    fallback_level: str
+    token_count: int
+
+
+@dataclass(frozen=True)
+class PublicQueryProjection:
+    """Public envelope plus the non-public statistics needed by the wrapper."""
+
+    response: dict[str, Any]
+    telemetry: QueryTelemetryStats
 
 
 def _quality_gate_branch(*, coverage_fallback: bool, fallback_level: str, lexical_mode: str) -> str | None:
@@ -89,7 +109,7 @@ def _resolve_quality_gate_artifact_path(vault_root: Path, artifact_path: str | P
 
 
 def _quality_gate_evaluation(
-    candidates: tuple[Mapping[str, Any], ...],
+    candidates: Sequence[Mapping[str, Any]],
     *,
     vault_root: Path,
     settings: QualityGateSettings | None,
@@ -99,7 +119,7 @@ def _quality_gate_evaluation(
     coverage_fallback: bool,
     lexical_mode: str,
 ) -> _QualityGateEvaluation | None:
-    """Run the pure gate after outcome freeze and keep decisions private."""
+    """Run the pure gate after execution and before the outcome freeze."""
 
     if settings is None or settings.mode == "off":
         return None
@@ -436,16 +456,307 @@ def _stage_one_fts_hits(
     return hits, mode, counts.get("qualified_code", 0)
 
 
-def _thaw_value(value: Any) -> Any:
-    """Copy an immutable outcome projection back into public JSON containers."""
+def _public_projection_value(value: Any) -> Any:
+    """Normalize frozen owner payloads at the public projection boundary."""
 
     if isinstance(value, Mapping):
-        return {key: _thaw_value(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw_value(item) for item in value]
-    if isinstance(value, frozenset):
-        return {_thaw_value(item) for item in value}
+        return {key: _public_projection_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_public_projection_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return {_public_projection_value(item) for item in value}
     return value
+
+
+def assemble_public_projection(
+    view: QueryExecutionView,
+    *,
+    request_view: QueryRequestView,
+    public_scope: str,
+    provenance: Mapping[str, Mapping[str, str]],
+    fts_hits: int,
+    qualified_fts_hits: int,
+    vector_hits: int,
+    vector_warnings: Sequence[str],
+    index_warnings: Sequence[str],
+    scope_rules: Sequence[str],
+    lexical_enabled: bool,
+    include_context_pack: bool,
+    debug: bool,
+    quality_gate_evaluation: _QualityGateEvaluation | None,
+) -> PublicQueryProjection:
+    """Assemble the public envelope from the still-open execution view.
+
+    Calibration loading and cancellation checkpoints happen at the pipeline
+    boundary.  This function is deliberately a data-only projection seam:
+    gate admission, context packing, discovery/batch JSON normalization and
+    the fallback envelope are all completed before the context's single
+    ``outcome()`` freeze.
+    """
+
+    baseline_selected = list(view.selected)
+    selected = baseline_selected
+    gate_evaluation = quality_gate_evaluation
+    enforce_projection_changed = False
+    if (
+        gate_evaluation is not None
+        and gate_evaluation.summary.get("mode") == "enforce"
+        and gate_evaluation.result is not None
+    ):
+        gate_result = gate_evaluation.result
+        if not gate_result.summary.fail_open:
+            accepted_selected = _accepted_selected(baseline_selected, gate_result)
+            if baseline_selected and not accepted_selected:
+                gate_evaluation = _QualityGateEvaluation(
+                    _mark_gate_all_rejected(gate_evaluation.summary),
+                    gate_result,
+                )
+            elif accepted_selected != baseline_selected:
+                selected = accepted_selected
+                enforce_projection_changed = True
+
+    public_selected = selected[: request_view.top_k]
+    additional_selected = selected[request_view.top_k :]
+    public_paths = {item["hit"].page_path for item in public_selected}
+    public_context_items = [
+        item
+        for item in view.context_items
+        if item["hit"].page_path in public_paths
+    ]
+    passages = [
+        ContextPassage(
+            item["hit"].passage_id,
+            item["hit"].page_path,
+            heading(item["hit"]),
+            item["hit"].text,
+            item["score"],
+            (
+                "raw_evidence"
+                if item["hit"].source_kind == "raw"
+                else "history_evidence"
+                if item["hit"].corpus == "history"
+                else "formal_knowledge"
+            ),
+        )
+        for item in public_context_items
+    ]
+    k_budget = result_floor_budget(request_view.top_k, request_view.hard_budget_tokens)
+    packed: dict[str, Any] = (
+        pack_context(
+            passages,
+            hard_limit=request_view.hard_budget_tokens,
+            intent=request_view.intent,
+            budget_scale=k_budget,
+        )
+        if include_context_pack
+        else {"passages": [], "budget": {"total": k_budget, "used": 0, "omitted": 0}}
+    )
+    packed_passages = [
+        item for item in packed.get("passages", []) if isinstance(item, dict)
+    ]
+
+    contains_raw = any(
+        item["hit"].source_kind == "raw" for item in baseline_selected
+    )
+    fallback_payload = dict(view.recovery.fallback)
+    if enforce_projection_changed:
+        accepted_raw_paths = {
+            _normalise_gate_path(item["hit"].page_path)
+            for item in selected
+            if item["hit"].source_kind == "raw"
+        }
+        allowed_source_paths = fallback_payload.get("allowed_source_paths")
+        if isinstance(allowed_source_paths, Sequence) and not isinstance(
+            allowed_source_paths, (str, bytes)
+        ):
+            fallback_payload["allowed_source_paths"] = [
+                path
+                for path in allowed_source_paths
+                if _normalise_gate_path(path) in accepted_raw_paths
+            ]
+
+    metadata = request_view.metadata
+
+    def result_item(
+        item: Mapping[str, Any], *, citation: str, include_content: bool
+    ) -> dict[str, Any]:
+        hit = item["hit"]
+        frontmatter = metadata.get(hit.page_path, {})
+        if hit.source_kind == "raw":
+            result_metadata: dict[str, Any] = {"type": hit.source_kind, "tags": []}
+        else:
+            tags = frontmatter.get("tags", [])
+            result_metadata = {
+                "type": frontmatter.get("type"),
+                "tags": list(tags) if isinstance(tags, tuple) else tags,
+            }
+        citation_metadata = _citation_metadata(hit, provenance)
+        if citation_metadata:
+            result_metadata["provenance"] = citation_metadata
+        result: dict[str, Any] = {
+            "citation": citation,
+            "path": hit.page_path,
+            "heading": heading(hit),
+            "score": item["score"],
+            "scores": {
+                "fts": hit.score,
+                "vector": item["vector_score"],
+                "rrf": item["rrf"],
+                "graph": item["graph_score"],
+            },
+            "source_kind": hit.source_kind,
+            "metadata": result_metadata,
+        }
+        if include_content:
+            context = next(
+                (
+                    packed_item
+                    for packed_item in packed_passages
+                    if str(packed_item.get("path") or "") == hit.page_path
+                ),
+                None,
+            )
+            if context:
+                result["content"] = context.get("content", "")
+                result["tokens"] = context.get("tokens", 0)
+                result["evidence_kind"] = context.get("evidence_kind", "")
+        return result
+
+    results = [
+        result_item(item, citation=f"[{index}]", include_content=include_context_pack)
+        for index, item in enumerate(public_selected, 1)
+    ]
+    additional_results = [
+        result_item(
+            item,
+            citation=f"[{len(public_selected) + index}]",
+            include_content=False,
+        )
+        for index, item in enumerate(additional_selected, 1)
+    ]
+    warnings = list(
+        dict.fromkeys([*scope_rules, *vector_warnings, *index_warnings])
+    )
+    if view.raw_index_warning:
+        warnings = list(dict.fromkeys([*warnings, view.raw_index_warning]))
+
+    pipeline: dict[str, Any] = {
+        "ranking_version": (
+            ENFORCED_RANKING_POLICY_VERSION
+            if enforce_projection_changed
+            else RANKING_POLICY_VERSION
+        ),
+        "scope": public_scope,
+        "corpus": (
+            "raw"
+            if contains_raw
+            else "archive"
+            if request_view.effective_scope == "archive"
+            else "active"
+        ),
+        "authority": "active:formal>project>raw_chat;fallback:wiki_relaxed>raw",
+        "intent": request_view.intent,
+        "retrieval_mode": request_view.retrieval_mode,
+        "lexical_enabled": lexical_enabled,
+        "lexical": {"mode": view.lexical_mode},
+        "coverage": {
+            "uncovered_latin_terms": list(view.uncovered_latin_terms),
+            "triggered": view.coverage_fallback,
+        },
+        "counters": {
+            "fts_hits": fts_hits,
+            "qualified_fts_hits": qualified_fts_hits,
+            "relaxed_fts_hits": view.relaxed_fts_hits,
+            "raw_fts_hits": view.raw_fts_hits,
+            "vector_hits": vector_hits,
+            "graph_hits": sum(
+                1 for item in baseline_selected if item["graph_score"] > 0
+            ),
+            "selected": len(baseline_selected),
+            "returned": len(results),
+            "additional": len(additional_results),
+        },
+        "warnings": warnings,
+        "fallback": fallback_payload,
+    }
+    if gate_evaluation is not None:
+        pipeline["quality_gate"] = gate_evaluation.summary
+
+    discovery = _public_projection_value(view.discovery)
+    if not isinstance(discovery, dict):
+        discovery = {}
+    discovery_entities = _public_projection_value(view.discovery_entities)
+    discovery_source_items = _public_projection_value(view.discovery_source_items)
+    batch_payload = _public_projection_value(view.batch_payload)
+    if not isinstance(batch_payload, dict):
+        batch_payload = {}
+    if view.discovery_requested or discovery_entities or discovery_source_items:
+        pipeline["discovery"] = discovery
+    if batch_payload.get("status") != "not_triggered":
+        pipeline["batch"] = batch_payload
+
+    if debug:
+        pipeline["debug"] = [
+            {
+                "passage_id": (hit := cast(PassageHit, item["hit"])).passage_id,
+                "path": hit.page_path,
+                "fts_rank": item["fts_rank"],
+                "vector_rank": item["vector_rank"],
+                "rrf": item["rrf"],
+                "graph": item["graph_score"],
+                "graph_reasons": item["graph_reasons"],
+                "exact_match": item["exact"],
+                "final_score": item["score"],
+                "coverage_terms": item.get("coverage_terms", []),
+                "coverage_ratio": item.get("coverage_ratio"),
+                "source_local_rank": item.get("source_local_rank"),
+                "source_local_rrf": item.get("source_local_rrf"),
+                "fusion_score": item.get("fusion_score"),
+                "fusion_source": item.get("fusion_source"),
+                "fusion_local_position": item.get("fusion_local_position"),
+            }
+            for item in baseline_selected
+        ]
+
+    response: dict[str, Any] = {
+        "ok": True,
+        "question": request_view.question,
+        "scope": public_scope,
+        "project": request_view.project or "",
+        "results": results,
+        "additional_results": additional_results,
+        "expansion_suggestions": list(view.expansion_suggestions),
+        "budget": packed["budget"],
+        "pipeline": pipeline,
+    }
+    if not results:
+        has_discovery_entities = bool(discovery_entities) or bool(
+            discovery.get("candidate_entities")
+        )
+        has_batch_outcome = batch_payload.get("status") not in {
+            None,
+            "not_triggered",
+        }
+        if has_discovery_entities or has_batch_outcome:
+            response.update(
+                code="discovery_only",
+                message=(
+                    "Structured discovery found entities; inspect "
+                    "pipeline.discovery and pipeline.batch."
+                ),
+            )
+        else:
+            response.update(
+                code="no_results",
+                message="No indexed documentation matched the query.",
+            )
+
+    telemetry = QueryTelemetryStats(
+        passage_ids=tuple(item["hit"].passage_id for item in baseline_selected),
+        fallback_level=str(fallback_payload["level"]),
+        token_count=int(packed["budget"]["used"]),
+    )
+    return PublicQueryProjection(response=response, telemetry=telemetry)
 
 
 def run_query_v2(
@@ -467,7 +778,7 @@ def run_query_v2(
     expansion_terms: dict[str, list[str]] | None = None,
     confirmation_token: str | None = None,
     cancellation: QueryCancellationContext | None = None,
-    telemetry_recorder: QueryTelemetry | None = None,
+    telemetry_stats: MutableMapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Read existing projections and return one canonical result payload.
 
@@ -475,7 +786,6 @@ def run_query_v2(
     emitted once on each public ``results`` item; the old ``context_pack`` and
     legacy adapter are intentionally not part of the response contract.
     """
-    started = time.perf_counter()
     cancellation = cancellation or QueryCancellationContext.unbounded()
     cancellation.checkpoint("status")
     if not question.strip():
@@ -573,7 +883,6 @@ def run_query_v2(
     # title overlap (such as "script") must not prevent a natural-language
     # question, in any language, from using relaxed lexical recovery.
     has_primary_recall = bool(ranked)
-    expansion_suggestions: list[str] = []
     for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters, snapshot=snapshot, cancellation=cancellation), 1):
         cancellation.checkpoint_batch(rank - 1, every=16, stage="ranking")
         ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0, title_rank=rank))
@@ -646,285 +955,73 @@ def run_query_v2(
         store=store,
         cancellation=cancellation,
     )
-    execution = QueryExecutionContext(
-        root=root,
-        store=store,
-        cancellation=cancellation,
-        status=status,
-    )
-    execution._run_fallback_recovery(
+    request_view = QueryRequestView(
         question=question,
         effective_scope=effective_scope,
         project=project,
         filters=filters,
         top_k=top_k,
         metadata=metadata,
-        snapshot=snapshot,
-        expansion_terms=expansion_terms,
         intent=intent,
         effective_rrf_k=effective_rrf_k,
-        has_primary_recall=has_primary_recall,
-        selected=selected,
-        scored=scored,
-        recovery=recovery,
-        stage_lexical_mode=stage_lexical_mode,
-    )
-    cancellation.checkpoint("fallback")
-    execution._run_discovery_and_batch(
-        question=question,
-        metadata=metadata,
-        effective_scope=effective_scope,
-        project=project,
-        filters=filters,
-        snapshot=snapshot,
+        expansion_terms=expansion_terms,
         retrieval_mode=retrieval_mode,
         hard_budget_tokens=hard_budget_tokens,
         confirmation_token=confirmation_token,
     )
-    outcome = execution.outcome()
-    fallback_value = outcome.recovery.fallback
-    fallback_level = str(fallback_value.get("level") or "none") if isinstance(fallback_value, Mapping) else "none"
+    execution = QueryExecutionContext(
+        root=root,
+        store=store,
+        cancellation=cancellation,
+        status=status,
+        seed_selected=selected,
+        seed_scored=scored,
+        seed_recovery=recovery,
+        snapshot=snapshot,
+        seed_lexical_mode=stage_lexical_mode,
+        seed_has_primary_recall=has_primary_recall,
+    )
+    execution_view = execution.execute(request_view)
+    fallback_value = execution_view.recovery.fallback
+    fallback_level = (
+        str(fallback_value.get("level") or "none")
+        if isinstance(fallback_value, Mapping)
+        else "none"
+    )
     quality_gate_evaluation = _quality_gate_evaluation(
-        outcome.selected,
+        execution_view.selected,
         vault_root=root,
         settings=quality_gate,
         effective_scope=effective_scope,
         retrieval_mode=retrieval_mode,
         fallback_level=fallback_level,
-        coverage_fallback=outcome.coverage_fallback,
-        lexical_mode=outcome.lexical_mode,
+        coverage_fallback=execution_view.coverage_fallback,
+        lexical_mode=execution_view.lexical_mode,
     )
-    baseline_selected = _thaw_value(outcome.selected)
-    selected = baseline_selected
-    enforce_projection_changed = False
-    if (
-        quality_gate_evaluation is not None
-        and quality_gate is not None
-        and quality_gate.mode == "enforce"
-        and quality_gate_evaluation.result is not None
-    ):
-        gate_result = quality_gate_evaluation.result
-        if not gate_result.summary.fail_open:
-            accepted_selected = _accepted_selected(baseline_selected, gate_result)
-            if baseline_selected and not accepted_selected:
-                quality_gate_evaluation = _QualityGateEvaluation(
-                    _mark_gate_all_rejected(quality_gate_evaluation.summary),
-                    gate_result,
-                )
-            elif accepted_selected != baseline_selected:
-                selected = accepted_selected
-                enforce_projection_changed = True
-    context_items = _thaw_value(outcome.context_items)
-    recovery = outcome.recovery
-    raw_fts_hits = outcome.raw_fts_hits
-    relaxed_fts_hits = outcome.relaxed_fts_hits
-    raw_index_warning = outcome.raw_index_warning
-    coverage_fallback = outcome.coverage_fallback
-    lexical_mode = outcome.lexical_mode
-    expansion_suggestions = _thaw_value(outcome.expansion_suggestions)
-    uncovered_latin_terms = _thaw_value(outcome.uncovered_latin_terms)
-    discovery = _thaw_value(outcome.discovery)
-    discovery_entities = _thaw_value(outcome.discovery_entities)
-    discovery_source_items = _thaw_value(outcome.discovery_source_items)
-    discovery_requested = outcome.discovery_requested
-    batch_payload = _thaw_value(outcome.batch_payload)
-    public_selected = selected[:top_k]
-    additional_selected = selected[top_k:]
-    public_paths = {item["hit"].page_path for item in public_selected}
-    public_context_items = [
-        item for item in context_items if item["hit"].page_path in public_paths
-    ]
-    passages = [
-        ContextPassage(
-            item["hit"].passage_id,
-            item["hit"].page_path,
-            heading(item["hit"]),
-            item["hit"].text,
-            item["score"],
-            "raw_evidence" if item["hit"].source_kind == "raw" else "history_evidence" if item["hit"].corpus == "history" else "formal_knowledge",
-        )
-        for item in public_context_items
-    ]
-    k_budget = result_floor_budget(top_k, hard_budget_tokens)
     cancellation.checkpoint("context")
-    packed: dict[str, Any] = (
-        pack_context(passages, hard_limit=hard_budget_tokens, intent=intent, budget_scale=k_budget)
-        if include_context_pack
-        else {"passages": [], "budget": {"total": k_budget, "used": 0, "omitted": 0}}
+    projection = assemble_public_projection(
+        execution_view,
+        request_view=request_view,
+        public_scope=scope,
+        provenance=provenance,
+        fts_hits=len(fts),
+        qualified_fts_hits=qualified_fts_hits,
+        vector_hits=len(vector),
+        vector_warnings=vector_warnings,
+        index_warnings=index_warnings,
+        scope_rules=scope_rules,
+        lexical_enabled=lexical_enabled,
+        include_context_pack=include_context_pack,
+        debug=debug,
+        quality_gate_evaluation=quality_gate_evaluation,
     )
-    packed_passages = [
-        item
-        for item in packed.get("passages", [])
-        if isinstance(item, dict)
-    ]
-    # Corpus/authority telemetry describes the frozen retrieval outcome, not
-    # the later public admission projection.
-    contains_raw = any(item["hit"].source_kind == "raw" for item in baseline_selected)
-    # Recovery owns the final fallback envelope as well as the intermediate
-    # context state.  Keep the public payload projection here, but do not
-    # reconstruct level/reasons/path allowlists a second time.
-    fallback_payload = _thaw_value(recovery.fallback)
-    if enforce_projection_changed and isinstance(fallback_payload, dict):
-        accepted_raw_paths = {
-            _normalise_gate_path(item["hit"].page_path)
-            for item in selected
-            if item["hit"].source_kind == "raw"
-        }
-        allowed_source_paths = fallback_payload.get("allowed_source_paths")
-        if isinstance(allowed_source_paths, list):
-            fallback_payload = {
-                **fallback_payload,
-                "allowed_source_paths": [
-                    path
-                    for path in allowed_source_paths
-                    if _normalise_gate_path(path) in accepted_raw_paths
-                ],
-            }
-    def _result_item(item: dict[str, Any], *, citation: str, include_content: bool) -> dict[str, Any]:
-        hit = item["hit"]
-        result_metadata = (
-            {"type": hit.source_kind, "tags": []}
-            if hit.source_kind == "raw"
-            else {"type": metadata.get(hit.page_path, {}).get("type"), "tags": metadata.get(hit.page_path, {}).get("tags", [])}
-        )
-        citation_metadata = _citation_metadata(hit, provenance)
-        if citation_metadata:
-            result_metadata["provenance"] = citation_metadata
-        result: dict[str, Any] = {
-            "citation": citation,
-            "path": hit.page_path,
-            "heading": heading(hit),
-            "score": item["score"],
-            "scores": {"fts": hit.score, "vector": item["vector_score"], "rrf": item["rrf"], "graph": item["graph_score"]},
-            "source_kind": hit.source_kind,
-            "metadata": result_metadata,
-        }
-        if include_content:
-            context = next(
-                (
-                    packed_item
-                    for packed_item in packed_passages
-                    if str(packed_item.get("path") or "") == hit.page_path
-                ),
-                None,
-            )
-            if context:
-                result["content"] = context.get("content", "")
-                result["tokens"] = context.get("tokens", 0)
-                result["evidence_kind"] = context.get("evidence_kind", "")
-        return result
-
-    results = [
-        _result_item(item, citation=f"[{index}]", include_content=include_context_pack)
-        for index, item in enumerate(public_selected, 1)
-    ]
-    additional_results = [
-        _result_item(item, citation=f"[{len(public_selected) + index}]", include_content=False)
-        for index, item in enumerate(additional_selected, 1)
-    ]
-    warnings = list(dict.fromkeys([*filter(None, scope_rules), *vector_warnings, *index_warnings]))
-    if raw_index_warning:
-        warnings = list(dict.fromkeys([*warnings, raw_index_warning]))
-    pipeline: dict[str, Any] = {
-        "ranking_version": (
-            ENFORCED_RANKING_POLICY_VERSION
-            if enforce_projection_changed
-            else RANKING_POLICY_VERSION
-        ),
-        "scope": scope,
-        "corpus": "raw" if contains_raw else "archive" if effective_scope == "archive" else "active",
-        "authority": "active:formal>project>raw_chat;fallback:wiki_relaxed>raw",
-        "intent": intent,
-        "retrieval_mode": retrieval_mode,
-        "lexical_enabled": lexical_enabled,
-        "lexical": {"mode": lexical_mode},
-        "coverage": {"uncovered_latin_terms": uncovered_latin_terms, "triggered": coverage_fallback},
-        "counters": {
-            "fts_hits": len(fts),
-            "qualified_fts_hits": qualified_fts_hits,
-            "relaxed_fts_hits": relaxed_fts_hits,
-            "raw_fts_hits": raw_fts_hits,
-            "vector_hits": len(vector),
-            "graph_hits": sum(1 for item in baseline_selected if item["graph_score"] > 0),
-            "selected": len(baseline_selected),
-            "returned": len(results),
-            "additional": len(additional_results),
-        },
-        "warnings": warnings,
-        "fallback": fallback_payload,
-    }
-    if quality_gate_evaluation is not None:
-        pipeline["quality_gate"] = quality_gate_evaluation.summary
-    if discovery_requested or discovery_entities or discovery_source_items:
-        pipeline["discovery"] = discovery
-    if batch_payload.get("status") != "not_triggered":
-        pipeline["batch"] = batch_payload
-    if debug:
-        pipeline["debug"] = [
+    execution.outcome()
+    if telemetry_stats is not None:
+        telemetry_stats.update(
             {
-                "passage_id": (hit := cast(PassageHit, item["hit"])).passage_id,
-                "path": hit.page_path,
-                "fts_rank": item["fts_rank"],
-                "vector_rank": item["vector_rank"],
-                "rrf": item["rrf"],
-                "graph": item["graph_score"],
-                "graph_reasons": item["graph_reasons"],
-                "exact_match": item["exact"],
-                "final_score": item["score"],
-                "coverage_terms": item.get("coverage_terms", []),
-                "coverage_ratio": item.get("coverage_ratio"),
-                "source_local_rank": item.get("source_local_rank"),
-                "source_local_rrf": item.get("source_local_rrf"),
-                "fusion_score": item.get("fusion_score"),
-                "fusion_source": item.get("fusion_source"),
-                "fusion_local_position": item.get("fusion_local_position"),
+                "passage_ids": projection.telemetry.passage_ids,
+                "fallback_level": projection.telemetry.fallback_level,
+                "token_count": projection.telemetry.token_count,
             }
-            for item in baseline_selected
-        ]
-    cancellation.checkpoint("telemetry")
-    elapsed = (time.perf_counter() - started) * 1_000
-    if telemetry is None or telemetry.enabled:
-        (telemetry_recorder or QueryTelemetry(root)).finish_once(
-            question=question,
-            scope=scope,
-            project=project,
-            passage_ids=[item["hit"].passage_id for item in baseline_selected],
-            fallback_level=str(fallback_payload["level"]),
-            token_count=int(packed["budget"]["used"]),
-            latency_ms=elapsed,
-            retention_days=(telemetry.retention_days if telemetry else 90),
-            outcome="completed",
         )
-    response = {
-        "ok": True,
-        "question": question,
-        "scope": scope,
-        "project": project or "",
-        "results": results,
-        "additional_results": additional_results,
-        "expansion_suggestions": expansion_suggestions,
-        "budget": packed["budget"],
-        "pipeline": pipeline,
-    }
-    if not results:
-        has_discovery_entities = (
-            bool(discovery_entities)
-            or (isinstance(discovery, dict) and bool(discovery.get("candidate_entities")))
-        )
-        has_batch_outcome = (
-            batch_payload.get("status") not in {None, "not_triggered"}
-        )
-        if has_discovery_entities or has_batch_outcome:
-            response.update(
-                code="discovery_only",
-                message=(
-                    "Structured discovery found entities; inspect "
-                    "pipeline.discovery and pipeline.batch."
-                ),
-            )
-        else:
-            response.update(
-                code="no_results",
-                message="No indexed documentation matched the query.",
-            )
-    return response
+    return projection.response
