@@ -62,6 +62,8 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 [query_quality_policy.py](src/retrieval/query_quality_policy.py) 是 page-level 质量门禁的纯策略 owner；门禁在完整 recovery、page dedup 后、public results/context projection 前运行，消费同一次 `QueryCorpusSnapshot`。`QualityGateSettings` 属于 runtime snapshot，默认 `off`，不进入 `wiki_query` 公共参数；`shadow` 只产生有界摘要，`enforce` 只投影 accepted 页面，并在非空 baseline 全拒绝时 fail-open 返回 baseline、记录 `gate_would_suppress_all`。门禁不接管 eligibility/filter、fallback/discovery 或 no-result/cancel/timeout 语义。
 
+配置了 `QualityGateSettings.artifact_path` 时，`query_pipeline` 将 vault 相对路径解析到当前 vault、绝对路径按原值读取，并为 shadow/enforce 加载一次校准视图后传入 `evaluate_quality_gate`；artifact 缺失或版本不匹配继续 fail-open 保留候选并记录有界诊断。
+
 质量门禁的评测指标、identity 和安全报告由 [retrieval_eval_report.py](src/retrieval/retrieval_eval_report.py) 统一持有；缺少兼容 identity 或最小 holdout 样本时结论使用 `unproven`，保持 `off`/`shadow`，不得默认放行生产 enforce。修改门禁字段、状态或介入位置时，同步更新 `query-quality-gate` spec 与 Query V2/评测回归。
 
 [query_execution_context.py](src/retrieval/query_execution_context.py) 是单次 Query V2 执行状态、raw/fallback 分支迁移和冻结 `outcome()` 视图的唯一 owner。

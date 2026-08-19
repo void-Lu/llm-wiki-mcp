@@ -1,5 +1,9 @@
 # 变更记录
 
+## 2026-08-19 — Query V2 规则质量门禁接线
+
+- 接通 vault 级可选校准 `artifact_path`：相对路径按 vault root 解析，shadow/enforce 共用一次校准视图；artifact 缺失或 policy 版本不匹配时 fail-open 保留候选并记录有界诊断，评测 engine 与 MCP 入口共用门禁设置。
+
 ## 2026-08-18 — Query V2 规则质量门禁
 
 - 新增 Query V2 page-level 规则质量门禁，支持 runtime snapshot 下的 `off`、`shadow`、`enforce` 三态；shadow 不改变公共结果，enforce 全拒绝时 fail-open 返回 baseline 并记录 `gate_would_suppress_all`。
