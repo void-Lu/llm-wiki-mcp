@@ -1,5 +1,9 @@
 # 变更记录
 
+## 2026-08-19 — wiki_update 准备校验顺序统一
+
+- 合并 `wiki_update` preview/apply 的 incoming 准备流水线，统一执行 `REMOVED_FIELDS`、sources、参考段/wikilink 归一化与校验、lifecycle 校验；同一非法 sources + inactive 页面现在返回一致的来源错误优先级。
+
 ## 2026-08-19 — Query V2 规则质量门禁接线
 
 - 接通 vault 级可选校准 `artifact_path`：相对路径按 vault root 解析，shadow/enforce 共用一次校准视图；artifact 缺失或 policy 版本不匹配时 fail-open 保留候选并记录有界诊断，评测 engine 与 MCP 入口共用门禁设置。
