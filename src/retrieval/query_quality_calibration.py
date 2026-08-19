@@ -15,7 +15,6 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -646,66 +645,32 @@ class CalibrationLoadView:
     def for_feature(self, feature: CandidateFeature) -> QualityThresholdView:
         return resolve_threshold_view(self, feature)
 
-
-CalibrationArtifactView = CalibrationLoadView
-
-
-class CalibrationArtifactLoader:
-    """Read, validate, and identity-check an artifact at most once."""
-
-    def __init__(
-        self,
-        path: str | Path,
-        *,
-        expected_identity: CalibrationIdentity | Mapping[str, Any] | None = None,
-        expected_policy_version: str | None = None,
-    ) -> None:
-        self._path = Path(path).expanduser()
-        self._expected_identity = expected_identity
-        self._expected_policy_version = expected_policy_version
-        self._lock = Lock()
-        self._view: CalibrationLoadView | None = None
-
-    def load(self) -> CalibrationLoadView:
-        if self._view is not None:
-            return self._view
-        with self._lock:
-            if self._view is not None:
-                return self._view
-            self._view = self._load_once()
-            return self._view
-
-    def _load_once(self) -> CalibrationLoadView:
-        try:
-            if not self._path.is_file():
-                return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, "artifact_missing", True)
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-            artifact = parse_calibration_artifact(raw)
-            if self._expected_policy_version is not None and artifact.policy_version != self._expected_policy_version:
-                return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, "policy_version_mismatch", True)
-            if self._expected_identity is not None and not identity_matches(artifact.identity, self._expected_identity):
-                return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, "identity_mismatch", True)
-            return CalibrationLoadView(artifact, "loaded", None, "", False)
-        except (OSError, json.JSONDecodeError, CalibrationArtifactError, ValueError, TypeError) as exc:
-            diagnostic = getattr(exc, "code", "artifact_invalid")
-            return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, str(diagnostic), True)
-        except Exception:
-            # A corrupt optional policy must never become a query outage.  Do
-            # not expose the exception text or path in the view.
-            return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, "artifact_load_error", True)
-
-
 def load_calibration_artifact_once(
     path: str | Path,
     *,
     expected_identity: CalibrationIdentity | Mapping[str, Any] | None = None,
     expected_policy_version: str | None = None,
 ) -> CalibrationLoadView:
-    return CalibrationArtifactLoader(
-        path,
-        expected_identity=expected_identity,
-        expected_policy_version=expected_policy_version,
-    ).load()
+    """Read and validate one artifact for the current query snapshot."""
+
+    artifact_path = Path(path).expanduser()
+    try:
+        if not artifact_path.is_file():
+            return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, "artifact_missing", True)
+        raw = json.loads(artifact_path.read_text(encoding="utf-8"))
+        artifact = parse_calibration_artifact(raw)
+        if expected_policy_version is not None and artifact.policy_version != expected_policy_version:
+            return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, "policy_version_mismatch", True)
+        if expected_identity is not None and not identity_matches(artifact.identity, expected_identity):
+            return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, "identity_mismatch", True)
+        return CalibrationLoadView(artifact, "loaded", None, "", False)
+    except (OSError, json.JSONDecodeError, CalibrationArtifactError, ValueError, TypeError) as exc:
+        diagnostic = getattr(exc, "code", "artifact_invalid")
+        return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, str(diagnostic), True)
+    except Exception:
+        # A corrupt optional policy must never become a query outage.  Do
+        # not expose the exception text or path in the view.
+        return CalibrationLoadView(None, "fail_open", GATE_FAIL_OPEN_POLICY_MISSING, "artifact_load_error", True)
 
 
 def _feature_from_input(value: CandidateFeature | Mapping[str, Any] | object) -> CandidateFeature:
@@ -839,15 +804,6 @@ def resolve_threshold_view(
         policy_version=artifact.policy_version,
         calibration_revision=artifact.calibration_revision,
     )
-
-
-def resolve_threshold_views(
-    artifact_or_view: CalibrationArtifact | CalibrationLoadView | None,
-    features: Sequence[CandidateFeature],
-) -> tuple[QualityThresholdView, ...]:
-    """Resolve one immutable threshold view per candidate in input order."""
-
-    return tuple(resolve_threshold_view(artifact_or_view, feature) for feature in features)
 
 
 @dataclass(frozen=True)
@@ -1236,8 +1192,6 @@ __all__ = [
     "CALIBRATION_FEATURE_SCHEMA_VERSION",
     "CalibrationArtifact",
     "CalibrationArtifactError",
-    "CalibrationArtifactLoader",
-    "CalibrationArtifactView",
     "CalibrationBucket",
     "CalibrationBucketKey",
     "CalibrationGenerationError",
@@ -1260,6 +1214,5 @@ __all__ = [
     "parse_calibration_observation",
     "read_json_object",
     "resolve_threshold_view",
-    "resolve_threshold_views",
     "write_calibration_outputs",
 ]

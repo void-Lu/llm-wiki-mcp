@@ -9,7 +9,6 @@ import pytest
 
 from retrieval.query_quality_calibration import (
     CALIBRATION_FEATURE_SCHEMA_HASH,
-    CalibrationArtifactLoader,
     CalibrationBucketKey,
     CalibrationIdentity,
     CalibrationLoadView,
@@ -20,7 +19,6 @@ from retrieval.query_quality_calibration import (
     load_calibration_artifact_once,
     parse_calibration_artifact,
     resolve_threshold_view,
-    resolve_threshold_views,
     write_calibration_outputs,
 )
 from retrieval.query_quality_policy import (
@@ -132,17 +130,18 @@ def test_resolver_uses_exact_then_declared_backoff_then_fail_open() -> None:
     }
 
 
-def test_loader_missing_corrupt_identity_and_one_time_snapshot_fail_open(tmp_path: Path) -> None:
+def test_loader_missing_corrupt_identity_and_snapshot_fail_open(tmp_path: Path) -> None:
     raw, _exact, _language_backoff = _artifact_data()
     artifact_path = tmp_path / "calibration.json"
     artifact_path.write_text(json.dumps(raw), encoding="utf-8")
 
     expected = _identity()
-    loader = CalibrationArtifactLoader(artifact_path, expected_identity=expected)
-    loaded = loader.load()
+    loaded = load_calibration_artifact_once(artifact_path, expected_identity=expected)
     assert loaded.loaded is True
     artifact_path.write_text("{broken", encoding="utf-8")
-    assert loader.load() is loaded
+    reloaded = load_calibration_artifact_once(artifact_path, expected_identity=expected)
+    assert reloaded.loaded is False
+    assert reloaded.diagnostic_code == "artifact_invalid"
     assert identity_matches(loaded.artifact.identity, expected)  # type: ignore[union-attr]
 
     missing = load_calibration_artifact_once(tmp_path / "missing.json", expected_identity=expected)
@@ -162,7 +161,8 @@ def test_policy_threshold_view_is_optional_and_fail_open_keeps_original_candidat
 
     legacy = evaluate_quality_policy(features)
     assert legacy.accepted_features == features
-    _views = resolve_threshold_views(artifact, features)
+    views = tuple(resolve_threshold_view(artifact, feature) for feature in features)
+    assert len(views) == len(features)
     calibrated = evaluate_quality_policy(
         features,
         threshold_view=CalibrationLoadView(artifact, "loaded"),
