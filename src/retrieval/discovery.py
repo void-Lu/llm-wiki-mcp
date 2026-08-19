@@ -25,7 +25,7 @@ from retrieval.lexical_analyzer import (
     tokens,
 )
 from retrieval.query_cancellation import QueryCancellationContext
-from retrieval.query_shared import QueryFilters, eligible, heading, matches_request, probe_hit
+from retrieval.query_shared import QueryFilters, eligible, heading, matches_request, snapshot_page_eligible
 from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 
@@ -358,14 +358,7 @@ def _discovery_source_items(
             cancellation.checkpoint_batch(index, every=16, stage="discovery")
         path = str(page["path"])
         title = str(page.get("title") or "")
-        probe = probe_hit(
-            path,
-            title,
-            corpus=str(page.get("corpus") or "active"),
-            authority=str(page.get("authority") or ""),
-            source_kind=str(page.get("source_kind") or ""),
-        )
-        if not eligible(probe, metadata, scope=scope) or not matches_request(probe, metadata, project=project, filters=filters):
+        if not snapshot_page_eligible(page, metadata, scope=scope, project=project, filters=filters):
             continue
         eligible_pages.append((path, title, f"{title} {path}".casefold()))
 
@@ -830,5 +823,4 @@ __all__ = [
     "heading",
     "matches_request",
     "metadata_from_snapshot",
-    "probe_hit",
 ]
