@@ -1,5 +1,9 @@
 # 变更记录
 
+## 2026-08-19 — KnowledgeDependencies 页面策略接口收敛
+
+- 依赖投影内部 `update_page` 改为接收冻结 `PagePolicy`，并由存储边界统一展开 SQL 列与保留策略校验；正式页面、隐私审计和 provenance migration 不再重复展开五个策略字段。MCP 公开接口和表结构不变。
+
 ## 2026-08-19 — wiki_update 准备校验顺序统一
 
 - 合并 `wiki_update` preview/apply 的 incoming 准备流水线，统一执行 `REMOVED_FIELDS`、sources、参考段/wikilink 归一化与校验、lifecycle 校验；同一非法 sources + inactive 页面现在返回一致的来源错误优先级。
