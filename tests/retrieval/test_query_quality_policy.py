@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
+
 import pytest
 
 from retrieval.query_quality_policy import (
@@ -29,6 +31,7 @@ from retrieval.query_quality_policy import (
     KEEP_REASON_CODES,
     REJECT_REASON_CODES,
     SCORE_FAMILIES,
+    _HIT_KEYS,
     build_candidate_features,
     derive_score_family,
     evaluate_quality_policy,
@@ -50,6 +53,10 @@ def _hit(path: str, *, source_kind: str = "wiki", text: str = "invoice approval"
         authority="high" if source_kind != "raw" else "low",
         source_kind=source_kind,
     )
+
+
+def test_hit_key_vocabulary_follows_passage_hit_fields() -> None:
+    assert _HIT_KEYS == frozenset(field.name for field in fields(PassageHit))
 
 
 def test_score_family_derivation_covers_the_five_branches() -> None:

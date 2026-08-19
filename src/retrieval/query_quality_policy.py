@@ -8,13 +8,14 @@ reason code 先作为稳定接口保留给后续校准/rollout 子任务。
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 import math
 import re
 from types import MappingProxyType
 from typing import Any, Literal, TypeGuard
 
 from retrieval.candidate_items import CANDIDATE_CORE_KEYS, FUSION_KEYS
+from retrieval.retrieval_index import PassageHit
 
 
 ScoreFamily = Literal[
@@ -98,7 +99,7 @@ _CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uff00-\uffef]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _VALID_SCOPES = frozenset({"knowledge", "history", "all", "archive", "raw"})
 _CANONICAL_CANDIDATE_KEYS = CANDIDATE_CORE_KEYS | FUSION_KEYS
-_HIT_KEYS = frozenset({"authority", "corpus", "page_path", "score", "source_kind", "text", "title"})
+_HIT_KEYS: frozenset[str] = frozenset(field.name for field in fields(PassageHit))
 
 
 def is_score_family(value: object) -> TypeGuard[ScoreFamily]:
