@@ -80,6 +80,14 @@ _避免使用_：全库扫描、枚举工具、实时目录读取
 `src/retrieval/entity_batch.py` 是服务于目录发现的纯实体批处理 owner，把逐实体的批查询组织为带 token 与指纹缓存的有界执行机制；它不直接面向公共查询结果。
 _避免使用_：并发扇出、批量重试、目录发现
 
+**校准产物（Calibration Artifact）**：
+CLI `quality-gate calibrate` 从冻结评测数据集生成的 branch-relative 阈值产物，身份由 dataset manifest 冻结；运行时经 vault 配置 `quality_gate.artifact_path`（vault 相对解析）定位。产物缺失、policy_version 或身份不匹配时 fail-open（一律 keep）并携带诊断，不得静默降级为「无门禁」。
+_避免使用_：默认阈值表、全局阈值配置、无门禁模式
+
+**阈值视图（Threshold View）**：
+校准产物在运行时的 per-feature 阈值投影，供质量门禁按分支/桶消费；无产物时视图为空，门禁判定一律 keep。它是校准产物的运行时读取形态，不持有校准生成、评测数据集或门禁决策本身。
+_避免使用_：校准产物、阈值配置、门禁策略副本
+
 ## 派生与生命周期
 
 **页面提交（Page Commit）**：
