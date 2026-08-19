@@ -109,7 +109,10 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     profile_kind = "ingest_chat" if type_value == "chat" else "ingest"
     index: dict[str, object] = {}
     for stage in projection_stages(profile_kind):
-        result = projections[stage]()
+        projection = projections.get(stage)
+        if projection is None:
+            return {"ok": False, "code": "projection_stage_missing", "stage": stage}
+        result = projection()
         if stage == "raw_provenance":
             provenance_result = result
         elif stage == "retrieval":

@@ -67,6 +67,7 @@ _ERROR_MESSAGES: dict[str, str] = {
     "operation_not_committed": "the page operation has not committed its page fact",
     "write_failed_precommit": "the page fact was not committed",
     "projection_repair_required": "the page was committed and projections need repair",
+    "projection_stage_missing": "the configured projection stage is unavailable",
     "plan_consume_pending": "the page was committed and the update plan needs repair",
     "page_state_busy": "the page state store is busy",
     "page_state_incompatible": "the page state store is incompatible",

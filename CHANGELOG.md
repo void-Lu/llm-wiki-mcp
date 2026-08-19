@@ -1,5 +1,10 @@
 # 变更记录
 
+## 2026-08-19 — discovery 资格与摄入投影防御收敛
+
+- discovery 快照页面资格统一复用 `snapshot_page_eligible`，并清扫零消费兼容转口与校准 loader memo；既有公共结果行为保持不变。
+- 摄入 profile 缺失投影阶段返回稳定 `projection_stage_missing` 错误，不再暴露裸 `KeyError`。
+
 ## 2026-08-19 — note_writer 接口与脱敏 owner 收缩
 
 - 删除 `save_obsidian_note` 的无效内部参数与 overwrite 分支；页面脱敏和 `redacted_count` 统一由 `prepare_wiki_page` 计算并由 writer 透传，`wiki_write_note` 公共 schema 与响应字段不变。

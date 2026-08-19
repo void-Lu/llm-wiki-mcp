@@ -859,10 +859,7 @@ class PageMutationCoordinator:
             pass
 
     def _adapter_for_operation(self, operation_kind: str) -> WriteAdapter:
-        try:
-            return self._adapters.for_operation_kind(operation_kind)
-        except WriteAdapterError:
-            raise
+        return self._adapters.for_operation_kind(operation_kind)
 
     def _adapter_for_path(self, page_path: str) -> WriteAdapter:
         return self._adapters.for_path(page_path)

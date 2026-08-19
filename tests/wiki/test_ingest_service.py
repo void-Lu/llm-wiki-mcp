@@ -27,6 +27,19 @@ def test_single_file_ingest_rejects_a_directory(tmp_path: Path) -> None:
     assert result["code"] == "source_not_file"
 
 
+def test_single_file_ingest_reports_missing_profile_projection_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source", encoding="utf-8")
+    monkeypatch.setattr("wiki.ingest_service.projection_stages", lambda _kind: ("missing",))
+
+    result = ingest_file(vault_root=tmp_path / "vault", source_path=source, source_name="source")
+
+    assert result == {"ok": False, "code": "projection_stage_missing", "stage": "missing"}
+
+
 @pytest.mark.parametrize(
     ("source_name", "expected_code"),
     [

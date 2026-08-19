@@ -282,15 +282,13 @@ def save_obsidian_note(
         )
     except WikiWriteError as exc:
         return _error(exc.code, str(exc))
-    base_hash = sha256(target.read_bytes()).hexdigest() if target.is_file() else None
     intended_hash = sha256(prepared.text.encode("utf-8")).hexdigest()
     coordinator = PageMutationCoordinator(root)
     projection_result = coordinator.write_and_project(
         operation_kind="note",
         page_path=relative_path.as_posix(),
-        base_hash=base_hash,
+        base_hash=None,
         text=prepared.text,
-        expected_hash=base_hash,
     )
     if not projection_result.ok:
         return projection_result.to_dict()

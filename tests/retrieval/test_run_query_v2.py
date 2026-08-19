@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, run_query_v2
+from retrieval.query_pipeline import run_query_v2
 from retrieval.query_quality_calibration import CalibrationBucketKey
 from retrieval.query_quality_policy import (
     GATE_REJECT_SCORE_FLOOR,
@@ -12,6 +12,8 @@ from retrieval.query_quality_policy import (
     QualityGateResult,
     evaluate_quality_gate,
 )
+from retrieval.query_recall_policy import DEFAULT_TOP_K
+from retrieval.query_shared import QueryFilters
 import retrieval.query_pipeline as query_pipeline_module
 from retrieval.vector_index import VectorIndexStore, vector_index_records
 from retrieval.vector_provider import DeterministicFakeProvider

@@ -27,7 +27,7 @@ from retrieval.query_quality_calibration import (
 )
 from retrieval.retrieval_gold import RetrievalGoldError, finalize_retrieval_gold, sample_retrieval_gold
 from runtime.runtime_config import ConfigRegistry, ResolvedVault, RuntimeConfig, RuntimeConfigError, VaultSettings, resolve_runtime_config, vault_storage_id, write_global_config
-from retrieval.query_pipeline import DEFAULT_TOP_K
+from retrieval.query_recall_policy import DEFAULT_TOP_K
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, default_vector_index_path, parse_vector_settings, vector_index_records
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError, local_provider_readiness
 from archive.archive_migration import apply_legacy_migration, plan_legacy_migration

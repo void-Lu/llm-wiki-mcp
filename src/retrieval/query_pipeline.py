@@ -117,7 +117,7 @@ def _quality_gate_evaluation(
         fallback_level=fallback_level,
         lexical_mode=lexical_mode,
     )
-    artifact_path = _resolve_quality_gate_artifact_path(vault_root, getattr(settings, "artifact_path", None))
+    artifact_path = _resolve_quality_gate_artifact_path(vault_root, settings.artifact_path)
     threshold_view = (
         load_calibration_artifact_once(artifact_path, expected_policy_version=policy_version)
         if artifact_path is not None

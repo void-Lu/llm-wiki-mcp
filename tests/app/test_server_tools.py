@@ -386,7 +386,7 @@ def test_query_rejects_runtime_override_filters_before_domain_call() -> None:
 
 def test_query_passes_path_prefix_filter_to_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """path_prefix should pass the server whitelist and reach run_query_v2 as a QueryFilters."""
-    from retrieval.query_pipeline import QueryFilters
+    from retrieval.query_shared import QueryFilters
 
     registry, vault_root = _registry(tmp_path)
     monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
@@ -417,7 +417,7 @@ def test_query_normalizes_camel_case_path_prefix_and_rejects_conflicts(
     tmp_path: Path,
 ) -> None:
     """Nested camelCase filters must be normalized at the MCP boundary."""
-    from retrieval.query_pipeline import QueryFilters
+    from retrieval.query_shared import QueryFilters
 
     registry, vault_root = _registry(tmp_path)
     monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
