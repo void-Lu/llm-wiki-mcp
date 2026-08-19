@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 32
+- **Total Sessions**: 33
 - **Last Active**: 2026-08-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1068 | Active |
+| `journal-1.md` | ~1089 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 33 | 2026-08-19 | 完成 wiki_query discovery 公共投影与精确读取 | `77227a5` | `v0.9.33` |
 | 32 | 2026-08-19 | 完成 08-19 架构深化整改 r3 | `7d710db`, `ec01a00`, `339125d`, `af154c4`, `7041d70`, `1e532f5`, `65fa800`, `84c0766`, `5fc1933`, `b0b89b9`, `3b610e6`, `e78612c`, `4c66965`, `e421ea2`, `1bcd48e`, `4ca4499`, `ffdd13e`, `57c2a7d`, `d64b24c` | `v0.9.32` |
 | 31 | 2026-08-19 | G7 journal 阶段元组显式断言 | - | `v0.9.32` |
 | 30 | 2026-08-18 | query-quality-gate | `8f97709`, `a5422ad`, `550fb0a`, `523cfe9`, `5f34553` | `v0.9.32` |

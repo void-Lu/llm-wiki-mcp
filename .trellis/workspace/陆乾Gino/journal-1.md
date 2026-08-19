@@ -1066,3 +1066,24 @@ G1-G7 独立 Luna 会话实施完成，逐项验收、分组提交并归档；�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 33: 完成 wiki_query discovery 公共投影与精确读取
+
+**Date**: 2026-08-19
+**Task**: 完成 wiki_query discovery 公共投影与精确读取
+**Branch**: `v0.9.33`
+
+### Summary
+
+完成通用 discovery 意图边界、40 项/128 KiB 公共投影、query 命中 canonical content_ref、wiki_get 总量自动分页与 256 KiB clamp；补充脱敏 spill 回归 fixture、README/CLAUDE uv 约束和 docs 规划目录忽略规则。ruff、940 项非构建全量回归、3 项构建后端测试及 diff 检查通过；归档当前任务，保留 .netsuite-mcp/。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `77227a5` | (see git log) |
+
+### Status
+
+[OK] **Completed**
