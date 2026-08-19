@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -23,6 +24,7 @@ class PreparedWikiPage:
     target: Path
     relative_path: Path
     text: str
+    text_hash: str
     title: str
     frontmatter: dict[str, Any]
     redacted_count: int
@@ -80,8 +82,7 @@ def prepare_wiki_page(
     if removed_fields:
         raise WikiWriteError("source_capsules_removed", "source capsule provenance fields are retired; use raw sources instead")
     frontmatter.setdefault("title", title)
-    yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
-    text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{strip_leading_h1(body).strip()}\n"
+    text = render_page(frontmatter, strip_leading_h1(body), title_heading=f"# {title}")
     # Count display-text replacements only. The title is also mirrored in
     # frontmatter, so including the whole mapping would count one redaction
     # twice and change the public note response semantics.
@@ -91,6 +92,7 @@ def prepare_wiki_page(
         target=target,
         relative_path=relative_path,
         text=text,
+        text_hash=sha256(text.encode("utf-8")).hexdigest(),
         title=title,
         frontmatter=frontmatter,
         redacted_count=count_redactions(original_text, redacted_text),
@@ -111,11 +113,13 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return frontmatter, "\n".join(lines[end + 1 :]).strip()
 
 
-def render_page(frontmatter: Mapping[str, object], body: str) -> str:
+def render_page(frontmatter: Mapping[str, object], body: str, *, title_heading: str | None = None) -> str:
     """Render frontmatter and body using the canonical Wiki page envelope."""
 
     yaml_text = yaml.safe_dump(dict(frontmatter), allow_unicode=True, sort_keys=False).strip()
     body_text = body.strip()
+    if title_heading is not None:
+        body_text = f"{title_heading}\n\n{body_text}"
     return f"---\n{yaml_text}\n---\n\n{body_text}\n"
 
 

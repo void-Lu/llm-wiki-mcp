@@ -9,8 +9,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Mapping
 
-import yaml
-
 from common.redaction import (
     REDACTION_POLICY_VERSION,
     count_redaction_categories,
@@ -20,7 +18,7 @@ from common.redaction import (
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
 from wiki.atomic_file import sha256_file
 from wiki.page_mutation import MutationResult, PageMutationCoordinator
-from wiki.wiki_io import read_markdown_page
+from wiki.wiki_io import read_markdown_page, render_page
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ROLE_HEADING = re.compile(r"^#{1,6}\s*(user|assistant)\s*:?[ \t]*$", re.IGNORECASE | re.MULTILINE)
@@ -236,7 +234,7 @@ class ChatMemoryService:
 
     @staticmethod
     def _serialize(frontmatter: Mapping[str, Any], body: str) -> str:
-        return f"---\n{yaml.safe_dump(dict(frontmatter), allow_unicode=True, sort_keys=False).strip()}\n---\n\n{body.strip()}\n"
+        return render_page(frontmatter, body.strip(), title_heading=None)
 
     @staticmethod
     def _revisions(session_dir: Path) -> list[tuple[Path, Any]]:

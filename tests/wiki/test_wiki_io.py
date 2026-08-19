@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 from tests.helpers import write_test_page
+from wiki.chat_memory import ChatMemoryService
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, read_markdown_page, render_page, strip_leading_h1
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import create_wiki_root
@@ -14,6 +16,33 @@ def test_render_page_uses_canonical_frontmatter_and_body_envelope() -> None:
     assert render_page({"type": "concept", "generated": True}, "\n正文\n") == (
         "---\ntype: concept\ngenerated: true\n---\n\n正文\n"
     )
+
+
+def test_historical_page_envelopes_remain_byte_compatible(tmp_path: Path) -> None:
+    fixture_root = Path(__file__).parent / "fixtures" / "envelopes"
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+
+    prepared = prepare_wiki_page(
+        root,
+        WikiPage(
+            relative_path=Path("wiki/concepts/general/page.md"),
+            frontmatter={"title": "标题", "type": "concept", "generated": True, "tags": ["写路径"]},
+            title="标题",
+            body="# 标题\n\n正文第一行\n\n正文第二行\n",
+        ),
+        overwrite_generated_only=False,
+    )
+    chat = ChatMemoryService._serialize(
+        {"type": "chat_source", "session_id": "session-a", "revision": 1},
+        "\n## User\n\n消息内容。\n\n## Assistant\n\n已记录。\n",
+    )
+    rendered = render_page({"type": "concept", "generated": True}, "\n正文\n")
+
+    assert prepared.text.encode("utf-8") == (fixture_root / "prepare.md").read_bytes()
+    assert chat.encode("utf-8") == (fixture_root / "chat.md").read_bytes()
+    assert rendered.encode("utf-8") == (fixture_root / "render.md").read_bytes()
+    assert prepared.text_hash == sha256(prepared.text.encode("utf-8")).hexdigest()
 
 
 def test_write_test_page_writes_and_reads_markdown_page_with_frontmatter(tmp_path: Path):
