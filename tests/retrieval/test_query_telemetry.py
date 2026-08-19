@@ -3,8 +3,67 @@ from pathlib import Path
 import sqlite3
 import pytest
 
+import retrieval.query_telemetry as telemetry_module
 from retrieval.query_cancellation import QueryCancelled
 from retrieval.query_telemetry import QueryTelemetry, TelemetryReadError, read_completed_candidates, read_event_count
+
+
+def test_telemetry_init_defers_schema_and_pure_reads_do_not_create_storage(
+    tmp_path: Path,
+) -> None:
+    telemetry = QueryTelemetry(tmp_path)
+
+    assert not telemetry.path.exists()
+    assert telemetry.status()["events"] == 0
+    assert not telemetry.path.exists()
+
+    telemetry.record(
+        question="deferred schema",
+        scope="knowledge",
+        project=None,
+        passage_ids=(),
+        fallback_level="none",
+        token_count=0,
+        latency_ms=0,
+    )
+    assert telemetry.path.exists()
+
+
+def test_telemetry_schema_is_initialized_once_before_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    statements: list[str] = []
+    real_connect = telemetry_module.sqlite3.connect
+
+    def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(telemetry_module.sqlite3, "connect", traced_connect)
+    first = QueryTelemetry(tmp_path)
+    second = QueryTelemetry(tmp_path)
+    first.record(
+        question="first",
+        scope="knowledge",
+        project=None,
+        passage_ids=(),
+        fallback_level="none",
+        token_count=0,
+        latency_ms=0,
+    )
+    second.record(
+        question="second",
+        scope="knowledge",
+        project=None,
+        passage_ids=(),
+        fallback_level="none",
+        token_count=0,
+        latency_ms=0,
+    )
+
+    assert sum("CREATE TABLE" in statement for statement in statements) == 1
+    assert sum("PRAGMA table_info" in statement for statement in statements) == 1
 
 
 def test_telemetry_redacts_secret_and_never_stores_passage_body(tmp_path: Path) -> None:
@@ -141,6 +200,7 @@ def test_query_telemetry_migration_covers_alter_columns(tmp_path: Path) -> None:
         )
 
     telemetry = QueryTelemetry(tmp_path)
+    telemetry.cleanup()
     with sqlite3.connect(database) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(query_telemetry)")}
         defaults = conn.execute("SELECT outcome, cancelled_stage, worker_state FROM query_telemetry").fetchone()
