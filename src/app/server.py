@@ -765,7 +765,6 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
         related_pages=related_pages,
         related_pages_heading=related_pages_heading,
         sources=sources,
-        overwrite=False,
         vault_root=str(resolution.root),
     )
 

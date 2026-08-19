@@ -82,8 +82,11 @@ def prepare_wiki_page(
     frontmatter.setdefault("title", title)
     yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
     text = f"---\n{yaml_text}\n---\n\n# {title}\n\n{strip_leading_h1(body).strip()}\n"
-    original_text = f"{page.title}\n{page.frontmatter}\n{page.body}"
-    redacted_text = f"{title}\n{frontmatter}\n{body}"
+    # Count display-text replacements only. The title is also mirrored in
+    # frontmatter, so including the whole mapping would count one redaction
+    # twice and change the public note response semantics.
+    original_text = f"{page.title}\n{page.body}"
+    redacted_text = f"{title}\n{body}"
     return PreparedWikiPage(
         target=target,
         relative_path=relative_path,

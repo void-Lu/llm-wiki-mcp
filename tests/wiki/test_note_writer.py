@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import date
 from hashlib import sha256
+import inspect
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
+import wiki.note_writer as note_writer_module
 from wiki.note_writer import save_obsidian_note
 from wiki.chat_memory import ChatMemoryService
 from wiki.page_mutation import PageMutationCoordinator
@@ -47,6 +49,14 @@ def _written_path(vault: Path, result: dict[str, object]) -> Path:
     assert path.is_file()
     assert path.resolve().is_relative_to(vault.resolve())
     return path
+
+
+def test_save_note_signature_drops_dead_internal_parameters() -> None:
+    parameters = inspect.signature(save_obsidian_note).parameters
+
+    assert len(parameters) == 19
+    assert {"script_type", "object_type", "decision_status", "overwrite"}.isdisjoint(parameters)
+    assert "decision_status" not in inspect.signature(note_writer_module._frontmatter).parameters
 
 
 def test_invalid_note_type_returns_code(vault: Path):
@@ -238,7 +248,7 @@ def test_note_write_returns_null_indexed(vault: Path):
     assert result["indexed"] is None
 
 
-def test_existing_target_overwrite_false_returns_file_exists_and_preserves_bytes(vault: Path):
+def test_existing_target_returns_file_exists_and_preserves_bytes(vault: Path):
     target = vault / "wiki" / "projects" / "project-a" / "specs" / "existing-note.md"
     target.parent.mkdir(parents=True)
     original = b"original bytes\xff\n"
@@ -249,18 +259,6 @@ def test_existing_target_overwrite_false_returns_file_exists_and_preserves_bytes
     assert result["ok"] is False
     assert result["code"] == "file_exists"
     assert target.read_bytes() == original
-
-
-def test_existing_target_overwrite_true_replaces_content(vault: Path):
-    target = vault / "wiki" / "projects" / "project-a" / "specs" / "existing-note.md"
-    target.parent.mkdir(parents=True)
-    target.write_text("Original body", encoding="utf-8")
-
-    result = save_obsidian_note(note_type="spec", title="Existing note", content="Replacement body", project="project-a", filename="existing-note", overwrite=True, vault_root=str(vault))
-
-    assert result["ok"] is True
-    assert target.read_text(encoding="utf-8") != "Original body"
-    assert "Replacement body" in target.read_text(encoding="utf-8")
 
 
 def test_frontmatter_fixed_fields_and_old_fields_absent(vault: Path):
@@ -363,6 +361,23 @@ def test_redacts_sensitive_body_without_corrupting_frontmatter(vault: Path):
     assert "[REDACTED_SECRET]" in body
 
 
+def test_redacts_sensitive_title_before_filename_and_page_render(vault: Path):
+    result = save_obsidian_note(
+        note_type="spec",
+        title="Owner person@example.com",
+        content="Body",
+        project="project-a",
+        vault_root=str(vault),
+    )
+
+    path = _written_path(vault, result)
+    frontmatter, body = _frontmatter_and_body(path)
+    assert "person@example.com" not in str(result["path"])
+    assert frontmatter["title"] == "Owner [REDACTED_EMAIL]"
+    assert "person@example.com" not in body
+    assert result["redacted_count"] == 1
+
+
 def test_no_sensitive_body_returns_zero_redactions(vault: Path):
     result = save_obsidian_note(note_type="researches", title="No redaction", content="普通需求说明，不包含敏感信息。", project="project-a", vault_root=str(vault))
 
@@ -371,6 +386,34 @@ def test_no_sensitive_body_returns_zero_redactions(vault: Path):
     assert frontmatter["type"] == "researches"
     assert result["redacted_count"] == 0
     assert "普通需求说明" in body
+
+
+def test_note_write_uses_prepare_as_single_redaction_count_owner(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wiki.wiki_io as wiki_io
+
+    original_counter = wiki_io.count_redactions
+    calls: list[tuple[str, str]] = []
+
+    def counting_counter(original: str, redacted: str) -> int:
+        calls.append((original, redacted))
+        return original_counter(original, redacted)
+
+    monkeypatch.setattr(wiki_io, "count_redactions", counting_counter)
+    result = save_obsidian_note(
+        note_type="troubleshooting",
+        title="Single count",
+        content="Contact person@example.com and use token=secret-token-value.",
+        project="project-a",
+        filename="single-count",
+        vault_root=str(vault),
+    )
+
+    assert result["ok"] is True
+    assert len(calls) == 1
+    assert result["redacted_count"] == original_counter(*calls[0])
 
 
 def test_related_pages_and_raw_sources_are_written_with_verified_provenance(vault: Path):

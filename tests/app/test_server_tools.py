@@ -490,6 +490,26 @@ def test_write_and_update_schemas_expose_related_page_arguments() -> None:
             tools = {item.name: item for item in (await client.list_tools()).tools}
             write_properties = tools["wiki_write_note"].input_schema["properties"]
             update_properties = tools["wiki_update"].input_schema["properties"]
+            assert set(write_properties) == {
+                "chat_derived",
+                "chat_metadata",
+                "chat_sources",
+                "content",
+                "domain",
+                "filename",
+                "noteType",
+                "note_type",
+                "project",
+                "related_pages",
+                "related_pages_heading",
+                "sources",
+                "tags",
+                "title",
+                "vault",
+                "vaultRoot",
+                "vault_root",
+            }
+            assert tools["wiki_write_note"].input_schema["required"] == ["title", "content"]
             assert {"related_pages", "sources"} <= set(write_properties)
             assert "related_pages" in update_properties
 
@@ -667,7 +687,7 @@ def test_write_note_forwards_related_pages_and_sources(monkeypatch: pytest.Monke
 
     def fake_writer(**kwargs: object) -> dict[str, object]:
         calls.update(kwargs)
-        return {"ok": True}
+        return {"ok": True, "redacted_count": 2}
 
     monkeypatch.setattr("app.server.run_write_note", fake_writer)
     related_pages = [{"path": "wiki/concepts/related.md", "title": "Related"}]
@@ -683,7 +703,7 @@ def test_write_note_forwards_related_pages_and_sources(monkeypatch: pytest.Monke
         vault="primary",
     )
 
-    assert result == {"ok": True}
+    assert result == {"ok": True, "redacted_count": 2}
     assert calls["related_pages"] == related_pages
     assert calls["sources"] == sources
     assert calls["vault_root"] == str(root)

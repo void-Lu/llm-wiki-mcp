@@ -5,11 +5,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from common.redaction import count_redactions
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.page_policy import provenance_status, stamp_page_policy
-from wiki.wiki_io import WikiWriteError, prepare_wiki_page
+from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import WikiPathError, create_wiki_root, resolve_within_root, safe_segment, slug, translate_path_error
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
@@ -78,7 +77,6 @@ def _frontmatter(
     related_scripts: list[str] | None,
     tags: list[str] | None,
     zentao_urls: list[str] | None,
-    decision_status: str | None,
     status: str | None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
@@ -112,16 +110,12 @@ def save_obsidian_note(
     project: str | None = None,
     domain: str | None = None,
     related_script_types: list[str] | None = None,
-    script_type: str | None = None,
-    object_type: str | None = None,
     related_objects: list[str] | None = None,
     related_scripts: list[str] | None = None,
     tags: list[str] | None = None,
     zentao_urls: list[str] | None = None,
-    decision_status: str | None = None,
     status: str | None = None,
     filename: str | None = None,
-    overwrite: bool = False,
     vault_root: str | Path | None = None,
     chat_metadata: dict[str, Any] | None = None,
     chat_derived: bool = False,
@@ -178,8 +172,10 @@ def save_obsidian_note(
             return _error(exc.code, "source provenance could not be verified")
     source_paths = [item.relative_path for item in resolved_sources]
     source_hashes = source_hash_map(resolved_sources)
-    safe_title = policy.redact_display_text(title)
-    name, name_error = _filename(safe_title, filename)
+    # The default filename must not expose sensitive title text. Page display
+    # redaction and its count remain owned by prepare_wiki_page below.
+    filename_title = policy.redact_display_text(title) if filename is None else title
+    name, name_error = _filename(filename_title, filename)
     if name_error is not None:
         return name_error
     assert name is not None
@@ -228,32 +224,24 @@ def save_obsidian_note(
         target = resolve_within_root(root, relative_path)
     except WikiPathError as exc:
         return _error(translate_path_error(exc.code, "note_segment"), "resolved note path escapes vault_root")
-    if target.exists() and not overwrite:
+    if target.exists():
         return _error("file_exists", "target note already exists")
 
-    redacted_content = policy.redact_display_text(content)
-    redacted_count = count_redactions(f"{title}\n{content}", f"{safe_title}\n{redacted_content}")
-    redacted_content, normalized_wikilink_count = auto_normalize_wikilinks(redacted_content, root)
+    normalized_content, normalized_wikilink_count = auto_normalize_wikilinks(content, root)
     related_pages_skipped: list[dict[str, str]] = []
     if related_pages is not None:
-        redacted_content, related_pages_skipped = build_reference_section(root, redacted_content, related_pages, heading=related_pages_heading)
+        normalized_content, related_pages_skipped = build_reference_section(root, normalized_content, related_pages, heading=related_pages_heading)
     sources_skipped: list[dict[str, str]] = []
-    safe_tags = policy.redact_metadata(tags or [], field="tags")
-    safe_related_script_types = policy.redact_metadata(related_script_types or [], field="related_script_types")
-    safe_related_objects = policy.redact_metadata(related_objects or [], field="related_objects")
-    safe_related_scripts = policy.redact_metadata(related_scripts or [], field="related_scripts")
-    safe_zentao_urls = policy.redact_metadata(zentao_urls or [], field="zentao_urls")
     frontmatter = _frontmatter(
         note_type,
-        safe_title,
+        title,
         project,
         domain,
-        safe_related_script_types if isinstance(safe_related_script_types, list) else [],
-        safe_related_objects if isinstance(safe_related_objects, list) else [],
-        safe_related_scripts if isinstance(safe_related_scripts, list) else [],
-        safe_tags if isinstance(safe_tags, list) else [],
-        safe_zentao_urls if isinstance(safe_zentao_urls, list) else [],
-        decision_status,
+        related_script_types or [],
+        related_objects or [],
+        related_scripts or [],
+        tags or [],
+        zentao_urls or [],
         status,
     )
     if chat_derived:
@@ -289,7 +277,7 @@ def save_obsidian_note(
     try:
         prepared = prepare_wiki_page(
             root,
-            WikiPage(relative_path, frontmatter, safe_title, redacted_content),
+            WikiPage(relative_path, frontmatter, title, normalized_content),
             overwrite_generated_only=False,
         )
     except WikiWriteError as exc:
@@ -308,7 +296,8 @@ def save_obsidian_note(
         return projection_result.to_dict()
     operation_id = projection_result.operation_id or ""
     dependency_projection = projection_result.dependency_projection()
-    broken_wikilinks = validate_wikilinks(redacted_content, root)
+    _, prepared_body = split_frontmatter(prepared.text)
+    broken_wikilinks = validate_wikilinks(prepared_body, root)
     result: dict[str, Any] = {
         "ok": True,
         "state": projection_result.state or "completed",
@@ -316,7 +305,7 @@ def save_obsidian_note(
         "created": True,
         "operation_id": operation_id,
         "page_hash": projection_result.page_hash or intended_hash,
-        "redacted_count": redacted_count,
+        "redacted_count": prepared.redacted_count,
         "indexed": None,
         "wikilink_target": name[:-3] if name.endswith(".md") else name,
         "normalized_wikilinks": normalized_wikilink_count,
