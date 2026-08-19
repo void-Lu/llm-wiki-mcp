@@ -206,32 +206,6 @@ def _quality_gate_evaluation(
         return fail_open()
 
 
-def _quality_gate_summary(
-    candidates: tuple[Mapping[str, Any], ...],
-    *,
-    vault_root: Path,
-    settings: QualityGateSettings | None,
-    effective_scope: str,
-    retrieval_mode: str,
-    fallback_level: str,
-    coverage_fallback: bool,
-    lexical_mode: str,
-) -> dict[str, Any] | None:
-    """Compatibility wrapper for callers that only need the safe summary."""
-
-    evaluation = _quality_gate_evaluation(
-        candidates,
-        vault_root=vault_root,
-        settings=settings,
-        effective_scope=effective_scope,
-        retrieval_mode=retrieval_mode,
-        fallback_level=fallback_level,
-        coverage_fallback=coverage_fallback,
-        lexical_mode=lexical_mode,
-    )
-    return evaluation.summary if evaluation is not None else None
-
-
 def _normalise_gate_path(value: object) -> str:
     return str(value or "").replace("\\", "/").casefold()
 
@@ -640,11 +614,11 @@ def run_query_v2(
     has_primary_recall = bool(ranked)
     expansion_suggestions: list[str] = []
     for rank, hit in enumerate(_title_candidates(store, metadata, question, scope=effective_scope, project=project, filters=filters, snapshot=snapshot, cancellation=cancellation), 1):
-        cancellation.checkpoint_batch(rank - 1, every=16, stage="vector")
+        cancellation.checkpoint_batch(rank - 1, every=16, stage="ranking")
         ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0, title_rank=rank))
         ranked[hit.passage_id]["title_rank"] = rank
     for index, item in enumerate(ranked.values()):
-        cancellation.checkpoint_batch(index, every=16, stage="vector")
+        cancellation.checkpoint_batch(index, every=16, stage="ranking")
         vector_data = vector.get(item["hit"].passage_id)
         if vector_data:
             item["vector_rank"], item["vector_score"] = vector_data
@@ -701,7 +675,7 @@ def run_query_v2(
     # order so multi-section answers (fix steps, install checklists) survive
     # regardless of which sections carried the highest BM25 scores.
     for index in range(0, len(scored), 16):
-        cancellation.checkpoint_batch(index, every=16, stage="context")
+        cancellation.checkpoint_batch(index, every=16, stage="ranking")
     selected = select_best_per_page(scored)
     selected = adaptive_expand(selected, top_k)
     recovery = assemble_recovery(
@@ -734,7 +708,7 @@ def run_query_v2(
         recovery=recovery,
         stage_lexical_mode=stage_lexical_mode,
     )
-    cancellation.checkpoint("graph")
+    cancellation.checkpoint("fallback")
     execution._run_discovery_and_batch(
         question=question,
         metadata=metadata,

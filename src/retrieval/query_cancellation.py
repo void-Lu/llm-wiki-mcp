@@ -17,6 +17,7 @@ QueryStage = Literal[
     "metadata",
     "fts",
     "vector",
+    "ranking",
     "graph",
     "fallback",
     "context",

@@ -519,9 +519,6 @@ def build_candidate_features(
     return tuple(feature for feature in derived if feature is not None)
 
 
-extract_candidate_features = build_candidate_features
-
-
 @dataclass(frozen=True)
 class GateCandidateDecision:
     """一个候选的确定性 page-level 决策和内部 feature 记录。"""
@@ -804,36 +801,6 @@ def evaluate_quality_gate(
     return evaluate_quality_policy(features, policy_version=policy_version, threshold_view=threshold_view)
 
 
-def evaluate_candidates(
-    candidates: Sequence[Mapping[str, Any] | object],
-    *,
-    policy_version: str = QUALITY_POLICY_VERSION,
-    scope: str = "auto",
-    effective_scope: str | None = None,
-    retrieval_mode: str | None = None,
-    language_bucket: str | None = None,
-    branch: str | None = None,
-    fallback_level: str | None = None,
-    fallback_reason: str | None = None,
-    query_terms: Sequence[str] = (),
-    threshold_view: object | None = None,
-) -> QualityGateResult:
-    """便捷 seam：一次提取冻结特征并执行纯策略。"""
-
-    features = build_candidate_features(
-        candidates,
-        scope=scope,
-        effective_scope=effective_scope,
-        retrieval_mode=retrieval_mode,
-        language_bucket=language_bucket,
-        branch=branch,
-        fallback_level=fallback_level,
-        fallback_reason=fallback_reason,
-        query_terms=query_terms,
-    )
-    return evaluate_quality_policy(features, policy_version=policy_version, threshold_view=threshold_view)
-
-
 __all__ = [
     "CandidateFeature",
     "FAIL_OPEN_REASON_CODES",
@@ -867,11 +834,9 @@ __all__ = [
     "ScoreFamily",
     "build_candidate_features",
     "derive_score_family",
-    "evaluate_candidates",
     "evaluate_quality_gate",
     "evaluate_quality_policy",
     "extract_candidate_feature",
-    "extract_candidate_features",
     "is_gate_reason_code",
     "is_score_family",
     "resolve_effective_scope",

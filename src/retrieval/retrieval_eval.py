@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 from retrieval.metadata_filters import page_matches_filters, path_matches_prefix
-from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, RANKING_POLICY_VERSION, run_query_v2
+from retrieval.query_pipeline import run_query_v2
+from retrieval.query_recall_policy import DEFAULT_TOP_K, RANKING_POLICY_VERSION
+from retrieval.query_shared import QueryFilters
 from retrieval.query_telemetry import read_event_count
 from retrieval.retrieval_eval_dataset import (
     RETRIEVAL_EVAL_SCHEMA_VERSION,
@@ -858,29 +860,6 @@ def _run_case(
     return EvaluationQueryService(runtime).run(request, entrypoint=entrypoint)
 
 
-def _mcp_query_case(
-    root: Path,
-    case: RetrievalEvalCase,
-    *,
-    top_k: int,
-    query_version: str,
-    scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
-) -> dict[str, Any]:
-    """保留旧 MCP wrapper 名称，但只转发统一 request。"""
-
-    return _run_case(
-        root,
-        case,
-        top_k=top_k,
-        include_context_pack=False,
-        retrieval_mode="lexical",
-        vector_config=None,
-        query_version=query_version,
-        scope=scope,
-        entrypoint="mcp",
-    )
-
-
 def _require_mcp_lexical_pipeline(pipeline: Mapping[str, Any]) -> None:
     """在 MCP adapter seam 检查 lexical pipeline 和零 vector hits。"""
 
@@ -1015,7 +994,6 @@ def _evaluation_side_effects(
     }
 
 
-# 旧的私有 schema 名称保留为显式兼容转口，实际 owner 在 dataset 模块。
-_parse_case = parse_evaluation_case
+# 旧的私有 filter/manifest 名称保留为显式兼容转口，实际 owner 在 dataset 模块。
 _parse_filters = parse_evaluation_filters
 _parse_manifest = parse_evaluation_manifest
