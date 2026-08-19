@@ -183,29 +183,6 @@ def _render_archive_summary(entry: WikiLogEntry, timestamp: str, archive_rel: st
     return "\n".join(lines)
 
 
-def _operation_logged(
-    root: Path,
-    operation_id: str,
-    *,
-    operation_store: _OperationJournal | None = None,
-    log_store: WikiLogStore | None = None,
-) -> bool:
-    """Check the vault-local operation index without scanning archive volumes."""
-
-    state = log_store or WikiLogStore(root, operation_store=operation_store)
-    logged, _rebuilt = state.is_operation_logged(operation_id)
-    return logged
-
-
-def _load_operation_index(
-    root: Path,
-    *,
-    log_store: WikiLogStore | None = None,
-) -> tuple[set[str], bool]:
-    state = log_store or WikiLogStore(root)
-    return state.load_operation_index()
-
-
 def _read_operation_index(path: Path) -> set[str] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -234,21 +211,6 @@ def _scan_operation_ids(root: Path) -> set[str]:
             continue
         operation_ids.update(match.group(1) for line in lines if (match := _OPERATION_ID_RE.match(line)))
     return operation_ids
-
-
-def _write_operation_index(
-    root: Path,
-    operation_ids: set[str],
-    *,
-    log_store: WikiLogStore | None = None,
-) -> None:
-    state = log_store or WikiLogStore(root)
-    state.write_operation_index(operation_ids)
-
-
-def _force_operation_index_rebuild(root: Path, *, log_store: WikiLogStore | None = None) -> None:
-    state = log_store or WikiLogStore(root)
-    state.force_operation_index_rebuild()
 
 
 def _indented_items(items: list[str], *, field: str) -> list[str]:

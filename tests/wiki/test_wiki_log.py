@@ -153,7 +153,7 @@ def test_operation_index_manifest_failure_rebuilds_after_log_write(tmp_path: Pat
     root = tmp_path / "vault"
     create_wiki_root(root)
     log_store = WikiLogStore(root)
-    wiki_log._write_operation_index(root, set(), log_store=log_store)
+    log_store.write_operation_index(set())
     original_atomic_write_text = wiki_log.atomic_write_text
 
     def fail_manifest(target: str | Path, text: str):
