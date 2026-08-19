@@ -31,6 +31,35 @@ class ChatMemoryError(ValueError):
         self.code = code
 
 
+def _chat_index_response(
+    stage_view: Mapping[str, object] | None,
+    retrieval_result: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """Render the retrieval stage into the stable chat response shape."""
+
+    stage = stage_view if isinstance(stage_view, Mapping) else {}
+    if retrieval_result is None:
+        nested_result = stage.get("result")
+        retrieval_result = nested_result if isinstance(nested_result, Mapping) else None
+    retrieval_index = dict(retrieval_result or {})
+    if stage.get("state") == "succeeded":
+        indexed = retrieval_index.get("state") not in {"rebuild_required", "not_indexed"} and retrieval_index.get("ok") is True
+        return {
+            "ok": indexed,
+            "generation": {"enabled": False, "reason": "raw_only"},
+            "retrieval_index": retrieval_index,
+        }
+    return {
+        "ok": False,
+        "generation": {"enabled": False, "reason": "raw_only"},
+        "retrieval_index": {
+            "ok": False,
+            "state": stage.get("state", "pending"),
+            "code": stage.get("code") or "retrieval_pending",
+        },
+    }
+
+
 def _canonical(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -196,7 +225,10 @@ class ChatMemoryService:
             response["repair_action"] = result.repair_action
         if result.failed_stage:
             response["failed_stage"] = result.failed_stage
-        response["index"] = result.index_response()
+        response["index"] = _chat_index_response(
+            result.stages.get("retrieval"),
+            result.stage_result("retrieval"),
+        )
         return response
 
     def provenance(self, sources: object) -> dict[str, Any]:

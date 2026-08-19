@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 import threading
-from typing import Any, Iterable, Mapping
+from typing import Iterable, Mapping
 
 import yaml
 
@@ -77,57 +77,6 @@ class MutationResult:
             return None
         value = record.get("result")
         return dict(value) if isinstance(value, Mapping) else None
-
-    def dependency_projection(self) -> dict[str, object]:
-        """Explain the formal dependencies projection from the safe stage view."""
-
-        stage = self.stages.get("dependencies")
-        if not isinstance(stage, Mapping):
-            return {"ok": True, "state": "ready"}
-        result = stage.get("result")
-        if isinstance(result, Mapping):
-            return dict(result)
-        if stage.get("state") == "succeeded":
-            return {"ok": True, "state": "ready"}
-        state = stage.get("state")
-        if isinstance(state, str) and state:
-            code = stage.get("code")
-            return {
-                "ok": False,
-                "state": state,
-                "code": str(code) if isinstance(code, str) and code else f"dependencies_{state}",
-            }
-        return {"ok": True, "state": "ready"}
-
-    def retrieval_index(self) -> dict[str, object] | None:
-        """Return the safe retrieval projection, preserving the missing shape."""
-
-        return self.stage_result("retrieval")
-
-    def index_response(self) -> dict[str, Any]:
-        """Project chat retrieval state into the stable chat response shape."""
-
-        stage = self.stages.get("retrieval", {})
-        if not isinstance(stage, Mapping):
-            stage = {}
-        stage_result = self.stage_result("retrieval") or {}
-        if stage.get("state") == "succeeded":
-            retrieval_index = dict(stage_result)
-            indexed = retrieval_index.get("state") not in {"rebuild_required", "not_indexed"} and retrieval_index.get("ok") is True
-            return {
-                "ok": indexed,
-                "generation": {"enabled": False, "reason": "raw_only"},
-                "retrieval_index": retrieval_index,
-            }
-        return {
-            "ok": False,
-            "generation": {"enabled": False, "reason": "raw_only"},
-            "retrieval_index": {
-                "ok": False,
-                "state": stage.get("state", "pending"),
-                "code": stage.get("code") or "retrieval_pending",
-            },
-        }
 
     def to_dict(self) -> dict[str, object]:
         """Return the legacy-shaped scalar result plus the safe stage view."""

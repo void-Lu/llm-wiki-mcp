@@ -262,7 +262,7 @@ def test_write_and_project_reuses_supplied_intended_hash(monkeypatch: pytest.Mon
     assert hash_calls == 1  # the final commit integrity check remains in place
 
 
-def test_stage_explanation_helpers_use_safe_persisted_views(tmp_path: Path) -> None:
+def test_mutation_result_exposes_only_neutral_safe_stage_views(tmp_path: Path) -> None:
     _, store, _, operation_id = _operation(tmp_path)
     store.record_stage(
         operation_id,
@@ -284,12 +284,15 @@ def test_stage_explanation_helpers_use_safe_persisted_views(tmp_path: Path) -> N
             "navigation": {"state": "pending"},
         },
     )
-    assert result.dependency_projection() == {"ok": True, "state": "ready"}
-    assert result.retrieval_index() == {"ok": True, "state": "ready", "written": ["wiki/page.md"]}
+    assert result.stage_result("dependencies") is None
+    assert result.stage_result("retrieval") == {"ok": True, "state": "ready", "written": ["wiki/page.md"]}
     assert result.stage_result("navigation") is None
+    assert not hasattr(result, "dependency_projection")
+    assert not hasattr(result, "retrieval_index")
+    assert not hasattr(result, "index_response")
 
 
-def test_dependency_projection_exposes_failed_stage_without_result() -> None:
+def test_mutation_result_does_not_render_failed_stage_without_result() -> None:
     failed = MutationResult(
         ok=True,
         stages={"dependencies": {"state": "failed", "code": "dependency_unavailable"}},
@@ -297,17 +300,9 @@ def test_dependency_projection_exposes_failed_stage_without_result() -> None:
     pending = MutationResult(ok=True, stages={"dependencies": {"state": "pending"}})
     succeeded = MutationResult(ok=True, stages={"dependencies": {"state": "succeeded"}})
 
-    assert failed.dependency_projection() == {
-        "ok": False,
-        "state": "failed",
-        "code": "dependency_unavailable",
-    }
-    assert pending.dependency_projection() == {
-        "ok": False,
-        "state": "pending",
-        "code": "dependencies_pending",
-    }
-    assert succeeded.dependency_projection() == {"ok": True, "state": "ready"}
+    assert failed.stage_result("dependencies") is None
+    assert pending.stage_result("dependencies") is None
+    assert succeeded.stage_result("dependencies") is None
 
 
 @pytest.mark.parametrize(

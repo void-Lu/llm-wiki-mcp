@@ -5,10 +5,9 @@ from pathlib import Path
 import pytest
 
 from wiki.atomic_file import AtomicFileError, atomic_write_text, fault_context
-from wiki.chat_memory import ChatMemoryError, ChatMemoryService
+from wiki.chat_memory import ChatMemoryError, ChatMemoryService, _chat_index_response
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_policy import PagePolicy
-from wiki.page_mutation import MutationResult
 from wiki.page_operation_store import PageOperationStore
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.query_pipeline import run_query_v2
@@ -68,14 +67,8 @@ def test_chat_index_response_uses_flattened_success_and_synthesizes_failure() ->
     safe_result = PageOperationStore.safe_stage_result(
         {"ok": True, "state": "ready", "operation": "update", "retrieval_index": {"nested": "discarded"}}
     )
-    success = MutationResult(
-        ok=True,
-        stages={"retrieval": {"state": "succeeded", "result": safe_result}},
-    ).index_response()
-    failure = MutationResult(
-        ok=False,
-        stages={"retrieval": {"state": "failed", "code": "retrieval_unavailable"}},
-    ).index_response()
+    success = _chat_index_response({"state": "succeeded", "result": safe_result})
+    failure = _chat_index_response({"state": "failed", "code": "retrieval_unavailable"})
 
     assert success == {
         "ok": True,
