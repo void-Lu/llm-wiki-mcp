@@ -36,18 +36,17 @@ from retrieval.retrieval_eval_dataset import (
     parse_evaluation_manifest,
 )
 from retrieval.retrieval_eval_report import (
-    _build_slice_metrics,
-    _calculate_metrics_by_k,
-    _mean_or_none,
-    _median,
-    _normalise_experiment_metadata,
-    _pipeline_summary,
-    _result_summary,
+    assemble_quality_gate_report,
+    build_slice_metrics,
+    calculate_metrics_by_k,
     calculate_ranking_metrics,
-    calculate_quality_gate_metrics,
     evaluate_retrieval_gate,
-    quality_gate_report_identity,
+    mean_or_none,
+    median,
+    normalise_experiment_metadata,
+    pipeline_summary,
     percentile_95,
+    result_summary,
     safe_report_identity,
     write_retrieval_eval_report,
 )
@@ -219,10 +218,14 @@ class EvaluationQueryAdapter(Protocol):
 class EngineQueryAdapter:
     """在既有 Query V2 engine 上实现统一 query interface。"""
 
-    root: Path
+    runtime: EvaluationRuntimeSnapshot
 
     def run(self, request: EvaluationQueryRequest) -> dict[str, Any]:
-        response = _execute_engine_query(self.root, request)
+        response = _execute_engine_query(
+            self.runtime.root,
+            request,
+            quality_gate=self.runtime.settings.quality_gate,
+        )
         return _normalise_query_envelope(response, error_code="query_contract_invalid")
 
 
@@ -314,7 +317,7 @@ class EvaluationQueryService:
     def _adapter(self) -> EvaluationQueryAdapter:
         if self.runtime.adapter is not None:
             return McpQueryAdapter(self.runtime)
-        return EngineQueryAdapter(self.runtime.root)
+        return EngineQueryAdapter(self.runtime)
 
 
 def validate_dataset_paths(dataset: RetrievalEvalDataset, vault_root: str | Path) -> None:
@@ -397,8 +400,6 @@ def run_retrieval_evaluation(
         raise RetrievalEvalError("invalid_retrieval_mode", "retrieval_mode must be lexical, vector, or hybrid")
     if entrypoint not in {"engine", "mcp"}:
         raise RetrievalEvalError("invalid_entrypoint", "entrypoint must be engine or mcp")
-    if entrypoint == "mcp" and retrieval_mode != "lexical":
-        raise RetrievalEvalError("mcp_requires_lexical", "the MCP evaluation entrypoint is lexical-only")
     if retrieval_mode != "lexical" and not vector_config:
         raise RetrievalEvalError("vector_config_missing", "vector and hybrid evaluation require a local vector configuration")
     if query_version != "v2":
@@ -474,7 +475,7 @@ def run_retrieval_evaluation(
         result = query_runs[0]["result"]
         ranked_paths = rankings[0]
         metrics = calculate_ranking_metrics(ranked_paths, case.relevant, top_k=top_k)
-        metrics_by_k = _calculate_metrics_by_k(ranked_paths, case.relevant, top_k=top_k)
+        metrics_by_k = calculate_metrics_by_k(ranked_paths, case.relevant, top_k=top_k)
         for raw_k, per_k in metrics_by_k.items():
             k_metrics = ranking_values_by_k.setdefault(raw_k, {"recall": [], "precision": [], "mrr": [], "ndcg": []})
             for metric_name in ("recall", "precision", "mrr", "ndcg"):
@@ -526,7 +527,7 @@ def run_retrieval_evaluation(
                 budget_violations.append(case.id)
             packed_token_samples.append(used)
 
-        pipeline = _pipeline_summary(result.get("pipeline", {}))
+        pipeline = pipeline_summary(result.get("pipeline", {}))
         quality_gate_observation = _quality_gate_observation(
             result.get("pipeline", {}),
             configured=quality_gate,
@@ -586,7 +587,7 @@ def run_retrieval_evaluation(
                 "pipeline": pipeline,
                 "warnings": [],
                 "warning_count": pipeline.get("warning_count", 0),
-                "result_summary": [_result_summary(item) for item in result["results"]],
+                "result_summary": [result_summary(item) for item in result["results"]],
                 "diagnosis": diagnosis,
                 "quality_gate_observation": quality_gate_observation,
             }
@@ -609,19 +610,10 @@ def run_retrieval_evaluation(
         if quality_gate is not None and quality_gate.mode in {"shadow", "enforce"}
         else None
     )
-    gate_metrics = calculate_quality_gate_metrics(
-        cases,
-        top_k=top_k,
-        gate_enabled=gate_configured is not None or any(case.get("quality_gate_observation") is not None for case in cases),
-    )
-    gate_identity = quality_gate_report_identity(cases, configured=gate_configured)
-    metadata_quality_gate: dict[str, Any] = {
-        "status": gate_identity["status"],
-        "enabled": gate_identity["enabled"],
-    }
-    for key in ("mode", "gate_policy_version", "gate_config_hash", "calibration_revision"):
-        if key in gate_identity:
-            metadata_quality_gate[key] = gate_identity[key]
+    gate_report = assemble_quality_gate_report(cases, top_k=top_k, configured=gate_configured)
+    gate_identity = gate_report["identity"]
+    metadata_quality_gate = gate_report["metadata"]
+    quality_gate_metric_projection = gate_report["metrics"]
 
     ranking_version = _evaluation_ranking_version(cases)
     report = {
@@ -635,7 +627,7 @@ def run_retrieval_evaluation(
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "runtime_provenance": RUNTIME_PROVENANCE.to_public_dict(),
             "ranking": {"version": ranking_version},
-            "experiment": _normalise_experiment_metadata(experiment_metadata),
+            "experiment": normalise_experiment_metadata(experiment_metadata),
             "parameters": {
                 "top_k": top_k,
                 "include_content": False,
@@ -662,20 +654,20 @@ def run_retrieval_evaluation(
             "quality_gate": metadata_quality_gate,
         },
         "metrics": {
-            "recall_at_k_macro": _mean_or_none(recall_values),
+            "recall_at_k_macro": mean_or_none(recall_values),
             "recall_at_k_micro": total_hits / total_relevant if total_relevant else None,
-            "precision_at_k_macro": _mean_or_none(precision_values),
+            "precision_at_k_macro": mean_or_none(precision_values),
             "precision_at_k_micro": total_hits / (len(recall_values) * top_k) if recall_values else None,
-            "mrr_at_k_macro": _mean_or_none(mrr_values),
-            "ndcg_at_k_macro": _mean_or_none(ndcg_values),
+            "mrr_at_k_macro": mean_or_none(mrr_values),
+            "ndcg_at_k_macro": mean_or_none(ndcg_values),
             "ranking_by_k": {
                 str(k): {
-                    metric_name: _mean_or_none(values[metric_name])
+                    metric_name: mean_or_none(values[metric_name])
                     for metric_name in ("recall", "precision", "mrr", "ndcg")
                 }
                 for k, values in sorted(ranking_values_by_k.items())
             },
-            "slice_metrics": _build_slice_metrics(cases),
+            "slice_metrics": build_slice_metrics(cases),
             "relevant_hits": total_hits,
             "relevant_total": total_relevant,
             "no_answer_false_positive_rate": no_answer_false_positives / no_answer_cases if no_answer_cases else None,
@@ -688,7 +680,7 @@ def run_retrieval_evaluation(
             "fallback_rate": fallback_cases / len(cases),
             "fallback_reason_distribution": fallback_reasons,
             "diagnosis_distribution": diagnosis_distribution,
-            "packed_token_median": _median(packed_token_samples),
+            "packed_token_median": median(packed_token_samples),
             "latency_sample_count": len(latency_samples),
             "context_budget": {
                 "measured_cases": sum(1 for case in cases if case["context_budget"] is not None),
@@ -696,14 +688,7 @@ def run_retrieval_evaluation(
                 "violations": budget_violations,
                 "within_budget": not budget_violations,
             },
-            "quality_gate": gate_metrics,
-            "false_suppression": gate_metrics["false_suppression"],
-            "false_suppression_rate": gate_metrics["false_suppression_rate"],
-            "would_accept": gate_metrics["would_accept"],
-            "would_accept_rate": gate_metrics["would_accept_rate"],
-            "rank_churn": gate_metrics["rank_churn"],
-            "gate_reason_counts": gate_metrics["reason_counts"],
-            "gate_score_family_counts": gate_metrics["score_family_counts"],
+            **quality_gate_metric_projection,
         },
         "cases": cases,
     }
@@ -745,10 +730,13 @@ def _quality_gate_observation(
     ):
         if key in raw_gate:
             observation[key] = raw_gate[key]
-    for key in ("reason_counts", "score_family_counts"):
+    for key in ("reason_counts", "score_family_counts", "selection_counts"):
         value = raw_gate.get(key)
         if isinstance(value, Mapping):
             observation[key] = dict(value)
+    low_sample_buckets = raw_gate.get("low_sample_buckets")
+    if isinstance(low_sample_buckets, (list, tuple)):
+        observation["low_sample_buckets"] = [str(value) for value in low_sample_buckets[:32] if isinstance(value, str)]
 
     # Future adapters may expose page-level decisions.  They are intentionally
     # kept only in the internal case view so report output remains path-free.
@@ -907,7 +895,12 @@ def _public_filters(filters: Mapping[str, Any]) -> dict[str, Any] | None:
     return dict(normalize_evaluation_filter_contract(filters).public) or None
 
 
-def _execute_engine_query(root: Path, request: EvaluationQueryRequest) -> dict[str, Any]:
+def _execute_engine_query(
+    root: Path,
+    request: EvaluationQueryRequest,
+    *,
+    quality_gate: QualityGateSettings | None = None,
+) -> dict[str, Any]:
     if request.query_version != "v2":
         raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
     embedding: EmbeddingSettings | None = None
@@ -935,6 +928,7 @@ def _execute_engine_query(root: Path, request: EvaluationQueryRequest) -> dict[s
         top_k=request.top_k,
         embedding=embedding,
         telemetry=TelemetrySettings(enabled=False),
+        quality_gate=quality_gate,
         include_context_pack=request.include_context_pack,
         retrieval_mode=request.retrieval_mode,
     )
@@ -1019,31 +1013,6 @@ def _evaluation_side_effects(
         "index_after": {key: index_after.get(key) for key in ("code", "state", "fingerprint", "schema_version")},
         "clean": vault_unchanged and telemetry_unchanged and index_unchanged,
     }
-
-
-def _query_case(
-    root: Path,
-    case: RetrievalEvalCase,
-    *,
-    top_k: int,
-    include_context_pack: bool,
-    retrieval_mode: Literal["lexical", "vector", "hybrid"] = "lexical",
-    vector_config: Mapping[str, Any] | None = None,
-    query_version: str = "v2",
-    scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"] = "knowledge",
-) -> dict[str, Any]:
-    """旧 engine helper 的兼容转口，实际执行归 EngineQueryAdapter。"""
-
-    request = EvaluationQueryRequest(
-        case=case,
-        top_k=top_k,
-        include_context_pack=include_context_pack,
-        retrieval_mode=retrieval_mode,
-        vector_config=vector_config,
-        query_version=query_version,
-        scope=scope,
-    )
-    return EngineQueryAdapter(root).run(request)
 
 
 # 旧的私有 schema 名称保留为显式兼容转口，实际 owner 在 dataset 模块。

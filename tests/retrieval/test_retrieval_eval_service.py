@@ -17,6 +17,7 @@ from retrieval.retrieval_eval import (
     RetrievalEvalCase,
     RetrievalEvalError,
 )
+from runtime.runtime_config import QualityGateSettings
 
 
 def _request(*, retrieval_mode: str = "lexical") -> EvaluationQueryRequest:
@@ -33,19 +34,30 @@ def _request(*, retrieval_mode: str = "lexical") -> EvaluationQueryRequest:
 
 
 def test_engine_adapter_owns_query_envelope_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def execute(_root: Path, _request: EvaluationQueryRequest, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"ok": True, "results": [], "pipeline": {}, "budget": {}}
+
     monkeypatch.setattr(
         retrieval_eval,
         "_execute_engine_query",
-        lambda _root, _request: {"ok": True, "results": [], "pipeline": {}, "budget": {}},
+        execute,
     )
 
-    result = EngineQueryAdapter(Path("vault")).run(_request())
+    runtime = EvaluationRuntimeSnapshot.lexical_only(
+        Path("vault"),
+        quality_gate=QualityGateSettings(mode="shadow", artifact_path="reports/calibration.json"),
+    )
+    result = EngineQueryAdapter(runtime).run(_request())
 
     assert result == {"ok": True, "results": [], "pipeline": {}, "budget": {}}
+    assert captured["quality_gate"] == runtime.settings.quality_gate
 
-    monkeypatch.setattr(retrieval_eval, "_execute_engine_query", lambda _root, _request: {"results": {}})
+    monkeypatch.setattr(retrieval_eval, "_execute_engine_query", lambda _root, _request, **_kwargs: {"results": {}})
     with pytest.raises(RetrievalEvalError, match="results must be a list"):
-        EngineQueryAdapter(Path("vault")).run(_request())
+        EngineQueryAdapter(runtime).run(_request())
 
 
 def test_mcp_adapter_rejects_malformed_envelope_before_service_consumes_it(tmp_path: Path) -> None:

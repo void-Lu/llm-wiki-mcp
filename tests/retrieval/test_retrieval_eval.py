@@ -519,6 +519,10 @@ def test_shadow_evaluation_reports_gate_identity_and_metrics_without_changing_le
     assert metadata_gate["gate_policy_version"] == "query-quality-policy-v0"
     assert len(metadata_gate["gate_config_hash"]) == 64
     assert report["metadata"]["gate_config_hash"] == metadata_gate["gate_config_hash"]
+    observations = [case["quality_gate_observation"] for case in report["cases"]]
+    assert all(observation is not None and observation["available"] is True for observation in observations)
+    assert all(observation["mode"] == "shadow" for observation in observations)
+    assert all("candidate_count" in observation for observation in observations)
     assert report["metrics"]["no_answer_false_positive_rate"] == 0.0
     assert not (vault / ".llm-wiki" / "state.sqlite3").exists()
 

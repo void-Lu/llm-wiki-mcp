@@ -20,12 +20,20 @@ from retrieval.query_quality_policy import SCORE_FAMILIES, is_gate_reason_code, 
 
 
 __all__ = [
+    "assemble_quality_gate_report",
+    "build_slice_metrics",
+    "calculate_metrics_by_k",
     "calculate_ranking_metrics",
     "calculate_quality_gate_metrics",
     "evaluate_retrieval_gate",
+    "mean_or_none",
+    "median",
+    "normalise_experiment_metadata",
+    "pipeline_summary",
     "quality_gate_config_hash",
     "quality_gate_report_identity",
     "percentile_95",
+    "result_summary",
     "safe_report_identity",
     "write_retrieval_eval_report",
 ]
@@ -459,7 +467,7 @@ def _project_safe_output_value(value: object, *, depth: int = 0) -> Any:
     return None
 
 
-def _calculate_metrics_by_k(
+def calculate_metrics_by_k(
     ranked_paths: Sequence[str],
     relevant: Sequence[Relevance],
     *,
@@ -469,7 +477,7 @@ def _calculate_metrics_by_k(
     return {k: calculate_ranking_metrics(ranked_paths, relevant, top_k=k) for k in ks}
 
 
-def _build_slice_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+def build_slice_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
     buckets: dict[str, list[Mapping[str, Any]]] = {"all": list(cases)}
     for case in cases:
         language = case.get("language")
@@ -504,12 +512,12 @@ def _build_slice_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[s
         result[name] = {
             "case_count": len(bucket),
             "answerable_case_count": len(answerable),
-            "recall_at_k_macro": _mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("recall")) is not None]),
-            "precision_at_k_macro": _mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("precision")) is not None]),
-            "mrr_at_k_macro": _mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("mrr")) is not None]),
-            "ndcg_at_k_macro": _mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("ndcg")) is not None]),
-            "filter_correctness": _mean_or_none([1.0 if case.get("filter_correct") else 0.0 for case in bucket]),
-            "no_answer_false_positive_rate": _mean_or_none([1.0 if case.get("no_answer_false_positive") else 0.0 for case in no_answer]),
+            "recall_at_k_macro": mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("recall")) is not None]),
+            "precision_at_k_macro": mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("precision")) is not None]),
+            "mrr_at_k_macro": mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("mrr")) is not None]),
+            "ndcg_at_k_macro": mean_or_none([float(value) for metrics in ranking_metrics if (value := metrics.get("ndcg")) is not None]),
+            "filter_correctness": mean_or_none([1.0 if case.get("filter_correct") else 0.0 for case in bucket]),
+            "no_answer_false_positive_rate": mean_or_none([1.0 if case.get("no_answer_false_positive") else 0.0 for case in no_answer]),
             "p95_latency_ms": percentile_95([float(value) for case in bucket for value in case.get("latency_ms", [])]),
         }
         gate_metrics = calculate_quality_gate_metrics(bucket, gate_enabled=gate_enabled)
@@ -879,7 +887,51 @@ def calculate_quality_gate_metrics(
     }
 
 
-def _pipeline_summary(pipeline: object) -> dict[str, Any]:
+def assemble_quality_gate_report(
+    cases: Sequence[Mapping[str, Any]],
+    *,
+    top_k: int = 10,
+    configured: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble the single report-owned quality-gate schema projection."""
+
+    configured_gate = (
+        dict(configured)
+        if isinstance(configured, Mapping) and configured.get("mode") in {"shadow", "enforce"}
+        else None
+    )
+    gate_metrics = calculate_quality_gate_metrics(
+        cases,
+        top_k=top_k,
+        gate_enabled=configured_gate is not None
+        or any(case.get("quality_gate_observation") is not None for case in cases),
+    )
+    gate_identity = quality_gate_report_identity(cases, configured=configured_gate)
+    metadata: dict[str, Any] = {
+        "status": gate_identity["status"],
+        "enabled": gate_identity["enabled"],
+    }
+    for key in ("mode", "gate_policy_version", "gate_config_hash", "calibration_revision"):
+        if key in gate_identity:
+            metadata[key] = gate_identity[key]
+
+    return {
+        "metrics": {
+            "quality_gate": gate_metrics,
+            "false_suppression": gate_metrics["false_suppression"],
+            "false_suppression_rate": gate_metrics["false_suppression_rate"],
+            "would_accept": gate_metrics["would_accept"],
+            "would_accept_rate": gate_metrics["would_accept_rate"],
+            "rank_churn": gate_metrics["rank_churn"],
+            "gate_reason_counts": gate_metrics["reason_counts"],
+            "gate_score_family_counts": gate_metrics["score_family_counts"],
+        },
+        "identity": gate_identity,
+        "metadata": metadata,
+    }
+
+
+def pipeline_summary(pipeline: object) -> dict[str, Any]:
     """把 public pipeline 投影为唯一的报告安全视图。"""
 
     return _project_pipeline(pipeline)
@@ -1249,7 +1301,7 @@ def _is_safe_reason_code(value: str) -> bool:
     return all(character.isalnum() or character in {"_", ":", ".", "-"} for character in value.strip())
 
 
-def _result_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+def result_summary(item: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "path": item.get("path", ""),
         "score": item.get("score", 0.0),
@@ -1265,11 +1317,11 @@ def _finite_number(value: object) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _mean_or_none(values: Sequence[float]) -> float | None:
+def mean_or_none(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
-def _median(values: Sequence[int]) -> float | None:
+def median(values: Sequence[int]) -> float | None:
     if not values:
         return None
     ordered = sorted(values)
@@ -1282,7 +1334,7 @@ def _format_metric(value: object) -> str:
     return "N/A" if number is None else f"{number:.4f}"
 
 
-def _normalise_experiment_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+def normalise_experiment_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     if metadata is None:
         return {}
     if not isinstance(metadata, Mapping):
