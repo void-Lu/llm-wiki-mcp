@@ -36,6 +36,20 @@ class ProjectionContext:
     log_store: WikiLogStore
 
 
+@dataclass(frozen=True)
+class PlanIntent:
+    """The domain inputs whose normalized shape is protected by an update plan."""
+
+    body: str
+    frontmatter: Mapping[str, Any]
+
+
+def build_plan_intent(body: str, frontmatter: Mapping[str, Any]) -> PlanIntent:
+    """Build one normalized plan intent for every durable write kind."""
+
+    return PlanIntent(body=body, frontmatter=dict(frontmatter))
+
+
 class WriteAdapterError(ValueError):
     """Stable adapter-registry failure."""
 
@@ -57,8 +71,6 @@ class WriteAdapter(Protocol):
     def target(self, root: Path, page_path: str) -> Path: ...
 
     def projection_stages(self) -> tuple[str, ...]: ...
-
-    def build_plan_intent(self, body: str, frontmatter: Mapping[str, Any]) -> Any: ...
 
     def request_key(
         self,
@@ -102,11 +114,6 @@ class FormalPageAdapter:
 
     def projection_stages(self) -> tuple[str, ...]:
         return profile_stages("formal")
-
-    def build_plan_intent(self, body: str, frontmatter: Mapping[str, Any]) -> Any:
-        from wiki.page_mutation import PlanIntent
-
-        return PlanIntent(body=body, frontmatter=dict(frontmatter))
 
     def request_key(
         self,
@@ -215,11 +222,6 @@ class ChatSourceAdapter:
 
     def projection_stages(self) -> tuple[str, ...]:
         return profile_stages("chat")
-
-    def build_plan_intent(self, body: str, frontmatter: Mapping[str, Any]) -> Any:
-        from wiki.page_mutation import PlanIntent
-
-        return PlanIntent(body=body, frontmatter=dict(frontmatter))
 
     def request_key(
         self,

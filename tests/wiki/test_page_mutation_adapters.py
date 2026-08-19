@@ -5,6 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from wiki.atomic_file import sha256_file
+from wiki.page_mutation_adapters import build_plan_intent
 from wiki.page_mutation import ChatSourceAdapter, FormalPageAdapter, PageMutationCoordinator, PlanIntent
 from wiki.projection_profile import projection_stages
 
@@ -35,9 +36,17 @@ def test_coordinator_registers_formal_and_chat_adapters(tmp_path: Path) -> None:
     assert [type(adapter) for adapter in coordinator._adapters.adapters] == [FormalPageAdapter, ChatSourceAdapter]
     assert coordinator._adapters.adapters[0].projection_stages() is projection_stages("formal")
     assert coordinator._adapters.adapters[1].projection_stages() is projection_stages("chat")
-    intent = coordinator.build_plan_intent(operation_kind="update", body="body", frontmatter={"title": "Title"})
+    intent = build_plan_intent(body="body", frontmatter={"title": "Title"})
     assert intent.body == "body"
     assert intent.frontmatter == {"title": "Title"}
+
+
+def test_build_plan_intent_has_one_module_owner_without_lazy_import() -> None:
+    import wiki.page_mutation_adapters as adapters
+
+    source = inspect.getsource(adapters)
+    assert source.count("def build_plan_intent") == 1
+    assert "from wiki.page_mutation import" not in source
 
 
 def test_formal_adapter_owns_note_and_body_request_key_policies() -> None:
