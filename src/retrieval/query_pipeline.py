@@ -28,8 +28,6 @@ from retrieval.query_shared import (
     QueryFilters,
     eligible,
     heading,
-    is_retired_source_namespace,
-    is_source_index,
     matches_request,
     probe_hit,
 )
@@ -397,12 +395,8 @@ def _graph_expand(
             authority=str(page.get("authority") or ""),
             source_kind=str(page.get("source_kind") or ""),
         )
-        lifecycle = str(frontmatter.get("lifecycle") or frontmatter.get("lifecycle_status") or "active")
         if (
             not path.startswith("wiki/")
-            or is_retired_source_namespace(path)
-            or lifecycle in {"superseded", "deprecated", "archived"}
-            or is_source_index(path, frontmatter)
             or not eligible(probe, metadata, scope=scope)
             or not matches_request(probe, metadata, project=project, filters=filters)
         ):
