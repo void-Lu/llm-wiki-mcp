@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from retrieval.query_pipeline import DEFAULT_TOP_K, QueryFilters, run_query_v2
+from retrieval.query_quality_calibration import CalibrationBucketKey
 from retrieval.query_quality_policy import (
     GATE_REJECT_SCORE_FLOOR,
     GATE_WOULD_SUPPRESS_ALL,
@@ -23,6 +24,32 @@ from wiki.wiki_paths import create_wiki_root
 def _write(root: Path, path: str, title: str, body: str, **frontmatter: object) -> None:
     data = {"title": title, "generated": bool(frontmatter.pop("generated", True)), **frontmatter}
     write_test_page(root, path, data, body)
+
+
+def _calibration_artifact(*, policy_version: str = "query-quality-policy-v0") -> dict[str, object]:
+    global_bucket = CalibrationBucketKey("main_rrf", "*", "*", "*", "*")
+    return {
+        "schema_version": 1,
+        "policy_version": policy_version,
+        "calibration_revision": "cal-1",
+        "identity": {
+            "dataset_id": "query-quality-holdout",
+            "dataset_revision": "dataset-rev",
+            "vault_fingerprint": {"algorithm": "sha256", "value": "fixture", "status": "complete"},
+            "ranking_policy_version": "query-v2-passage-rrf-10",
+            "runtime_provenance": {"package_version": "test", "revision": "fixture", "revision_source": "fixture"},
+            "feature_schema_hash": "query-quality-feature-v1",
+        },
+        "minimum_sample_count": 1,
+        "status": "proven",
+        "buckets": {
+            global_bucket.encode(): {
+                "sample_count": 1,
+                "thresholds": {"ratio": 0.99},
+            }
+        },
+        "global_bucket": global_bucket.encode(),
+    }
 
 
 def _without_quality_gate(result: dict[str, object]) -> dict[str, object]:
@@ -150,6 +177,93 @@ def test_quality_gate_exception_fails_open_without_changing_public_envelope(tmp_
     assert shadow["pipeline"]["quality_gate"]["status"] == "gate_unavailable"
     assert shadow["pipeline"]["quality_gate"]["fail_open"] is True
     assert shadow["pipeline"]["quality_gate"]["reason_counts"] == {"gate_fail_open_error": 1}
+
+
+def test_quality_gate_artifact_enforce_rejects_and_resolves_relative_and_absolute_paths(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    for index in range(4):
+        _write(
+            root,
+            f"wiki/concepts/gate-{index}.md",
+            f"Gate {index}",
+            "shared enforce sentinel " * (index + 1),
+            type="concept",
+        )
+    refresh_indexes(root)
+    artifact_path = root / "reports" / "calibration.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(json.dumps(_calibration_artifact()), encoding="utf-8")
+    telemetry = TelemetrySettings(enabled=False)
+
+    relative = run_query_v2(
+        root,
+        "shared enforce sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="enforce", artifact_path="reports/calibration.json"),
+    )
+    absolute = run_query_v2(
+        root,
+        "shared enforce sentinel",
+        top_k=1,
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="enforce", artifact_path=str(artifact_path)),
+    )
+
+    for result in (relative, absolute):
+        gate = result["pipeline"]["quality_gate"]
+        assert gate["status"] == "gate_enforced"
+        assert gate["fail_open"] is False
+        assert gate["calibration_revision"] == "cal-1"
+        assert gate["selection_counts"]
+        assert gate["selection_counts"].get("fail_open", 0) == 0
+        assert gate["rejected_count"] >= 1
+
+    assert relative["results"] == absolute["results"]
+    assert relative["additional_results"] == absolute["additional_results"]
+
+
+def test_quality_gate_artifact_missing_or_policy_mismatch_fails_open_with_diagnostic(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice.md", "Invoice Approval", "invoice approval workflow", type="concept")
+    _write(root, "wiki/concepts/noise.md", "Invoice Note", "invoice reference", type="concept")
+    refresh_indexes(root)
+    telemetry = TelemetrySettings(enabled=False)
+    baseline = run_query_v2(root, "invoice approval", retrieval_mode="lexical", telemetry=telemetry)
+
+    missing = run_query_v2(
+        root,
+        "invoice approval",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="enforce", artifact_path="missing/calibration.json"),
+    )
+    missing_gate = missing["pipeline"]["quality_gate"]
+    assert missing["results"] == baseline["results"]
+    assert missing["additional_results"] == baseline["additional_results"]
+    assert missing_gate["fail_open"] is True
+    assert missing_gate["reason_counts"] == {"gate_fail_open_policy_missing": missing_gate["candidate_count"]}
+    assert "artifact_missing" in missing_gate["low_sample_buckets"]
+
+    mismatch_path = root / "mismatch.json"
+    mismatch_path.write_text(json.dumps(_calibration_artifact(policy_version="other-policy")), encoding="utf-8")
+    mismatch = run_query_v2(
+        root,
+        "invoice approval",
+        retrieval_mode="lexical",
+        telemetry=telemetry,
+        quality_gate=QualityGateSettings(mode="enforce", artifact_path=str(mismatch_path)),
+    )
+    mismatch_gate = mismatch["pipeline"]["quality_gate"]
+    assert mismatch["results"] == baseline["results"]
+    assert mismatch["additional_results"] == baseline["additional_results"]
+    assert mismatch_gate["fail_open"] is True
+    assert mismatch_gate["reason_counts"] == {"gate_fail_open_policy_missing": mismatch_gate["candidate_count"]}
+    assert "policy_version_mismatch" in mismatch_gate["low_sample_buckets"]
 
 
 def test_quality_gate_enforce_projects_accepted_pages_and_bumps_ranking_version(tmp_path: Path, monkeypatch) -> None:

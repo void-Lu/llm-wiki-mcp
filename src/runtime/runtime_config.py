@@ -70,6 +70,7 @@ class QualityGateSettings:
 
     mode: Literal["off", "shadow", "enforce"] = "off"
     policy_version: str = DEFAULT_QUALITY_POLICY_VERSION
+    artifact_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -302,7 +303,7 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     archive_raw = _mapping(raw.get("archive", {}), "archive", path)
     _unknown_keys(archive_raw, {"archive_index_enabled", "index_snapshot_ttl_days", "automatic_purge", "purge_after_days"}, "archive", path)
     quality_gate_raw = _mapping(raw.get("quality_gate", {}), "quality_gate", path)
-    _unknown_keys(quality_gate_raw, {"mode", "policy_version"}, "quality_gate", path)
+    _unknown_keys(quality_gate_raw, {"mode", "policy_version", "artifact_path"}, "quality_gate", path)
     quality_gate_mode = quality_gate_raw.get("mode", "off")
     if quality_gate_mode not in QUALITY_GATE_MODES:
         raise RuntimeConfigError("quality_gate.mode is invalid", code="invalid_config", config_path=path)
@@ -312,6 +313,11 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
         "quality_gate.policy_version",
         path,
     )
+    quality_gate_artifact_path = quality_gate_raw.get("artifact_path")
+    if quality_gate_artifact_path is not None and (
+        not isinstance(quality_gate_artifact_path, str) or not quality_gate_artifact_path.strip()
+    ):
+        raise RuntimeConfigError("quality_gate.artifact_path must be a non-empty string", code="invalid_config", config_path=path)
     purge_after = archive_raw.get("purge_after_days")
     if purge_after is not None:
         purge_after = _integer(purge_after, 1, 1, 36_500, "archive.purge_after_days", path)
@@ -350,6 +356,7 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
         quality_gate=QualityGateSettings(
             mode=quality_gate_mode,
             policy_version=quality_gate_policy_version,
+            artifact_path=quality_gate_artifact_path,
         ),
     )
 
@@ -423,6 +430,14 @@ class ConfigRegistry:
 
     def public_status(self, vault: ResolvedVault) -> dict[str, object]:
         settings = vault.settings
+        quality_gate_status: dict[str, object] = {
+            "mode": settings.quality_gate.mode,
+            "policy_version": settings.quality_gate.policy_version,
+        }
+        if settings.quality_gate.artifact_path is not None:
+            # Keep the configured value for operator visibility; never expose
+            # the vault-resolved path used by the query consumer.
+            quality_gate_status["artifact_path"] = settings.quality_gate.artifact_path
         return {
             "schema_version": self.config.schema_version,
             "logical_vault": vault.name,
@@ -443,7 +458,7 @@ class ConfigRegistry:
             "privacy": {"credential_redaction_enabled": settings.privacy.credential_redaction_enabled, "redaction_rule_version": settings.privacy.redaction_rule_version, "pii_policy": settings.privacy.pii_policy},
             "telemetry": {"enabled": settings.telemetry.enabled, "retention_days": settings.telemetry.retention_days, "store_query_body": settings.telemetry.store_query_body},
             "archive": {"archive_index_enabled": settings.archive.archive_index_enabled, "index_snapshot_ttl_days": settings.archive.index_snapshot_ttl_days, "automatic_purge": settings.archive.automatic_purge, "purge_configured": settings.archive.purge_after_days is not None},
-            "quality_gate": {"mode": settings.quality_gate.mode, "policy_version": settings.quality_gate.policy_version},
+            "quality_gate": quality_gate_status,
             "restart_required_for_changes": True,
         }
 

@@ -773,8 +773,14 @@ def resolve_threshold_view(
 
     if isinstance(artifact_or_view, CalibrationLoadView):
         if artifact_or_view.artifact is None:
+            diagnostic_buckets = (
+                (artifact_or_view.diagnostic_code,)
+                if artifact_or_view.diagnostic_code
+                else ()
+            )
             return _fail_open_threshold_view(
                 reason=artifact_or_view.reason_code or GATE_FAIL_OPEN_POLICY_MISSING,
+                low_sample_buckets=diagnostic_buckets,
             )
         artifact = artifact_or_view.artifact
     elif isinstance(artifact_or_view, CalibrationArtifact):

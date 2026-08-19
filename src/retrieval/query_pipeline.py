@@ -36,6 +36,7 @@ from retrieval.query_shared import (
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.metadata_filters import page_matches_filters
+from retrieval.query_quality_calibration import load_calibration_artifact_once
 from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
 from retrieval.query_quality_policy import (
     GATE_FAIL_OPEN_ERROR,
@@ -81,9 +82,19 @@ def _quality_gate_branch(*, coverage_fallback: bool, fallback_level: str, lexica
     return None
 
 
+def _resolve_quality_gate_artifact_path(vault_root: Path, artifact_path: str | Path | None) -> Path | None:
+    """Resolve the configured artifact at the runtime consumer boundary."""
+
+    if artifact_path is None or not str(artifact_path).strip():
+        return None
+    configured = Path(artifact_path).expanduser()
+    return configured if configured.is_absolute() else vault_root / configured
+
+
 def _quality_gate_evaluation(
     candidates: tuple[Mapping[str, Any], ...],
     *,
+    vault_root: Path,
     settings: QualityGateSettings | None,
     effective_scope: str,
     retrieval_mode: str,
@@ -108,6 +119,12 @@ def _quality_gate_evaluation(
         coverage_fallback=coverage_fallback,
         fallback_level=fallback_level,
         lexical_mode=lexical_mode,
+    )
+    artifact_path = _resolve_quality_gate_artifact_path(vault_root, getattr(settings, "artifact_path", None))
+    threshold_view = (
+        load_calibration_artifact_once(artifact_path, expected_policy_version=policy_version)
+        if artifact_path is not None
+        else None
     )
 
     def fail_open() -> _QualityGateEvaluation:
@@ -134,7 +151,14 @@ def _quality_gate_evaluation(
             retrieval_mode=retrieval_mode,
             branch=branch,
         )
-        result = evaluate_quality_gate(features, policy_version=policy_version)
+        if threshold_view is None:
+            result = evaluate_quality_gate(features, policy_version=policy_version)
+        else:
+            result = evaluate_quality_gate(
+                features,
+                policy_version=policy_version,
+                threshold_view=threshold_view,
+            )
         summary = result.summary
         score_family_counts = {
             str(key): int(value)
@@ -185,6 +209,7 @@ def _quality_gate_evaluation(
 def _quality_gate_summary(
     candidates: tuple[Mapping[str, Any], ...],
     *,
+    vault_root: Path,
     settings: QualityGateSettings | None,
     effective_scope: str,
     retrieval_mode: str,
@@ -196,6 +221,7 @@ def _quality_gate_summary(
 
     evaluation = _quality_gate_evaluation(
         candidates,
+        vault_root=vault_root,
         settings=settings,
         effective_scope=effective_scope,
         retrieval_mode=retrieval_mode,
@@ -725,6 +751,7 @@ def run_query_v2(
     fallback_level = str(fallback_value.get("level") or "none") if isinstance(fallback_value, Mapping) else "none"
     quality_gate_evaluation = _quality_gate_evaluation(
         outcome.selected,
+        vault_root=root,
         settings=quality_gate,
         effective_scope=effective_scope,
         retrieval_mode=retrieval_mode,

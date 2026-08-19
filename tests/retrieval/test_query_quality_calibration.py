@@ -12,6 +12,7 @@ from retrieval.query_quality_calibration import (
     CalibrationArtifactLoader,
     CalibrationBucketKey,
     CalibrationIdentity,
+    CalibrationLoadView,
     CalibrationObservation,
     CalibrationThresholds,
     generate_calibration_artifact,
@@ -162,7 +163,10 @@ def test_policy_threshold_view_is_optional_and_fail_open_keeps_original_candidat
     legacy = evaluate_quality_policy(features)
     assert legacy.accepted_features == features
     views = resolve_threshold_views(artifact, features)
-    calibrated = evaluate_quality_policy(features, threshold_view=views)
+    calibrated = evaluate_quality_policy(
+        features,
+        threshold_view=CalibrationLoadView(artifact, "loaded"),
+    )
     assert len(calibrated.accepted) == 1
     assert calibrated.rejected[0].reason_code == GATE_REJECT_SCORE_FLOOR
     assert calibrated.summary.threshold_selection_counts["backoff"] == 2
@@ -172,6 +176,7 @@ def test_policy_threshold_view_is_optional_and_fail_open_keeps_original_candidat
     assert fail_open.accepted_features == features
     assert fail_open.summary.fail_open is True
     assert fail_open.summary.reason_counts[GATE_FAIL_OPEN_POLICY_MISSING] == 2
+    assert fail_open.summary.low_sample_buckets == ("artifact_missing",)
 
 
 def test_generator_records_branch_relative_thresholds_backoff_weights_and_unproven_status(tmp_path: Path) -> None:

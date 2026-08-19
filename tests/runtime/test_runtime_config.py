@@ -276,6 +276,29 @@ def test_registry_decodes_quality_gate_into_immutable_snapshot(tmp_path: Path) -
         registry.config.vaults["other"] = resolved.settings  # type: ignore[index]
 
 
+def test_quality_gate_artifact_path_round_trips_and_public_status_keeps_configured_value(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path / "vault")
+    config_path = tmp_path / "config.yaml"
+    write_global_config(
+        config_path,
+        vault_name="primary",
+        vault_root=vault,
+        quality_gate={"mode": "enforce", "artifact_path": "reports/calibration.json"},
+    )
+
+    registry = ConfigRegistry.from_file(config_path)
+    resolved = registry.resolve_vault()
+
+    assert resolved.settings.quality_gate.artifact_path == "reports/calibration.json"
+    assert registry.public_status(resolved)["quality_gate"] == {
+        "mode": "enforce",
+        "policy_version": "query-quality-policy-v0",
+        "artifact_path": "reports/calibration.json",
+    }
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert raw["vaults"]["primary"]["quality_gate"]["artifact_path"] == "reports/calibration.json"
+
+
 def test_registry_decodes_trusted_query_execution_bounds_without_public_exposure(tmp_path: Path) -> None:
     vault = _make_vault(tmp_path / "vault")
     config_path = tmp_path / "config.yaml"
@@ -319,6 +342,8 @@ def test_registry_decodes_trusted_query_execution_bounds_without_public_exposure
         ({"quality_gate": {"unknown": True}}, "unknown_config_field"),
         ({"quality_gate": {"mode": "on"}}, "invalid_config"),
         ({"quality_gate": {"policy_version": "token=secret"}}, "invalid_config"),
+        ({"quality_gate": {"artifact_path": ""}}, "invalid_config"),
+        ({"quality_gate": {"artifact_path": 42}}, "invalid_config"),
     ],
 )
 def test_registry_rejects_unknown_unsafe_and_out_of_range_profile_fields(tmp_path: Path, patch: dict[str, object], code: str) -> None:
