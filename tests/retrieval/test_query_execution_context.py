@@ -1,9 +1,14 @@
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
 from retrieval.query_cancellation import QueryCancellationContext
-from retrieval.query_execution_context import QueryExecutionContext, QueryFilters
+from retrieval.query_execution_context import (
+    QueryExecutionContext,
+    QueryFilters,
+    QueryRequestView,
+)
 from retrieval.query_recall_policy import RRF_K
 from retrieval.query_recovery import (
     DEFAULT_RECOVERY_CONDITION,
@@ -11,6 +16,7 @@ from retrieval.query_recovery import (
     assemble_recovery,
     plan_fallback,
 )
+from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.wiki_index import refresh_indexes
 from wiki.wiki_paths import create_wiki_root
@@ -56,21 +62,23 @@ def test_query_execution_context_runs_parameterized_raw_branches(tmp_path: Path)
         )
     )
     assert coverage_plan is not None and coverage_plan.branch == "coverage"
+    context.uncovered_latin_terms = ["rag"]
     context.run_raw_branch(
+        QueryRequestView(
+            question="RAG",
+            effective_scope="knowledge",
+            project=None,
+            filters=QueryFilters(),
+            top_k=2,
+            metadata={},
+            intent="concept",
+            effective_rrf_k=RRF_K,
+        ),
         branch="coverage",
-        question="RAG",
-        project=None,
-        filters=QueryFilters(),
-        top_k=2,
         extra_terms=[],
         term_variants={},
-        uncovered_latin_terms=("rag",),
-        effective_rrf_k=RRF_K,
-        selected=[],
         candidate_pool=[],
         plan=coverage_plan,
-        lexical_mode="strict",
-        coverage_fallback=False,
     )
     coverage_path = context.selected[0]["hit"].page_path
     coverage_reasons = context.recovery.fallback["reasons"]
@@ -86,21 +94,26 @@ def test_query_execution_context_runs_parameterized_raw_branches(tmp_path: Path)
         )
     )
     assert all_coverage_plan is not None and all_coverage_plan.branch == "all_coverage"
+    context.selected = []
+    context.uncovered_latin_terms = ["llm"]
+    context.lexical_mode = "relaxed"
+    context.coverage_fallback = False
     context.run_raw_branch(
+        QueryRequestView(
+            question="LLM",
+            effective_scope="all",
+            project=None,
+            filters=QueryFilters(),
+            top_k=2,
+            metadata={},
+            intent="concept",
+            effective_rrf_k=RRF_K,
+        ),
         branch="all_coverage",
-        question="LLM",
-        project=None,
-        filters=QueryFilters(),
-        top_k=2,
         extra_terms=["retrieval"],
         term_variants={"llm": ["LLM"]},
-        uncovered_latin_terms=("llm",),
-        effective_rrf_k=RRF_K,
-        selected=[],
         candidate_pool=[],
         plan=all_coverage_plan,
-        lexical_mode="relaxed",
-        coverage_fallback=False,
     )
     all_coverage_path = context.selected[0]["hit"].page_path
     all_coverage_reasons = context.recovery.fallback["reasons"]
@@ -116,21 +129,26 @@ def test_query_execution_context_runs_parameterized_raw_branches(tmp_path: Path)
         )
     )
     assert raw_zero_plan is not None and raw_zero_plan.branch == "raw_zero"
+    context.selected = []
+    context.uncovered_latin_terms = []
+    context.lexical_mode = "strict"
+    context.coverage_fallback = False
     context.run_raw_branch(
+        QueryRequestView(
+            question="access reports",
+            effective_scope="knowledge",
+            project=None,
+            filters=QueryFilters(),
+            top_k=2,
+            metadata={},
+            intent="concept",
+            effective_rrf_k=RRF_K,
+        ),
         branch="raw_zero",
-        question="access reports",
-        project=None,
-        filters=QueryFilters(),
-        top_k=2,
         extra_terms=[],
         term_variants={},
-        uncovered_latin_terms=(),
-        effective_rrf_k=RRF_K,
-        selected=[],
         candidate_pool=[],
         plan=raw_zero_plan,
-        lexical_mode="strict",
-        coverage_fallback=False,
     )
     raw_zero_path = context.selected[0]["hit"].page_path
     raw_zero_reasons = context.recovery.fallback["reasons"]
@@ -215,3 +233,57 @@ def test_query_execution_context_outcome_does_not_open_lazy_raw_store(tmp_path: 
     context.outcome()
 
     assert context.raw_store is None
+
+
+def test_query_request_view_is_frozen_at_the_execution_seam() -> None:
+    view = QueryRequestView(
+        question="invoice approval",
+        effective_scope="knowledge",
+        project=None,
+        filters=QueryFilters(path_prefix="wiki/concepts/"),
+        top_k=2,
+        metadata={"wiki/concepts/invoice.md": {"tags": ["finance"]}},
+        intent="concept",
+        effective_rrf_k=RRF_K,
+        expansion_terms={"invoice": ["billing"]},
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        view.question = "changed"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        view.metadata["new"] = {}  # type: ignore[index]
+    assert view.expansion_terms == {"invoice": ("billing",)}
+
+
+def test_execute_owns_the_fallback_then_discovery_batch_order(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    context = _context(root)
+    context.snapshot = QueryCorpusSnapshot.empty("active")
+    events: list[str] = []
+    monkeypatch.setattr(
+        context,
+        "_run_fallback_recovery",
+        lambda _view: events.append("fallback"),
+    )
+    monkeypatch.setattr(
+        context,
+        "_run_discovery_and_batch",
+        lambda _view: events.append("discovery_batch"),
+    )
+
+    view = context.execute(
+        QueryRequestView(
+            question="invoice approval",
+            effective_scope="knowledge",
+            project=None,
+            filters=QueryFilters(),
+            top_k=2,
+            metadata={},
+            intent="concept",
+            effective_rrf_k=RRF_K,
+        )
+    )
+
+    assert events == ["fallback", "discovery_batch"]
+    assert view.recovery is context.recovery

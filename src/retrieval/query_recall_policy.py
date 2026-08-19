@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from retrieval.candidate_items import candidate_item, with_fusion
 from retrieval.lexical_analyzer import (
@@ -44,6 +44,15 @@ IDENTIFIER_PHRASE_CANDIDATES = 200
 ADAPTIVE_EXPAND_MAX = 40
 ADAPTIVE_SCORE_RATIO = 0.9
 MAX_ADAPTIVE_SCORE_RATIO = 0.7
+
+
+class RawRecoveryRequestView(Protocol):
+    """Structural request slice consumed by the raw recovery ladder."""
+
+    question: str
+    project: str | None
+    filters: QueryFilters
+    top_k: int
 
 _STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
 _COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
@@ -287,14 +296,10 @@ def _raw_recovery_bonus(hit: PassageHit, question: str, identifier_terms: list[s
 
 def raw_recovery_candidates(
     raw_store: RetrievalIndexStore,
-    question: str,
+    request: RawRecoveryRequestView,
     *,
-    project: str | None,
-    filters: QueryFilters,
-    scope: str,
-    extra_terms: list[str],
-    term_variants: dict[str, list[str]],
-    top_k: int,
+    extra_terms: Sequence[str] = (),
+    term_variants: Mapping[str, Sequence[str]] | None = None,
     snapshot: QueryCorpusSnapshot,
     raw_availability: Literal["fresh", "stale", "missing"],
     raw_index_warning: str = "",
@@ -315,7 +320,9 @@ def raw_recovery_candidates(
     raw_fts_hits = 0
     raw_index_warning = ""
     raw_lexical_mode = "strict"
-    candidate_limit = min(max(top_k * 8, RAW_FALLBACK_LIMIT), RAW_FALLBACK_CANDIDATE_LIMIT)
+    candidate_limit = min(
+        max(request.top_k * 8, RAW_FALLBACK_LIMIT), RAW_FALLBACK_CANDIDATE_LIMIT
+    )
     if raw_availability != "fresh":
         return raw_store, [], raw_fts_hits, raw_index_warning, raw_lexical_mode
     raw_metadata: dict[str, dict[str, Any]] = {}
@@ -327,29 +334,39 @@ def raw_recovery_candidates(
         raw_metadata[str(page["path"])] = dict(frontmatter) if isinstance(frontmatter, Mapping) else {}
 
     common_kwargs = {
-        "project": project,
-        "page_type": filters.type,
-        "tags": list(filters.tags),
+        "project": request.project,
+        "page_type": request.filters.type,
+        "tags": list(request.filters.tags),
     }
-    ladder_steps = [LadderStep("strict", "strict", question, common_kwargs)]
-    if has_qualified_identifier(question):
-        ladder_steps.append(LadderStep("qualified_code", "qualified_code", question, common_kwargs))
+    ladder_steps = [LadderStep("strict", "strict", request.question, common_kwargs)]
+    if has_qualified_identifier(request.question):
+        ladder_steps.append(
+            LadderStep(
+                "qualified_code", "qualified_code", request.question, common_kwargs
+            )
+        )
     ladder_steps.extend(
         [
             LadderStep(
                 "identifier_phrase",
                 "identifier_phrase",
-                question,
-                {**common_kwargs, "term_variants": term_variants},
+                request.question,
+                {**common_kwargs, "term_variants": term_variants or {}},
                 run_if_empty=True,
                 ignore_errors=True,
             ),
-            LadderStep("raw_prefix", "raw_prefix", question, common_kwargs, run_if_empty=True),
+            LadderStep(
+                "raw_prefix",
+                "raw_prefix",
+                request.question,
+                common_kwargs,
+                run_if_empty=True,
+            ),
             LadderStep(
                 "relaxed",
                 "relaxed",
-                question,
-                {**common_kwargs, "extra_terms": extra_terms},
+                request.question,
+                {**common_kwargs, "extra_terms": list(extra_terms)},
                 run_if_empty=True,
             ),
         ]
@@ -366,18 +383,28 @@ def raw_recovery_candidates(
 
     raw_fts_hits = len(raw_hits)
     raw_items: list[dict[str, Any]] = []
-    query_identifier_phrases = identifier_phrases(question) if raw_lexical_mode == "identifier_phrase" else []
+    query_identifier_phrases = (
+        identifier_phrases(request.question)
+        if raw_lexical_mode == "identifier_phrase"
+        else []
+    )
     for rank, hit in enumerate(raw_hits, 1):
         if cancellation is not None:
             cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
-        if not eligible(hit, raw_metadata, scope=scope):
+        if not eligible(hit, raw_metadata, scope="raw"):
             continue
-        score = hit.score + _raw_recovery_bonus(hit, question, query_identifier_phrases)
+        score = hit.score + _raw_recovery_bonus(
+            hit, request.question, query_identifier_phrases
+        )
         if query_identifier_phrases:
             compact = f"{hit.title}\n{hit.text}".casefold()
             if any(phrase in compact for phrase in query_identifier_phrases):
                 score += IDENTIFIER_PHRASE_BONUS
-            elif any(variant in compact for variants in term_variants.values() for variant in variants):
+            elif any(
+                variant in compact
+                for variants in (term_variants or {}).values()
+                for variant in variants
+            ):
                 score += IDENTIFIER_PHRASE_BONUS * 0.5
         raw_items.append(candidate_item(hit, score=score, fts_rank=rank))
     raw_candidate_items = select_best_per_page(raw_items)
