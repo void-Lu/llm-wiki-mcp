@@ -15,6 +15,7 @@ from wiki.atomic_file import AtomicFileError, atomic_write_text, current_fault, 
 from wiki.page_mutation_adapters import (
     ChatSourceAdapter,
     FormalPageAdapter,
+    PlanIntent,
     Projection,
     ProjectionContext,
     WriteAdapter,
@@ -25,14 +26,6 @@ from wiki.page_mutation_adapters import (
 from wiki.page_operation_store import PageOperation, PageOperationError, PageOperationStore, UpdatePlan, UpdatePlanError, plan_is_expired
 from wiki.wiki_log import WikiLogStore
 from wiki.wiki_paths import WikiPathError, translate_path_error
-
-
-@dataclass(frozen=True)
-class PlanIntent:
-    """The domain inputs whose normalized shape is protected by an update plan."""
-
-    body: str
-    frontmatter: Mapping[str, Any]
 
 
 def plan_intent_hash(page_path: str, base_hash: str, intent: PlanIntent) -> str:
@@ -372,21 +365,6 @@ class PageMutationCoordinator:
 
         return self._plan_lifecycle.issue(page_path, base_hash, intent, ttl_seconds=ttl_seconds)
 
-    def build_plan_intent(
-        self,
-        *,
-        operation_kind: str,
-        body: str,
-        frontmatter: Mapping[str, Any],
-    ) -> PlanIntent:
-        """Build a plan intent through the registered kind adapter."""
-
-        try:
-            adapter = self._adapter_for_operation(operation_kind)
-        except WriteAdapterError as exc:
-            raise PageMutationError(exc.code) from exc
-        return adapter.build_plan_intent(body, frontmatter)
-
     def prepare(
         self,
         *,
@@ -710,6 +688,7 @@ class PageMutationCoordinator:
         page_path: str,
         base_hash: str | None,
         text: str,
+        intended_hash: str | None = None,
         expected_hash: str | None = None,
         plan_id: str | None = None,
         plan_intent: PlanIntent | None = None,
@@ -725,7 +704,8 @@ class PageMutationCoordinator:
             adapter = self._adapter_for_operation(operation_kind)
         except WriteAdapterError as exc:
             return MutationResult(ok=False, code=exc.code)
-        intended_hash = sha256(text.encode("utf-8")).hexdigest()
+        if intended_hash is None:
+            intended_hash = sha256(text.encode("utf-8")).hexdigest()
         effective_request_key = adapter.request_key(
             operation_kind=operation_kind,
             page_path=page_path,

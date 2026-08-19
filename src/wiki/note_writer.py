@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -282,13 +281,13 @@ def save_obsidian_note(
         )
     except WikiWriteError as exc:
         return _error(exc.code, str(exc))
-    intended_hash = sha256(prepared.text.encode("utf-8")).hexdigest()
     coordinator = PageMutationCoordinator(root)
     projection_result = coordinator.write_and_project(
         operation_kind="note",
         page_path=relative_path.as_posix(),
         base_hash=None,
         text=prepared.text,
+        intended_hash=prepared.text_hash,
     )
     if not projection_result.ok:
         return projection_result.to_dict()
@@ -302,7 +301,7 @@ def save_obsidian_note(
         "path": relative_path.as_posix(),
         "created": True,
         "operation_id": operation_id,
-        "page_hash": projection_result.page_hash or intended_hash,
+        "page_hash": projection_result.page_hash or prepared.text_hash,
         "redacted_count": prepared.redacted_count,
         "indexed": None,
         "wikilink_target": name[:-3] if name.endswith(".md") else name,

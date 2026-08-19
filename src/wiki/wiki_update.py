@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import difflib
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from wiki.atomic_file import sha256_file
 from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_mutation_adapters import build_plan_intent
 from wiki.page_operation_store import UpdatePlanError
 from wiki.page_policy import provenance_status, stamp_page_policy
 from wiki.reference_section import build_reference_section, skipped_warnings
@@ -35,10 +35,6 @@ class _PreparedIncoming:
     normalized_count: int
     broken_wikilinks: list[dict[str, Any]]
     removed_fields: list[str]
-
-
-def _digest(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _prepare_incoming(
@@ -123,8 +119,7 @@ def preview_update(
         plan = coordinator.issue_plan(
             page_path=page_path,
             base_hash=current_hash,
-            intent=coordinator.build_plan_intent(
-                operation_kind="update",
+            intent=build_plan_intent(
                 body=incoming_body,
                 frontmatter=incoming,
             ),
@@ -213,17 +208,16 @@ def apply_update(
         )
     except WikiWriteError as exc:
         return _attach_related_page_skips({"ok": False, "code": exc.code, "error": str(exc)}, related_pages, related_pages_skipped)
-    updated_hash = _digest(prepared.text)
     coordinator = PageMutationCoordinator(root)
     mutation = coordinator.write_and_project(
         operation_kind="update",
         page_path=page_path,
         base_hash=current_hash,
         text=prepared.text,
+        intended_hash=prepared.text_hash,
         expected_hash=expected_hash,
         plan_id=plan_id,
-        plan_intent=coordinator.build_plan_intent(
-            operation_kind="update",
+        plan_intent=build_plan_intent(
             body=incoming_body,
             frontmatter=incoming,
         ),
@@ -245,7 +239,7 @@ def apply_update(
     dependency_projection = mutation.dependency_projection()
     navigation = mutation.stage_result("navigation")
     retrieval_index = mutation.retrieval_index()
-    result = {"ok": True, "state": mutation.state or "completed", "action": "apply", "page_path": page_path, "operation_id": mutation.operation_id, "hash": updated_hash, "page_hash": mutation.page_hash or updated_hash, "navigation": navigation, "retrieval_index": retrieval_index, "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "dependency_projection": dependency_projection, "provenance_status": provenance_status(policy_stamp), "freshness": str(policy_stamp["freshness"])}
+    result = {"ok": True, "state": mutation.state or "completed", "action": "apply", "page_path": page_path, "operation_id": mutation.operation_id, "hash": prepared.text_hash, "page_hash": mutation.page_hash or prepared.text_hash, "navigation": navigation, "retrieval_index": retrieval_index, "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "dependency_projection": dependency_projection, "provenance_status": provenance_status(policy_stamp), "freshness": str(policy_stamp["freshness"])}
     if mutation.repair_action:
         result["repair_action"] = mutation.repair_action
     if mutation.failed_stage:

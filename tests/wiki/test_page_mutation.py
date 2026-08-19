@@ -232,6 +232,36 @@ def test_write_and_project_plan_claims_consumes_and_returns_safe_stages(tmp_path
     assert store.get_plan(plan_id).state == "consumed"
 
 
+def test_write_and_project_reuses_supplied_intended_hash(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import wiki.page_mutation as page_mutation_module
+
+    text = "new"
+    intended_hash = sha256(text.encode()).hexdigest()
+    hash_calls = 0
+    original_sha256 = page_mutation_module.sha256
+
+    def counting_sha256(value: bytes):
+        nonlocal hash_calls
+        hash_calls += 1
+        return original_sha256(value)
+
+    monkeypatch.setattr(page_mutation_module, "sha256", counting_sha256)
+    coordinator = PageMutationCoordinator(tmp_path)
+    monkeypatch.setattr(coordinator, "projections_for", lambda _operation: {})
+
+    result = coordinator.write_and_project(
+        operation_kind="note",
+        page_path="wiki/concepts/general/page.md",
+        base_hash=None,
+        text=text,
+        intended_hash=intended_hash,
+    )
+
+    assert result.ok is True
+    assert result.page_hash == intended_hash
+    assert hash_calls == 1  # the final commit integrity check remains in place
+
+
 def test_stage_explanation_helpers_use_safe_persisted_views(tmp_path: Path) -> None:
     _, store, _, operation_id = _operation(tmp_path)
     store.record_stage(
