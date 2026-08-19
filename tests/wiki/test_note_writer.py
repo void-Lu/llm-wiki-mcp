@@ -531,6 +531,7 @@ def test_write_note_returns_page_operation_contract(vault: Path) -> None:
     assert result["state"] == "completed"
     assert isinstance(result["operation_id"], str) and result["operation_id"]
     assert isinstance(result["page_hash"], str) and len(result["page_hash"]) == 64
+    assert result["dependency_projection"] == {"ok": True, "state": "ready"}
     assert "repair_action" not in result
     assert "failed_stage" not in result
 

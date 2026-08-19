@@ -8,7 +8,27 @@ import yaml
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.page_operation_store import PageOperationStore
-from wiki.wiki_update import _PreparedIncoming, _prepare_incoming, apply_update, preview_update
+from wiki.wiki_update import _PreparedIncoming, _prepare_incoming, apply_update, preview_update, project_dependency_stage
+
+
+def test_dependency_stage_projection_preserves_formal_response_shapes() -> None:
+    assert project_dependency_stage(None) == {"ok": True, "state": "ready"}
+    assert project_dependency_stage({"state": "succeeded"}) == {"ok": True, "state": "ready"}
+    assert project_dependency_stage({"state": "succeeded", "result": {"ok": True, "state": "ready", "operation": "update"}}) == {
+        "ok": True,
+        "state": "ready",
+        "operation": "update",
+    }
+    assert project_dependency_stage({"state": "failed", "code": "dependency_unavailable"}) == {
+        "ok": False,
+        "state": "failed",
+        "code": "dependency_unavailable",
+    }
+    assert project_dependency_stage({"state": "pending"}) == {
+        "ok": False,
+        "state": "pending",
+        "code": "dependencies_pending",
+    }
 
 
 def test_preview_apply_cas_and_generated_becomes_manual(tmp_path) -> None:
@@ -20,7 +40,16 @@ def test_preview_apply_cas_and_generated_becomes_manual(tmp_path) -> None:
     page.write_text("---\ntype: concept\nconcept_id: concept_a\ngenerated: true\nmaintenance: auto\nsources: [raw/sources/a.md]\ncreated: '2026-01-01'\n---\n\n# A\n\nold\n", encoding="utf-8")
     preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "new", {"sources": ["raw/sources/a.md"]})
     assert preview["ok"] and preview["plan_id"]
-    assert apply_update(tmp_path, "wiki/concepts/general/a.md", "new", incoming_frontmatter={"sources": ["raw/sources/a.md"]}, plan_id=preview["plan_id"], expected_hash=preview["current_hash"])["ok"]
+    result = apply_update(
+        tmp_path,
+        "wiki/concepts/general/a.md",
+        "new",
+        incoming_frontmatter={"sources": ["raw/sources/a.md"]},
+        plan_id=preview["plan_id"],
+        expected_hash=preview["current_hash"],
+    )
+    assert result["ok"]
+    assert result["dependency_projection"] == {"ok": True, "state": "ready"}
     written_frontmatter = yaml.safe_load(page.read_text(encoding="utf-8").split("---", 2)[1])
     assert written_frontmatter["maintenance"] == "manual"
     assert written_frontmatter["source_hashes"] == {"raw/sources/a.md": sha256(b"raw evidence").hexdigest()}

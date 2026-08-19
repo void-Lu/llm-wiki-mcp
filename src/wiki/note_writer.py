@@ -7,6 +7,7 @@ from typing import Any
 from common.privacy_policy import LocatorError, PrivacyPolicy, normalize_vault_relative
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.page_policy import provenance_status, stamp_page_policy
+from wiki.wiki_update import project_dependency_stage
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import WikiPathError, create_wiki_root, resolve_within_root, safe_segment, slug, translate_path_error
@@ -292,7 +293,7 @@ def save_obsidian_note(
     if not projection_result.ok:
         return projection_result.to_dict()
     operation_id = projection_result.operation_id or ""
-    dependency_projection = projection_result.dependency_projection()
+    dependency_projection = project_dependency_stage(projection_result.stages.get("dependencies"))
     _, prepared_body = split_frontmatter(prepared.text)
     broken_wikilinks = validate_wikilinks(prepared_body, root)
     result: dict[str, Any] = {
