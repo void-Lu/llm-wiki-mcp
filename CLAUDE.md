@@ -39,7 +39,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 - 跨平台配置/数据目录在 [platform_paths.py](src/runtime/platform_paths.py)，测试通过 [tests/conftest.py](tests/conftest.py) 自动隔离这些环境变量。
 - Wiki 目录创建、path segment 校验、slug 规则、路径错误翻译表与物理逃逸校验由 [wiki_paths.py](src/wiki/wiki_paths.py) 单一持有，核心入口为 `safe_segment`/`slug`/`translate_path_error`/`resolve_within_root`。外部 Obsidian root 的固定目录清单由 [wiki_paths.py](src/wiki/wiki_paths.py) 单一持有；`note_writer` 通过 `lowercase=False`、`fallback=""`、`ascii_punctuation=True` 的显式参数保持旧人工笔记文件名兼容；现有文件不自动迁移。
 - `raw/sources/` 是来源事实层；`wiki_ingest` 只复制明确文件并同步检索投影。`wiki/` 是可读 Markdown 层；活动 Wiki 只接受具体 raw 文件的 `sources` 与 `source_hashes` 溯源。
-- Markdown/frontmatter 读写、覆盖保护和脱敏在 [wiki_io.py](src/wiki/wiki_io.py)。生成页只能覆盖 `generated: true` 页面；人工页不能被静默覆盖。
+- Markdown/frontmatter 读写、页面脱敏与 `redacted_count` 单一计算点在 [wiki_io.py](src/wiki/wiki_io.py) 的 `prepare_wiki_page`；生成页只能覆盖 `generated: true` 页面，默认人工页保护语义保持不变。`note_writer` 仅负责笔记路径、来源和正文结构，必要时只为默认文件名做标题预检，随后消费 prepared 结果，不再自行计算脱敏计数。
 
 ### 写入与维护流水线
 

@@ -1,5 +1,9 @@
 # 变更记录
 
+## 2026-08-19 — note_writer 接口与脱敏 owner 收缩
+
+- 删除 `save_obsidian_note` 的无效内部参数与 overwrite 分支；页面脱敏和 `redacted_count` 统一由 `prepare_wiki_page` 计算并由 writer 透传，`wiki_write_note` 公共 schema 与响应字段不变。
+
 ## 2026-08-19 — Query V2 死代码与只读状态边界清扫
 
 - 删除质量门禁与日志 operation index 的无调用方私有包装、评测死转口，并让评测/server 从各自 owner 导入查询类型与常量；G1 已落地的公开 report seam 与 MCP lexical adapter 保持不变。
