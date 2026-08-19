@@ -8,7 +8,7 @@ import yaml
 from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.page_mutation import PageMutationCoordinator
 from wiki.page_operation_store import PageOperationStore
-from wiki.wiki_update import _plan_id, apply_update, preview_update
+from wiki.wiki_update import _PreparedIncoming, _prepare_incoming, apply_update, preview_update
 
 
 def test_preview_apply_cas_and_generated_becomes_manual(tmp_path) -> None:
@@ -29,18 +29,34 @@ def test_preview_apply_cas_and_generated_becomes_manual(tmp_path) -> None:
     assert apply_update(tmp_path, "wiki/concepts/general/a.md", "bad", incoming_frontmatter={"concept_id": "other"})["code"] == "locked_field"
 
 
-def test_plan_id_locks_utf8_input_shape_and_sorted_frontmatter() -> None:
-    path = "wiki/concepts/shape.md"
-    current_hash = "base-hash"
-    body = "正文\n"
-    frontmatter = {"zeta": "值", "alpha": ["一", "two"], "nested": {"b": 2, "a": 1}}
-    dumped = yaml.safe_dump(dict(frontmatter), sort_keys=True, allow_unicode=True)
-    payload = "\0".join((path, current_hash, body, dumped))
-    expected = "0f2b8a9be8d087130fe5ef55f32de91a2c0ae233f89dad7dce1f773aad195e40"
+def test_prepare_incoming_returns_normalized_content_and_source_metadata(tmp_path) -> None:
+    source = tmp_path / "raw/sources/evidence.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("raw evidence", encoding="utf-8")
+    wiki = tmp_path / "wiki/concepts/general"
+    wiki.mkdir(parents=True)
+    (wiki / "Target-Page.md").write_text("# Target", encoding="utf-8")
+    (wiki / "Related.md").write_text("# Related", encoding="utf-8")
 
-    assert sha256(payload.encode()).hexdigest() == expected
-    assert _plan_id(path, current_hash, body, frontmatter) == expected
-    assert _plan_id(path, current_hash, body, {"nested": {"a": 1, "b": 2}, "alpha": ["一", "two"], "zeta": "值"}) == expected
+    prepared = _prepare_incoming(
+        tmp_path,
+        incoming_frontmatter={"sources": ["raw/sources/evidence.md"]},
+        incoming_body="See [[Target Page]] and [[Missing]].",
+        related_pages=[{"path": "wiki/concepts/general/Related.md", "title": "Related"}],
+        related_pages_heading="## 相关文档",
+    )
+
+    assert isinstance(prepared, _PreparedIncoming)
+    assert prepared.incoming["sources"] == ["raw/sources/evidence.md"]
+    assert prepared.incoming["source_hashes"] == {"raw/sources/evidence.md": sha256(b"raw evidence").hexdigest()}
+    assert prepared.resolved_sources is not None
+    assert prepared.related_pages_skipped == []
+    assert prepared.normalized_count == 1
+    assert prepared.broken_wikilinks == [{"target": "Missing", "suggestion": ""}]
+    assert prepared.removed_fields == []
+    assert "[[Target-Page]]" in prepared.prepared_body
+    assert "## 相关文档" in prepared.prepared_body
+    assert "[[wiki/concepts/general/Related|Related]]" in prepared.prepared_body
 
 
 def test_apply_update_uses_redacted_writer_and_refreshes_existing_retrieval_index(tmp_path, monkeypatch) -> None:
@@ -146,7 +162,7 @@ def test_plan_is_consumed_before_projection_failure_and_replay_is_already_applie
 def test_preview_and_apply_reject_invalid_sources_before_writes(tmp_path) -> None:
     page = tmp_path / "wiki/concepts/general/a.md"
     page.parent.mkdir(parents=True)
-    original = "---\ntype: concept\ntitle: A\n---\n\n# A\n\nold\n"
+    original = "---\ntype: concept\ntitle: A\nlifecycle: archived\n---\n\n# A\n\nold\n"
     page.write_text(original, encoding="utf-8")
 
     preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "new", {"sources": ["wiki/other.md"]})

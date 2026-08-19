@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from wiki.page_mutation import PageMutationCoordinator, PlanIntent, plan_intent_hash
 from wiki.atomic_file import sha256_file
+from wiki.page_mutation import PageMutationCoordinator
 from wiki.page_operation_store import UpdatePlanError
 from wiki.page_policy import provenance_status, stamp_page_policy
-from wiki.reference_section import build_reference_section, skipped_warnings  # noqa: F401  placeholder
+from wiki.reference_section import build_reference_section, skipped_warnings
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
@@ -21,12 +22,65 @@ from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_e
 LOCKED_FIELDS = {"type", "concept_id", "entity_id", "entity_type", "created", "source_path", "source_hash"}
 REMOVED_FIELDS = {"source_capsules", "source_capsule"}
 SERVER_OWNED_FIELDS = {"source_hashes"}
+
+
+@dataclass(frozen=True)
+class _PreparedIncoming:
+    """Hold the side-effect-free incoming update preparation result."""
+
+    incoming: dict[str, Any]
+    prepared_body: str
+    resolved_sources: list[ResolvedRawSource] | None
+    related_pages_skipped: list[dict[str, str]]
+    normalized_count: int
+    broken_wikilinks: list[dict[str, Any]]
+    removed_fields: list[str]
+
+
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _plan_id(path: str, current_hash: str, body: str, frontmatter: Mapping[str, Any]) -> str:
-    return plan_intent_hash(path, current_hash, PlanIntent(body=body, frontmatter=frontmatter))
+def _prepare_incoming(
+    root: Path,
+    *,
+    incoming_frontmatter: Mapping[str, Any] | None,
+    incoming_body: str,
+    related_pages: list[dict[str, Any]] | None,
+    related_pages_heading: str | None,
+    existing_frontmatter: Mapping[str, Any] | None = None,
+) -> _PreparedIncoming | dict[str, Any]:
+    """Validate and normalize incoming content before preview/apply diverge."""
+
+    incoming = dict(incoming_frontmatter or {})
+    removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
+    if removed_fields:
+        return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
+
+    incoming, resolved_sources, source_error = _prepare_incoming_sources(root, incoming)
+    if source_error is not None:
+        return source_error
+
+    prepared_body, related_pages_skipped = build_reference_section(
+        root,
+        incoming_body,
+        related_pages,
+        heading=related_pages_heading,
+    )
+    prepared_body, normalized_count = auto_normalize_wikilinks(prepared_body, root)
+    broken_wikilinks = validate_wikilinks(prepared_body, root)
+    if existing_frontmatter is not None and existing_frontmatter.get("lifecycle", "active") != "active":
+        return {"ok": False, "code": "inactive_page"}
+
+    return _PreparedIncoming(
+        incoming=incoming,
+        prepared_body=prepared_body,
+        resolved_sources=resolved_sources,
+        related_pages_skipped=related_pages_skipped,
+        normalized_count=normalized_count,
+        broken_wikilinks=broken_wikilinks,
+        removed_fields=removed_fields,
+    )
 
 
 def preview_update(
@@ -45,18 +99,22 @@ def preview_update(
         return {"ok": False, "code": "page_not_found"}
     text = target.read_text(encoding="utf-8")
     fm, old_body = split_frontmatter(text)
-    if fm.get("lifecycle", "active") != "active":
-        return {"ok": False, "code": "inactive_page"}
-    incoming = dict(incoming_frontmatter or {})
-    removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
-    if removed_fields:
-        return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
-    incoming, resolved_sources, source_error = _prepare_incoming_sources(root, incoming)
-    if source_error is not None:
-        return source_error
-    incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages, heading=related_pages_heading)
-    incoming_body, normalized_count = auto_normalize_wikilinks(incoming_body, root)
-    broken_wikilinks = validate_wikilinks(incoming_body, root)
+    prepared = _prepare_incoming(
+        root,
+        incoming_frontmatter=incoming_frontmatter,
+        incoming_body=incoming_body,
+        related_pages=related_pages,
+        related_pages_heading=related_pages_heading,
+        existing_frontmatter=fm,
+    )
+    if isinstance(prepared, dict):
+        return prepared
+    incoming = prepared.incoming
+    incoming_body = prepared.prepared_body
+    resolved_sources = prepared.resolved_sources
+    related_pages_skipped = prepared.related_pages_skipped
+    normalized_count = prepared.normalized_count
+    broken_wikilinks = prepared.broken_wikilinks
     violations = _locked_violations(fm, incoming)
     removed_sources = set(_sources(fm)) - set(_sources(incoming)) if "sources" in incoming else set()
     current_hash = sha256_file(target)
@@ -99,18 +157,24 @@ def apply_update(
     text = target.read_text(encoding="utf-8")
     existing, _ = split_frontmatter(text)
     current_hash = sha256_file(target)
-    incoming = dict(incoming_frontmatter or {})
-    removed_fields = sorted(REMOVED_FIELDS & incoming.keys())
-    if removed_fields:
-        return {"ok": False, "code": "source_capsules_removed", "fields": removed_fields}
-    incoming, resolved_sources, source_error = _prepare_incoming_sources(root, incoming)
-    if source_error is not None:
-        return _attach_related_page_skips(source_error, related_pages, [])
-    incoming_body, related_pages_skipped = _with_reference_section(root, incoming_body, related_pages, heading=related_pages_heading)
-    incoming_body, normalized_count = auto_normalize_wikilinks(incoming_body, root)
-    broken_wikilinks = validate_wikilinks(incoming_body, root)
-    if existing.get("lifecycle", "active") != "active":
-        return {"ok": False, "code": "inactive_page"}
+    prepared = _prepare_incoming(
+        root,
+        incoming_frontmatter=incoming_frontmatter,
+        incoming_body=incoming_body,
+        related_pages=related_pages,
+        related_pages_heading=related_pages_heading,
+        existing_frontmatter=existing,
+    )
+    if isinstance(prepared, dict):
+        if prepared.get("code") in {"source_capsules_removed", "inactive_page"}:
+            return prepared
+        return _attach_related_page_skips(prepared, related_pages, [])
+    incoming = prepared.incoming
+    incoming_body = prepared.prepared_body
+    resolved_sources = prepared.resolved_sources
+    related_pages_skipped = prepared.related_pages_skipped
+    normalized_count = prepared.normalized_count
+    broken_wikilinks = prepared.broken_wikilinks
     violations = _locked_violations(existing, incoming)
     if violations:
         return {"ok": False, "code": "locked_field", "fields": violations}
@@ -228,15 +292,6 @@ def _prepare_incoming_sources(
     prepared["sources"] = [source.relative_path for source in resolved]
     prepared["source_hashes"] = source_hash_map(resolved)
     return prepared, resolved, None
-
-
-def _with_reference_section(
-    root: Path,
-    body: str,
-    related_pages: list[dict[str, Any]] | None,
-    heading: str | None = None,
-) -> tuple[str, list[dict[str, str]]]:
-    return build_reference_section(root, body, related_pages, heading=heading)
 
 
 def _attach_related_page_skips(
