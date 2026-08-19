@@ -17,6 +17,7 @@ import pytest
 from retrieval.retrieval_eval import (
     EvaluationQueryService,
     EvaluationFilterContract,
+    EvaluationQueryRequest,
     EvaluationRuntimeSnapshot,
     McpEntryAdapter,
     Relevance,
@@ -572,16 +573,16 @@ def test_mcp_evaluation_services_are_isolated_without_registry_exchange(tmp_path
     registry_before = server_module.CONFIG_REGISTRY
 
     def run_case(vault: Path) -> list[str]:
-        result = EvaluationQueryService(EvaluationRuntimeSnapshot.from_mcp_vault(vault)).run(
-            case,
+        request = EvaluationQueryRequest(
+            case=case,
             top_k=10,
             include_context_pack=False,
             retrieval_mode="lexical",
             vector_config=None,
             query_version="v2",
             scope="knowledge",
-            entrypoint="mcp",
         )
+        result = EvaluationQueryService(EvaluationRuntimeSnapshot.from_mcp_vault(vault)).run(request)
         return [str(item["path"]) for item in result["results"]]
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -610,8 +611,8 @@ def test_mcp_evaluation_uses_injected_adapter_without_importing_server_in_eval_p
     source_resolution = server_module.resolve_tool_vault(vault_root=str(vault))
     calls: list[str] = []
 
-    def resolve(root: str):
-        calls.append(f"resolve:{root}")
+    def resolve(*, vault_root: str):
+        calls.append(f"resolve:{vault_root}")
         return source_resolution
 
     @contextmanager
@@ -631,16 +632,16 @@ def test_mcp_evaluation_uses_injected_adapter_without_importing_server_in_eval_p
 
     adapter = McpEntryAdapter(resolve=resolve, snapshot=snapshot, query=query)
     runtime = EvaluationRuntimeSnapshot.from_mcp_vault(vault, adapter=adapter)
-    result = EvaluationQueryService(runtime).run(
-        dataset.cases[0],
+    request = EvaluationQueryRequest(
+        case=dataset.cases[0],
         top_k=10,
         include_context_pack=False,
         retrieval_mode="lexical",
         vector_config=None,
         query_version="v2",
         scope="knowledge",
-        entrypoint="mcp",
     )
+    result = EvaluationQueryService(runtime).run(request)
 
     assert result["pipeline"] == {"retrieval_mode": "lexical", "counters": {"vector_hits": 0}}
     assert calls == [f"resolve:{vault}", "snapshot-enter", "query", "snapshot-exit"]

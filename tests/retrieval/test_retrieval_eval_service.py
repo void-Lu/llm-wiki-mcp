@@ -66,7 +66,7 @@ def test_mcp_adapter_rejects_malformed_envelope_before_service_consumes_it(tmp_p
         yield
 
     adapter = McpEntryAdapter(
-        resolve=lambda _root: object(),
+        resolve=lambda *, vault_root: object(),
         snapshot=snapshot,
         query=lambda **_kwargs: {"ok": True, "results": [], "pipeline": "malformed"},
     )

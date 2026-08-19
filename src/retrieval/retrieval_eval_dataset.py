@@ -288,12 +288,6 @@ def parse_evaluation_filters(raw: object, case_id: str = "<unknown>") -> dict[st
     return dict(normalize_evaluation_filter_contract(raw, case_id).internal)
 
 
-def _parse_filters(raw: object, case_id: str) -> dict[str, Any]:
-    """旧调用方的兼容别名；新代码应调用公开 facade。"""
-
-    return parse_evaluation_filters(raw, case_id)
-
-
 def _mapping(raw: object, code: str, message: str) -> Mapping[str, Any]:
     if not isinstance(raw, Mapping):
         raise RetrievalEvalError(code, message)

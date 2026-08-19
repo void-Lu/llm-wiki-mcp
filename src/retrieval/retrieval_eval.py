@@ -9,7 +9,6 @@ adapter、统一 query service，以及跨层评测编排。这样 engine/MCP �
 from __future__ import annotations
 
 import hashlib
-import inspect
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
@@ -112,15 +111,9 @@ def default_mcp_entry_adapter() -> McpEntryAdapter:
 
 
 def _resolve_mcp_vault(adapter: McpEntryAdapter, vault_root: str | Path) -> Any:
-    """兼容 production keyword-only resolver 和旧测试 resolver。"""
+    """Resolve the MCP vault through the production keyword-only seam."""
 
-    try:
-        parameters = inspect.signature(adapter.resolve).parameters
-    except (TypeError, ValueError):
-        return adapter.resolve(str(vault_root))
-    if "vault_root" in parameters:
-        return adapter.resolve(vault_root=str(vault_root))
-    return adapter.resolve(str(vault_root))
+    return adapter.resolve(vault_root=str(vault_root))
 
 
 @dataclass(frozen=True)
@@ -280,41 +273,10 @@ class EvaluationQueryService:
 
     runtime: EvaluationRuntimeSnapshot
 
-    def run(
-        self,
-        query: EvaluationQueryRequest | RetrievalEvalCase,
-        *,
-        top_k: int | None = None,
-        include_context_pack: bool = False,
-        retrieval_mode: Literal["lexical", "vector", "hybrid"] = "lexical",
-        vector_config: Mapping[str, Any] | None = None,
-        query_version: str = "v2",
-        scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"] = "knowledge",
-        entrypoint: Literal["engine", "mcp"] | None = None,
-    ) -> dict[str, Any]:
-        """运行统一 request；case+kwargs 是旧调用方的兼容 facade。"""
+    def run(self, request: EvaluationQueryRequest) -> dict[str, Any]:
+        """运行已构造的统一 request。"""
 
-        if isinstance(query, RetrievalEvalCase):
-            if top_k is None:
-                raise RetrievalEvalError("invalid_query", "evaluation query requires top_k")
-            request = EvaluationQueryRequest(
-                case=query,
-                top_k=top_k,
-                include_context_pack=include_context_pack,
-                retrieval_mode=retrieval_mode,
-                vector_config=vector_config,
-                query_version=query_version,
-                scope=scope,
-            )
-        else:
-            request = query
-
-        adapter = self._adapter()
-        if entrypoint is not None:
-            expected = "mcp" if isinstance(adapter, McpQueryAdapter) else "engine"
-            if entrypoint != expected:
-                raise RetrievalEvalError("invalid_entrypoint", f"query service is bound to the {expected} adapter")
-        return adapter.run(request)
+        return self._adapter().run(request)
 
     def _adapter(self) -> EvaluationQueryAdapter:
         if self.runtime.adapter is not None:
@@ -857,7 +819,7 @@ def _run_case(
         query_version=query_version,
         scope=scope,
     )
-    return EvaluationQueryService(runtime).run(request, entrypoint=entrypoint)
+    return EvaluationQueryService(runtime).run(request)
 
 
 def _require_mcp_lexical_pipeline(pipeline: Mapping[str, Any]) -> None:
@@ -992,8 +954,3 @@ def _evaluation_side_effects(
         "index_after": {key: index_after.get(key) for key in ("code", "state", "fingerprint", "schema_version")},
         "clean": vault_unchanged and telemetry_unchanged and index_unchanged,
     }
-
-
-# 旧的私有 filter/manifest 名称保留为显式兼容转口，实际 owner 在 dataset 模块。
-_parse_filters = parse_evaluation_filters
-_parse_manifest = parse_evaluation_manifest
