@@ -78,6 +78,8 @@ Query V2 支持 `expansion_terms` 模糊词扩展和 `filters` 元数据过滤�
 
 [query_snapshot.py](src/retrieval/query_snapshot.py) 的 `QueryCorpusSnapshot` 为每次查询捕获 active/raw store 的不可变页面 metadata、provenance 和 candidate 视图；discovery、过滤、向量、图扩展和回退必须复用该快照，不能在同一请求内重复读取漂移的 store 状态。
 
+[query_shared.py](src/retrieval/query_shared.py) 是查询候选资格策略的 owner：`eligible`/`matches_request` 继续服务 PassageHit，`snapshot_page_eligible` 统一把快照 page record 构造成 probe 并执行两层资格判定；标题候选、向量 allowlist 和图扩展必须复用该入口，不在调用点重拼过滤规则。
+
 [query_recovery.py](src/retrieval/query_recovery.py) 是回退决策、阶梯、每页选择、打分组合与 envelope 装配的唯一 owner；其中 `assemble_recovery` 统一拥有命中统计、按页候选池和 context pack。新增回退分支应扩展 `FallbackPlan`/`RecoveryCondition`/该装配边界，不要在 query pipeline、MCP wrapper 或 telemetry 中复制一套状态逻辑。
 
 [retrieval_eval_dataset.py](src/retrieval/retrieval_eval_dataset.py) 是评测 JSONL/manifest schema、相关性标签和 public/legacy 过滤器投影的唯一 owner；解析函数不依赖 vault 或查询运行时。 [retrieval_eval_report.py](src/retrieval/retrieval_eval_report.py) 是 Recall/Precision/MRR/nDCG、slice/gate、pipeline 安全投影与 JSON/Markdown 报告输出的 owner。 [retrieval_eval.py](src/retrieval/retrieval_eval.py) 只保留 `EvaluationRuntimeSnapshot`、`EngineQueryAdapter`/`McpQueryAdapter`、`EvaluationQueryService` 和评测编排 seam。评测经 `query_telemetry` 只读接口取遥测、经注入 adapter 走 MCP 入口；`app.server` 只允许在 `default_mcp_entry_adapter()` 内惰性导入，评测模块顶层不得加载 server。MCP 入口只在请求局部 ContextVar 中注入不可变 tool resolution，不得修改 `server.CONFIG_REGISTRY`；`parse_evaluation_filters` 由 dataset owner 提供并由 eval 兼容导出。评测必须保持只读，不创建/更新检索库，也不写入 telemetry。
