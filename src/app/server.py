@@ -717,6 +717,7 @@ def _run_wiki_query(
     settings = resolution.resolved.settings.retrieval
     telemetry_settings = resolution.resolved.settings.telemetry
     telemetry_recorder = QueryTelemetry(resolution.root, retention_days=telemetry_settings.retention_days) if telemetry_settings.enabled else None
+    telemetry_stats: dict[str, object] = {}
     query_started = time.perf_counter()
     if cancellation is not None and telemetry_recorder is not None:
         def record_cancellation(event: QueryCancelled) -> None:
@@ -740,14 +741,16 @@ def _run_wiki_query(
             top_k=top_k,
             hard_budget_tokens=settings.context.hard_budget_tokens,
             embedding=settings.embedding,
-            telemetry=resolution.resolved.settings.telemetry,
             quality_gate=resolution.resolved.settings.quality_gate,
             lexical_enabled=settings.lexical_enabled,
             retrieval_mode=retrieval_mode,
             expansion_terms=expansion_terms,
             confirmation_token=confirmation_token,
             cancellation=cancellation,
-            telemetry_recorder=telemetry_recorder,
+            telemetry_stats=telemetry_stats,
+        )
+        result = attach_no_results_outcome(
+            _attach_query_content_refs(result, logical_vault=resolution.logical_name)
         )
     except QueryCancelled:
         raise
@@ -766,7 +769,25 @@ def _run_wiki_query(
                 worker_state="failed",
             )
         raise
-    return attach_no_results_outcome(_attach_query_content_refs(result, logical_vault=resolution.logical_name))
+    if telemetry_recorder is not None:
+        passage_ids_value = telemetry_stats.get("passage_ids", ())
+        passage_ids = (
+            tuple(str(value) for value in passage_ids_value)
+            if isinstance(passage_ids_value, (list, tuple, set, frozenset))
+            else ()
+        )
+        telemetry_recorder.finish_once(
+            question=question,
+            scope=scope,
+            project=project,
+            passage_ids=passage_ids,
+            fallback_level=str(telemetry_stats.get("fallback_level") or ""),
+            token_count=int(telemetry_stats.get("token_count") or 0),
+            latency_ms=(time.perf_counter() - query_started) * 1_000,
+            retention_days=telemetry_settings.retention_days,
+            outcome="completed",
+        )
+    return result
 
 
 @_register(

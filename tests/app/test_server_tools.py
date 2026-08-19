@@ -514,6 +514,33 @@ def test_query_enforces_wall_clock_timeout(monkeypatch: pytest.MonkeyPatch, tmp_
     assert rows == [("timeout", "running")]
 
 
+def test_query_success_records_one_terminal_telemetry_event(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry, vault_root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+
+    def successful_query(root: Path, question: str, **kwargs: object) -> dict[str, object]:
+        stats = kwargs["telemetry_stats"]
+        assert isinstance(stats, dict)
+        stats.update({"passage_ids": ("p1", "p2"), "fallback_level": "relaxed", "token_count": 321})
+        return {
+            "ok": True,
+            "question": question,
+            "results": [{"path": "wiki/answer.md", "source_kind": "active"}],
+        }
+
+    monkeypatch.setattr("app.server.run_query_v2", successful_query)
+
+    result = wiki_query(question="hello", vault_root=str(vault_root))
+
+    assert result["ok"] is True
+    with sqlite3.connect(vault_root / ".llm-wiki" / "state.sqlite3") as conn:
+        rows = conn.execute(
+            "SELECT outcome, worker_state, passage_ids, fallback_level, token_count "
+            "FROM query_telemetry"
+        ).fetchall()
+    assert rows == [("completed", "", "p1,p2", "relaxed", 321)]
+
+
 def test_write_note_requires_note_type() -> None:
     assert wiki_write_note(title="Title", content="Body")["code"] == "missing_note_type"
 
