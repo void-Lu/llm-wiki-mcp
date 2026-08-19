@@ -59,7 +59,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### 查询与图谱能力
 
-[query_pipeline.py](src/retrieval/query_pipeline.py) 是唯一查询引擎入口（Query V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 上下文预算裁剪 -> compact context pack，并将紧凑正文直接放入结果项；MCP 工具 `wiki_query` 只负责公共边界与运行时配置解析。
+[query_pipeline.py](src/retrieval/query_pipeline.py) 是唯一查询引擎入口（Query V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 构造冻结 `QueryRequestView` -> context 执行 fallback/discovery/batch -> 上下文预算裁剪 -> compact context pack，并将紧凑正文直接放入结果项；MCP 工具 `wiki_query` 只负责公共边界与运行时配置解析。
 
 [query_quality_policy.py](src/retrieval/query_quality_policy.py) 是 page-level 质量门禁的纯策略 owner；门禁在完整 recovery、page dedup 后、public results/context projection 前运行，消费同一次 `QueryCorpusSnapshot`。`QualityGateSettings` 属于 runtime snapshot，默认 `off`，不进入 `wiki_query` 公共参数；`shadow` 只产生有界摘要，`enforce` 只投影 accepted 页面，并在非空 baseline 全拒绝时 fail-open 返回 baseline、记录 `gate_would_suppress_all`。门禁不接管 eligibility/filter、fallback/discovery 或 no-result/cancel/timeout 语义。
 
@@ -67,7 +67,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 质量门禁的评测指标、identity 和安全报告由 [retrieval_eval_report.py](src/retrieval/retrieval_eval_report.py) 统一持有；缺少兼容 identity 或最小 holdout 样本时结论使用 `unproven`，保持 `off`/`shadow`，不得默认放行生产 enforce。修改门禁字段、状态或介入位置时，同步更新 `query-quality-gate` spec 与 Query V2/评测回归。
 
-[query_execution_context.py](src/retrieval/query_execution_context.py) 是单次 Query V2 执行状态、raw/fallback 分支迁移和冻结 `outcome()` 视图的唯一 owner。
+[query_execution_context.py](src/retrieval/query_execution_context.py) 是单次 Query V2 执行状态、raw/fallback 分支迁移和冻结 `outcome()` 视图的唯一 owner。`QueryRequestView` 是该 seam 的冻结请求值对象；pipeline 只调用公开的 `QueryExecutionContext.execute(request_view)`，由 context 封装 fallback -> discovery -> batch 顺序。公共投影由 query_pipeline 的模块级纯函数在 `outcome()` 封存前完成，随后只冻结一次并直读；terminal telemetry 由 server wrapper 单点写入，`QueryTelemetry` 只在首次写入前建表/迁移。
 
 [query_recall_policy.py](src/retrieval/query_recall_policy.py) 是 Query V2 召回与回退启发式的唯一 owner：意图分类、查询扩展、relaxed/raw 候选、coverage 合并、自适应扩展和步骤计数均由此模块提供；execution context 只负责状态编排，不复制这些策略。
 
