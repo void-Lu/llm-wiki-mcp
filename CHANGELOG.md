@@ -1,5 +1,10 @@
 # 变更记录
 
+## 2026-08-19 — Query V2 死代码与只读状态边界清扫
+
+- 删除质量门禁与日志 operation index 的无调用方私有包装、评测死转口，并让评测/server 从各自 owner 导入查询类型与常量；G1 已落地的公开 report seam 与 MCP lexical adapter 保持不变。
+- 修正查询取消诊断的 ranking/fallback 阶段标签；`wiki_status` 在没有查询时不再创建 `QueryExecutionRegistry`，只返回未初始化的执行量摘要。
+
 ## 2026-08-19 — KnowledgeDependencies 页面策略接口收敛
 
 - 依赖投影内部 `update_page` 改为接收冻结 `PagePolicy`，并由存储边界统一展开 SQL 列与保留策略校验；正式页面、隐私审计和 provenance migration 不再重复展开五个策略字段。MCP 公开接口和表结构不变。
