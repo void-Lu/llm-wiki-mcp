@@ -29,11 +29,10 @@ from retrieval.query_shared import (
     eligible,
     heading,
     matches_request,
-    probe_hit,
+    snapshot_page_eligible,
 )
 from retrieval.query_telemetry import QueryTelemetry
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
-from retrieval.metadata_filters import page_matches_filters
 from retrieval.query_quality_calibration import load_calibration_artifact_once
 from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
 from retrieval.query_quality_policy import (
@@ -302,14 +301,7 @@ def _title_candidates(
         overlap = len(terms & (title_terms | provenance_terms))
         if not overlap:
             continue
-        probe = probe_hit(
-            path,
-            str(page["title"]),
-            corpus=str(page.get("corpus") or "active"),
-            authority=str(page.get("authority") or ""),
-            source_kind=str(page.get("source_kind") or ""),
-        )
-        if eligible(probe, metadata, scope=scope) and matches_request(probe, metadata, project=project, filters=filters):
+        if snapshot_page_eligible(page, metadata, scope=scope, project=project, filters=filters):
             candidates.append((overlap, path))
     paths = [path for _overlap, path in sorted(candidates, key=lambda item: (-item[0], item[1]))[:limit]]
     return store.passages_for_pages(paths, limit_per_page=1)
@@ -388,17 +380,9 @@ def _graph_expand(
             cancellation.checkpoint_batch(index, every=16, stage="graph")
         path = str(page["path"])
         frontmatter = metadata.get(path, {})
-        probe = probe_hit(
-            path,
-            str(page["title"]),
-            corpus=str(page.get("corpus") or "active"),
-            authority=str(page.get("authority") or ""),
-            source_kind=str(page.get("source_kind") or ""),
-        )
         if (
             not path.startswith("wiki/")
-            or not eligible(probe, metadata, scope=scope)
-            or not matches_request(probe, metadata, project=project, filters=filters)
+            or not snapshot_page_eligible(page, metadata, scope=scope, project=project, filters=filters)
         ):
             continue
         candidates.append(
@@ -555,29 +539,12 @@ def run_query_v2(
     allowed_vector_paths: set[str] = set()
     for index, item in enumerate(snapshot.pages):
         cancellation.checkpoint_batch(index, every=16, stage="snapshot")
-        frontmatter = item.get("frontmatter")
-        if not isinstance(frontmatter, Mapping):
-            frontmatter = {}
-        if not page_matches_filters(
-            frontmatter,
-            str(item.get("source_kind") or ""),
-            project=project,
-            page_type=filters.type,
-            tags=filters.tags,
-            path_prefix=filters.path_prefix,
-            page_path=str(item.get("path") or ""),
-        ):
-            continue
-        if not eligible(
-            probe_hit(
-                str(item["path"]),
-                str(item["title"]),
-                corpus=str(item.get("corpus") or "active"),
-                authority=str(item.get("authority") or ""),
-                source_kind=str(item.get("source_kind") or ""),
-            ),
+        if not snapshot_page_eligible(
+            item,
             metadata,
             scope=effective_scope,
+            project=project,
+            filters=filters,
         ):
             continue
         allowed_vector_paths.add(str(item["path"]))

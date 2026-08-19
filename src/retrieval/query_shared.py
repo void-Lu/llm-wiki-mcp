@@ -109,6 +109,32 @@ def matches_request(
     )
 
 
+def snapshot_page_eligible(
+    page: Mapping[str, Any],
+    metadata: Mapping[str, Mapping[str, Any]],
+    *,
+    scope: str,
+    project: str | None,
+    filters: QueryFilters,
+) -> bool:
+    """Apply the shared eligibility and request filters to one snapshot page."""
+
+    path = str(page["path"])
+    probe = probe_hit(
+        path,
+        str(page["title"]),
+        corpus=str(page.get("corpus") or "active"),
+        authority=str(page.get("authority") or ""),
+        source_kind=str(page.get("source_kind") or ""),
+    )
+    return eligible(probe, metadata, scope=scope) and matches_request(
+        probe,
+        metadata,
+        project=project,
+        filters=filters,
+    )
+
+
 def heading(hit: PassageHit) -> str:
     return " / ".join(hit.heading_path) if hit.heading_path else hit.title
 
@@ -121,4 +147,5 @@ __all__ = [
     "is_source_index",
     "matches_request",
     "probe_hit",
+    "snapshot_page_eligible",
 ]
