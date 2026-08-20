@@ -1,5 +1,10 @@
 # 变更记录
 
+## 2026-08-20 — 架构深化 r5 G1 恢复通道
+
+- `repair page-operation` 重放遇到导航/overview 的已知结构缺口时，显式升级为无 hint 的全量投影，修复 G6 fail-loud 后原有 repair 死循环；首次页面写入仍保持 fail-loud。
+- operation journal 安全记录升级标记和原始稳定错误码，增量失败提示改指向真实的 `repair page-operation` admin 命令；不新增普通 MCP 写入中的隐式全量检索重建。
+
 ## 2026-08-19 — discovery 资格与摄入投影防御收敛
 
 - discovery 快照页面资格统一复用 `snapshot_page_eligible`，并清扫零消费兼容转口与校准 loader memo；既有公共结果行为保持不变。

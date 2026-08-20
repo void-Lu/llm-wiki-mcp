@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from wiki.atomic_file import atomic_write_text
+from wiki.repair_messages import page_operation_repair_message
 from wiki.wiki_io import is_manual_page, split_frontmatter
 from wiki.wiki_log import read_recent_log_entries
 from wiki.wiki_paths import WikiPathError, filesystem_path, resolve_within_root, validate_wiki_page_path
@@ -96,7 +97,7 @@ def _refresh_overview_incremental(
         return {
             "ok": False,
             "code": "incremental_overview_structure_missing",
-            "error": "Wiki root is missing; run the explicit maintenance rebuild",
+            "error": page_operation_repair_message("Wiki root is missing"),
         }
 
     if not target.is_file() and not bootstrap:
@@ -104,7 +105,7 @@ def _refresh_overview_incremental(
             "ok": False,
             "code": "incremental_overview_structure_missing",
             "path": "wiki/overview.md",
-            "error": "overview structure is missing; run the explicit maintenance rebuild",
+            "error": page_operation_repair_message("overview structure is missing"),
         }
     existing = target.read_text(encoding="utf-8") if target.is_file() else ""
     counts = _overview_counts(existing)
@@ -113,7 +114,7 @@ def _refresh_overview_incremental(
             "ok": False,
             "code": "incremental_overview_structure_missing",
             "path": "wiki/overview.md",
-            "error": "overview counters are missing or malformed; run the explicit maintenance rebuild",
+            "error": page_operation_repair_message("overview counters are missing or malformed"),
         }
     projects_root = wiki_root / "projects"
     projects = [path for path in projects_root.iterdir() if path.is_dir()] if projects_root.exists() else []

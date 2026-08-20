@@ -236,7 +236,7 @@ def test_incremental_navigation_missing_index_fails_without_full_rebuild(tmp_pat
         "ok": False,
         "code": "incremental_navigation_index_missing",
         "path": "wiki/concepts/index.md",
-        "error": "concept navigation index is missing; run the explicit navigation rebuild",
+        "error": "concept navigation index is missing; run 'uv run llm-wiki-mcp repair page-operation apply --vault <vault> --operation-id <operation-id>'",
     }
     assert (root / "wiki/index.md").read_bytes() == top_before
 

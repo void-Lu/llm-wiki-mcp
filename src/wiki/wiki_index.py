@@ -6,6 +6,7 @@ from typing import Any
 import yaml
 
 from wiki.atomic_file import atomic_write_text
+from wiki.repair_messages import page_operation_repair_message
 from wiki.wiki_io import is_manual_page, split_frontmatter
 from wiki.wiki_paths import (
     ARCHIVES_DIR,
@@ -279,7 +280,7 @@ def _incremental_missing(scope: str, target: Path, root: Path) -> dict[str, Any]
         "ok": False,
         "code": "incremental_navigation_index_missing",
         "path": _relative_path(root, target),
-        "error": f"{scope} is missing; run the explicit navigation rebuild",
+        "error": page_operation_repair_message(f"{scope} is missing"),
     }
 
 

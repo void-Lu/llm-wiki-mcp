@@ -194,7 +194,7 @@ def test_incremental_overview_fails_on_missing_structure_instead_of_scanning_ful
         "ok": False,
         "code": "incremental_overview_structure_missing",
         "path": "wiki/overview.md",
-        "error": "overview structure is missing; run the explicit maintenance rebuild",
+        "error": "overview structure is missing; run 'uv run llm-wiki-mcp repair page-operation apply --vault <vault> --operation-id <operation-id>'",
     }
 
 
