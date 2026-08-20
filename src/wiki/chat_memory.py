@@ -33,14 +33,11 @@ class ChatMemoryError(ValueError):
 
 def _chat_index_response(
     stage_view: Mapping[str, object] | None,
-    retrieval_result: Mapping[str, object] | None = None,
+    retrieval_result: Mapping[str, object] | None,
 ) -> dict[str, Any]:
     """Render the retrieval stage into the stable chat response shape."""
 
     stage = stage_view if isinstance(stage_view, Mapping) else {}
-    if retrieval_result is None:
-        nested_result = stage.get("result")
-        retrieval_result = nested_result if isinstance(nested_result, Mapping) else None
     retrieval_index = dict(retrieval_result or {})
     if stage.get("state") == "succeeded":
         indexed = retrieval_index.get("state") not in {"rebuild_required", "not_indexed"} and retrieval_index.get("ok") is True

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from wiki.atomic_file import sha256_file
-from wiki.page_mutation import PageMutationCoordinator
+from wiki.page_mutation import PageMutationCoordinator, explain_stage
 from wiki.page_mutation_adapters import build_plan_intent
 from wiki.page_operation_store import UpdatePlanError
 from wiki.page_policy import provenance_status, stamp_page_policy
@@ -22,26 +22,6 @@ from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_e
 LOCKED_FIELDS = {"type", "concept_id", "entity_id", "entity_type", "created", "source_path", "source_hash"}
 REMOVED_FIELDS = {"source_capsules", "source_capsule"}
 SERVER_OWNED_FIELDS = {"source_hashes"}
-
-
-def project_dependency_stage(stage_view: Mapping[str, object] | None) -> dict[str, object]:
-    """Render the persisted dependencies stage into the formal response shape."""
-
-    stage = stage_view if isinstance(stage_view, Mapping) else {}
-    result = stage.get("result")
-    if isinstance(result, Mapping):
-        return dict(result)
-    if stage.get("state") == "succeeded":
-        return {"ok": True, "state": "ready"}
-    state = stage.get("state")
-    if isinstance(state, str) and state:
-        code = stage.get("code")
-        return {
-            "ok": False,
-            "state": state,
-            "code": str(code) if isinstance(code, str) and code else f"dependencies_{state}",
-        }
-    return {"ok": True, "state": "ready"}
 
 
 @dataclass(frozen=True)
@@ -256,7 +236,7 @@ def apply_update(
         if mutation.repair_action:
             replay["repair_action"] = mutation.repair_action
         return _attach_related_page_skips(replay, related_pages, related_pages_skipped)
-    dependency_projection = project_dependency_stage(mutation.stages.get("dependencies"))
+    dependency_projection = explain_stage(mutation.stages.get("dependencies"), stage_name="dependencies")
     navigation = mutation.stage_result("navigation")
     retrieval_index = mutation.stage_result("retrieval")
     result = {"ok": True, "state": mutation.state or "completed", "action": "apply", "page_path": page_path, "operation_id": mutation.operation_id, "hash": prepared.text_hash, "page_hash": mutation.page_hash or prepared.text_hash, "navigation": navigation, "retrieval_index": retrieval_index, "normalized_wikilinks": normalized_count, "broken_wikilinks": broken_wikilinks, "dependency_projection": dependency_projection, "provenance_status": provenance_status(policy_stamp), "freshness": str(policy_stamp["freshness"])}

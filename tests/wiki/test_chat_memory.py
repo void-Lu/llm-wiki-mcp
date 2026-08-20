@@ -67,8 +67,8 @@ def test_chat_index_response_uses_flattened_success_and_synthesizes_failure() ->
     safe_result = PageOperationStore.safe_stage_result(
         {"ok": True, "state": "ready", "operation": "update", "retrieval_index": {"nested": "discarded"}}
     )
-    success = _chat_index_response({"state": "succeeded", "result": safe_result})
-    failure = _chat_index_response({"state": "failed", "code": "retrieval_unavailable"})
+    success = _chat_index_response({"state": "succeeded"}, safe_result)
+    failure = _chat_index_response({"state": "failed", "code": "retrieval_unavailable"}, None)
 
     assert success == {
         "ok": True,

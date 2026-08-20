@@ -36,6 +36,36 @@ def plan_intent_hash(page_path: str, base_hash: str, intent: PlanIntent) -> str:
     return sha256(payload.encode()).hexdigest()
 
 
+def explain_stage(
+    stage_view: Mapping[str, object] | None,
+    *,
+    stage_name: str = "stage",
+) -> dict[str, object]:
+    """Render one persisted stage into the neutral mutation result shape.
+
+    Persisted stage results retain their bounded public fields.  When an old
+    journal only has a stage state, synthesize the same ready/failure view used
+    by the write responses; ``stage_name`` only keeps the legacy fallback code
+    stable for existing consumers.
+    """
+
+    stage = stage_view if isinstance(stage_view, Mapping) else {}
+    result = stage.get("result")
+    if isinstance(result, Mapping):
+        return dict(result)
+    if stage.get("state") == "succeeded":
+        return {"ok": True, "state": "ready"}
+    state = stage.get("state")
+    if isinstance(state, str) and state:
+        code = stage.get("code")
+        return {
+            "ok": False,
+            "state": state,
+            "code": str(code) if isinstance(code, str) and code else f"{stage_name}_{state}",
+        }
+    return {"ok": True, "state": "ready"}
+
+
 @dataclass(frozen=True)
 class MutationResult:
     """Typed, bounded result view returned by the deep mutation facade."""

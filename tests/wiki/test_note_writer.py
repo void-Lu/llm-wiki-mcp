@@ -241,11 +241,11 @@ def test_path_traversal_returns_path_escape(vault: Path, kwargs: dict[str, str])
     assert result["code"] == "path_escape"
 
 
-def test_note_write_returns_null_indexed(vault: Path):
+def test_note_write_omits_dead_indexed_field(vault: Path):
     result = _save(vault, note_type="spec", project="project-a")
 
     assert result["ok"] is True
-    assert result["indexed"] is None
+    assert "indexed" not in result
 
 
 def test_existing_target_returns_file_exists_and_preserves_bytes(vault: Path):
