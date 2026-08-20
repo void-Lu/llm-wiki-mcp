@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from retrieval.candidate_items import candidate_item, with_fusion
@@ -53,6 +54,31 @@ class RawRecoveryRequestView(Protocol):
     project: str | None
     filters: QueryFilters
     top_k: int
+
+
+@dataclass(frozen=True)
+class QueryExpansionRequestView:
+    """Request slice consumed by title-based query expansion."""
+
+    question: str
+    project: str | None
+    agent_terms: Mapping[str, Sequence[str]] | None = None
+    snapshot: QueryCorpusSnapshot | None = None
+    raw_snapshot: QueryCorpusSnapshot | None = None
+    cancellation: QueryCancellationContext | None = None
+
+
+@dataclass(frozen=True)
+class RelaxedRecoveryRequestView:
+    """Request slice consumed by relaxed lexical recovery."""
+
+    metadata: Mapping[str, Mapping[str, Any]]
+    question: str
+    scope: str
+    project: str | None
+    filters: QueryFilters
+    extra_terms: Sequence[str]
+    cancellation: QueryCancellationContext | None = None
 
 _STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
 _COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
@@ -157,15 +183,9 @@ def adaptive_expand(
 
 
 def query_expansion(
-    question: str,
     store: RetrievalIndexStore,
     raw_store: RetrievalIndexStore | None,
-    agent_terms: dict[str, list[str]] | None = None,
-    project: str | None = None,
-    *,
-    snapshot: QueryCorpusSnapshot | None = None,
-    raw_snapshot: QueryCorpusSnapshot | None = None,
-    cancellation: QueryCancellationContext | None = None,
+    request: QueryExpansionRequestView,
 ) -> tuple[list[str], dict[str, list[str]], list[str]]:
     """Build query-expansion terms from page titles and caller-supplied maps.
 
@@ -180,28 +200,36 @@ def query_expansion(
     """
 
     title_words: set[str] = set()
-    active_pages = snapshot.pages if snapshot is not None else store.page_candidates()
+    active_pages = (
+        request.snapshot.pages
+        if request.snapshot is not None
+        else store.page_candidates()
+    )
     for index, page in enumerate(active_pages):
-        if cancellation is not None:
-            cancellation.checkpoint_batch(index, every=16, stage="snapshot")
+        if request.cancellation is not None:
+            request.cancellation.checkpoint_batch(index, every=16, stage="snapshot")
         raw_frontmatter = page.get("frontmatter")
         frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, Mapping) else {}
-        if not page_matches_filters(frontmatter, "wiki", project=project):
+        if not page_matches_filters(frontmatter, "wiki", project=request.project):
             continue
         title_words.update(tokens(str(page.get("title") or "")))
     if raw_store is not None:
-        raw_pages = raw_snapshot.pages if raw_snapshot is not None else raw_store.page_candidates()
+        raw_pages = (
+            request.raw_snapshot.pages
+            if request.raw_snapshot is not None
+            else raw_store.page_candidates()
+        )
         for index, page in enumerate(raw_pages):
-            if cancellation is not None:
-                cancellation.checkpoint_batch(index, every=16, stage="snapshot")
+            if request.cancellation is not None:
+                request.cancellation.checkpoint_batch(index, every=16, stage="snapshot")
             raw_frontmatter = page.get("frontmatter")
             frontmatter: Mapping[str, Any] = raw_frontmatter if isinstance(raw_frontmatter, Mapping) else {}
-            if not page_matches_filters(frontmatter, "raw", project=project):
+            if not page_matches_filters(frontmatter, "raw", project=request.project):
                 continue
             title_words.update(tokens(str(page.get("title") or "")))
     base_latin = [
         value
-        for value in tokens(question)
+        for value in tokens(request.question)
         if len(value) >= 2 and re.fullmatch(r"[a-z0-9_]+", value)
     ]
     variants: dict[str, list[str]] = {}
@@ -213,7 +241,7 @@ def query_expansion(
                 for word in title_words
                 if word != term and len(word) >= 4 and edit_distance(term, word) <= 1
             ]
-        for alias in (agent_terms or {}).get(term, ()):
+        for alias in (request.agent_terms or {}).get(term, ()):
             if alias != term and alias not in close:
                 close.append(alias)
         if close:
@@ -241,35 +269,31 @@ def classify_intent(question: str) -> str:
 
 def relaxed_recovery_items(
     store: RetrievalIndexStore,
-    metadata: dict[str, dict[str, Any]],
-    question: str,
-    *,
-    scope: str,
-    project: str | None,
-    filters: QueryFilters,
-    extra_terms: list[str],
-    cancellation: QueryCancellationContext | None = None,
+    request: RelaxedRecoveryRequestView,
 ) -> tuple[list[dict[str, Any]], int, str]:
     """Read a bounded relaxed candidate set from one existing projection."""
 
     try:
         hits = store.search_fts(
-            question,
+            request.question,
             limit=IDENTIFIER_PHRASE_CANDIDATES,
-            project=project,
-            page_type=filters.type,
-            tags=list(filters.tags),
+            project=request.project,
+            page_type=request.filters.type,
+            tags=list(request.filters.tags),
             mode="relaxed",
-            extra_terms=extra_terms,
+            extra_terms=request.extra_terms,
         )
     except RetrievalIndexError as exc:
         return [], 0, exc.code
     items: list[dict[str, Any]] = []
     for rank, hit in enumerate(hits, 1):
-        if cancellation is not None:
-            cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
-        if not eligible(hit, metadata, scope=scope) or not matches_request(
-            hit, metadata, project=project, filters=filters
+        if request.cancellation is not None:
+            request.cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
+        if not eligible(hit, request.metadata, scope=request.scope) or not matches_request(
+            hit,
+            request.metadata,
+            project=request.project,
+            filters=request.filters,
         ):
             continue
         items.append(candidate_item(hit, score=round(hit.score, 12), fts_rank=rank))

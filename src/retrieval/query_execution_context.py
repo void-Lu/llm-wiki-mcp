@@ -477,27 +477,31 @@ class QueryExecutionContext:
             self.cancellation.checkpoint("fallback")
             query_extra_terms, query_term_variants, self.expansion_suggestions = (
                 recall_policy.query_expansion(
-                    request_view.question,
                     self.store,
                     None,
-                    request_view.expansion_terms,
-                    request_view.project,
-                    snapshot=self.snapshot,
-                    raw_snapshot=self.raw_snapshot,
-                    cancellation=self.cancellation,
+                    recall_policy.QueryExpansionRequestView(
+                        question=request_view.question,
+                        project=request_view.project,
+                        agent_terms=request_view.expansion_terms,
+                        snapshot=self.snapshot,
+                        raw_snapshot=self.raw_snapshot,
+                        cancellation=self.cancellation,
+                    ),
                 )
             )
             self.cancellation.checkpoint("fallback")
             wiki_relaxed_items, self.relaxed_fts_hits, relaxed_warning = (
                 recall_policy.relaxed_recovery_items(
                     self.store,
-                    request_view.metadata,
-                    request_view.question,
-                    scope=request_view.effective_scope,
-                    project=request_view.project,
-                    filters=request_view.filters,
-                    extra_terms=query_extra_terms,
-                    cancellation=self.cancellation,
+                    recall_policy.RelaxedRecoveryRequestView(
+                        metadata=request_view.metadata,
+                        question=request_view.question,
+                        scope=request_view.effective_scope,
+                        project=request_view.project,
+                        filters=request_view.filters,
+                        extra_terms=query_extra_terms,
+                        cancellation=self.cancellation,
+                    ),
                 )
             )
             if relaxed_warning:
