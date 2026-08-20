@@ -7,7 +7,13 @@ from wiki.atomic_file import atomic_write_text
 from wiki.repair_messages import page_operation_repair_message
 from wiki.wiki_io import is_manual_page, split_frontmatter
 from wiki.wiki_log import read_recent_log_entries
-from wiki.wiki_paths import WikiPathError, filesystem_path, resolve_within_root, validate_wiki_page_path
+from wiki.wiki_paths import (
+    WikiPathError,
+    filesystem_path,
+    projection_files_initialized,
+    resolve_within_root,
+    validate_wiki_page_path,
+)
 
 
 _OVERVIEW_BOOTSTRAP_BODY = "# Overview"
@@ -92,7 +98,11 @@ def _refresh_overview_incremental(
             "path": target.relative_to(root).as_posix(),
             "error": "refusing to overwrite non-generated wiki page",
         }
-    bootstrap = _is_uninitialized_vault(root)
+    # Navigation runs first during bare-vault repair and may have created only
+    # wiki/index.md.  The shared predicate requires the complete projection
+    # set; the still-missing log distinguishes that stage from an initialized
+    # vault whose overview was later removed and must fail loudly.
+    bootstrap = not projection_files_initialized(root) and not (wiki_root / "log.md").is_file()
     if not wiki_root.is_dir():
         return {
             "ok": False,
@@ -205,15 +215,6 @@ def _overview_counts(text: str) -> tuple[int, int] | None:
     if set(values) != {"Projects", "Generated pages", "Manual pages"}:
         return None
     return values["Generated pages"], values["Manual pages"]
-
-
-def _is_uninitialized_vault(root: Path) -> bool:
-    wiki_root = root / "wiki"
-    # Navigation may bootstrap ``wiki/index.md`` immediately before overview
-    # runs in a bare-vault repair.  The durable overview/log pair is the
-    # marker for an initialized projection set; a missing one in an otherwise
-    # initialized vault remains a repairable structural failure.
-    return not any((wiki_root / name).is_file() for name in ("overview.md", "log.md"))
 
 
 def _read_frontmatter(path: Path) -> dict[str, Any]:

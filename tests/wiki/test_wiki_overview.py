@@ -9,8 +9,9 @@ from tests.helpers import write_test_page
 from wiki.atomic_file import AtomicFileError, fault_context
 from wiki.wiki_log import append_log_entry
 from wiki.wiki_models import WikiLogEntry
+from wiki.wiki_index import refresh_navigation
 from wiki.wiki_overview import refresh_overview
-from wiki.wiki_paths import create_wiki_root
+from wiki.wiki_paths import create_wiki_root, projection_files_initialized
 
 
 def test_refresh_overview_writes_deterministic_counts_and_recent_log(tmp_path: Path):
@@ -74,6 +75,24 @@ def test_refresh_overview_does_not_crash_on_malformed_frontmatter_page(tmp_path:
     assert result["ok"] is True
     overview = (root / "wiki/overview.md").read_text(encoding="utf-8")
     assert "- Manual pages: 1" in overview
+
+
+def test_navigation_bootstraps_index_before_overview_on_bare_vault(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    page_path = "wiki/concepts/invoice.md"
+    write_test_page(root, page_path, {"title": "Invoice", "generated": True}, "body")
+
+    navigation = refresh_navigation(root, changed_path=page_path)
+
+    assert navigation["ok"] is True
+    assert "wiki/index.md" in navigation["written"]
+    assert (root / "wiki/index.md").is_file()
+    assert projection_files_initialized(root) is False
+
+    overview = refresh_overview(root, changed_path=page_path, changed_page_state="created")
+
+    assert overview["ok"] is True
+    assert (root / "wiki/overview.md").is_file()
 
 
 @pytest.mark.parametrize("stage", ["temp_write", "flush", "replace"])

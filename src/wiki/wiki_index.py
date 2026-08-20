@@ -13,6 +13,7 @@ from wiki.wiki_paths import (
     ARCHIVES_LOG_PATH,
     WikiPathError,
     filesystem_path,
+    projection_files_initialized,
     validate_wiki_page_path,
 )
 from wiki.wikilinks import format_wikilink
@@ -120,7 +121,7 @@ def _refresh_project_navigation_incremental(root: Path, relative: Path) -> dict[
     top_index = root / "wiki" / "index.md"
     written: list[str] = []
     changed: list[str] = []
-    bootstrap = _is_uninitialized_vault(root)
+    bootstrap = not projection_files_initialized(root)
 
     if project_dir.is_dir():
         index_existed = project_index.is_file()
@@ -157,7 +158,7 @@ def _refresh_concept_navigation_incremental(root: Path, relative: Path) -> dict[
     concepts_index = concepts_root / "index.md"
     written: list[str] = []
     changed: list[str] = []
-    bootstrap = _is_uninitialized_vault(root)
+    bootstrap = not projection_files_initialized(root)
 
     if not concepts_root.is_dir():
         return _incremental_missing("concept navigation scope", concepts_root, root)
@@ -238,7 +239,7 @@ def _refresh_entity_navigation_incremental(root: Path, relative: Path) -> dict[s
     entities_index = root / "wiki" / "entities" / "index.md"
     changed: list[str] = []
     written: list[str] = []
-    bootstrap = _is_uninitialized_vault(root)
+    bootstrap = not projection_files_initialized(root)
     if not entities_root.is_dir():
         return _incremental_missing("entity navigation scope", entities_root, root)
     if not entities_index.is_file() and not bootstrap:
@@ -282,11 +283,6 @@ def _incremental_missing(scope: str, target: Path, root: Path) -> dict[str, Any]
         "path": _relative_path(root, target),
         "error": page_operation_repair_message(f"{scope} is missing"),
     }
-
-
-def _is_uninitialized_vault(root: Path) -> bool:
-    wiki_root = root / "wiki"
-    return not any((wiki_root / name).is_file() for name in ("index.md", "overview.md", "log.md"))
 
 
 def _ensure_top_category_link(

@@ -80,6 +80,12 @@ TOP_LEVEL_DIRS = (
     Path(".llm-wiki/relation-candidates"),
 )
 
+INITIALIZED_PROJECTION_FILES = (
+    Path("wiki/index.md"),
+    Path("wiki/overview.md"),
+    Path("wiki/log.md"),
+)
+
 
 _WIKI_PAGE_PREFIXES = (
     Path("wiki/projects"),
@@ -304,6 +310,19 @@ def translate_path_error(code: str, surface: str) -> str:
     """
 
     return _SURFACE_CODE_MAPS.get(surface, {}).get(code, code)
+
+
+def projection_files_initialized(root: Path) -> bool:
+    """判断固定投影集是否已完成初始化。
+
+    裸 vault 的修复顺序是 navigation 先引导并生成 ``wiki/index.md``，
+    overview 随后才生成 ``wiki/overview.md``，日志投影再补齐
+    ``wiki/log.md``。因此只有固定投影集中的三个文件全部存在时，才算
+    全量初始化完成；overview 调用方必须把只生成了 index 的中间态视为
+    仍可 bootstrap 的状态，而不能把它误判成结构损坏。
+    """
+
+    return all((root / relative).is_file() for relative in INITIALIZED_PROJECTION_FILES)
 
 
 def resolve_within_root(root: Path, relative: Path) -> Path:

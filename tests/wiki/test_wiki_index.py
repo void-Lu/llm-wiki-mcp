@@ -6,10 +6,11 @@ from typing import Any, cast
 import pytest
 
 import wiki.wiki_index as wiki_index
+import wiki.wiki_overview as wiki_overview
 from wiki.atomic_file import AtomicFileError, fault_context
 from wiki.wiki_index import rebuild_retrieval_index, refresh_indexes, refresh_navigation
 from tests.helpers import write_test_page
-from wiki.wiki_paths import create_wiki_root
+from wiki.wiki_paths import INITIALIZED_PROJECTION_FILES, create_wiki_root, projection_files_initialized
 from retrieval.query_pipeline import run_query_v2
 
 
@@ -20,6 +21,25 @@ def _write(root: Path, path: str, title: str, summary: str = "") -> None:
         {"title": title, "summary": summary, "generated": True, "sources": []},
         summary or title,
     )
+
+
+def test_projection_initialization_has_one_owner_and_complete_file_set(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    wiki_root = root / "wiki"
+    wiki_root.mkdir(parents=True)
+
+    assert wiki_index.projection_files_initialized is projection_files_initialized
+    assert wiki_overview.projection_files_initialized is projection_files_initialized
+    assert INITIALIZED_PROJECTION_FILES == (
+        Path("wiki/index.md"),
+        Path("wiki/overview.md"),
+        Path("wiki/log.md"),
+    )
+    assert projection_files_initialized(root) is False
+
+    for relative in INITIALIZED_PROJECTION_FILES:
+        (root / relative).touch()
+        assert projection_files_initialized(root) is (relative == INITIALIZED_PROJECTION_FILES[-1])
 
 
 def test_refresh_indexes_groups_only_active_wiki_categories(tmp_path: Path):
