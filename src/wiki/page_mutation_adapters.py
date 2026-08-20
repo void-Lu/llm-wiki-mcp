@@ -179,7 +179,7 @@ class FormalPageAdapter:
                 result = refresh_overview(
                     context.root,
                     changed_path=operation.page_path,
-                    changed_page_state="created",
+                    created=True,
                 )
             else:
                 result = refresh_overview(context.root, changed_path=operation.page_path)

@@ -122,7 +122,7 @@ def test_formal_projection_callbacks_forward_operation_page_path_on_replay(
     store = PageOperationStore(tmp_path)
     coordinator = PageMutationCoordinator(tmp_path, store=store)
     navigation_paths: list[str] = []
-    overview_calls: list[tuple[str, str | None]] = []
+    overview_calls: list[tuple[str, bool | None]] = []
 
     def fake_navigation(root: Path, *, changed_path: str) -> dict[str, object]:
         del root
@@ -133,10 +133,10 @@ def test_formal_projection_callbacks_forward_operation_page_path_on_replay(
         root: Path,
         *,
         changed_path: str,
-        changed_page_state: str | None = None,
+        created: bool | None = None,
     ) -> dict[str, object]:
         del root
-        overview_calls.append((changed_path, changed_page_state))
+        overview_calls.append((changed_path, created))
         return {"ok": True}
 
     monkeypatch.setattr("wiki.page_mutation_adapters.refresh_navigation", fake_navigation)
@@ -166,4 +166,4 @@ def test_formal_projection_callbacks_forward_operation_page_path_on_replay(
     create_projections["overview"]()
 
     assert navigation_paths == [page_path, page_path]
-    assert overview_calls == [(page_path, None), (page_path, "created")]
+    assert overview_calls == [(page_path, None), (page_path, True)]

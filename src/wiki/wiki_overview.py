@@ -23,16 +23,14 @@ def refresh_overview(
     vault_root: str | Path,
     changed_path: str | Path | None = None,
     *,
-    changed_page_state: str | None = None,
-    previous_generated: bool | None = None,
+    created: bool | None = None,
 ) -> dict[str, Any]:
     """Refresh the generated overview.
 
     ``changed_path`` selects the bounded projection used by page mutations.
-    ``changed_page_state`` is an internal adapter hint for page creation or
-    deletion; callers that only update an existing page need to pass only the
-    path.  With no path the historical full scan remains available to
-    explicit maintenance callers.
+    ``created=True`` is the only incremental count hint.  Deletions are not
+    incrementally reconciled here; the repair full channel is responsible for
+    correcting any resulting count drift.
     """
 
     root = filesystem_path(vault_root)
@@ -40,8 +38,7 @@ def refresh_overview(
         return _refresh_overview_incremental(
             root,
             changed_path,
-            changed_page_state=changed_page_state,
-            previous_generated=previous_generated,
+            created=created,
         )
     return _refresh_overview_full(root)
 
@@ -76,8 +73,7 @@ def _refresh_overview_incremental(
     root: Path,
     changed_path: str | Path,
     *,
-    changed_page_state: str | None,
-    previous_generated: bool | None,
+    created: bool | None,
 ) -> dict[str, Any]:
     try:
         relative = validate_wiki_page_path(changed_path, allow_navigation_index=False)
@@ -132,7 +128,7 @@ def _refresh_overview_incremental(
     current_generated: bool | None = None
     if page.is_file():
         current_generated = _read_frontmatter(page).get("generated") is True
-    elif changed_page_state != "deleted":
+    else:
         return {
             "ok": False,
             "code": "changed_path_missing",
@@ -140,33 +136,9 @@ def _refresh_overview_incremental(
         }
 
     generated, manual = counts or (0, 0)
-    if changed_page_state not in {None, "created", "deleted", "updated"}:
-        return {
-            "ok": False,
-            "code": "changed_page_state_invalid",
-            "error": "changed page state must be created, updated, or deleted",
-        }
-    if changed_page_state == "created":
-        if current_generated:
-            generated += 1
-        else:
-            manual += 1
-    elif changed_page_state == "deleted":
-        if previous_generated is None:
-            return {
-                "ok": False,
-                "code": "changed_page_state_required",
-                "error": "deleted page projections require its previous generated state",
-            }
-        if previous_generated:
-            generated = max(0, generated - 1)
-        else:
-            manual = max(0, manual - 1)
-    elif previous_generated is not None and current_generated is not None and previous_generated != current_generated:
-        if previous_generated:
-            generated = max(0, generated - 1)
-        else:
-            manual = max(0, manual - 1)
+    # Archive deletion is retrieval-only and does not enter this incremental
+    # projection; G1's repair full channel corrects any count drift.
+    if created is True:
         if current_generated:
             generated += 1
         else:

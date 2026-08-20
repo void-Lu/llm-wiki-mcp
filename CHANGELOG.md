@@ -6,6 +6,7 @@
 - operation journal 安全记录升级标记和原始稳定错误码，增量失败提示改指向真实的 `repair page-operation` admin 命令；不新增普通 MCP 写入中的隐式全量检索重建。
 - Query V2 收拢执行视图、请求投影选项、seed 统计和召回切片，`QueryTelemetry` 在数据库被外部重置后自动重建 schema 并重试；公共响应保持逐位不变。
 - 初始化投影集的三文件判定统一由 `wiki_paths.py` 持有，navigation-first 的裸 vault 引导顺序改为显式契约并由回归断言守护。
+- G4 收敛写路径：`wiki_update` 与 `wiki_write_note` 共用 `page_mutation.explain_stage`，移除 note 响应的死字段 `indexed: null` 和 chat 检索死回退；导航/概览生成页统一使用 `wiki_io.render_page`，概览也只在 UTF-8 字节变化时写入，增量 API 仅保留 `created` 提示。
 
 ## 2026-08-19 — discovery 资格与摄入投影防御收敛
 

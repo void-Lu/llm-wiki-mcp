@@ -89,7 +89,7 @@ def test_navigation_bootstraps_index_before_overview_on_bare_vault(tmp_path: Pat
     assert (root / "wiki/index.md").is_file()
     assert projection_files_initialized(root) is False
 
-    overview = refresh_overview(root, changed_path=page_path, changed_page_state="created")
+    overview = refresh_overview(root, changed_path=page_path, created=True)
 
     assert overview["ok"] is True
     assert (root / "wiki/overview.md").is_file()
@@ -134,7 +134,28 @@ def test_refresh_overview_post_replace_fault_keeps_complete_new_overview(tmp_pat
     assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
 
 
-def test_incremental_overview_create_update_delete_matches_full_and_reads_only_changed_page(
+def test_refresh_overview_skips_atomic_write_when_utf8_bytes_are_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_test_page(root, "wiki/concepts/invoice.md", {"title": "Invoice", "generated": True}, "body")
+    assert refresh_overview(root)["ok"] is True
+
+    calls: list[str] = []
+
+    def unexpected_write(target: Path, text: str, **kwargs: object) -> None:
+        del text, kwargs
+        calls.append(target.name)
+
+    monkeypatch.setattr(wiki_overview, "atomic_write_text", unexpected_write)
+    result = refresh_overview(root)
+
+    assert result == {"ok": True, "path": "wiki/overview.md"}
+    assert calls == []
+
+
+def test_incremental_overview_create_update_matches_full_and_reads_only_changed_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "vault"
@@ -178,25 +199,26 @@ def test_incremental_overview_create_update_delete_matches_full_and_reads_only_c
     updated = refresh_overview(root, changed_path=target_path)
     assert updated["ok"] is True
     assert read_paths == [target_path]
-    assert write_paths == ["wiki/overview.md"]
+    assert write_paths == []
     incremental_update = (root / "wiki/overview.md").read_bytes()
     refresh_overview(root)
     assert (root / "wiki/overview.md").read_bytes() == incremental_update
 
     new_path = "wiki/projects/alpha/specs/new.md"
     write_test_page(root, new_path, {"title": "New", "generated": True}, "new")
-    created = refresh_overview(root, changed_path=new_path, changed_page_state="created")
+    created = refresh_overview(root, changed_path=new_path, created=True)
     assert created["ok"] is True
     incremental_create = (root / "wiki/overview.md").read_bytes()
     refresh_overview(root)
     assert (root / "wiki/overview.md").read_bytes() == incremental_create
 
     (root / manual_path).unlink()
-    deleted = refresh_overview(root, changed_path=manual_path, changed_page_state="deleted", previous_generated=False)
-    assert deleted["ok"] is True
-    incremental_delete = (root / "wiki/overview.md").read_bytes()
-    refresh_overview(root)
-    assert (root / "wiki/overview.md").read_bytes() == incremental_delete
+    missing = refresh_overview(root, changed_path=manual_path)
+    assert missing == {
+        "ok": False,
+        "code": "changed_path_missing",
+        "error": "changed Wiki page is missing",
+    }
 
 
 def test_incremental_overview_fails_on_missing_structure_instead_of_scanning_full_vault(tmp_path: Path) -> None:
@@ -223,7 +245,7 @@ def test_incremental_overview_bootstraps_a_bare_vault_without_a_full_scan(tmp_pa
     page.parent.mkdir(parents=True)
     page.write_text("---\ntitle: Invoice\ngenerated: true\n---\n\n# Invoice\n", encoding="utf-8")
 
-    result = refresh_overview(root, changed_path="wiki/concepts/invoice.md", changed_page_state="created")
+    result = refresh_overview(root, changed_path="wiki/concepts/invoice.md", created=True)
 
     assert result["ok"] is True
     overview = (root / "wiki/overview.md").read_text(encoding="utf-8")
