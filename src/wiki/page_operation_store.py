@@ -518,7 +518,20 @@ def _safe_stage_result(result: Mapping[str, Any] | None) -> dict[str, object]:
     if not isinstance(result, Mapping):
         return {}
     safe: dict[str, object] = {}
-    for key in ("ok", "state", "code", "repair_action", "deduplicated", "operation", "affected_count", "written", "changed", "batch"):
+    for key in (
+        "ok",
+        "state",
+        "code",
+        "repair_action",
+        "deduplicated",
+        "operation",
+        "affected_count",
+        "written",
+        "changed",
+        "batch",
+        "escalated_to_full_rebuild",
+        "escalated_from_code",
+    ):
         value = result.get(key)
         if isinstance(value, (str, bool, int, float)) and value is not None:
             safe[key] = value

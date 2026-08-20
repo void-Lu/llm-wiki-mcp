@@ -34,6 +34,7 @@ class ProjectionContext:
 
     root: Path
     log_store: WikiLogStore
+    allow_projection_escalation: bool = False
 
 
 @dataclass(frozen=True)
@@ -166,16 +167,27 @@ class FormalPageAdapter:
             return RetrievalIndexStore(context.root, scope="active").update_page_from_file(target)
 
         def navigation() -> dict[str, object]:
-            return refresh_navigation(context.root, changed_path=operation.page_path)
+            result = refresh_navigation(context.root, changed_path=operation.page_path)
+            return _escalate_incremental_projection(
+                context,
+                result,
+                full_rebuild=lambda: refresh_navigation(context.root),
+            )
 
         def overview() -> dict[str, object]:
             if operation.base_hash is None:
-                return refresh_overview(
+                result = refresh_overview(
                     context.root,
                     changed_path=operation.page_path,
                     changed_page_state="created",
                 )
-            return refresh_overview(context.root, changed_path=operation.page_path)
+            else:
+                result = refresh_overview(context.root, changed_path=operation.page_path)
+            return _escalate_incremental_projection(
+                context,
+                result,
+                full_rebuild=lambda: refresh_overview(context.root),
+            )
 
         def audit_log() -> dict[str, object]:
             return append_log_entry(
@@ -199,6 +211,38 @@ class FormalPageAdapter:
             "overview": overview,
             "audit_log": audit_log,
         }
+
+
+_ESCALATABLE_INCREMENTAL_CODES = frozenset(
+    {
+        "incremental_navigation_index_missing",
+        "incremental_overview_structure_missing",
+    }
+)
+
+
+def _escalate_incremental_projection(
+    context: ProjectionContext,
+    result: Mapping[str, object] | None,
+    *,
+    full_rebuild: Callable[[], Mapping[str, object] | None],
+) -> dict[str, object]:
+    """Upgrade only repair-time structural failures to an explicit full build."""
+
+    result_dict = dict(result or {})
+    code = result_dict.get("code")
+    if (
+        not context.allow_projection_escalation
+        or result_dict.get("ok") is not False
+        or not isinstance(code, str)
+        or code not in _ESCALATABLE_INCREMENTAL_CODES
+    ):
+        return result_dict
+
+    rebuilt = dict(full_rebuild() or {})
+    rebuilt["escalated_to_full_rebuild"] = True
+    rebuilt["escalated_from_code"] = str(code)
+    return rebuilt
 
 
 class ChatSourceAdapter:

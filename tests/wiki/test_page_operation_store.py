@@ -86,6 +86,8 @@ def test_stage_result_keeps_bounded_projection_summary_only(tmp_path: Path) -> N
             "written": ["wiki/index.md", "C:\\secret\\absolute.md"],
             "changed": ["wiki/index.md"],
             "batch": {"kind": "navigation", "boundary": "page-submit", "secret": "hidden"},
+            "escalated_to_full_rebuild": True,
+            "escalated_from_code": "incremental_navigation_index_missing",
             "body": "secret body",
         },
     )
@@ -96,6 +98,8 @@ def test_stage_result_keeps_bounded_projection_summary_only(tmp_path: Path) -> N
         "ok": True,
         "changed": ["wiki/index.md"],
         "batch": {"boundary": "page-submit", "kind": "navigation"},
+        "escalated_to_full_rebuild": True,
+        "escalated_from_code": "incremental_navigation_index_missing",
     }
 
 

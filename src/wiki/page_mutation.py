@@ -505,13 +505,25 @@ class PageMutationCoordinator:
             operation,
         )
 
-    def repair(self, operation_id: str, projections: Mapping[str, Projection]) -> MutationResult:
+    def repair(
+        self,
+        operation_id: str,
+        projections: Mapping[str, Projection] | None = None,
+    ) -> MutationResult:
+        """Recover one committed operation, escalating structural repair gaps."""
+
         recovered = self.recover(operation_id)
         if recovered.state == "completed":
             return recovered
         if recovered.state != "repair_pending":
             return recovered
-        return self.run_projections(operation_id, projections)
+        selected = projections
+        if selected is None:
+            operation = self._store.get_operation(operation_id)
+            if operation is None:
+                return MutationResult(ok=False, code="operation_not_found")
+            selected = self.projections_for(operation, allow_projection_escalation=True)
+        return self.run_projections(operation_id, selected)
 
     def project_existing(
         self,
@@ -540,7 +552,7 @@ class PageMutationCoordinator:
         operation = self._store.get_operation(operation_id)
         if operation is None:
             return MutationResult(ok=False, code="operation_not_found")
-        selected = projections if projections is not None else self.projections_for(operation)
+        selected = projections
         return self.repair(operation_id, selected)
 
     def _project_existing_path(self, page_path: str, content_hash: str) -> MutationResult:
@@ -574,6 +586,8 @@ class PageMutationCoordinator:
     def projections_for(
         self,
         operation: PageOperation,
+        *,
+        allow_projection_escalation: bool = False,
     ) -> dict[str, Projection]:
         """Build the projection set selected by the registered adapter."""
 
@@ -584,7 +598,15 @@ class PageMutationCoordinator:
                 stage: (lambda: {"ok": False, "code": "page_not_found"})
                 for stage in adapter.projection_stages()
             }
-        return adapter.build_projections(ProjectionContext(self.root, self._log_store), operation, target)
+        return adapter.build_projections(
+            ProjectionContext(
+                self.root,
+                self._log_store,
+                allow_projection_escalation=allow_projection_escalation,
+            ),
+            operation,
+            target,
+        )
 
     def _commit_with_projections(
         self,

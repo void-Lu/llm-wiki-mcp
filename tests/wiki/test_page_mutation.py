@@ -185,7 +185,30 @@ def test_projection_failure_is_repair_pending_and_retry_skips_succeeded_stages(t
     assert calls == ["dependencies", "retrieval", "navigation", "overview", "audit_log"]
 
 
-def test_incremental_projection_structure_failure_is_durable_and_replays_same_page_hint(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("missing_stage", "missing_target", "failure_code", "full_target"),
+    [
+        (
+            "navigation",
+            "wiki/concepts/index.md",
+            "incremental_navigation_index_missing",
+            "wiki/concepts/index.md",
+        ),
+        (
+            "overview",
+            "wiki/overview.md",
+            "incremental_overview_structure_missing",
+            "wiki/overview.md",
+        ),
+    ],
+)
+def test_incremental_projection_structure_failure_is_fail_loud_then_repair_escalates_to_full(
+    tmp_path: Path,
+    missing_stage: str,
+    missing_target: str,
+    failure_code: str,
+    full_target: str,
+) -> None:
     create_wiki_root(tmp_path)
     page_path = "wiki/concepts/general/page.md"
     page = tmp_path / page_path
@@ -195,7 +218,7 @@ def test_incremental_projection_structure_failure_is_durable_and_replays_same_pa
     page.write_text(old_text, encoding="utf-8")
     refresh_navigation(tmp_path)
     refresh_overview(tmp_path)
-    (tmp_path / "wiki/concepts/index.md").unlink()
+    (tmp_path / missing_target).unlink()
 
     store = PageOperationStore(tmp_path)
     coordinator = PageMutationCoordinator(tmp_path, store=store)
@@ -210,22 +233,42 @@ def test_incremental_projection_structure_failure_is_durable_and_replays_same_pa
 
     assert result.ok is True
     assert result.state == "repair_pending"
-    assert result.failed_stage == "navigation"
+    assert result.failed_stage == missing_stage
     operation = store.get_operation(result.operation_id or "")
     assert operation is not None
     assert operation.page_path == page_path
-    assert operation.stages["navigation"]["state"] == "failed"
+    assert operation.stages[missing_stage]["state"] == "failed"
+    assert operation.stages[missing_stage]["code"] == failure_code
+    assert operation.stages[missing_stage]["result"] == {"ok": False, "code": failure_code}
+    assert not (tmp_path / missing_target).exists()
 
-    # The explicit admin/full maintenance boundary repairs the missing index;
-    # replay then uses the durable operation's original page hint.
-    assert refresh_navigation(tmp_path)["ok"] is True
+    # Repair owns the explicit full-rebuild fallback; the first write remains
+    # fail-loud and does not silently create the missing projection.
     repaired = PageRepairService(tmp_path).apply(operation.operation_id)
     assert repaired["ok"] is True
     assert repaired["state"] == "completed"
+    repair_stage = repaired["stages"][missing_stage]
+    assert repair_stage["state"] == "succeeded"
+    assert repair_stage["result"]["ok"] is True
+    assert repair_stage["result"]["escalated_to_full_rebuild"] is True
+    assert repair_stage["result"]["escalated_from_code"] == failure_code
     final = PageOperationStore(tmp_path).get_operation(operation.operation_id)
     assert final is not None
-    assert final.stages["navigation"]["state"] == "succeeded"
+    assert final.stages[missing_stage]["state"] == "succeeded"
+    assert final.stages[missing_stage]["result"]["escalated_to_full_rebuild"] is True
+    assert final.stages[missing_stage]["result"]["escalated_from_code"] == failure_code
     assert page.read_text(encoding="utf-8") == new_text
+
+    expected_root = tmp_path / "expected-full-rebuild"
+    create_wiki_root(expected_root)
+    expected_page = expected_root / page_path
+    expected_page.parent.mkdir(parents=True, exist_ok=True)
+    expected_page.write_text(new_text, encoding="utf-8")
+    if missing_stage == "navigation":
+        assert refresh_navigation(expected_root)["ok"] is True
+    else:
+        assert refresh_overview(expected_root)["ok"] is True
+    assert (tmp_path / full_target).read_bytes() == (expected_root / full_target).read_bytes()
 
 
 def test_repair_and_project_existing_return_the_typed_mutation_result(tmp_path: Path) -> None:
