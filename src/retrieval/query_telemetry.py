@@ -46,6 +46,12 @@ _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_READY: set[Path] = set()
 
 
+def _is_schema_operational_error(error: sqlite3.OperationalError) -> bool:
+    """Recognize the missing-table failure caused by an externally reset DB."""
+
+    return "no such table" in str(error).casefold()
+
+
 def read_event_count(root: str | Path) -> int | None:
     """Read the telemetry event count without creating or migrating storage."""
 
@@ -129,35 +135,39 @@ class QueryTelemetry:
             if self.path in _SCHEMA_READY:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connection() as conn:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS query_telemetry("
-                    "query_hash TEXT NOT NULL, normalized_query_redacted TEXT NOT NULL, "
-                    "at TEXT NOT NULL, expires_at TEXT NOT NULL, scope TEXT NOT NULL, "
-                    "project TEXT NOT NULL, passage_ids TEXT NOT NULL, fallback_level TEXT NOT NULL, "
-                    "token_count INTEGER NOT NULL, latency_ms REAL NOT NULL, "
-                    "outcome TEXT NOT NULL DEFAULT 'completed', cancelled_stage TEXT NOT NULL DEFAULT '', "
-                    "worker_state TEXT NOT NULL DEFAULT '')"
-                )
-                columns = {
-                    str(row[1])
-                    for row in conn.execute("PRAGMA table_info(query_telemetry)")
-                }
-                if "outcome" not in columns:
+            connection = self._connection()
+            try:
+                with connection as conn:
                     conn.execute(
-                        "ALTER TABLE query_telemetry "
-                        "ADD COLUMN outcome TEXT NOT NULL DEFAULT 'completed'"
+                        "CREATE TABLE IF NOT EXISTS query_telemetry("
+                        "query_hash TEXT NOT NULL, normalized_query_redacted TEXT NOT NULL, "
+                        "at TEXT NOT NULL, expires_at TEXT NOT NULL, scope TEXT NOT NULL, "
+                        "project TEXT NOT NULL, passage_ids TEXT NOT NULL, fallback_level TEXT NOT NULL, "
+                        "token_count INTEGER NOT NULL, latency_ms REAL NOT NULL, "
+                        "outcome TEXT NOT NULL DEFAULT 'completed', cancelled_stage TEXT NOT NULL DEFAULT '', "
+                        "worker_state TEXT NOT NULL DEFAULT '')"
                     )
-                if "cancelled_stage" not in columns:
-                    conn.execute(
-                        "ALTER TABLE query_telemetry "
-                        "ADD COLUMN cancelled_stage TEXT NOT NULL DEFAULT ''"
-                    )
-                if "worker_state" not in columns:
-                    conn.execute(
-                        "ALTER TABLE query_telemetry "
-                        "ADD COLUMN worker_state TEXT NOT NULL DEFAULT ''"
-                    )
+                    columns = {
+                        str(row[1])
+                        for row in conn.execute("PRAGMA table_info(query_telemetry)")
+                    }
+                    if "outcome" not in columns:
+                        conn.execute(
+                            "ALTER TABLE query_telemetry "
+                            "ADD COLUMN outcome TEXT NOT NULL DEFAULT 'completed'"
+                        )
+                    if "cancelled_stage" not in columns:
+                        conn.execute(
+                            "ALTER TABLE query_telemetry "
+                            "ADD COLUMN cancelled_stage TEXT NOT NULL DEFAULT ''"
+                        )
+                    if "worker_state" not in columns:
+                        conn.execute(
+                            "ALTER TABLE query_telemetry "
+                            "ADD COLUMN worker_state TEXT NOT NULL DEFAULT ''"
+                        )
+            finally:
+                connection.close()
             _SCHEMA_READY.add(self.path)
 
     def _connection(self) -> sqlite3.Connection:
@@ -183,28 +193,45 @@ class QueryTelemetry:
         redacted = redact_query(question) if not terminal_without_evidence else ""
         safe_passage_ids = () if terminal_without_evidence else passage_ids
         now = datetime.now(UTC)
-        with self._connection() as conn:
-            conn.execute(
-                "INSERT INTO query_telemetry("
-                "query_hash, normalized_query_redacted, at, expires_at, scope, project, passage_ids, "
-                "fallback_level, token_count, latency_ms, outcome, cancelled_stage, worker_state) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    hashlib.sha256(redacted.encode()).hexdigest(),
-                    redacted,
-                    now.isoformat(),
-                    (now + timedelta(days=retention_days)).isoformat(),
-                    scope,
-                    project or "",
-                    ",".join(sorted(set(safe_passage_ids))),
-                    fallback_level,
-                    int(token_count),
-                    float(latency_ms),
-                    outcome,
-                    cancelled_stage,
-                    worker_state,
-                ),
-            )
+        values = (
+            hashlib.sha256(redacted.encode()).hexdigest(),
+            redacted,
+            now.isoformat(),
+            (now + timedelta(days=retention_days)).isoformat(),
+            scope,
+            project or "",
+            ",".join(sorted(set(safe_passage_ids))),
+            fallback_level,
+            int(token_count),
+            float(latency_ms),
+            outcome,
+            cancelled_stage,
+            worker_state,
+        )
+
+        def insert_row() -> None:
+            connection = self._connection()
+            try:
+                with connection as conn:
+                    conn.execute(
+                        "INSERT INTO query_telemetry("
+                        "query_hash, normalized_query_redacted, at, expires_at, scope, project, passage_ids, "
+                        "fallback_level, token_count, latency_ms, outcome, cancelled_stage, worker_state) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        values,
+                    )
+            finally:
+                connection.close()
+
+        try:
+            insert_row()
+        except sqlite3.OperationalError as error:
+            if not _is_schema_operational_error(error):
+                raise
+            with _SCHEMA_LOCK:
+                _SCHEMA_READY.discard(self.path)
+            self._ensure_schema()
+            insert_row()
 
     def finish_once(self, **kwargs: object) -> bool:
         """Persist at most one terminal event for this request."""

@@ -66,6 +66,34 @@ def test_telemetry_schema_is_initialized_once_before_first_write(
     assert sum("PRAGMA table_info" in statement for statement in statements) == 1
 
 
+def test_telemetry_rebuilds_schema_after_database_reset(tmp_path: Path) -> None:
+    telemetry = QueryTelemetry(tmp_path)
+    telemetry.record(
+        question="before reset",
+        scope="knowledge",
+        project=None,
+        passage_ids=(),
+        fallback_level="none",
+        token_count=0,
+        latency_ms=0,
+    )
+
+    telemetry.path.unlink()
+
+    telemetry.record(
+        question="after reset",
+        scope="knowledge",
+        project=None,
+        passage_ids=(),
+        fallback_level="none",
+        token_count=0,
+        latency_ms=0,
+    )
+
+    with sqlite3.connect(telemetry.path) as conn:
+        assert conn.execute("SELECT count(*) FROM query_telemetry").fetchone() == (1,)
+
+
 def test_telemetry_redacts_secret_and_never_stores_passage_body(tmp_path: Path) -> None:
     telemetry = QueryTelemetry(tmp_path)
     telemetry.record(question="token=super-secret what is approval", scope="knowledge", project=None, passage_ids=["passage-1"], fallback_level="none", token_count=4, latency_ms=1)

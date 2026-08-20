@@ -4,6 +4,7 @@
 
 - `repair page-operation` 重放遇到导航/overview 的已知结构缺口时，显式升级为无 hint 的全量投影，修复 G6 fail-loud 后原有 repair 死循环；首次页面写入仍保持 fail-loud。
 - operation journal 安全记录升级标记和原始稳定错误码，增量失败提示改指向真实的 `repair page-operation` admin 命令；不新增普通 MCP 写入中的隐式全量检索重建。
+- Query V2 收拢执行视图、请求投影选项、seed 统计和召回切片，`QueryTelemetry` 在数据库被外部重置后自动重建 schema 并重试；公共响应保持逐位不变。
 
 ## 2026-08-19 — discovery 资格与摄入投影防御收敛
 
