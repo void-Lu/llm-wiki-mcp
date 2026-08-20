@@ -48,4 +48,3 @@ def test_generated_page_envelopes_preserve_baseline_utf8_bytes(tmp_path: Path) -
         actual = (tmp_path / relative).read_bytes()
         assert len(actual) == len(expected)
         assert actual == expected
-
