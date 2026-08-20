@@ -1138,3 +1138,57 @@ G1-G7 独立 Luna 会话实施完成，逐项验收、分组提交并归档；�
 ### Next Steps
 
 - 继续处理其他未完成 Trellis 任务时，先重新读取当前任务上下文
+
+## Session 35: 架构深化 r5 G1 修复通道
+
+**Date**: 2026-08-20
+**Task**: G1 G6 恢复通道（repair 升级全量）
+**Branch**: `v0.9.33`
+
+### Summary
+
+完成 G1：首次页面写入继续对导航/概览增量结构缺失保持 fail-loud；admin `repair page-operation` 重放携带升级语境，导航/概览对应增量失败时显式调用无 hint 全量重建。升级后的 stage result 持久化 `escalated_to_full_rebuild` 与原始稳定 code，错误提示改指向真实 repair 命令，CLAUDE.md 同步说明生产消费边界。未执行提交，保留既有 `.netsuite-mcp/`。
+
+### Testing
+
+- 基线原命令因 Windows pytest 临时目录权限失败；仓库内专用 basetemp 重跑 `26 passed`。
+- G1 定向回归 `73 passed`。
+- `uv run ruff check src/ tests/` 通过；`git diff --check` 通过。
+- 主体全量 `uv run python -m pytest --basetemp .tmp\\pytest-g1-no-build -q --ignore=tests/test_build_backend.py`：961 passed、2 skipped。
+- 最终主体全量 `uv run python -m pytest --basetemp .tmp\\pytest-g1-final-full -q --ignore=tests/test_build_backend.py`：961 passed、2 skipped。
+- 原命令全量：961 passed、2 skipped、3 failed；失败均在 `tests/test_build_backend.py` 内部 `uv build` 的隔离依赖解析，无法连接 `https://pypi.org/simple/setuptools/`，返回 WinError 10013。
+
+### Status
+
+[OK] **Implementation complete; full non-build suite verified; build-backend gate environment-blocked; main session owns logical commit**
+
+
+## Session 35: 完成架构深化整改 r5
+
+**Date**: 2026-08-20
+**Task**: 完成架构深化整改 r5
+**Branch**: `v0.9.33`
+
+### Summary
+
+按 G1→G2→G3→G4 独立会话实施并逐项验收；主会话按实施边界完成 11 个逻辑提交，更新 CLAUDE/CONTEXT/README/CHANGELOG 与架构合同，完整 pytest 970 passed、2 skipped，4 个子任务及父 campaign 已归档。保留既有 .netsuite-mcp/ 与其他 Trellis journal 变更。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0d04f9d` | (see git log) |
+| `d2d7ff6` | (see git log) |
+| `4bcd3a5` | (see git log) |
+| `fce5dc0` | (see git log) |
+| `b9f181e` | (see git log) |
+| `969f4e8` | (see git log) |
+| `d422621` | (see git log) |
+| `da7536e` | (see git log) |
+| `79dd06c` | (see git log) |
+| `67f596e` | (see git log) |
+| `dcc6432` | (see git log) |
+
+### Status
+
+[OK] **Completed**
