@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 33
-- **Last Active**: 2026-08-19
+- **Total Sessions**: 34
+- **Last Active**: 2026-08-20
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1089 | Active |
+| `journal-1.md` | ~1140 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 34 | 2026-08-20 | 架构深化整改 r4 收尾 | `2f3fb6e`, `530c3cd`, `68a1e20`, `bcf5f34`, `4035ec6`, `ec73824`, `f449a47`, `2bde625`, `8cc8d47`, `c23f28b`, `9990069`, `499d22d`, `e41f300`, `8f567c2`, `01044d8`, `96360f6`, `3d2f5c8`, `0621874`, `5371607` | `v0.9.33` |
 | 33 | 2026-08-19 | 完成 wiki_query discovery 公共投影与精确读取 | `77227a5` | `v0.9.33` |
 | 32 | 2026-08-19 | 完成 08-19 架构深化整改 r3 | `7d710db`, `ec01a00`, `339125d`, `af154c4`, `7041d70`, `1e532f5`, `65fa800`, `84c0766`, `5fc1933`, `b0b89b9`, `3b610e6`, `e78612c`, `4c66965`, `e421ea2`, `1bcd48e`, `4ca4499`, `ffdd13e`, `57c2a7d`, `d64b24c` | `v0.9.32` |
 | 31 | 2026-08-19 | G7 journal 阶段元组显式断言 | - | `v0.9.32` |
