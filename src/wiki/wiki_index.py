@@ -3,11 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from wiki.atomic_file import atomic_write_text
 from wiki.repair_messages import page_operation_repair_message
-from wiki.wiki_io import is_manual_page, split_frontmatter
+from wiki.wiki_io import is_manual_page, render_page, split_frontmatter
 from wiki.wiki_paths import (
     ARCHIVES_DIR,
     ARCHIVES_LOG_PATH,
@@ -345,13 +343,18 @@ def _write_top_index(
     target = root / "wiki" / "index.md"
     if is_manual_page(target):
         return _manual_page_error(target, root)
-    lines = ["---", "type: index", "generated: true", "---", "", "# Index", ""]
+    lines = ["# Index", ""]
     for title, relative_dir in _TOP_LEVEL_GROUPS:
         lines.append(f"## {title}")
         entries = _top_level_entries(root, title, relative_dir)
         lines.extend(entries or ["- 无"])
         lines.append("")
-    _write_rendered_index(target, "\n".join(lines).rstrip() + "\n", root=root, changed=changed)
+    _write_rendered_index(
+        target,
+        render_page({"type": "index", "generated": True}, "\n".join(lines), title_heading=None),
+        root=root,
+        changed=changed,
+    )
     return None
 
 
@@ -476,10 +479,9 @@ def _write_listing_index(
 ) -> dict[str, Any] | None:
     if is_manual_page(target):
         return _manual_page_error(target, root)
-    yaml_text = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
-    lines = ["---", *yaml_text.splitlines(), "---", "", f"# {title}", "", *(entries or ["- 无"])]
+    body = "\n".join([f"# {title}", "", *(entries or ["- 无"])])
     target.parent.mkdir(parents=True, exist_ok=True)
-    _write_rendered_index(target, "\n".join(lines).rstrip() + "\n", root=root, changed=changed)
+    _write_rendered_index(target, render_page(frontmatter, body, title_heading=None), root=root, changed=changed)
     return None
 
 

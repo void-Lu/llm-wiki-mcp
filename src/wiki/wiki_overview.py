@@ -5,7 +5,7 @@ from typing import Any
 
 from wiki.atomic_file import atomic_write_text
 from wiki.repair_messages import page_operation_repair_message
-from wiki.wiki_io import is_manual_page, split_frontmatter
+from wiki.wiki_io import is_manual_page, render_page, split_frontmatter
 from wiki.wiki_log import read_recent_log_entries
 from wiki.wiki_paths import (
     WikiPathError,
@@ -178,11 +178,6 @@ def _refresh_overview_incremental(
 
 def _write_overview(target: Path, projects: int, generated: int, manual: int, recent: list[str]) -> dict[str, Any]:
     lines = [
-        "---",
-        "type: overview",
-        "generated: true",
-        "---",
-        "",
         "# Overview",
         "",
         "## Counts",
@@ -194,7 +189,10 @@ def _write_overview(target: Path, projects: int, generated: int, manual: int, re
         *(recent or ["- 无"]),
         "",
     ]
-    atomic_write_text(target, "\n".join(lines))
+    rendered = render_page({"type": "overview", "generated": True}, "\n".join(lines), title_heading=None)
+    encoded = rendered.encode("utf-8")
+    if not target.is_file() or target.read_bytes() != encoded:
+        atomic_write_text(target, rendered)
     return {"ok": True, "path": "wiki/overview.md"}
 
 
