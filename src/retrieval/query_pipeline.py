@@ -73,6 +73,18 @@ class _QualityGateEvaluation:
 
 
 @dataclass(frozen=True)
+class QuerySeedStats:
+    """Bounded retrieval statistics collected before execution-context stages."""
+
+    fts_hits: int
+    qualified_fts_hits: int
+    vector_hits: int
+    vector_warnings: tuple[str, ...]
+    index_warnings: tuple[str, ...]
+    scope_rules: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class QueryTelemetryStats:
     """Successful-query statistics handed to the server terminal owner."""
 
@@ -111,13 +123,10 @@ def _resolve_quality_gate_artifact_path(vault_root: Path, artifact_path: str | P
 def _quality_gate_evaluation(
     candidates: Sequence[Mapping[str, Any]],
     *,
+    request_view: QueryRequestView,
+    execution_view: QueryExecutionView,
     vault_root: Path,
     settings: QualityGateSettings | None,
-    effective_scope: str,
-    retrieval_mode: str,
-    fallback_level: str,
-    coverage_fallback: bool,
-    lexical_mode: str,
 ) -> _QualityGateEvaluation | None:
     """Run the pure gate after execution and before the outcome freeze."""
 
@@ -126,6 +135,12 @@ def _quality_gate_evaluation(
     if settings.mode not in {"shadow", "enforce"}:
         return None
 
+    fallback_value = execution_view.recovery.fallback
+    fallback_level = (
+        str(fallback_value.get("level") or "none")
+        if isinstance(fallback_value, Mapping)
+        else "none"
+    )
     policy_version_value = settings.policy_version
     policy_version = (
         policy_version_value
@@ -133,9 +148,9 @@ def _quality_gate_evaluation(
         else QUALITY_POLICY_VERSION
     )
     branch = _quality_gate_branch(
-        coverage_fallback=coverage_fallback,
+        coverage_fallback=execution_view.coverage_fallback,
         fallback_level=fallback_level,
-        lexical_mode=lexical_mode,
+        lexical_mode=execution_view.lexical_mode,
     )
     artifact_path = _resolve_quality_gate_artifact_path(vault_root, settings.artifact_path)
     threshold_view = (
@@ -164,8 +179,8 @@ def _quality_gate_evaluation(
     try:
         features = build_candidate_features(
             candidates,
-            effective_scope=effective_scope,
-            retrieval_mode=retrieval_mode,
+            effective_scope=request_view.effective_scope,
+            retrieval_mode=request_view.retrieval_mode,
             branch=branch,
         )
         if threshold_view is None:
@@ -472,17 +487,8 @@ def assemble_public_projection(
     view: QueryExecutionView,
     *,
     request_view: QueryRequestView,
-    public_scope: str,
     provenance: Mapping[str, Mapping[str, str]],
-    fts_hits: int,
-    qualified_fts_hits: int,
-    vector_hits: int,
-    vector_warnings: Sequence[str],
-    index_warnings: Sequence[str],
-    scope_rules: Sequence[str],
-    lexical_enabled: bool,
-    include_context_pack: bool,
-    debug: bool,
+    seed_stats: QuerySeedStats,
     quality_gate_evaluation: _QualityGateEvaluation | None,
 ) -> PublicQueryProjection:
     """Assemble the public envelope from the still-open execution view.
@@ -548,7 +554,7 @@ def assemble_public_projection(
             intent=request_view.intent,
             budget_scale=k_budget,
         )
-        if include_context_pack
+        if request_view.include_context_pack
         else {"passages": [], "budget": {"total": k_budget, "used": 0, "omitted": 0}}
     )
     packed_passages = [
@@ -623,7 +629,11 @@ def assemble_public_projection(
         return result
 
     results = [
-        result_item(item, citation=f"[{index}]", include_content=include_context_pack)
+        result_item(
+            item,
+            citation=f"[{index}]",
+            include_content=request_view.include_context_pack,
+        )
         for index, item in enumerate(public_selected, 1)
     ]
     additional_results = [
@@ -635,7 +645,13 @@ def assemble_public_projection(
         for index, item in enumerate(additional_selected, 1)
     ]
     warnings = list(
-        dict.fromkeys([*scope_rules, *vector_warnings, *index_warnings])
+        dict.fromkeys(
+            [
+                *seed_stats.scope_rules,
+                *seed_stats.vector_warnings,
+                *seed_stats.index_warnings,
+            ]
+        )
     )
     if view.raw_index_warning:
         warnings = list(dict.fromkeys([*warnings, view.raw_index_warning]))
@@ -646,7 +662,7 @@ def assemble_public_projection(
             if enforce_projection_changed
             else RANKING_POLICY_VERSION
         ),
-        "scope": public_scope,
+        "scope": request_view.public_scope,
         "corpus": (
             "raw"
             if contains_raw
@@ -657,18 +673,18 @@ def assemble_public_projection(
         "authority": "active:formal>project>raw_chat;fallback:wiki_relaxed>raw",
         "intent": request_view.intent,
         "retrieval_mode": request_view.retrieval_mode,
-        "lexical_enabled": lexical_enabled,
+        "lexical_enabled": request_view.lexical_enabled,
         "lexical": {"mode": view.lexical_mode},
         "coverage": {
             "uncovered_latin_terms": list(view.uncovered_latin_terms),
             "triggered": view.coverage_fallback,
         },
         "counters": {
-            "fts_hits": fts_hits,
-            "qualified_fts_hits": qualified_fts_hits,
+            "fts_hits": seed_stats.fts_hits,
+            "qualified_fts_hits": seed_stats.qualified_fts_hits,
             "relaxed_fts_hits": view.relaxed_fts_hits,
             "raw_fts_hits": view.raw_fts_hits,
-            "vector_hits": vector_hits,
+            "vector_hits": seed_stats.vector_hits,
             "graph_hits": sum(
                 1 for item in baseline_selected if item["graph_score"] > 0
             ),
@@ -695,7 +711,7 @@ def assemble_public_projection(
     if batch_payload.get("status") != "not_triggered":
         pipeline["batch"] = batch_payload
 
-    if debug:
+    if request_view.debug:
         pipeline["debug"] = [
             {
                 "passage_id": (hit := cast(PassageHit, item["hit"])).passage_id,
@@ -721,7 +737,7 @@ def assemble_public_projection(
     response: dict[str, Any] = {
         "ok": True,
         "question": request_view.question,
-        "scope": public_scope,
+        "scope": request_view.public_scope,
         "project": request_view.project or "",
         "results": results,
         "additional_results": additional_results,
@@ -968,6 +984,10 @@ def run_query_v2(
         retrieval_mode=retrieval_mode,
         hard_budget_tokens=hard_budget_tokens,
         confirmation_token=confirmation_token,
+        public_scope=scope,
+        lexical_enabled=lexical_enabled,
+        include_context_pack=include_context_pack,
+        debug=debug,
     )
     execution = QueryExecutionContext(
         root=root,
@@ -982,37 +1002,26 @@ def run_query_v2(
         seed_has_primary_recall=has_primary_recall,
     )
     execution_view = execution.execute(request_view)
-    fallback_value = execution_view.recovery.fallback
-    fallback_level = (
-        str(fallback_value.get("level") or "none")
-        if isinstance(fallback_value, Mapping)
-        else "none"
-    )
     quality_gate_evaluation = _quality_gate_evaluation(
         execution_view.selected,
+        request_view=request_view,
+        execution_view=execution_view,
         vault_root=root,
         settings=quality_gate,
-        effective_scope=effective_scope,
-        retrieval_mode=retrieval_mode,
-        fallback_level=fallback_level,
-        coverage_fallback=execution_view.coverage_fallback,
-        lexical_mode=execution_view.lexical_mode,
     )
     cancellation.checkpoint("context")
     projection = assemble_public_projection(
         execution_view,
         request_view=request_view,
-        public_scope=scope,
         provenance=provenance,
-        fts_hits=len(fts),
-        qualified_fts_hits=qualified_fts_hits,
-        vector_hits=len(vector),
-        vector_warnings=vector_warnings,
-        index_warnings=index_warnings,
-        scope_rules=scope_rules,
-        lexical_enabled=lexical_enabled,
-        include_context_pack=include_context_pack,
-        debug=debug,
+        seed_stats=QuerySeedStats(
+            fts_hits=len(fts),
+            qualified_fts_hits=qualified_fts_hits,
+            vector_hits=len(vector),
+            vector_warnings=tuple(vector_warnings),
+            index_warnings=tuple(index_warnings),
+            scope_rules=tuple(scope_rules),
+        ),
         quality_gate_evaluation=quality_gate_evaluation,
     )
     execution.outcome()
