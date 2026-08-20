@@ -7,7 +7,9 @@ from pathlib import Path
 from wiki.atomic_file import sha256_file
 from wiki.page_mutation_adapters import build_plan_intent
 from wiki.page_mutation import ChatSourceAdapter, FormalPageAdapter, PageMutationCoordinator, PlanIntent
+from wiki.page_operation_store import PageOperationStore
 from wiki.projection_profile import projection_stages
+from wiki.wiki_paths import create_wiki_root
 
 
 def _chat_page(tmp_path: Path) -> Path:
@@ -107,3 +109,61 @@ def test_chat_existing_projection_does_not_consume_formal_plan(tmp_path: Path) -
 
 def test_coordinator_has_no_concrete_chat_kind_branch() -> None:
     assert "chat_source" not in inspect.getsource(PageMutationCoordinator)
+
+
+def test_formal_projection_callbacks_forward_operation_page_path_on_replay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    create_wiki_root(tmp_path)
+    page_path = "wiki/concepts/general/page.md"
+    page = tmp_path / page_path
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\ntype: concept\ntitle: Page\ngenerated: false\n---\n\n# Page\n", encoding="utf-8")
+    store = PageOperationStore(tmp_path)
+    coordinator = PageMutationCoordinator(tmp_path, store=store)
+    navigation_paths: list[str] = []
+    overview_calls: list[tuple[str, str | None]] = []
+
+    def fake_navigation(root: Path, *, changed_path: str) -> dict[str, object]:
+        del root
+        navigation_paths.append(changed_path)
+        return {"ok": True}
+
+    def fake_overview(
+        root: Path,
+        *,
+        changed_path: str,
+        changed_page_state: str | None = None,
+    ) -> dict[str, object]:
+        del root
+        overview_calls.append((changed_path, changed_page_state))
+        return {"ok": True}
+
+    monkeypatch.setattr("wiki.page_mutation_adapters.refresh_navigation", fake_navigation)
+    monkeypatch.setattr("wiki.page_mutation_adapters.refresh_overview", fake_overview)
+
+    page_hash = sha256_file(page)
+    update = coordinator.prepare(
+        request_key="update-operation",
+        operation_kind="update",
+        page_path=page_path,
+        base_hash=page_hash,
+        intended_hash=page_hash,
+    )
+    update_projections = coordinator.projections_for(update)
+    update_projections["navigation"]()
+    update_projections["overview"]()
+
+    create = coordinator.prepare(
+        request_key="create-operation",
+        operation_kind="create",
+        page_path=page_path,
+        base_hash=None,
+        intended_hash=page_hash,
+    )
+    create_projections = coordinator.projections_for(create)
+    create_projections["navigation"]()
+    create_projections["overview"]()
+
+    assert navigation_paths == [page_path, page_path]
+    assert overview_calls == [(page_path, None), (page_path, "created")]

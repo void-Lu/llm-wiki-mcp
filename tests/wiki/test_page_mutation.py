@@ -16,6 +16,10 @@ from wiki.page_mutation import (
 from wiki.knowledge_dependencies import KnowledgeDependencies
 from wiki.page_operation_store import PageOperationStore, UpdatePlanError
 from wiki.atomic_file import fault_context
+from wiki.page_repair import PageRepairService
+from wiki.wiki_index import refresh_navigation
+from wiki.wiki_overview import refresh_overview
+from wiki.wiki_paths import create_wiki_root
 
 
 def _operation(tmp_path: Path, old: str = "old", new: str = "new") -> tuple[PageMutationCoordinator, PageOperationStore, Path, str]:
@@ -179,6 +183,49 @@ def test_projection_failure_is_repair_pending_and_retry_skips_succeeded_stages(t
     completed = coordinator.run_projections(operation_id, projections)
     assert completed.state == "completed"
     assert calls == ["dependencies", "retrieval", "navigation", "overview", "audit_log"]
+
+
+def test_incremental_projection_structure_failure_is_durable_and_replays_same_page_hint(tmp_path: Path) -> None:
+    create_wiki_root(tmp_path)
+    page_path = "wiki/concepts/general/page.md"
+    page = tmp_path / page_path
+    page.parent.mkdir(parents=True, exist_ok=True)
+    old_text = "---\ntype: concept\ntitle: Page\ngenerated: false\n---\n\n# Page\n\nold\n"
+    new_text = old_text.replace("old", "new")
+    page.write_text(old_text, encoding="utf-8")
+    refresh_navigation(tmp_path)
+    refresh_overview(tmp_path)
+    (tmp_path / "wiki/concepts/index.md").unlink()
+
+    store = PageOperationStore(tmp_path)
+    coordinator = PageMutationCoordinator(tmp_path, store=store)
+    base_hash = sha256(page.read_bytes()).hexdigest()
+    result = coordinator.write_and_project(
+        operation_kind="update",
+        page_path=page_path,
+        base_hash=base_hash,
+        text=new_text,
+        expected_hash=base_hash,
+    )
+
+    assert result.ok is True
+    assert result.state == "repair_pending"
+    assert result.failed_stage == "navigation"
+    operation = store.get_operation(result.operation_id or "")
+    assert operation is not None
+    assert operation.page_path == page_path
+    assert operation.stages["navigation"]["state"] == "failed"
+
+    # The explicit admin/full maintenance boundary repairs the missing index;
+    # replay then uses the durable operation's original page hint.
+    assert refresh_navigation(tmp_path)["ok"] is True
+    repaired = PageRepairService(tmp_path).apply(operation.operation_id)
+    assert repaired["ok"] is True
+    assert repaired["state"] == "completed"
+    final = PageOperationStore(tmp_path).get_operation(operation.operation_id)
+    assert final is not None
+    assert final.stages["navigation"]["state"] == "succeeded"
+    assert page.read_text(encoding="utf-8") == new_text
 
 
 def test_repair_and_project_existing_return_the_typed_mutation_result(tmp_path: Path) -> None:

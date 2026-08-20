@@ -100,6 +100,146 @@ def test_refresh_navigation_diffs_utf8_content_before_atomic_write(tmp_path: Pat
     assert third["changed"] == ["wiki/concepts/index.md"]
     assert calls == ["wiki/concepts/index.md"]
 
+
+def test_incremental_project_navigation_is_scoped_and_matches_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    alpha_pages = ["wiki/projects/alpha/specs/a.md", "wiki/projects/alpha/plans/b.md"]
+    beta_pages = [f"wiki/projects/beta/specs/page-{index}.md" for index in range(12)]
+    for path in [*alpha_pages, *beta_pages]:
+        _write(root, path, Path(path).stem, "summary")
+    refresh_navigation(root)
+    unrelated_before = (root / "wiki/projects/beta/index.md").read_bytes()
+
+    page = root / alpha_pages[0]
+    page.write_text(page.read_text(encoding="utf-8").replace("title: a", "title: Alpha updated"), encoding="utf-8")
+    metadata_paths: list[str] = []
+    writes: list[str] = []
+    original_metadata = wiki_index._read_page_metadata
+    original_atomic_write = wiki_index.atomic_write_text
+
+    def counted_metadata(path: Path) -> tuple[dict[str, Any], str]:
+        comparable = Path(str(path).removeprefix("\\\\?\\"))
+        metadata_paths.append(comparable.relative_to(root).as_posix())
+        return original_metadata(path)
+
+    def counted_write(target: Path, text: str, **kwargs: object) -> object:
+        comparable = Path(str(target).removeprefix("\\\\?\\"))
+        writes.append(comparable.relative_to(root).as_posix())
+        return original_atomic_write(target, text, **kwargs)
+
+    monkeypatch.setattr(wiki_index, "_read_page_metadata", counted_metadata)
+    monkeypatch.setattr(wiki_index, "atomic_write_text", counted_write)
+    result = refresh_navigation(root, changed_path=alpha_pages[0])
+
+    assert result["ok"] is True
+    assert result["changed"] == ["wiki/projects/alpha/index.md"]
+    assert writes == ["wiki/projects/alpha/index.md"]
+    assert metadata_paths
+    assert all(path.startswith("wiki/projects/alpha/") for path in metadata_paths)
+    assert (root / "wiki/projects/beta/index.md").read_bytes() == unrelated_before
+    incremental = (root / "wiki/projects/alpha/index.md").read_bytes()
+
+    refresh_navigation(root)
+    assert (root / "wiki/projects/alpha/index.md").read_bytes() == incremental
+
+
+def test_incremental_navigation_create_and_delete_matches_full_for_domains_and_entities(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/stable/page.md", "Stable")
+    _write(root, "wiki/entities/customer/customer.md", "Customer")
+    refresh_navigation(root)
+
+    direct_page = root / "wiki/concepts/root.md"
+    _write(root, direct_page.relative_to(root).as_posix(), "Root Concept")
+    direct_created = refresh_navigation(root, changed_path="wiki/concepts/root.md")
+    assert direct_created["ok"] is True
+    direct_concepts = (root / "wiki/concepts/index.md").read_bytes()
+    direct_top = (root / "wiki/index.md").read_bytes()
+    refresh_navigation(root)
+    assert (root / "wiki/concepts/index.md").read_bytes() == direct_concepts
+    assert (root / "wiki/index.md").read_bytes() == direct_top
+
+    direct_page.unlink()
+    direct_deleted = refresh_navigation(root, changed_path="wiki/concepts/root.md")
+    assert direct_deleted["ok"] is True
+    direct_concepts_deleted = (root / "wiki/concepts/index.md").read_bytes()
+    refresh_navigation(root)
+    assert (root / "wiki/concepts/index.md").read_bytes() == direct_concepts_deleted
+
+    new_domain_page = root / "wiki/concepts/transient/page.md"
+    _write(root, new_domain_page.relative_to(root).as_posix(), "Transient")
+    created = refresh_navigation(root, changed_path="wiki/concepts/transient/page.md")
+    assert created["ok"] is True
+    created_domain = (root / "wiki/concepts/transient/index.md").read_bytes()
+    created_concepts = (root / "wiki/concepts/index.md").read_bytes()
+    refresh_navigation(root)
+    assert (root / "wiki/concepts/transient/index.md").read_bytes() == created_domain
+    assert (root / "wiki/concepts/index.md").read_bytes() == created_concepts
+
+    new_domain_page.unlink()
+    (new_domain_page.parent / "index.md").unlink()
+    new_domain_page.parent.rmdir()
+    deleted = refresh_navigation(root, changed_path="wiki/concepts/transient/page.md")
+    assert deleted["ok"] is True
+    deleted_concepts = (root / "wiki/concepts/index.md").read_bytes()
+    refresh_navigation(root)
+    assert (root / "wiki/concepts/index.md").read_bytes() == deleted_concepts
+
+    entity_page = root / "wiki/entities/customer/customer.md"
+    entity_page.write_text(entity_page.read_text(encoding="utf-8").replace("title: Customer", "title: Customer Updated"), encoding="utf-8")
+    entity_result = refresh_navigation(root, changed_path="wiki/entities/customer/customer.md")
+    assert entity_result["ok"] is True
+    incremental_entities = (root / "wiki/entities/index.md").read_bytes()
+    refresh_navigation(root)
+    assert (root / "wiki/entities/index.md").read_bytes() == incremental_entities
+
+
+def test_incremental_navigation_bootstraps_a_new_project_without_touching_other_projects(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/projects/existing/specs/page.md", "Existing")
+    refresh_navigation(root)
+    existing_before = (root / "wiki/projects/existing/index.md").read_bytes()
+
+    new_path = "wiki/projects/new-project/specs/page.md"
+    _write(root, new_path, "New Project")
+    result = refresh_navigation(root, changed_path=new_path)
+
+    assert result["ok"] is True
+    assert set(result["written"]) == {
+        "wiki/projects/new-project/index.md",
+        "wiki/index.md",
+    }
+    assert (root / "wiki/projects/existing/index.md").read_bytes() == existing_before
+    incremental_project = (root / "wiki/projects/new-project/index.md").read_bytes()
+    incremental_top = (root / "wiki/index.md").read_bytes()
+    refresh_navigation(root)
+    assert (root / "wiki/projects/new-project/index.md").read_bytes() == incremental_project
+    assert (root / "wiki/index.md").read_bytes() == incremental_top
+
+
+def test_incremental_navigation_missing_index_fails_without_full_rebuild(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/invoice.md", "Invoice")
+    refresh_navigation(root)
+    (root / "wiki/concepts/index.md").unlink()
+    top_before = (root / "wiki/index.md").read_bytes()
+
+    result = refresh_navigation(root, changed_path="wiki/concepts/invoice.md")
+
+    assert result == {
+        "ok": False,
+        "code": "incremental_navigation_index_missing",
+        "path": "wiki/concepts/index.md",
+        "error": "concept navigation index is missing; run the explicit navigation rebuild",
+    }
+    assert (root / "wiki/index.md").read_bytes() == top_before
+
 def test_refresh_indexes_creates_project_index_grouped_by_subdirectories(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

@@ -166,10 +166,16 @@ class FormalPageAdapter:
             return RetrievalIndexStore(context.root, scope="active").update_page_from_file(target)
 
         def navigation() -> dict[str, object]:
-            return refresh_navigation(context.root)
+            return refresh_navigation(context.root, changed_path=operation.page_path)
 
         def overview() -> dict[str, object]:
-            return refresh_overview(context.root)
+            if operation.base_hash is None:
+                return refresh_overview(
+                    context.root,
+                    changed_path=operation.page_path,
+                    changed_page_state="created",
+                )
+            return refresh_overview(context.root, changed_path=operation.page_path)
 
         def audit_log() -> dict[str, object]:
             return append_log_entry(
