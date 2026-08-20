@@ -72,29 +72,6 @@ def _freeze_recovery(value: RecoveryAssembly) -> RecoveryAssembly:
 
 
 @dataclass(frozen=True)
-class QueryExecutionOutcome:
-    """Immutable read model published once a query execution is complete."""
-
-    selected: tuple[Mapping[str, Any], ...]
-    context_items: tuple[Mapping[str, Any], ...]
-    recovery: RecoveryAssembly
-    status: Mapping[str, Any]
-    raw_availability: RawAvailability
-    raw_fts_hits: int
-    relaxed_fts_hits: int
-    raw_index_warning: str
-    coverage_fallback: bool
-    lexical_mode: str
-    expansion_suggestions: tuple[str, ...]
-    uncovered_latin_terms: tuple[str, ...]
-    discovery: Mapping[str, Any]
-    discovery_entities: tuple[Mapping[str, Any], ...]
-    discovery_source_items: tuple[Mapping[str, Any], ...]
-    batch_payload: Mapping[str, Any]
-    discovery_requested: bool
-
-
-@dataclass(frozen=True)
 class QueryRequestView:
     """Immutable request-time inputs shared by all execution stages."""
 
@@ -110,6 +87,10 @@ class QueryRequestView:
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid"
     hard_budget_tokens: int = 16_000
     confirmation_token: str | None = None
+    public_scope: str = "auto"
+    lexical_enabled: bool = True
+    include_context_pack: bool = True
+    debug: bool = False
 
     def __post_init__(self) -> None:
         # Freeze the view boundary while preserving list-valued frontmatter
@@ -202,10 +183,10 @@ class QueryExecutionContext:
     )
     _sealed: bool = field(default=False, init=False, repr=False)
     _executed: bool = field(default=False, init=False, repr=False)
-    _outcome: QueryExecutionOutcome | None = field(default=None, init=False, repr=False)
+    _frozen_view: QueryExecutionView | None = field(default=None, init=False, repr=False)
 
     def __setattr__(self, name: str, value: object) -> None:
-        if name not in {"_sealed", "_outcome"} and getattr(self, "_sealed", False):
+        if name not in {"_sealed", "_frozen_view"} and getattr(self, "_sealed", False):
             raise RuntimeError("query execution context is sealed")
         object.__setattr__(self, name, value)
 
@@ -421,34 +402,28 @@ class QueryExecutionContext:
             raise RuntimeError("query execution recovery has not been initialized")
         return self.recovery
 
-    def outcome(self) -> QueryExecutionOutcome:
-        """Freeze and publish the complete state for the envelope assembler."""
+    def outcome(self) -> QueryExecutionView:
+        """Freeze and publish the execution view, then seal this context."""
 
-        if self._outcome is not None:
-            return self._outcome
-        recovery = self.recovery_or_raise()
-        outcome = QueryExecutionOutcome(
-            selected=_freeze_value(self.selected),
-            context_items=_freeze_value(self.context_items),
-            recovery=_freeze_recovery(recovery),
-            status=_freeze_value(self.status),
-            raw_availability=self._raw_availability,
-            raw_fts_hits=self.raw_fts_hits,
-            relaxed_fts_hits=self.relaxed_fts_hits,
-            raw_index_warning=self.raw_index_warning,
-            coverage_fallback=self.coverage_fallback,
-            lexical_mode=self.lexical_mode,
-            expansion_suggestions=_freeze_value(self.expansion_suggestions),
-            uncovered_latin_terms=_freeze_value(self.uncovered_latin_terms),
-            discovery=_freeze_value(self.discovery),
-            discovery_entities=_freeze_value(self.discovery_entities),
-            discovery_source_items=_freeze_value(self.discovery_source_items),
-            batch_payload=_freeze_value(self.batch_payload),
-            discovery_requested=self.discovery_requested,
+        if self._frozen_view is not None:
+            return self._frozen_view
+        view = self._execution_view()
+        frozen_view = replace(
+            view,
+            selected=_freeze_value(view.selected),
+            context_items=_freeze_value(view.context_items),
+            recovery=_freeze_recovery(view.recovery),
+            status=_freeze_value(view.status),
+            expansion_suggestions=_freeze_value(view.expansion_suggestions),
+            uncovered_latin_terms=_freeze_value(view.uncovered_latin_terms),
+            discovery=_freeze_value(view.discovery),
+            discovery_entities=_freeze_value(view.discovery_entities),
+            discovery_source_items=_freeze_value(view.discovery_source_items),
+            batch_payload=_freeze_value(view.batch_payload),
         )
-        object.__setattr__(self, "_outcome", outcome)
+        object.__setattr__(self, "_frozen_view", frozen_view)
         object.__setattr__(self, "_sealed", True)
-        return outcome
+        return frozen_view
 
     def _run_fallback_recovery(self, request_view: QueryRequestView) -> None:
         """Run fallback branches and retain their state on this context."""

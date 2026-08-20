@@ -67,7 +67,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 质量门禁的评测指标、identity 和安全报告由 [retrieval_eval_report.py](src/retrieval/retrieval_eval_report.py) 统一持有；缺少兼容 identity 或最小 holdout 样本时结论使用 `unproven`，保持 `off`/`shadow`，不得默认放行生产 enforce。修改门禁字段、状态或介入位置时，同步更新 `query-quality-gate` spec 与 Query V2/评测回归。
 
-[query_execution_context.py](src/retrieval/query_execution_context.py) 是单次 Query V2 执行状态、raw/fallback 分支迁移和冻结 `outcome()` 视图的唯一 owner。`QueryRequestView` 是该 seam 的冻结请求值对象；pipeline 只调用公开的 `QueryExecutionContext.execute(request_view)`，由 context 封装 fallback -> discovery -> batch 顺序。公共投影由 query_pipeline 的模块级纯函数在 `outcome()` 封存前完成，随后只冻结一次并直读；terminal telemetry 由 server wrapper 单点写入，`QueryTelemetry` 只在首次写入前建表/迁移。
+[query_execution_context.py](src/retrieval/query_execution_context.py) 是单次 Query V2 执行状态、raw/fallback 分支迁移和冻结 `outcome()` 视图的唯一 owner。`QueryRequestView` 是该 seam 的冻结请求值对象；pipeline 只调用公开的 `QueryExecutionContext.execute(request_view)`，由 context 封装 fallback -> discovery -> batch 顺序。公共投影由 query_pipeline 的模块级纯函数在 `outcome()` 封存前完成，`outcome()` 只返回同一 `QueryExecutionView` 的递归冻结形态并封存上下文，随后只冻结一次并直读；terminal telemetry 由 server wrapper 单点写入，`QueryTelemetry` 只在首次写入前建表/迁移。
 
 [query_recall_policy.py](src/retrieval/query_recall_policy.py) 是 Query V2 召回与回退启发式的唯一 owner：意图分类、查询扩展、relaxed/raw 候选、coverage 合并、自适应扩展和步骤计数均由此模块提供；execution context 只负责状态编排，不复制这些策略。
 

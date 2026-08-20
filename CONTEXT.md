@@ -65,7 +65,7 @@ _避免使用_：查询执行上下文、查询流水线编排、重复实现回
 _避免使用_：全库扫描、重建索引、查询执行上下文、策略副本
 
 **查询执行上下文（QueryExecutionContext）**：
-`src/retrieval/query_execution_context.py` 中的 `QueryExecutionContext` 是一次 Query V2 调用的可变执行状态 owner，持有本次查询的 root、检索 store、取消状态、执行 status，以及按需创建并记忆化的 raw store 与 raw snapshot；`QueryRequestView` 是由 pipeline 构造的冻结请求值对象，承载 question、effective scope、filters、top_k、metadata、intent、effective RRF scale 及 discovery/batch 所需的请求配置。pipeline 只调用公开的 `execute(request_view)`，context 在其中封装 fallback → discovery → batch 的顺序，召回策略委托给 `query_recall_policy.py`。raw 分支把 raw index 规范化为 `fresh`、`stale`、`missing`，在 `coverage`、`all_coverage` 和 `raw_zero` 分支中迁移 selected、recovery/context_items、命中计数、warning、词法模式与 coverage 标记；非 fresh 状态使用空 raw snapshot，不伪造 raw 候选。公共投影在 `outcome()` 封存前完成，`outcome()` 随后只发布一次递归冻结的 `QueryExecutionOutcome` 只读视图并封存上下文；它不是公开响应对象本身。
+`src/retrieval/query_execution_context.py` 中的 `QueryExecutionContext` 是一次 Query V2 调用的可变执行状态 owner，持有本次查询的 root、检索 store、取消状态、执行 status，以及按需创建并记忆化的 raw store 与 raw snapshot；`QueryRequestView` 是由 pipeline 构造的冻结请求值对象，承载 question、public/effective scope、filters、top_k、metadata、intent、effective RRF scale、投影选项及 discovery/batch 所需的请求配置。pipeline 只调用公开的 `execute(request_view)`，context 在其中封装 fallback → discovery → batch 的顺序，召回策略委托给 `query_recall_policy.py`。raw 分支把 raw index 规范化为 `fresh`、`stale`、`missing`，在 `coverage`、`all_coverage` 和 `raw_zero` 分支中迁移 selected、recovery/context_items、命中计数、warning、词法模式与 coverage 标记；非 fresh 状态使用空 raw snapshot，不伪造 raw 候选。公共投影在 `outcome()` 封存前完成，`outcome()` 随后只发布一次递归冻结的执行视图只读形态并封存上下文；它不是公开响应对象本身。
 _避免使用_：召回/扩展启发式、紧凑正文、context pack、检索结果
 
 **Context Pack（紧凑正文）**：

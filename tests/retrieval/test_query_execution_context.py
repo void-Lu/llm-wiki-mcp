@@ -6,6 +6,7 @@ import pytest
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_execution_context import (
     QueryExecutionContext,
+    QueryExecutionView,
     QueryFilters,
     QueryRequestView,
 )
@@ -216,6 +217,7 @@ def test_query_execution_context_outcome_freezes_state_and_is_read_once(tmp_path
     outcome = context.outcome()
 
     assert outcome is context.outcome()
+    assert isinstance(outcome, QueryExecutionView)
     assert outcome.selected == ({"score": 1.0},)
     assert outcome.raw_fts_hits == 2
     assert outcome.coverage_fallback is True
