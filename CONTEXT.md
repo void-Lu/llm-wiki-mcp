@@ -37,7 +37,7 @@ _避免使用_：全文搜索、相关性查询、知识库搜索、页面目录
 _避免使用_：绝对路径、模糊查询、数据库行号、裸相对路径
 
 **正文预算（Body Budget）**：
-一次精确读取允许返回的最大正文字数；服务端配置给出硬上限，调用方只能主动缩小，不能通过请求扩张。
+一次精确读取允许返回的最大正文字数；服务端配置给出硬上限，调用方只能主动缩小，不能通过请求扩张。传入 `max_total_bytes` 时服务端隐式启用正文读取并按读取游标顺序自动续读拼接：默认总量 64 KiB、硬上限 256 KiB、单页仍受页预算约束；超过硬上限时确定性 clamp 并返回 `total_body_budget_clamped` 警告，省略该参数保持单页行为。
 _避免使用_：完整文件保证、无限上下文、调用方上限
 
 **读取游标（Read Cursor）**：
@@ -73,7 +73,7 @@ _避免使用_：召回/扩展启发式、紧凑正文、context pack、检索�
 _避免使用_：查询执行上下文、执行状态、完整页面
 
 **目录发现（Catalog Discovery）**：
-`src/retrieval/discovery.py` 是 Query V2 正交检索分支的纯发现 owner，从查询语料快照出发按锚点、通配符与别名模式有界枚举未解析实体与证据目录项；它产出冻结的发现结果，不持有执行状态、检索 store 或取消器。
+`src/retrieval/discovery.py` 是 Query V2 正交检索分支的纯发现 owner，从查询语料快照出发按锚点、通配符与别名模式有界枚举未解析实体与证据目录项；它产出冻结的发现结果，不持有执行状态、检索 store 或取消器。公共投影只暴露有界摘要（`candidate_entities` 至多 40 项、整个 discovery JSON 投影不超过 128 KiB，附 `total_count`/`returned_count`/`truncated`），内部候选全集仅供 batch/confirmation 消费；候选延续由 batch `continuation_token` 负责，不提供 discovery 候选 cursor。
 _避免使用_：全库扫描、枚举工具、实时目录读取
 
 **实体批处理（Entity Batch）**：
@@ -81,7 +81,7 @@ _避免使用_：全库扫描、枚举工具、实时目录读取
 _避免使用_：并发扇出、批量重试、目录发现
 
 **校准产物（Calibration Artifact）**：
-CLI `quality-gate calibrate` 从冻结评测数据集生成的 branch-relative 阈值产物，身份由 dataset manifest 冻结；运行时经 vault 配置 `quality_gate.artifact_path`（vault 相对解析）定位。产物缺失、policy_version 或身份不匹配时 fail-open（一律 keep）并携带诊断，不得静默降级为「无门禁」。
+CLI `quality-gate calibrate` 从冻结评测数据集生成的 branch-relative 阈值产物，身份由 dataset manifest 冻结；运行时经 vault 配置 `quality_gate.artifact_path`（vault 相对解析，绝对路径按原值）定位。产物缺失、policy_version 或身份不匹配时 fail-open（一律 keep）并携带诊断，不得静默降级为「无门禁」。
 _避免使用_：默认阈值表、全局阈值配置、无门禁模式
 
 **阈值视图（Threshold View）**：

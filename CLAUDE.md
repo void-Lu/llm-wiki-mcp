@@ -89,7 +89,7 @@ Query V2 支持 `expansion_terms` 模糊词扩展和 `filters` 元数据过滤�
 
 [wikilinks.py](src/wiki/wikilinks.py) 提供 wikilink 格式化和解析工具函数。query、update 等模块统一使用此模块处理 wikilink，不内嵌正则。
 
-[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、版本与运行身份。MCP 工具为 `wiki_status`；status 只读取已存在的 `QueryExecutionRegistry`，首次查询前返回 `active/pending=0`，不物化执行 registry。
+[wiki_files.py](src/wiki/wiki_files.py) 只提供 `wiki_status`：vault 结构、检索/vector index、版本与运行身份。MCP 工具为 `wiki_status`；执行 registry 的只读状态查询在 server 层 wrapper（只读取已存在的 `QueryExecutionRegistry`，首次查询前返回 `active/pending=0`，不物化执行 registry）。
 
 [content_catalog.py](src/wiki/content_catalog.py)（含 [catalog_cursor.py](src/wiki/catalog_cursor.py)、[content_reference.py](src/wiki/content_reference.py)）是 `wiki_list`/`wiki_get` 的只读 catalog 后端：metadata 分页 + opaque `content_ref`，不读正文。
 
