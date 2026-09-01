@@ -48,7 +48,12 @@ uv run llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --outp
 uv run llm-wiki-mcp vector status --vault <path>
 uv run llm-wiki-mcp vector build --vault <path> --model-path <local-bge-m3-path>
 uv run llm-wiki-mcp vector update --vault <path> --model-path <local-bge-m3-path>
+uv run llm-wiki-mcp raw-replace plan --vault <path> --source-root <external-raw-source-path> --target-path <vault-relative-raw-path>
+uv run llm-wiki-mcp raw-replace apply --vault <path> --plan-id <plan-id>
+uv run llm-wiki-mcp raw-replace recover --vault <path> --plan-id <plan-id>
 ```
+
+`raw-replace plan` 只生成迁移计划；`apply` 会切换 Vault 内 Raw Source、重写正式 Wiki 的来源引用和正文 Raw 链接，并显式重建 Raw/active 检索索引。若 apply 在目录切换阶段中断，先用 `recover` 从外部 backup 恢复旧树，再重试原 plan。执行 `apply` 前应人工检查 plan，并保留 Vault 外部的旧 Raw 备份直到验收完成。
 
 ## 配置
 

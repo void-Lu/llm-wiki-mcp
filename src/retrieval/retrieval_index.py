@@ -39,6 +39,7 @@ from wiki.wiki_paths import RETRIEVAL_DB_BY_SCOPE, filesystem_path
 
 RETRIEVAL_SCHEMA_VERSION = 2
 StoreScope = Literal["active", "archive", "raw"]
+RAW_AUXILIARY_SEGMENTS = frozenset({"manifest", "_deprecated_archive"})
 
 
 class RetrievalIndexError(RuntimeError):
@@ -721,7 +722,12 @@ def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:
     if scope == "archive":
         return path.startswith("archives/bundles/")
     if scope == "raw":
-        return path.startswith("raw/sources/") and not path.startswith("raw/sources/chat/")
+        lowered = path.casefold()
+        return (
+            lowered.startswith("raw/sources/")
+            and not lowered.startswith("raw/sources/chat/")
+            and not is_raw_auxiliary_path(lowered)
+        )
     # Legacy chatlogs have completed their retention period.  They are moved
     # into immutable archive bundles by the legacy migration and must never
     # re-enter the active retrieval projection while a pre-migration file is
@@ -736,6 +742,13 @@ def eligible_path(relative_path: str, *, scope: StoreScope) -> bool:
     if name in {"index.md", "overview.md", "log.md"}:
         return False
     return any(path.startswith(prefix) for prefix in ("wiki/concepts/", "wiki/entities/", "wiki/projects/"))
+
+
+def is_raw_auxiliary_path(relative_path: str) -> bool:
+    parts = relative_path.replace("\\", "/").casefold().split("/")
+    return len(parts) > 2 and parts[0:2] == ["raw", "sources"] and any(
+        part in RAW_AUXILIARY_SEGMENTS for part in parts[2:]
+    )
 
 
 def _chat_session(relative_path: str) -> str:

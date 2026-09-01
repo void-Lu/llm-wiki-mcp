@@ -36,6 +36,7 @@ from archive.archive_service import ArchiveService
 from wiki.page_repair import PageRepairService
 from wiki.privacy_audit import PrivacyAuditError, PrivacyAuditService
 from wiki.provenance_migration import ProvenanceMigrationError, ProvenanceMigrationService
+from wiki.raw_replacement import RawReplacementError, RawReplacementService
 from wiki.wiki_paths import PAGE_STATE_DB, STATE_DB
 
 
@@ -202,6 +203,19 @@ def _build_parser() -> argparse.ArgumentParser:
     archive_rebuild = archive_actions.add_parser("rebuild-index"); archive_rebuild.add_argument("--vault", required=True)
     archive_purge = archive_actions.add_parser("purge"); archive_purge.add_argument("--vault", required=True); archive_purge.add_argument("--archive-id", required=True); archive_purge.add_argument("--forget", action="store_true"); archive_purge.add_argument("--authorize", action="store_true")
     archive_migrate = archive_actions.add_parser("migrate"); archive_migrate.add_argument("--vault", required=True); archive_migrate.add_argument("--apply", action="store_true")
+
+    raw_replace_parser = subparsers.add_parser("raw-replace", help="Admin-only replacement of an external Raw Source tree.")
+    raw_replace_actions = raw_replace_parser.add_subparsers(dest="raw_replace_action", required=True)
+    raw_replace_plan = raw_replace_actions.add_parser("plan", help="Plan a Raw Source tree replacement without changing Wiki facts.")
+    raw_replace_plan.add_argument("--vault", required=True)
+    raw_replace_plan.add_argument("--source-root", required=True)
+    raw_replace_plan.add_argument("--target-path", required=True, help="Vault-relative Raw Source tree to replace.")
+    raw_replace_apply = raw_replace_actions.add_parser("apply", help="Apply a previously reviewed Raw Source replacement plan.")
+    raw_replace_apply.add_argument("--vault", required=True)
+    raw_replace_apply.add_argument("--plan-id", required=True)
+    raw_replace_recover = raw_replace_actions.add_parser("recover", help="Recover an interrupted Raw Source replacement from its external backup.")
+    raw_replace_recover.add_argument("--vault", required=True)
+    raw_replace_recover.add_argument("--plan-id", required=True)
 
     repair_parser = subparsers.add_parser("repair", help="Admin-only repair of committed page projections.")
     repair_actions = repair_parser.add_subparsers(dest="repair_action", required=True)
@@ -499,6 +513,24 @@ def _run_archive(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 2
 
 
+def _run_raw_replace(args: argparse.Namespace) -> int:
+    if args.raw_replace_action == "plan":
+        service = RawReplacementService(args.vault, target_path=args.target_path)
+        _print_json(service.plan(args.source_root))
+        return 0
+    if args.raw_replace_action == "apply":
+        service = RawReplacementService(args.vault)
+        payload = service.apply(args.plan_id)
+        _print_json(payload)
+        return 0 if payload.get("ok") and payload.get("state") in {"completed", "already_applied"} else 2
+    if args.raw_replace_action == "recover":
+        service = RawReplacementService(args.vault)
+        payload = service.recover(args.plan_id)
+        _print_json(payload)
+        return 0 if payload.get("ok") and payload.get("state") == "recovered" else 2
+    raise ValueError(f"unknown raw-replace action: {args.raw_replace_action}")
+
+
 def _run_repair(args: argparse.Namespace) -> int:
     if args.repair_action == "page-operation":
         service = PageRepairService(args.vault)
@@ -561,6 +593,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_index(args)
         if args.command == "archive":
             return _run_archive(args)
+        if args.command == "raw-replace":
+            return _run_raw_replace(args)
         if args.command == "repair":
             return _run_repair(args)
     except RuntimeConfigError as exc:
@@ -580,6 +614,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except (ProvenanceMigrationError, PrivacyAuditError) as exc:
         _print_json(_error_payload(exc.code, "administrative plan could not be completed"))
+        return 2
+    except RawReplacementError as exc:
+        _print_json(_error_payload(exc.code, "raw source replacement could not be completed"))
         return 2
     except ValueError as exc:
         _print_json(_error_payload("invalid_config", str(exc)))

@@ -27,3 +27,6 @@ docs/plan/
 docs/superpowers/
 docs/*
 !docs/adr/
+/.netsuite-mcp/logs/
+/.vscode/mcp.json
+/.mcp.json
