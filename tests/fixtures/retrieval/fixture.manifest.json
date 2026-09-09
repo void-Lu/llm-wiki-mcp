@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "dataset_id": "ci-retrieval-fixture",
+  "revision": "2026-07-27.1",
+  "abstention_threshold": 0.5
+}

@@ -1,76 +1,32 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
+__pycache__
 .pytest_cache/
-*.egg-info/
-*.egg
-dist/
-build/
-.eggs/
-
-# Local/generated project-adjacent content
-rag/
-docs/
-
-# Virtual environment
 .venv/
-venv/
-env/
-
-# RAG index data (regenerated from vault)
-.rag-index/
-
-# Local embedding model cache (preloaded/regenerated locally)
-.models/
-
-# Local environment and secrets
-.env
-.env/
-.env.*
-!.env.example
-.envrc
-config.local.json
-config.local.yml
-config.local.yaml
-settings.local.json
-settings.local.yml
-settings.local.yaml
-*.pem
-*.key
-*.p12
-*.pfx
-*.jks
-*.keystore
-credentials*.json
-*credentials*.json
-secrets*.json
-*secret*.json
-service-account*.json
-*-credentials.json
-*-secrets.json
-
-# IDE / local editor config
 .vscode/
-.idea/
-.cursor/
-*.swp
-*.swo
-*~
-.claude/
-.codegraph/
-.omc/
-.omx/
-archive/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Model cache (downloaded automatically)
-.cache/
+*.egg-info/
+rag/
+.agents
+.claude
+.codegraph
+.codex
+.github
+.netsuite-mcp/logs
+.pytest_cache
+.ruff_cache
+.trellis
+.venv
+.vscode
+dist
+scripts
+src/__pycache__
+src/llm_wiki_mcp.egg-info
+tests/__pycache__
+tests/fixtures
+build
+.tmp
+docs/plan/
+docs/superpowers/
+docs/*
+!docs/adr/
+/.netsuite-mcp/logs/
+/.vscode/mcp.json
+/.mcp.json

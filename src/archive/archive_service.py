@@ -1,0 +1,472 @@
+"""Durable, recoverable archive / restore / purge service.
+
+The archive bundle is the fact of record.  SQLite is deliberately only an
+operation journal and rebuildable projection; no code assumes a cross-medium
+transaction exists.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from hashlib import sha256
+import json
+import os
+from pathlib import Path
+import shutil
+import sqlite3
+from typing import Any, Iterator
+from uuid import uuid4
+
+from archive.archive_manifest import content_hash, verify_bundle, write_manifest
+from archive.archive_models import ArchiveAttachment, ArchiveError, ArchiveItem, ArchiveManifest, ArchivePlan, Tombstone
+from archive.archive_planner import ArchivePlanner
+from archive.archive_schema import ARCHIVE_TABLE_DDL
+from retrieval.retrieval_index import RetrievalIndexStore, page_from_file
+from wiki.atomic_file import current_fault
+from wiki.projection_profile import projection_stages
+from wiki.wiki_paths import STATE_DB
+
+
+_TRANSITIONS = {
+    "planned": {"staged", "rolling_back", "failed_recoverable"},
+    "staged": {"pending", "rolling_back", "failed_recoverable"},
+    "pending": {"detaching", "rolling_back", "failed_recoverable"},
+    "detaching": {"committed", "rolling_back", "failed_recoverable"},
+    "failed_recoverable": {"rolling_back", "detaching"},
+    "rolling_back": {"rolled_back"},
+    "committed": set(), "rolled_back": set(),
+}
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class ArchiveService:
+    def __init__(self, vault_root: str | Path, *, actor: str = "unknown") -> None:
+        self.root = Path(vault_root).expanduser().resolve()
+        self.actor = actor
+        self.archive_root = self.root / "archives"
+        self.state_path = self.root / STATE_DB
+        self._planner: ArchivePlanner | None = None
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.state_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn; conn.commit()
+        except Exception:
+            conn.rollback(); raise
+        finally:
+            conn.close()
+
+    def _ensure_state(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connection() as conn:
+            conn.executescript(ARCHIVE_TABLE_DDL)
+
+    def _get_planner(self) -> ArchivePlanner:
+        if self._planner is None:
+            self._planner = ArchivePlanner(self.root)
+        return self._planner
+
+    def plan_archive(
+        self,
+        targets: str | list[str],
+        *,
+        reason: str = "manual",
+        cascade: bool = False,
+        force_namespace: str | None = None,
+        restorable: bool = True,
+        attachments: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_state()
+        plan = self._get_planner().archive_plan(
+            targets,
+            reason=reason,
+            cascade=cascade,
+            actor=self.actor,
+            force_namespace=force_namespace,
+            restorable=restorable,
+            attachments=attachments,
+        )
+        self._save_plan(plan)
+        return self._plan_payload(plan)
+
+    def plan_restore(self, archive_id: str, *, targets: list[str] | None = None) -> dict[str, Any]:
+        self._ensure_state()
+        plan = self._get_planner().restore_plan(archive_id, targets=targets)
+        self._save_plan(plan)
+        return self._plan_payload(plan)
+
+    @staticmethod
+    def _plan_payload(plan: ArchivePlan) -> dict[str, Any]:
+        payload = plan.to_dict()
+        if plan.blockers:
+            payload["code"] = str(plan.blockers[0].get("code", "archive_plan_blocked"))
+        return payload
+
+    def apply(self, plan_id: str) -> dict[str, Any]:
+        self._ensure_state()
+        try:
+            plan = self._load_plan(plan_id)
+        except ArchiveError as exc:
+            return {"ok": False, "code": exc.code, "error": str(exc)}
+        if plan.blockers:
+            return {
+                "ok": False,
+                "code": str(plan.blockers[0].get("code", "archive_plan_blocked")),
+                "blockers": list(plan.blockers),
+            }
+        if plan.operation_type == "archive":
+            return self._apply_archive(plan)
+        return self._apply_restore(plan)
+
+    def _save_plan(self, plan: ArchivePlan) -> None:
+        payload = json.dumps(plan.to_dict(), ensure_ascii=False, sort_keys=True)
+        with self._connection() as conn:
+            conn.execute("INSERT INTO archive_plans(plan_id,payload,created_at,expires_at) VALUES(?,?,?,?)", (plan.plan_id, payload, plan.created_at, plan.expires_at))
+
+    def _load_plan(self, plan_id: str) -> ArchivePlan:
+        with self._connection() as conn:
+            row = conn.execute("SELECT payload,expires_at,used FROM archive_plans WHERE plan_id=?", (plan_id,)).fetchone()
+            if row is None: raise ArchiveError("archive_plan_required", "a valid plan_id is required")
+            if row["used"]: raise ArchiveError("archive_plan_used", "archive plan was already applied")
+            if datetime.fromisoformat(row["expires_at"]) < datetime.now(UTC): raise ArchiveError("archive_plan_expired", "archive plan has expired")
+            raw = json.loads(row["payload"])
+        items = tuple(ArchiveItem(item["original_path"], item["archive_path"], item["content_hash"], item["kind"], tuple(item.get("dependencies", [])), tuple(item.get("passage_ids", []))) for item in raw["items"])
+        attachments = tuple(
+            ArchiveAttachment(
+                archive_path=str(item["archive_path"]),
+                content_hash=str(item["content_hash"]),
+                content=item.get("content"),
+            )
+            for item in raw.get("attachments", [])
+        )
+        return ArchivePlan(
+            plan_id=raw["plan_id"],
+            operation_type=raw["operation_type"],
+            archive_id=raw.get("archive_id"),
+            created_at=raw["created_at"],
+            expires_at=raw["expires_at"],
+            items=items,
+            plan_hash=raw["plan_hash"],
+            reason=raw.get("reason"),
+            blockers=tuple(raw.get("blockers", [])),
+            cascade=bool(raw.get("cascade")),
+            force_namespace=raw.get("force_namespace"),
+            restorable=bool(raw.get("restorable", True)),
+            attachments=attachments,
+        )
+
+    def _operation(self, plan: ArchivePlan, archive_id: str) -> str:
+        operation_id = uuid4().hex
+        now = _now()
+        with self._connection() as conn:
+            conn.execute("INSERT INTO archive_operations VALUES(?,?,?,?,?,?,?,?,NULL)", (operation_id, archive_id, plan.operation_type, "planned", plan.plan_hash, self.actor, now, now))
+            conn.executemany("INSERT INTO archive_operation_items VALUES(?,?,?,?,?)", [(operation_id, item.original_path, item.content_hash, item.archive_path, item.kind) for item in plan.items])
+        return operation_id
+
+    def _transition(self, operation_id: str, new_state: str) -> None:
+        with self._connection() as conn:
+            row = conn.execute("SELECT state FROM archive_operations WHERE operation_id=?", (operation_id,)).fetchone()
+            if row is None or new_state not in _TRANSITIONS.get(row["state"], set()):
+                raise ArchiveError("invalid_archive_transition", "archive operation cannot transition to requested state")
+            conn.execute("UPDATE archive_operations SET state=?,updated_at=? WHERE operation_id=?", (new_state, _now(), operation_id))
+        current_fault()(new_state)
+
+    def _apply_archive(self, plan: ArchivePlan) -> dict[str, Any]:
+        # Re-plan before touching the filesystem: plan payload contains the CAS hashes.
+        attachment_contents = {
+            attachment.archive_path: attachment.content
+            for attachment in plan.attachments
+            if attachment.content is not None
+        }
+        current = self._get_planner().archive_plan(
+            [item.original_path for item in plan.items],
+            reason=plan.reason or "manual",
+            cascade=plan.cascade,
+            actor=self.actor,
+            force_namespace=plan.force_namespace,
+            restorable=plan.restorable,
+            attachments=attachment_contents,
+        )
+        if current.blockers: return {"ok": False, "code": current.blockers[0]["code"], "blockers": list(current.blockers)}
+        if {item.original_path: item.content_hash for item in current.items} != {item.original_path: item.content_hash for item in plan.items}:
+            return {"ok": False, "code": "archive_plan_drift"}
+        if {item.archive_path: item.content_hash for item in current.attachments} != {item.archive_path: item.content_hash for item in plan.attachments}:
+            return {"ok": False, "code": "archive_plan_drift"}
+        archive_id = self._archive_id()
+        operation_id = self._operation(plan, archive_id)
+        staging = self.archive_root / ".staging" / operation_id
+        pending = self.archive_root / ".pending" / operation_id
+        try:
+            manifest = ArchiveManifest(
+                archive_id,
+                operation_id,
+                plan.reason or "manual",
+                _now(),
+                plan.items,
+                actor=self.actor,
+                restorable=plan.restorable,
+                attachments=tuple(ArchiveAttachment(item.archive_path, item.content_hash) for item in plan.attachments),
+            )
+            for item in plan.items:
+                source = self.root / item.original_path
+                target = staging / item.archive_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                if content_hash(target) != item.content_hash: raise ArchiveError("archive_hash_mismatch", "staged archive payload differs")
+            for attachment in plan.attachments:
+                if attachment.content is None:
+                    raise ArchiveError("archive_plan_invalid", "archive attachment content is missing")
+                target = staging / attachment.archive_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("w", encoding="utf-8", newline="") as handle:
+                    handle.write(attachment.content)
+                if content_hash(target) != attachment.content_hash:
+                    raise ArchiveError("archive_hash_mismatch", "staged archive attachment differs")
+            write_manifest(staging, manifest)
+            self._transition(operation_id, "staged")
+            pending.parent.mkdir(parents=True, exist_ok=True); os.replace(staging, pending)
+            self._transition(operation_id, "pending")
+            # Keep rollback payload beside the pending bundle, rather than
+            # inside it, so the immutable bundle never contains recovery data.
+            recovery = self._recovery_path(operation_id)
+            recovery.mkdir(parents=True, exist_ok=True)
+            for item in plan.items:
+                source = self.root / item.original_path
+                if not source.exists() or content_hash(source) != item.content_hash: raise ArchiveError("archive_plan_drift", "active payload changed")
+                backup = recovery / item.original_path; backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source, backup)
+            self._transition(operation_id, "detaching")
+            for item in plan.items:
+                self._delete_active_index(item.original_path)
+            final = self.archive_root / "bundles" / archive_id[:4] / archive_id[4:6] / archive_id
+            final.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(pending, final)
+            self._transition(operation_id, "committed")
+            # Only the committed archive makes the rollback copy disposable.
+            shutil.rmtree(recovery, ignore_errors=True)
+            self._event(operation_id, archive_id, "archived", {"items": [item.original_path for item in plan.items]})
+            self._mark_plan_used(plan.plan_id)
+            index: dict[str, Any] = {"ok": True, "state": "not_applicable"}
+            for stage in projection_stages("archive"):
+                if stage == "retrieval":
+                    index = self.rebuild_archive_index()
+            return {"ok": True, "operation_id": operation_id, "archive_id": archive_id, "state": "committed", "archive_index": index}
+        except Exception as exc:
+            self._recover_operation(operation_id)
+            return {"ok": False, "code": getattr(exc, "code", "archive_apply_failed"), "error": str(exc), "operation_id": operation_id}
+
+    def _apply_restore(self, plan: ArchivePlan) -> dict[str, Any]:
+        if not plan.archive_id: return {"ok": False, "code": "archive_not_found"}
+        operation_id: str | None = None
+        try:
+            bundle = self._bundle(plan.archive_id); manifest = verify_bundle(self.root, bundle)
+            if not manifest.restorable: return {"ok": False, "code": "archive_not_restorable"}
+            operation_id = self._operation(plan, plan.archive_id)
+            for item in plan.items:
+                payload, target = bundle / item.archive_path, self.root / item.original_path
+                if content_hash(payload) != item.content_hash: raise ArchiveError("archive_hash_mismatch", "archive payload differs")
+                if target.exists() and content_hash(target) != item.content_hash: raise ArchiveError("restore_target_conflict", "restore would overwrite changed content")
+            staging = self.archive_root / ".staging" / operation_id
+            for item in plan.items:
+                target = staging / item.archive_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(bundle / item.archive_path, target)
+                if content_hash(target) != item.content_hash:
+                    raise ArchiveError("archive_hash_mismatch", "staged restore payload differs")
+            self._transition(operation_id, "staged")
+            for item in plan.items:
+                payload, target = staging / item.archive_path, self.root / item.original_path
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    # Record intent before the atomic move so recovery can remove
+                    # only files created by this unfinished restore operation.
+                    self._mark_restore_created(operation_id, item.original_path)
+                    os.replace(payload, target)
+                    self._update_active_index(item.original_path)
+            self._transition(operation_id, "pending"); self._transition(operation_id, "detaching"); self._transition(operation_id, "committed")
+            shutil.rmtree(staging, ignore_errors=True)
+            self._event(operation_id, plan.archive_id, "restored", {"items": [item.original_path for item in plan.items]})
+            self._mark_plan_used(plan.plan_id)
+            return {"ok": True, "operation_id": operation_id, "archive_id": plan.archive_id, "state": "committed"}
+        except Exception as exc:
+            if operation_id is not None:
+                self._recover_operation(operation_id)
+            return {"ok": False, "code": getattr(exc, "code", "restore_apply_failed"), "error": str(exc), "operation_id": operation_id}
+
+    def recover(self) -> dict[str, Any]:
+        self._ensure_state()
+        with self._connection() as conn:
+            rows = list(conn.execute("SELECT operation_id,state FROM archive_operations"))
+        ids = [row[0] for row in rows if row[1] not in {"committed", "rolled_back"}]
+        for operation_id, state in rows:
+            if state in {"committed", "rolled_back"}:
+                # A process can die after the journal transition but before
+                # the normal post-commit cleanup.  Completed operations no
+                # longer need a rollback copy.
+                shutil.rmtree(self._recovery_path(operation_id), ignore_errors=True)
+        return {"ok": True, "recovered": [self._recover_operation(operation_id) for operation_id in ids]}
+
+    def _recover_operation(self, operation_id: str) -> str:
+        with self._connection() as conn:
+            operation = conn.execute(
+                "SELECT archive_id,operation_type,state FROM archive_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            items = list(conn.execute(
+                "SELECT original_path,original_hash,staged_path FROM archive_operation_items WHERE operation_id=?", (operation_id,)
+            ))
+        if operation is None:
+            return operation_id
+        if operation["state"] in {"committed", "rolled_back"}:
+            shutil.rmtree(self._recovery_path(operation_id), ignore_errors=True)
+            return operation_id
+        pending = self.archive_root / ".pending" / operation_id
+        staging = self.archive_root / ".staging" / operation_id
+        if operation["operation_type"] == "restore":
+            for item in items:
+                if not str(item["staged_path"]).startswith("restore-created:"):
+                    continue
+                target = self.root / item["original_path"]
+                if target.is_file() and content_hash(target) == item["original_hash"]:
+                    target.unlink()
+                    try:
+                        self._delete_active_index(item["original_path"])
+                    except ArchiveError:
+                        pass
+            shutil.rmtree(staging, ignore_errors=True)
+        else:
+            # A crash after pending was renamed to the final path but before
+            # the committed journal transition must restore active payloads
+            # from that not-yet-committed bundle, then discard the bundle.
+            final = self.archive_root / "bundles" / operation["archive_id"][:4] / operation["archive_id"][4:6] / operation["archive_id"]
+            if final.exists():
+                for item in items:
+                    payload = final / item["staged_path"]
+                    target = self.root / item["original_path"]
+                    if payload.is_file() and content_hash(payload) == item["original_hash"] and not target.exists():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        temporary = target.with_name(target.name + f".recover-{operation_id}")
+                        shutil.copy2(payload, temporary)
+                        os.replace(temporary, target)
+                        self._update_active_index(item["original_path"])
+                shutil.rmtree(final, ignore_errors=True)
+        # Support both the current sibling recovery directory and an older
+        # in-flight operation that still placed recovery under .pending/<id>.
+        recovery_roots = [self._recovery_path(operation_id)]
+        legacy_recovery = pending / ".recovery"
+        if legacy_recovery != recovery_roots[0]:
+            recovery_roots.append(legacy_recovery)
+        for recovery_root in recovery_roots:
+            if not recovery_root.exists():
+                continue
+            for source in sorted(recovery_root.rglob("*")):
+                if source.is_file():
+                    target = self.root / source.relative_to(recovery_root); target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.exists(): os.replace(source, target)
+                    self._update_active_index(target.relative_to(self.root).as_posix())
+            shutil.rmtree(recovery_root, ignore_errors=True)
+        if pending.exists():
+            shutil.rmtree(pending, ignore_errors=True)
+        if staging.exists(): shutil.rmtree(staging, ignore_errors=True)
+        with self._connection() as conn:
+            row = conn.execute("SELECT state FROM archive_operations WHERE operation_id=?", (operation_id,)).fetchone()
+            if row and row["state"] not in {"committed", "rolled_back"}:
+                conn.execute("UPDATE archive_operations SET state='rolled_back',updated_at=? WHERE operation_id=?", (_now(), operation_id))
+        return operation_id
+
+    def purge(self, archive_id: str, *, authorized: bool = False, forget: bool = False, reason: str = "manual") -> dict[str, Any]:
+        self._ensure_state()
+        if not authorized: return {"ok": False, "code": "purge_not_authorized"}
+        try:
+            bundle = self._bundle(archive_id); manifest = verify_bundle(self.root, bundle)
+            # An archived raw source cannot be purged while it has returned to active use.
+            active = [item.original_path for item in manifest.items if (self.root / item.original_path).exists()]
+            active.extend(
+                dependent
+                for item in manifest.items
+                if item.kind == "raw"
+                for dependent in self._get_planner().dependencies.dependents(item.original_path)
+                if (self.root / dependent).is_file()
+            )
+            if active: return {"ok": False, "code": "purge_active_reference", "paths": active}
+            path_hashes = () if forget else tuple("sha256:" + sha256(item.original_path.encode()).hexdigest() for item in manifest.items)
+            tombstone = Tombstone(archive_id=archive_id, purged_at=_now(), reason=reason, path_hashes=path_hashes, forget=forget)
+            with self._connection() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO tombstones(archive_id,purged_at,reason,payload) VALUES(?,?,?,?)",
+                    (
+                        tombstone.archive_id,
+                        tombstone.purged_at,
+                        tombstone.reason,
+                        json.dumps(tombstone.to_dict(), ensure_ascii=False),
+                    ),
+                )
+            shutil.rmtree(bundle)
+            self._event(uuid4().hex, archive_id, "purged", {"count": len(manifest.items), "forget": forget})
+            for stage in projection_stages("archive"):
+                if stage == "retrieval":
+                    self.rebuild_archive_index()
+            return {"ok": True, "archive_id": archive_id, "tombstone": tombstone.to_dict()}
+        except ArchiveError as exc: return {"ok": False, "code": exc.code, "error": str(exc)}
+
+    def rebuild_archive_index(self) -> dict[str, Any]:
+        self._ensure_state()
+        store = RetrievalIndexStore(self.root, scope="archive")
+        try:
+            # Do not let a directory merely placed under bundles become
+            # searchable: the manifest and every payload must validate first.
+            pages = []
+            for bundle in sorted((self.archive_root / "bundles").glob("*/*/*")):
+                if not bundle.is_dir():
+                    continue
+                manifest = verify_bundle(self.root, bundle)
+                for item in manifest.items:
+                    page = page_from_file(self.root, bundle / item.archive_path, scope="archive")
+                    if page is not None:
+                        pages.append(page)
+            return store.build(pages)
+        except Exception as exc:
+            # Index is a projection: failure does not roll back a committed bundle.
+            try: store.mark_stale()
+            except Exception: pass
+            return {"ok": False, "code": "archive_index_stale", "state": "stale", "error": str(exc)}
+
+    def _bundle(self, archive_id: str) -> Path:
+        matches = list((self.archive_root / "bundles").glob(f"*/*/{archive_id}"))
+        if len(matches) != 1: raise ArchiveError("archive_not_found", "archive id was not found")
+        return matches[0]
+
+    def _recovery_path(self, operation_id: str) -> Path:
+        return self.archive_root / ".pending" / f"{operation_id}.recovery"
+
+    def _archive_id(self) -> str:
+        # Lexically sortable and collision-resistant; UTC timestamp remains audit friendly.
+        return datetime.now(UTC).strftime("%Y%m%d%H%M%S%f") + uuid4().hex[:10]
+
+    def _mark_plan_used(self, plan_id: str) -> None:
+        with self._connection() as conn: conn.execute("UPDATE archive_plans SET used=1 WHERE plan_id=?", (plan_id,))
+
+    def _mark_restore_created(self, operation_id: str, original_path: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE archive_operation_items SET staged_path=? WHERE operation_id=? AND original_path=?",
+                (f"restore-created:{original_path}", operation_id, original_path),
+            )
+
+    def _event(self, operation_id: str, archive_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        with self._connection() as conn: conn.execute("INSERT INTO archive_events(operation_id,archive_id,event_type,created_at,payload) VALUES(?,?,?,?,?)", (operation_id, archive_id, event_type, _now(), json.dumps(payload, ensure_ascii=False, sort_keys=True)))
+
+    def _delete_active_index(self, path: str) -> None:
+        status = RetrievalIndexStore(self.root).delete_page(path)
+        if status.get("ok") is False and status.get("code") not in {"index_missing"}: raise ArchiveError("active_index_update_failed", "could not update active retrieval index")
+
+    def _update_active_index(self, path: str) -> None:
+        store = RetrievalIndexStore(self.root)
+        result = store.update_page_from_file(self.root / path)
+        if result.get("state") == "rebuild_required" or result.get("code") == "not_eligible": return
+        if not result.get("ok"): raise ArchiveError("active_index_update_failed", "could not restore active retrieval index")
