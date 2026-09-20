@@ -129,6 +129,13 @@ def _refresh_overview_incremental(
     if page.is_file():
         current_generated = _read_frontmatter(page).get("generated") is True
     else:
+        if created is False:
+            # The deleted page is gone, so its count cannot be decremented
+            # here; the repair full channel corrects the drift, as with
+            # archive deletion below.
+            generated, manual = counts or (0, 0)
+            recent = read_recent_log_entries(root, limit=5)
+            return _write_overview(target, len(projects), generated, manual, recent)
         return {
             "ok": False,
             "code": "changed_path_missing",

@@ -36,6 +36,9 @@ def plan_intent_hash(page_path: str, base_hash: str, intent: PlanIntent) -> str:
     return sha256(payload.encode()).hexdigest()
 
 
+DELETED_PAGE_HASH = sha256(b"").hexdigest()
+
+
 def explain_stage(
     stage_view: Mapping[str, object] | None,
     *,
@@ -381,8 +384,15 @@ class PageMutationCoordinator:
                 {"ok": False, "code": "expected_hash_mismatch", "operation_id": operation_id, "state": "failed_precommit"},
                 operation,
             )
-        intended_hash = sha256(text.encode("utf-8")).hexdigest()
-        if intended_hash != operation.intended_hash:
+        deleting = operation.operation_kind == "delete"
+        intended_hash = DELETED_PAGE_HASH if deleting else sha256(text.encode("utf-8")).hexdigest()
+        if deleting and operation.intended_hash != DELETED_PAGE_HASH:
+            self._mark_precommit_failure(operation_id, "operation_intent_drift")
+            return self._mutation_result(
+                {"ok": False, "code": "operation_intent_drift", "operation_id": operation_id, "state": "failed_precommit"},
+                operation,
+            )
+        if not deleting and intended_hash != operation.intended_hash:
             self._mark_precommit_failure(operation_id, "operation_intent_drift")
             return self._mutation_result(
                 {"ok": False, "code": "operation_intent_drift", "operation_id": operation_id, "state": "failed_precommit"},
@@ -398,8 +408,14 @@ class PageMutationCoordinator:
                     operation,
                 )
             try:
-                atomic_write_text(target, text)
+                if deleting:
+                    if target.is_file():
+                        target.unlink()
+                else:
+                    atomic_write_text(target, text)
             except AtomicFileError:
+                return self._classify_commit_failure(operation, target)
+            except OSError:
                 return self._classify_commit_failure(operation, target)
             try:
                 self._invoke("journal_commit")
@@ -623,7 +639,7 @@ class PageMutationCoordinator:
 
         adapter = self._adapter_for_operation(operation.operation_kind)
         target = self._target(operation.page_path, adapter=adapter)
-        if not target.is_file():
+        if operation.operation_kind != "delete" and not target.is_file():
             return {
                 stage: (lambda: {"ok": False, "code": "page_not_found"})
                 for stage in adapter.projection_stages()
@@ -705,7 +721,9 @@ class PageMutationCoordinator:
             adapter = self._adapter_for_operation(operation_kind)
         except WriteAdapterError as exc:
             return MutationResult(ok=False, code=exc.code)
-        if intended_hash is None:
+        if operation_kind == "delete":
+            intended_hash = DELETED_PAGE_HASH
+        elif intended_hash is None:
             intended_hash = sha256(text.encode("utf-8")).hexdigest()
         effective_request_key = adapter.request_key(
             operation_kind=operation_kind,
@@ -827,6 +845,12 @@ class PageMutationCoordinator:
 
     def _classify_disk(self, operation: PageOperation, target: Path) -> str:
         current = _hash_if_exists(target)
+        if operation.operation_kind == "delete":
+            if current is None:
+                return "intended"
+            if current == operation.base_hash:
+                return "base"
+            return "third"
         if current == operation.intended_hash:
             return "intended"
         if current == operation.base_hash:
@@ -874,6 +898,7 @@ def _hash_if_exists(path: Path) -> str | None:
 
 __all__ = [
     "MutationResult",
+    "DELETED_PAGE_HASH",
     "ChatSourceAdapter",
     "FormalPageAdapter",
     "PlanIntent",

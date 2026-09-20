@@ -60,6 +60,7 @@ _KIND_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
         "create": "formal",
         "note": "formal",
         "update": "formal",
+        "delete": "formal",
         "chat_source": "chat",
         "ingest_text": "ingest",
         "ingest_chat_source": "ingest_chat",

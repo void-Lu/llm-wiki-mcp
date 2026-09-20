@@ -49,6 +49,7 @@ from retrieval.metadata_filters import (
 )
 from archive.archive_models import ARCHIVE_REASONS, is_archive_reason
 from archive.archive_service import ArchiveService
+from wiki.spec_reuse import SharedSpecService, SpecMirrorService
 
 
 @dataclass(frozen=True)
@@ -258,6 +259,8 @@ _TOOL_ANNOTATIONS = {
     "wiki_update": ToolAnnotations(title="Update a wiki page", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
     "wiki_archive": ToolAnnotations(title="Archive a wiki page", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
     "wiki_restore": ToolAnnotations(title="Restore a wiki page", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
+    "wiki_sync_specs": ToolAnnotations(title="Sync project specs", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
+    "wiki_manage_shared_spec": ToolAnnotations(title="Manage a shared spec", read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
 }
 
 
@@ -937,6 +940,34 @@ def wiki_restore(archive_id: str, action: str = "plan", plan_id: str | None = No
     except Exception as exc:
         result = {"ok": False, "code": getattr(exc, "code", "restore_apply_failed"), "error": str(exc)}
     return result
+
+
+@_register()
+def wiki_sync_specs(source_root: str, project: str, action: str = "preview", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+    """Preview/apply an exact mirror of one project's ``.trellis/spec`` tree."""
+    if action not in {"preview", "apply", "discard"}:
+        return {"ok": False, "code": "invalid_action", "error": "action must be preview, apply, or discard"}
+    resolution = _registered_resolution()
+    service = SpecMirrorService(resolution.root)
+    if action == "preview":
+        return service.plan(source_root, project)
+    if not plan_id:
+        return {"ok": False, "code": "missing_plan_id", "writes": 0}
+    return service.apply(plan_id) if action == "apply" else service.discard(plan_id)
+
+
+@_register()
+def wiki_manage_shared_spec(operation: str, page_path: str, action: str = "preview", body: str = "", title: str = "", applies_to: dict[str, list[str]] | None = None, conditions: str = "", derived_from: list[dict[str, str]] | None = None, plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
+    """Preview/apply one validated shared-spec page create/update/delete."""
+    if action not in {"preview", "apply", "discard"}:
+        return {"ok": False, "code": "invalid_action", "error": "action must be preview, apply, or discard"}
+    resolution = _registered_resolution()
+    service = SharedSpecService(resolution.root)
+    if action == "preview":
+        return service.plan(operation, page_path, body=body, title=title, applies_to=applies_to, conditions=conditions, derived_from=derived_from)
+    if not plan_id:
+        return {"ok": False, "code": "missing_plan_id", "writes": 0}
+    return service.apply(plan_id) if action == "apply" else service.discard(plan_id)
 
 
 def main() -> None:
