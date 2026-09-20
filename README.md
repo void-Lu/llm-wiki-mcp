@@ -176,7 +176,7 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 | `wiki_query`            | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；检索策略来自启动时配置快照。              |
 | `wiki_archive`          | 归档生命周期的`plan/apply`。                                                                                     |
 | `wiki_restore`          | 不可变归档包的`plan/apply`。                                                                                     |
-| `wiki_sync_specs`       | 预览/应用/舍弃项目 `.trellis/spec` 到 `wiki/projects/<project>/specs/` 的精确镜像计划，包含删除过期页面。       |
+| `wiki_sync_specs`       | 预览/应用/舍弃调用方指定规范目录（`source_root`，不限于 `.trellis/spec`）到 `wiki/projects/<project>/specs/` 的精确镜像计划，包含删除过期页面。 |
 | `wiki_manage_shared_spec` | 预览/应用/舍弃 `wiki/entities/shared-specs/` 单页公共规范的新建、更新或删除计划。                             |
 
 `wiki_write_note` 成功写入后返回 `state`、`operation_id`、`page_hash`；若页面已提交但派生投影待修复，响应会额外给出 `repair_action` 与 `failed_stage`，调用方应执行指定 repair，而不是重复创建整页。
@@ -193,7 +193,7 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 ### 整改后的架构边界
 
 - 所有 durable Markdown 写入都经过 `atomic_write_text` 和 `PageMutationCoordinator`：先以 CAS 提交页面事实，再按 durable operation journal 执行依赖、检索、导航、overview 和 audit log 投影。页面已经提交但投影失败时返回 `repair_pending`/`repair_action`，调用方应修复同一 operation，不要重复创建页面；`repair page-operation` 重放会对已知的导航/overview 结构缺口显式升级为全量修复，并把升级原因留在 journal 中。
-- 低频 `wiki_sync_specs` 与 `wiki_manage_shared_spec` 是规范维护边界：预览快照只保存当前树和 `page_path -> operation_id`；apply 时每页都经 `PageMutationCoordinator` 提交或删除，投影失败后按同一 `operation_id` 重试 `repair()`。索引缺失返回 `rebuild_required`，不在 MCP 路径全量重建检索。
+- 低频 `wiki_sync_specs` 与 `wiki_manage_shared_spec` 是规范维护边界：源目录由调用方通过必需参数 `source_root` 指定，工具不假设 `.trellis/spec`（具体路径由 `shared-spec-vault` skill 按项目声明）；预览快照只保存当前树和 `page_path -> operation_id`；apply 时每页都经 `PageMutationCoordinator` 提交或删除，投影失败后按同一 `operation_id` 重试 `repair()`。索引缺失返回 `rebuild_required`，不在 MCP 路径全量重建检索。
 - `wiki_write_note`、`wiki_update` 和 chat source 共用上述协调器。普通页面变更只对 RetrievalIndexStore 做单页增量 `update_page`/`delete_page`/`rename_page`，导航索引由 `refresh_navigation` 单独维护；不会在 MCP 写入路径隐式执行全量检索建库，首次导航/overview 结构失败仍保持 fail-loud。索引缺失或不兼容时返回 `rebuild_required`，使用显式 `index build|update` 或 admin repair 处理。
 - Query V2 为每个 active/raw store 捕获一次不可变 `QueryCorpusSnapshot`，召回、过滤、向量、图扩展和回退都复用同一快照；`assemble_recovery` 是回退分支、命中统计、候选池和 context pack 的唯一装配边界，并在阶段间执行协作式取消检查。
 - `retrieval-eval` 通过不可变 `EvaluationRuntimeSnapshot` 和 `EvaluationQueryService` 统一 engine、MCP 与 gold 评测调用；评测不会修改全局配置注册表、索引或 telemetry。没有冻结真实 vault 数据集和 manifest 时，生产基线仍是 `unproven`。

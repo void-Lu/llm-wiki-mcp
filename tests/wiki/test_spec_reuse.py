@@ -35,6 +35,20 @@ def test_spec_mirror_preview_and_apply_syncs_nested_tree_and_removes_stale_page(
     assert not stale.exists()
 
 
+def test_spec_mirror_accepts_a_source_directory_that_is_not_trellis(tmp_path: Path) -> None:
+    source = tmp_path / "project/docs/standards"
+    vault = tmp_path / "vault"
+    _write(source / "backend/style.md", "# Style\n")
+
+    service = SpecMirrorService(vault)
+    preview = service.plan(source, "demo")
+
+    assert preview["ok"] is True
+    assert preview["entries"][0]["page_path"] == "wiki/projects/demo/specs/backend/style.md"
+    assert service.apply(str(preview["plan_id"]))["ok"] is True
+    assert (vault / "wiki/projects/demo/specs/backend/style.md").is_file()
+
+
 def test_spec_mirror_apply_rejects_target_drift_before_writing(tmp_path: Path) -> None:
     source = tmp_path / "project/.trellis/spec"
     vault = tmp_path / "vault"

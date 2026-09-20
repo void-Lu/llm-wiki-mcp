@@ -256,7 +256,7 @@ def _apply_page(
 
 
 class SpecMirrorService:
-    """Plan and apply a current `.trellis/spec` tree mirror."""
+    """Plan and apply a current mirror of one caller-supplied project spec tree."""
 
     def __init__(self, vault_root: str | Path):
         self.root = Path(vault_root).expanduser().resolve()
@@ -583,4 +583,3 @@ class SharedSpecService:
 
 
 __all__ = ["SharedSpecService", "SpecMirrorService", "SpecPlanStore", "SpecReuseError"]
-

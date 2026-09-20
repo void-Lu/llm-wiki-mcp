@@ -3,7 +3,7 @@
 ## 2026-09-20 — 规范镜像与公共规范维护
 
 - 新增 core MCP 工具 `wiki_sync_specs` 与 `wiki_manage_shared_spec`（均为 preview/apply/discard 两阶段），core profile 从 9 个业务工具变为 11 个；README、CLAUDE.md 与 `.trellis/scripts/spec_lint.py` 的冻结集合同步。
-- `wiki_sync_specs` 把当前项目 `.trellis/spec` 精确镜像到 `wiki/projects/<project>/specs/`：源目录已删除的页面同步删除，不保留历史副本；`wiki_manage_shared_spec` 管理 `wiki/entities/shared-specs/<file>.md` 单页 upsert/delete，公共页必须声明 `applies_to`、可选 `conditions` 以及非空 `derived_from`（指向具体项目镜像页），并保留规则正文原文。
+- `wiki_sync_specs` 把调用方 `source_root` 指定的项目规范目录精确镜像到 `wiki/projects/<project>/specs/`（不假设 `.trellis/spec`）：源目录已删除的页面同步删除，不保留历史副本；`wiki_manage_shared_spec` 管理 `wiki/entities/shared-specs/<file>.md` 单页 upsert/delete，公共页必须声明 `applies_to`、可选 `conditions` 以及非空 `derived_from`（指向具体项目镜像页），并保留规则正文原文。
 - formal adapter 新增统一 `delete` operation：页面删除由 `PageMutationCoordinator` 提交（`DELETED_PAGE_HASH` 哨兵、commit 时 unlink），依赖、检索、导航、overview 和审计投影按 formal profile 执行；投影失败按同一 `operation_id` 走 `repair()`，不重写页面、不使用 `project_existing`。
 - 规范维护的预览计划是短期快照，只保存当前树指纹、CAS 哈希和 `page_path -> operation_id`，不保存审核状态和旧正文；每次导入重新审核。镜像与公共页正文先做 UTF-8 无 BOM 校验，再以原子写落盘。
 - 规范写入保持与普通写入相同的索引边界：检索索引缺失返回 `rebuild_required`，不在 MCP 路径全量重建；`overview` 增量接受删除提示（`created=False`）只重写概览页，计数漂移继续由 `repair page-operation` 全量通道兜底。

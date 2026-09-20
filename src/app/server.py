@@ -944,7 +944,7 @@ def wiki_restore(archive_id: str, action: str = "plan", plan_id: str | None = No
 
 @_register()
 def wiki_sync_specs(source_root: str, project: str, action: str = "preview", plan_id: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
-    """Preview/apply an exact mirror of one project's ``.trellis/spec`` tree."""
+    """Preview/apply an exact mirror of one caller-supplied project spec tree."""
     if action not in {"preview", "apply", "discard"}:
         return {"ok": False, "code": "invalid_action", "error": "action must be preview, apply, or discard"}
     resolution = _registered_resolution()
