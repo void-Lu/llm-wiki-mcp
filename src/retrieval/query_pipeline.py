@@ -587,6 +587,7 @@ def assemble_public_projection(
                 if item["hit"].corpus == "history"
                 else "formal_knowledge"
             ),
+            ordinal=item["hit"].ordinal,
         )
         for item in public_context_items
     ]

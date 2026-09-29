@@ -1,5 +1,9 @@
 # 变更记录
 
+## 2026-09-29 — 检索上下文
+
+- 查询结果正文按阅读顺序拼接同页 passage，并去掉相邻 chunk 的重叠（按 passage 单位比较，8–128 个单位）；同一次响应中已出现过的长段落（字母数字 ≥ 48，汉字计 2）在后续页面省略，结果页至少保留第一段正文。`PassageHit` 新增 `ordinal`（默认 -1），`ContextPassage` 新增可选 `ordinal`。排序不变，无需重建索引。
+
 ## 2026-09-29 — 向量嵌入文本与写入提示
 
 - 向量索引改为嵌入“页面标题 + 标题路径 + passage 正文”（`embedding_text`；与标题相同的 H1 不重复），存储的 passage 文本与词法检索不变。向量记录的 content hash 同时覆盖嵌入文本，改标题或改小节标题会让对应向量变为 stale。向量索引 schema 升为 3，旧索引报告 `index_incompatible`，需要执行一次 `llm-wiki-mcp vector build`。

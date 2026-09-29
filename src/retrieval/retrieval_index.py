@@ -85,6 +85,10 @@ class PassageHit:
     corpus: str
     authority: str
     source_kind: str
+    # Reading-order position of the passage within its page (``-1`` when
+    # unknown, e.g. for synthetic hits).  Context packing uses it to stitch
+    # adjacent chunks without repeating their overlap.
+    ordinal: int = -1
 
 
 class RetrievalIndexStore:
@@ -322,7 +326,7 @@ class RetrievalIndexStore:
         sql = """
             SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
                    passages.text, -bm25(passages_fts, 8.0, 4.0, 3.0, 2.0, 1.0) AS score,
-                   pages.corpus, pages.authority, pages.source_kind
+                   pages.corpus, pages.authority, pages.source_kind, passages.ordinal
             FROM passages_fts JOIN passages ON passages_fts.passage_id = passages.passage_id
             JOIN pages ON pages.path = passages.page_path
             WHERE """ + " AND ".join(clauses) + " ORDER BY score DESC, passages.page_path, passages.ordinal LIMIT ?"
@@ -331,7 +335,7 @@ class RetrievalIndexStore:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise RetrievalIndexError("index_corrupt", "retrieval store could not be searched") from exc
-        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8]) for row in rows]
+        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8], int(row[9])) for row in rows]
 
     def search_qualified_identifier(
         self,
@@ -365,8 +369,8 @@ class RetrievalIndexStore:
             return []
         marks = ",".join("?" for _ in values)
         with self._connection(readonly=True) as connection:
-            rows = connection.execute(f"SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json, passages.text, 0.0, pages.corpus, pages.authority, pages.source_kind FROM passages JOIN pages ON pages.path=passages.page_path WHERE passages.passage_id IN ({marks}) ORDER BY passages.page_path, passages.ordinal", values).fetchall()
-        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8]) for row in rows]
+            rows = connection.execute(f"SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json, passages.text, 0.0, pages.corpus, pages.authority, pages.source_kind, passages.ordinal FROM passages JOIN pages ON pages.path=passages.page_path WHERE passages.passage_id IN ({marks}) ORDER BY passages.page_path, passages.ordinal", values).fetchall()
+        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8], int(row[9])) for row in rows]
 
     def passages_for_pages(self, page_paths: Iterable[str], *, limit_per_page: int = 1) -> list[PassageHit]:
         """Return bounded passage projections for already-selected pages.
@@ -379,7 +383,7 @@ class RetrievalIndexStore:
             return []
         marks = ",".join("?" for _ in paths)
         sql = f"""
-            SELECT passage_id, page_path, title, heading_path_json, text, corpus, authority, source_kind
+            SELECT passage_id, page_path, title, heading_path_json, text, corpus, authority, source_kind, ordinal
             FROM (
                 SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
                        passages.text, passages.ordinal, pages.corpus, pages.authority, pages.source_kind,
@@ -390,7 +394,7 @@ class RetrievalIndexStore:
         """
         with self._connection(readonly=True) as connection:
             rows = connection.execute(sql, [*paths, limit_per_page]).fetchall()
-        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], 0.0, row[5], row[6], row[7]) for row in rows]
+        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], 0.0, row[5], row[6], row[7], int(row[8])) for row in rows]
 
     def page_candidates(self) -> list[dict[str, object]]:
         """Load query projections from the DB without re-reading source files."""
