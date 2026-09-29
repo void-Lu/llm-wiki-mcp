@@ -181,7 +181,7 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 
 `wiki_write_note` 成功写入后返回 `state`、`operation_id`、`page_hash`；若页面已提交但派生投影待修复，响应会额外给出 `repair_action` 与 `failed_stage`，调用方应执行指定 repair，而不是重复创建整页。
 
-写入提示（只读、可选字段，不改写页面）：`wiki_write_note` 与 `wiki_update(action="apply")` 保存成功后，若正文提到了其他 Wiki 页面的标题、别名或多词文件名（如 `retry-budget` → “retry budget”）但没有链接，响应附带 `link_suggestions`，每个目标页只报告第一次出现：`{"target": "wiki/entities/rate-engine.md", "title": "Rate Engine", "mention": "rate engine", "line": 3, "link": "[[rate-engine|rate engine]]"}`。跳过代码块/行内代码、已有 wikilink 与 Markdown 链接、页面自身、正文已链接的目标、短于 4 个拉丁字符或 2 个汉字的词、指向多个页面的词；拉丁词要求词边界，单个拉丁单词须大小写一致，中文按子串匹配且长词优先。标题/别名来自已构建的检索投影；投影缺失时不返回该字段。没有提示时不出现该字段。
+写入提示（只读、可选字段，不改写页面）：`wiki_write_note` 与 `wiki_update(action="apply")` 保存成功后（`wiki_update(action="preview")` 也会按 apply 将写入的渲染结果预先计算同一提示），若正文提到了其他 Wiki 页面的标题、别名或多词文件名（如 `retry-budget` → “retry budget”）但没有链接，响应附带 `link_suggestions`，每个目标页只报告第一次出现：`{"target": "wiki/entities/rate-engine.md", "title": "Rate Engine", "mention": "rate engine", "line": 3, "link": "[[rate-engine|rate engine]]"}`。跳过代码块/行内代码、已有 wikilink 与 Markdown 链接、页面自身、正文已链接的目标、短于 4 个拉丁字符或 2 个汉字的词、指向多个页面的词；拉丁词要求词边界，单个拉丁单词须大小写一致，中文按子串匹配且长词优先。标题/别名来自已构建的检索投影；投影缺失时不返回该字段。没有提示时不出现该字段。
 
 `wiki_write_note` 新建页面后还会检查标题是否与已有页面重复或近似，若有则附带 `duplicate_warnings`（最多 5 条，页面照常创建）：`{"path": "wiki/concepts/general/限流器.md", "title": "限流器", "reason": "title_contains", "score": 0.6, "matched": "限流器组件"}`。`reason` 为 `same_title_or_alias`（经 `ConceptRegistry.resolve` 的别名归一化后与已有标题/别名相同）、`similar_title`（归一化后字符 bigram Jaccard ≥ 0.6，比较对象含已有标题、别名和文件名短语）或 `title_contains`（一方包含另一方、较短一方至少 3 个字符且占较长一方至少一半）。同样只读已构建的检索投影，无警告时不出现该字段。
 

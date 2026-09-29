@@ -7,7 +7,7 @@ from retrieval.retrieval_index import RetrievalIndexStore
 from wiki.link_suggestions import eligible_link_targets, suggest_unlinked_mentions, unlinked_mention_suggestions
 from wiki.note_writer import save_obsidian_note
 from wiki.wiki_paths import create_wiki_root
-from wiki.wiki_update import apply_update
+from wiki.wiki_update import apply_update, preview_update
 
 
 def _targets(*rows: tuple[str, str, list[str]] | tuple[str, str, list[str], dict[str, str]]):
@@ -149,3 +149,41 @@ def test_update_apply_returns_link_suggestions(tmp_path: Path) -> None:
         ("wiki/entities/general/carrier-gateway.md", "[[carrier-gateway|Carrier Gateway]]")
     ]
     assert "[[" not in page.read_text(encoding="utf-8")
+
+
+def test_update_preview_returns_the_same_link_suggestions_as_its_apply(tmp_path: Path) -> None:
+    root = _vault(tmp_path)
+    page_path = "wiki/entities/general/rate-engine.md"
+    body = "# Ignored Heading\n\nReceives calls from the Carrier Gateway.\n\nThe Rate Engine itself is not a hint.\n"
+    incoming = {"aliases": ["Pricing Core"]}
+
+    preview = preview_update(root, page_path, body, incoming)
+    applied = apply_update(root, page_path, body, incoming_frontmatter=incoming, plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
+
+    assert preview["ok"] is True and applied["ok"] is True
+    assert preview["link_suggestions"] == applied["link_suggestions"]
+    assert [(item["target"], item["line"]) for item in preview["link_suggestions"]] == [("wiki/entities/general/carrier-gateway.md", 3)]
+
+
+def test_update_preview_parity_holds_when_title_or_aliases_change(tmp_path: Path) -> None:
+    root = _vault(tmp_path)
+    page_path = "wiki/entities/general/rate-engine.md"
+    # The projection still holds the old title/aliases during preview.  The
+    # new alias makes "Carrier Gateway" one of this page's own terms, so
+    # neither phase may suggest it; "Rate Engine" stays the page's own stem.
+    body = "Pricing Service calls the Carrier Gateway and the Rate Engine.\n"
+    incoming = {"title": "Pricing Service", "aliases": ["Carrier Gateway"]}
+
+    preview = preview_update(root, page_path, body, incoming)
+    applied = apply_update(root, page_path, body, incoming_frontmatter=incoming, plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
+
+    assert applied["ok"] is True
+    assert "link_suggestions" not in preview
+    assert "link_suggestions" not in applied
+
+
+def test_update_preview_omits_link_suggestions_when_there_are_none(tmp_path: Path) -> None:
+    root = _vault(tmp_path)
+    preview = preview_update(root, "wiki/entities/general/rate-engine.md", "Nothing to link here.\n")
+    assert preview["ok"] is True
+    assert "link_suggestions" not in preview
