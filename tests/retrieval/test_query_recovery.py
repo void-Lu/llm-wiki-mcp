@@ -609,3 +609,37 @@ def test_assembler_rejects_retired_explicit_maps_path() -> None:
             cancellation=QueryCancellationContext.unbounded(),
             hit_stats={},  # type: ignore[call-arg]
         )
+
+
+def _window_hits(sizes: list[int]) -> list:
+    from retrieval.retrieval_index import PassageHit
+
+    return [
+        PassageHit(f"p{index}", "wiki/concepts/long.md", "Long", ("Long",), " ".join(f"w{index}n{n}" for n in range(size)), 0.0, "wiki", "wiki", "wiki", index)
+        for index, size in enumerate(sizes)
+    ]
+
+
+def test_hit_window_keeps_reading_order_fill_when_the_page_fits_the_budget() -> None:
+    from retrieval.query_recovery import _hit_window
+
+    hits = _window_hits([100, 100, 100])
+    assert _hit_window(hits, [{"hit": hits[2], "score": 1.0}], set(), {}) is hits
+
+
+def test_hit_window_centres_a_long_page_on_its_matched_passage_and_keeps_the_opening() -> None:
+    from retrieval.context_packer import estimate_response_tokens
+    from retrieval.body_budget import PAGE_TOKEN_BUDGET
+    from retrieval.query_recovery import _hit_window
+
+    hits = _window_hits([60] + [400] * 20)
+    matched = hits[12]
+    window = _hit_window(hits, [{"hit": matched, "score": 1.0}], {matched.passage_id}, {})
+    ordinals = [hit.ordinal for hit in window]
+
+    assert ordinals == sorted(ordinals)
+    assert ordinals[0] == 0 and 12 in ordinals and 13 in ordinals and 11 in ordinals
+    assert 1 not in ordinals and 20 not in ordinals
+    assert sum(estimate_response_tokens(hit.text) for hit in window if hit is not matched) <= PAGE_TOKEN_BUDGET
+    # The following neighbour is preferred when the budget is odd.
+    assert max(ordinals) - 12 >= 12 - min(o for o in ordinals if o)

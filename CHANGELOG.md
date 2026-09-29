@@ -2,6 +2,7 @@
 
 ## 2026-09-29 — 检索上下文
 
+- 超过页面正文预算（约 2400 token）的强相关长页面，不再只从页首补全：保留页首 passage 后，以命中 passage 为中心交替扩展前后相邻 passage。放得下预算的页面行为不变；排序不变，无需重建索引。
 - 可选 frontmatter `questions`（本页能回答的问题）进入检索：并入页面第一个 passage 的 FTS `aliases` 列。无 schema 变更；没有该字段的页面索引不变，已有 `questions` 的 vault 需要一次增量/全量重建才会生效。
 - 查询结果正文按阅读顺序拼接同页 passage，并去掉相邻 chunk 的重叠（按 passage 单位比较，8–128 个单位）；同一次响应中已出现过的长段落（字母数字 ≥ 48，汉字计 2）在后续页面省略，结果页至少保留第一段正文。`PassageHit` 新增 `ordinal`（默认 -1），`ContextPassage` 新增可选 `ordinal`。排序不变，无需重建索引。
 
