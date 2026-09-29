@@ -217,6 +217,24 @@ graph_v1 总体四位小数（R@1 / R@3 / R@5 / R@10 / MRR / nDCG）：修复 3 
 - 延迟：`pack_context` 在 longdoc 上每次查询 2.6 → 4.3 ms（端到端约 37 → 40 ms）；2000 页合成 vault（每页 1 个 passage）端到端中位数交替两轮 231/220 ms → 226/228 ms，噪声范围内。
 - 实验（未采用）：对按页选出的结果做 MMR 重排（λ·相关度 − (1−λ)·与已选页的词集合 Jaccard），graph_v1 lexical nDCG@10 0.6189 → 0.6171（λ=0.9）/ 0.6136（0.7）/ 0.6120（0.5），MRR 0.5351 → 0.5358 / 0.5302 / 0.5285；CI 不变。nDCG 下降，未采用；上下文去重不改排序。
 
+### 2. frontmatter `questions:` 进入检索索引
+
+- 改动：可选 `questions`（字符串列表/单个字符串）并入页面第一个 passage 的 FTS `aliases` 列（bm25 权重 4）。没有该字段的页面 FTS 文本逐字节不变，现有三套 fixture 排序与 `d6bb043` 完全相同；无需 schema/索引版本升级。问题不进入正文与向量嵌入。
+- 新增评测（不入库、不计入三套 fixture，脚本 `/workspace/graph-eval-work/qeval/q_eval.py`）：复制 graph_v1 vault，给 12 个页面各加 2 个问题（共 24 个，含 4 个中文），另写 24 条用户式查询（与存储的问题措辞不同但词汇相近，每页 2 条，金标为该页）。问题与查询都由同一人编写，结果对该功能有利，只说明机制有效，不代表真实分布。
+
+| 查询集 / 模式 | 无 questions 的 vault | 加 questions 后 |
+| --- | --- | --- |
+| 问题查询 24 条 lexical | R@1 0.667 / MRR 0.714 / nDCG 0.743 | R@1 1.000 / MRR 1.000 / nDCG 1.000 |
+| 问题查询 24 条 vector（BGE-M3） | R@1 0.708 / MRR 0.791 / nDCG 0.841 | R@1 0.750 / MRR 0.819 / nDCG 0.862 |
+| 问题查询 24 条 hybrid | R@1 0.708 / MRR 0.791 / nDCG 0.841 | R@1 0.792 / MRR 0.846 / nDCG 0.883 |
+| 原 graph_v1 52 条 lexical | MRR 0.5351 / nDCG 0.6189 / R@3 0.6042 | MRR 0.5323 / nDCG 0.6169 / R@3 0.5938 |
+| 原 graph_v1 52 条 vector | MRR 0.5151 / nDCG 0.6046 | 不变 |
+| 原 graph_v1 52 条 hybrid | MRR 0.5326 / nDCG 0.6197 | MRR 0.5316 / nDCG 0.6188 |
+
+- 负面影响（内容变化引起，代码对无 questions 的 vault 无影响）：lexical 下 `dep-event-store-feeders` 首个金标 2 → 3，`owner-journal-exporter` 6 → 5（变好），另有多金标 case 的 nDCG 小幅变化；R@1 与 no-answer FP 不变。
+- 列位置实验：问题并入**每个** passage 的 aliases 列时，原 graph_v1 lexical MRR 0.5306 / nDCG 0.6106（`dep-throttler-troubleshooting` 金标从第 6 掉出前 10）；并入 keywords 列（权重 3）时 0.5327 / 0.6127；只并入第一个 passage 的 aliases 列 0.5323 / 0.6169，问题查询三种方案都是 1.000。采用最后一种。
+- 延迟：2000 页合成 vault（无 questions）交替两轮中位数 base 227/229 ms、head 229/235 ms，噪声范围内；建索引 2.88/2.81 s → 2.84/2.83 s。
+
 ## 复现
 
 ```bash

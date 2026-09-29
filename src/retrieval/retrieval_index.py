@@ -91,6 +91,17 @@ class PassageHit:
     ordinal: int = -1
 
 
+def frontmatter_questions_text(frontmatter: dict[str, object]) -> str:
+    """Return the optional ``questions:`` frontmatter as one indexable string.
+
+    Accepts a list of strings or a single string; blank and non-string entries
+    are ignored so a malformed field never breaks indexing.
+    """
+    value = frontmatter.get("questions")
+    items = value if isinstance(value, list) else [value]
+    return " ".join(item.strip() for item in items if isinstance(item, str) and item.strip())
+
+
 class RetrievalIndexStore:
     def __init__(self, vault_root: str | Path, *, scope: StoreScope = "active", path: str | Path | None = None) -> None:
         if scope not in {"active", "archive", "raw"}:
@@ -711,10 +722,17 @@ class RetrievalIndexStore:
         aliases = page.frontmatter.get("aliases", [])
         keywords = page.frontmatter.get("tags", [])
         aliases_text = " ".join(map(str, aliases if isinstance(aliases, list) else [aliases]))
+        # Optional ``questions:`` (questions the page answers) are indexed in
+        # the aliases column of the page's first passage only: question-style
+        # queries can match them without a schema change, while the page's
+        # other passages are not inflated.  Pages without the field index
+        # exactly the same text as before.
+        questions_text = frontmatter_questions_text(page.frontmatter)
+        first_aliases_text = f"{aliases_text} {questions_text}".strip() if questions_text else aliases_text
         keywords_text = " ".join(map(str, keywords if isinstance(keywords, list) else [keywords]))
         chunks = chunk_markdown(page.path, page.body)
         for chunk in chunks:
-            self._insert_chunk(connection, chunk, page.title, aliases_text, keywords_text)
+            self._insert_chunk(connection, chunk, page.title, first_aliases_text if chunk is chunks[0] else aliases_text, keywords_text)
         if chunks:
             # Pages without passages never become query candidates, so they
             # carry no edges either.  Links are removed with the page row via
