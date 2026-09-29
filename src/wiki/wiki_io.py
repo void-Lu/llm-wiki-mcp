@@ -154,6 +154,12 @@ def _extract_title(body: str) -> str:
     return ""
 
 
+def extract_title(body: str) -> str:
+    """Text of the first ``# `` heading in *body*, or ``""`` (title resolution for pages without frontmatter ``title``)."""
+
+    return _extract_title(body)
+
+
 def _remove_first_heading(body: str) -> str:
     lines = body.splitlines()
     for index, line in enumerate(lines):

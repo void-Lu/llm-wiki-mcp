@@ -15,7 +15,7 @@ from wiki.page_operation_store import UpdatePlanError
 from wiki.page_policy import provenance_status, stamp_page_policy
 from wiki.reference_section import build_reference_section, skipped_warnings
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
-from wiki.wiki_io import PreparedWikiPage, WikiWriteError, prepare_wiki_page, split_frontmatter
+from wiki.wiki_io import PreparedWikiPage, WikiWriteError, extract_title, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.duplicate_titles import new_title_surfaces, surface_duplicate_warnings
 from wiki.link_suggestions import load_target_rows, unlinked_mention_suggestions
@@ -136,9 +136,10 @@ def preview_update(
     # frontmatter merge, title heading and redaction), so a preview and the
     # apply of its plan report the same suggestions unless other pages
     # change in between.  Render problems are reported by apply, not here.
-    rendered = _render_final(root, page_path, target, fm, incoming, resolved_sources, incoming_body)
+    current_title = _current_title(fm, old_body, target)
+    rendered = _render_final(root, page_path, current_title, fm, incoming, resolved_sources, incoming_body)
     if not isinstance(rendered, dict):
-        _attach_write_hints(result, root, page_path, rendered[0], existing=fm, incoming=incoming, target=target)
+        _attach_write_hints(result, root, page_path, rendered[0], existing=fm, incoming=incoming, current_title=current_title)
         _attach_heading_warning(result, incoming_body, rendered[0].title)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
@@ -161,7 +162,7 @@ def apply_update(
     if not target.is_file():
         return {"ok": False, "code": "page_not_found"}
     text = target.read_text(encoding="utf-8")
-    existing, _ = split_frontmatter(text)
+    existing, existing_body = split_frontmatter(text)
     current_hash = sha256_file(target)
     prepared = _prepare_incoming(
         root,
@@ -194,7 +195,8 @@ def apply_update(
             resolved_sources = SourceProvenanceResolver(root).verify(resolved_sources)
         except SourceProvenanceError as exc:
             return _attach_related_page_skips({"ok": False, "code": exc.code}, related_pages, related_pages_skipped)
-    rendered = _render_final(root, page_path, target, existing, incoming, resolved_sources, incoming_body)
+    current_title = _current_title(existing, existing_body, target)
+    rendered = _render_final(root, page_path, current_title, existing, incoming, resolved_sources, incoming_body)
     if isinstance(rendered, dict):
         return _attach_related_page_skips(rendered, related_pages, related_pages_skipped)
     prepared, policy_stamp = rendered
@@ -236,7 +238,7 @@ def apply_update(
         result["failed_stage"] = mutation.failed_stage
     if resolved_sources is not None:
         result["source_hashes"] = source_hash_map(resolved_sources)
-    _attach_write_hints(result, root, page_path, prepared, existing=existing, incoming=incoming, target=target)
+    _attach_write_hints(result, root, page_path, prepared, existing=existing, incoming=incoming, current_title=current_title)
     _attach_heading_warning(result, incoming_body, prepared.title)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
@@ -244,7 +246,7 @@ def apply_update(
 def _render_final(
     root: Path,
     page_path: str,
-    target: Path,
+    current_title: str,
     existing: Mapping[str, Any],
     incoming: Mapping[str, Any],
     resolved_sources: list[ResolvedRawSource] | None,
@@ -268,7 +270,7 @@ def _render_final(
     except (TypeError, ValueError) as exc:
         return {"ok": False, "code": "invalid_page_policy", "error": str(exc)}
     final.update(policy_stamp)
-    title = str(final.get("title") or target.stem)
+    title = str(final.get("title") or current_title)
     try:
         prepared = prepare_wiki_page(
             root,
@@ -288,7 +290,7 @@ def _attach_write_hints(
     *,
     existing: Mapping[str, Any],
     incoming: Mapping[str, Any],
-    target: Path,
+    current_title: str,
 ) -> None:
     """Add advisory ``link_suggestions`` and ``duplicate_warnings``; never raises.
 
@@ -303,7 +305,7 @@ def _attach_write_hints(
     if link_suggestions:
         result["link_suggestions"] = link_suggestions
     if "title" in incoming or "aliases" in incoming:
-        gained = new_title_surfaces(_current_title(existing, target), _aliases(existing), prepared.title, _aliases(prepared.frontmatter))
+        gained = new_title_surfaces(current_title, _aliases(existing), prepared.title, _aliases(prepared.frontmatter))
         duplicate_warnings = surface_duplicate_warnings(root, page_path, gained, rows=rows)
         if duplicate_warnings:
             result["duplicate_warnings"] = duplicate_warnings
@@ -337,8 +339,15 @@ def _leading_h1(body: str) -> str | None:
     return None
 
 
-def _current_title(existing: Mapping[str, Any], target: Path) -> str:
-    return str(existing.get("title") or target.stem)
+def _current_title(existing: Mapping[str, Any], body: str, target: Path) -> str:
+    """The page's title before this update: frontmatter, else its H1, else the stem.
+
+    Legacy pages without a frontmatter ``title`` take their title from the
+    first H1 (as ``read_markdown_page`` and the retrieval projection do); a
+    body-only update must keep that title rather than fall back to the stem.
+    """
+
+    return str(existing.get("title") or extract_title(body) or target.stem)
 
 
 def _aliases(frontmatter: Mapping[str, Any]) -> list[str]:

@@ -5,6 +5,7 @@
 - 向量索引改为嵌入“页面标题 + 标题路径 + passage 正文”（`embedding_text`；与标题相同的 H1 不重复），存储的 passage 文本与词法检索不变。向量记录的 content hash 同时覆盖嵌入文本，改标题或改小节标题会让对应向量变为 stale。向量索引 schema 升为 3，旧索引报告 `index_incompatible`，需要执行一次 `llm-wiki-mcp vector build`。
 - `wiki_update(action="preview")` 也返回可选的 `link_suggestions`：按 apply 将写入的页面渲染结果（frontmatter 合并、标题行、脱敏）计算，页面自身的索引行替换为新标题/别名；同一 plan 的 preview 与 apply 返回相同提示（期间其他页面未变化时）。
 - `wiki_write_note` 与 `wiki_update(action="apply")` 保存成功后返回可选的 `link_suggestions`：正文中提到其他 Wiki 页面标题/别名/多词文件名却未链接的位置（每个目标只报第一次，含 `target`、`title`、`mention`、`line`、`link`）。跳过代码、已有链接、页面自身、已链接目标、过短或指向多页的词；拉丁词按词边界、单词须大小写一致，中文按子串且长词优先。只读取已构建的检索投影，不改写页面；无提示时不出现该字段。
+- 修复：没有 frontmatter `title` 的旧页面（标题来自正文 H1）经 `wiki_update` 纯正文更新后，标题被改成文件名（如 “Legacy Heading Title” → “legacy”）。现在按 frontmatter `title` → 原页面第一个 H1 → 文件名的顺序确定标题，并把该标题写入 frontmatter。
 - `wiki_update` preview/apply：`incoming_body` 开头的 `# H1` 与将保留的页面标题不同时（该行会按原有行为被 frontmatter 标题替换），在 `warnings` 中返回 `title_heading_ignored: ...`，提示改用 `incoming_frontmatter.title`。标题行为不变。
 - 修正默认 `schema.md` 模板（`DEFAULT_SCHEMA_TEXT`）对受控更新的描述，使其与代码一致：锁定字段为 `type`、`created`、`concept_id`、`entity_id`、`entity_type`、`source_path`、`source_hash`，`title` 不锁定（改名通过 `incoming_frontmatter.title`）；`incoming_frontmatter` 字段整体替换原值，数组不做去重合并。行为不变；已有 vault 的 `schema.md` 不会被改写。
 - `wiki_write_note` 新增可选参数 `aliases: list[str] | None`：去空白、脱敏、大小写不敏感去重、去掉与标题相同项，≤ 20 项且每项 ≤ 120 字符（否则 `invalid_aliases`）；写入 frontmatter `aliases` 并参与新建时的重复标题检查。不传或结果为空时输出与此前逐字节相同。

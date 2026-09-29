@@ -413,3 +413,38 @@ def test_heading_warning_uses_redacted_text(tmp_path) -> None:
     preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "# Owner bob@example.com\n\nnew\n")
     assert "bob@example.com" not in preview["warnings"][0]
     assert "[REDACTED_EMAIL]" in preview["warnings"][0]
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "---\ntype: concept\n---\n\n# Legacy Heading Title\n\nold\n",
+        "# Legacy Heading Title\n\nold\n",
+    ],
+)
+def test_body_only_update_keeps_the_h1_title_of_a_page_without_frontmatter_title(tmp_path, original: str) -> None:
+    page = tmp_path / "wiki/concepts/general/legacy.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(original, encoding="utf-8")
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/legacy.md", "new body\n")
+    applied = apply_update(tmp_path, "wiki/concepts/general/legacy.md", "new body\n", expected_hash=preview["current_hash"])
+
+    assert applied["ok"] is True
+    text = page.read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(text.split("---\n")[1])
+    assert frontmatter["title"] == "Legacy Heading Title"
+    assert "\n# Legacy Heading Title\n\nnew body\n" in text
+    assert "# legacy" not in text
+    assert "warnings" not in preview and "warnings" not in applied
+
+
+def test_page_without_title_or_heading_still_falls_back_to_the_stem(tmp_path) -> None:
+    page = tmp_path / "wiki/concepts/general/bare.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\n---\n\nold\n", encoding="utf-8")
+
+    applied = apply_update(tmp_path, "wiki/concepts/general/bare.md", "new\n", expected_hash=sha256(page.read_bytes()).hexdigest())
+
+    assert applied["ok"] is True
+    assert "\n# bare\n" in page.read_text(encoding="utf-8")
