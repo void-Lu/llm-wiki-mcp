@@ -74,7 +74,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 candidate 条目形状的唯一 owner 是 [candidate_items.py](src/retrieval/candidate_items.py) 模块。
 
-[graph_retrieval.py](src/retrieval/graph_retrieval.py) 提供 Query V2 共用的 wikilink、shared source、common neighbor、same type 有界图扩展；图边由 [graph_edges.py](src/retrieval/graph_edges.py) 在检索投影写入时抽取并持久化到 retrieval store 的 `links` 表（`wikilink`、`source` 与 `related_objects`/`applies_to`/`derived_from` 类型关系，后三者当前不参与评分），随 build/update/rename/delete 同事务增量维护；wikilink 只存原始目标与词法候选路径，查询时仍按已过滤候选集解析，`source_hash` 与快照不一致的页面回退解析快照正文。[vector_index.py](src/retrieval/vector_index.py) 提供 `VectorRecord`、`vector_index_records` 及显式向量生命周期所需的索引记录回退。v1 的 `src/wiki/wiki_query.py` 私有查询引擎已删除，不要重新引入第二套检索入口。
+[graph_retrieval.py](src/retrieval/graph_retrieval.py) 提供 Query V2 共用的 wikilink、shared source、common neighbor、same type 有界图扩展；图边由 [graph_edges.py](src/retrieval/graph_edges.py) 在检索投影写入时抽取并持久化到 retrieval store 的 `links` 表（`wikilink`、`source` 与 `related_objects`/`applies_to`/`derived_from` 类型关系；`derived_from`/`related_objects` 与 wikilink 同样按候选集解析到页面并以 `TYPED_RELATION_WEIGHTS` 计分，`applies_to` 是适用标签、只存不计分），随 build/update/rename/delete 同事务增量维护；wikilink 只存原始目标与词法候选路径，查询时仍按已过滤候选集解析，`source_hash` 与快照不一致的页面回退解析快照正文。[vector_index.py](src/retrieval/vector_index.py) 提供 `VectorRecord`、`vector_index_records` 及显式向量生命周期所需的索引记录回退。v1 的 `src/wiki/wiki_query.py` 私有查询引擎已删除，不要重新引入第二套检索入口。
 
 Query V2 支持 `expansion_terms` 模糊词扩展和 `filters` 元数据过滤（含 `path_prefix`，见 [metadata_filters.py](src/retrieval/metadata_filters.py)）；查询经 [query_cancellation.py](src/retrieval/query_cancellation.py) 协作式取消与有界并发。`note_type`/`noteType` 合并保持 canonical 优先、falsy 回退和双空报错，不能抽象为 aliases；过滤器的 MCP 边界与目录层防御性规范化契约见 `metadata_filters.py` 模块文档。
 

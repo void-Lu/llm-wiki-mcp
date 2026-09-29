@@ -87,3 +87,26 @@ def test_lexical_candidates_keep_the_proportional_graph_cap() -> None:
 
     assert other_candidate.graph_score == 0.3  # 15% of its own lexical score
     assert other_candidate.graph_evidence == 0.0
+
+
+def test_typed_relations_are_weighted_evidence_and_traversable_edges() -> None:
+    spec, origin, other = "wiki/spec.md", "wiki/origin.md", "wiki/other.md"
+    graph = Graph(
+        neighbors={spec: set(), origin: set(), other: set()},
+        sources={spec: set(), origin: set(), other: set()},
+        types={spec: "shared_spec", origin: "spec", other: "entity"},
+        typed={spec: {origin: {"derived_from"}, other: {"related_objects"}}, origin: {spec: {"derived_from"}}, other: {spec: {"related_objects"}}},
+    )
+
+    assert [(reason["kind"], reason["value"], reason["score"]) for reason in relationship_evidence_for(spec, origin, graph).reasons] == [("typed_relation", "derived_from", 3.0)]
+    assert relationship_score_for(other, spec, graph) == 2.0
+    assert graph.adjacent(spec) == {origin, other}
+
+    seed = _candidate(origin, fusion_score=10.0)
+    targets = {rel: _candidate(rel) for rel in (spec, other)}
+    apply_graph_expansion({origin: seed}, [seed, *targets.values()], graph, 2, collect_reasons=False)
+    # hop 1 through derived_from scores the relation itself ...
+    assert targets[spec].graph_evidence == 3.0
+    # ... while a typed hop only bridges: common neighbours stay wikilink-based,
+    # so a two-hop page with no evidence of its own gains nothing.
+    assert targets[other].graph_score == 0.0

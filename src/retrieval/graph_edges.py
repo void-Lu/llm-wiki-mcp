@@ -25,6 +25,8 @@ from wiki.wikilinks import wikilink_targets
 WIKILINK = "wikilink"
 SOURCE = "source"
 TYPED_RELATION_KINDS = ("related_objects", "applies_to", "derived_from")
+# Typed relations whose values address wiki pages; ``applies_to`` holds labels.
+PAGE_TARGET_RELATION_KINDS = ("related_objects", "derived_from")
 GRAPH_EDGE_KINDS = (WIKILINK, SOURCE, *TYPED_RELATION_KINDS)
 GRAPH_PAGE_PREFIX = "wiki/"
 _PATH_SEPARATOR = "\x1f"
@@ -60,9 +62,38 @@ def extract_page_links(rel: str, body: str, frontmatter: Mapping[str, Any], *, r
         PageLink(WIKILINK, target, _path_candidates(rel, target, root), Path(target).stem.casefold())
         for target in wikilink_targets(body)
     ]
-    for kind, field in ((SOURCE, "sources"), *((kind, kind) for kind in TYPED_RELATION_KINDS)):
-        links.extend(PageLink(kind, str(item)) for item in frontmatter_values(frontmatter.get(field)))
+    links.extend(PageLink(SOURCE, str(item)) for item in frontmatter_values(frontmatter.get("sources")))
+    for kind in TYPED_RELATION_KINDS:
+        for target in _typed_targets(kind, frontmatter.get(kind)):
+            if kind in PAGE_TARGET_RELATION_KINDS:
+                links.append(PageLink(kind, target, _path_candidates(rel, target, root), Path(target).stem.casefold()))
+            else:
+                links.append(PageLink(kind, target))
     return links
+
+
+def _typed_targets(kind: str, value: Any) -> list[str]:
+    """Normalise one typed frontmatter relation into ordered target strings.
+
+    ``derived_from`` entries are shared-spec origins (``{project, path,
+    rule}``) or plain paths; ``related_objects`` are page names, paths or
+    wikilinks; ``applies_to`` holds applicability labels (``{languages: [...],
+    frameworks: [...]}``), which name no page and are kept as ``key:label``.
+    """
+
+    targets: list[str] = []
+    if kind == "applies_to" and isinstance(value, Mapping):
+        for key in sorted(value, key=str):
+            targets.extend(f"{key}:{label}" for label in frontmatter_values(value[key]))
+        return [target for target in targets if target.strip()]
+    for item in frontmatter_values(value):
+        if isinstance(item, Mapping):
+            item = item.get("path") or ""
+        text = str(item).strip()
+        if not text:
+            continue
+        targets.extend(list(wikilink_targets(text)) if "[[" in text else [text])
+    return targets
 
 
 def frontmatter_values(value: Any) -> list[Any]:
@@ -136,6 +167,7 @@ def _root_relative(root: Path, base: str, target_path: Path) -> str:
 __all__ = [
     "GRAPH_EDGE_KINDS",
     "GRAPH_PAGE_PREFIX",
+    "PAGE_TARGET_RELATION_KINDS",
     "PageLink",
     "SOURCE",
     "TYPED_RELATION_KINDS",

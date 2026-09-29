@@ -11,7 +11,7 @@ from typing import Any, Literal, cast
 from retrieval.body_budget import result_floor_budget
 from retrieval.candidate_items import candidate_item
 from retrieval.context_packer import ContextPassage, pack_context
-from retrieval.graph_edges import WIKILINK
+from retrieval.graph_edges import PAGE_TARGET_RELATION_KINDS, WIKILINK
 from retrieval.graph_retrieval import QueryCandidate, apply_graph_expansion, build_graph
 from retrieval.lexical_analyzer import has_qualified_identifier
 from retrieval.query_cancellation import QueryCancellationContext
@@ -445,7 +445,7 @@ def _graph_expand(
         return {}, []
     if "graph" not in cache:
         candidate_hashes = cache["hashes"]
-        stored = snapshot.graph_links(store) if snapshot is not None else store.graph_links((WIKILINK,))
+        stored = snapshot.graph_links(store) if snapshot is not None else store.graph_links((WIKILINK, *PAGE_TARGET_RELATION_KINDS))
         # Only trust persisted edges extracted from the exact projection this
         # query sees; anything else is parsed from the snapshot body instead.
         edges = {

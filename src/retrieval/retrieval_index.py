@@ -45,7 +45,7 @@ from retrieval.metadata_filters import normalize_metadata_filters
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_paths import RETRIEVAL_DB_BY_SCOPE, filesystem_path
 
-RETRIEVAL_SCHEMA_VERSION = 3
+RETRIEVAL_SCHEMA_VERSION = 4
 StoreScope = Literal["active", "archive", "raw"]
 RAW_AUXILIARY_SEGMENTS = frozenset({"manifest", "_deprecated_archive"})
 

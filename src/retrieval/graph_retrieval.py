@@ -16,6 +16,13 @@ from typing import Any
 
 from retrieval.graph_edges import WIKILINK, PageLink, extract_page_links, frontmatter_values, resolve_wikilink
 
+# Evidence weights for typed frontmatter relations, alongside the existing
+# direct wikilink (3.0), shared source (4.0 each), common neighbour
+# (1.5 / ln(degree + 1)) and same type (1.0) weights.  ``derived_from`` is an
+# explicit, validated origin declaration and counts like a body wikilink;
+# ``related_objects`` is a looser association.  ``applies_to`` holds
+# applicability labels rather than page targets and is not scored.
+TYPED_RELATION_WEIGHTS = {"derived_from": 3.0, "related_objects": 2.0}
 _GRAPH_SCORE_RATIO_CAP = 0.15
 _PURE_GRAPH_SCORE_CAP = 0.75
 # Raw evidence at which a graph-only page reaches half of the pure-graph cap.
@@ -65,6 +72,16 @@ class Graph:
     neighbors: dict[str, set[str]]
     sources: dict[str, set[str]]
     types: dict[str, str]
+    # Symmetric typed frontmatter relations: page -> related page -> kinds.
+    typed: dict[str, dict[str, set[str]]] = field(default_factory=dict)
+
+    def adjacent(self, rel: str) -> set[str]:
+        """Pages one hop away through a wikilink or a typed relation."""
+
+        related = self.typed.get(rel)
+        if not related:
+            return self.neighbors.get(rel, set())
+        return self.neighbors.get(rel, set()) | set(related)
 
 
 def build_graph(
@@ -91,6 +108,7 @@ def build_graph(
         by_stem.setdefault(candidate.path.stem.casefold(), []).append(rel)
 
     neighbors = {rel: set() for rel in by_rel}
+    typed: dict[str, dict[str, set[str]]] = {}
     sources: dict[str, set[str]] = {}
     types: dict[str, str] = {}
     for rel, candidate in by_rel.items():
@@ -101,13 +119,17 @@ def build_graph(
         if page_links is None:
             page_links = extract_page_links(rel, candidate.body, candidate.frontmatter, root=root)
         for link in page_links:
-            if link.kind != WIKILINK:
-                continue
-            target = resolve_wikilink(link, by_rel, by_stem)
-            if target:
-                neighbors[rel].add(target)
-                neighbors.setdefault(target, set()).add(rel)
-    return Graph(neighbors=neighbors, sources=sources, types=types)
+            if link.kind == WIKILINK:
+                target = resolve_wikilink(link, by_rel, by_stem)
+                if target:
+                    neighbors[rel].add(target)
+                    neighbors.setdefault(target, set()).add(rel)
+            elif link.kind in TYPED_RELATION_WEIGHTS:
+                target = resolve_wikilink(link, by_rel, by_stem)
+                if target and target != rel:
+                    typed.setdefault(rel, {}).setdefault(target, set()).add(link.kind)
+                    typed.setdefault(target, {}).setdefault(rel, set()).add(link.kind)
+    return Graph(neighbors=neighbors, sources=sources, types=types, typed=typed)
 
 
 def apply_graph_expansion(
@@ -129,7 +151,7 @@ def apply_graph_expansion(
         for hop in range(1, max_graph_hops + 1):
             next_frontier: dict[str, str] = {}
             for via in sorted(frontier):
-                for rel in sorted(graph.neighbors.get(via, set()) - visited):
+                for rel in sorted(graph.adjacent(via) - visited):
                     # ``all_candidates`` is already scoped by project/type/tag
                     # filters.  Do not permit an excluded graph page to bridge
                     # to a result that would otherwise be unreachable.
@@ -191,6 +213,8 @@ def relationship_evidence_for(left: str, right: str, graph: Graph) -> Relationsh
     reasons: list[dict[str, Any]] = []
     if right in graph.neighbors.get(left, set()):
         reasons.append({"kind": "direct_wikilink", "source": left, "target": right, "score": 3.0})
+    for kind in sorted(graph.typed.get(left, {}).get(right, set())):
+        reasons.append({"kind": "typed_relation", "source": left, "target": right, "value": kind, "score": TYPED_RELATION_WEIGHTS[kind]})
     shared_sources = sorted(graph.sources.get(left, set()) & graph.sources.get(right, set()))
     for source in shared_sources:
         reasons.append({"kind": "shared_source", "source": left, "target": right, "value": source, "score": 4.0})

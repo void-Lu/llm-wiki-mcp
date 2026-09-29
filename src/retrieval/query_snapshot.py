@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from retrieval.graph_edges import WIKILINK, PageLink
+from retrieval.graph_edges import PAGE_TARGET_RELATION_KINDS, WIKILINK, PageLink
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import RetrievalIndexStore
 
@@ -35,7 +35,7 @@ class QueryCorpusSnapshot:
     )
 
     def graph_links(self, store: RetrievalIndexStore) -> Mapping[str, tuple[str, tuple[PageLink, ...]]]:
-        """Load persisted wikilink edges once per snapshot.
+        """Load persisted wikilink and page-target typed edges once per snapshot.
 
         Batched queries share one snapshot, so the edge table is read at most
         once per batch.  Callers still verify each page's ``source_hash``
@@ -44,7 +44,7 @@ class QueryCorpusSnapshot:
 
         key = str(store.path)
         if key not in self._graph_links:
-            self._graph_links[key] = store.graph_links((WIKILINK,))
+            self._graph_links[key] = store.graph_links((WIKILINK, *PAGE_TARGET_RELATION_KINDS))
         return self._graph_links[key]
 
     @classmethod

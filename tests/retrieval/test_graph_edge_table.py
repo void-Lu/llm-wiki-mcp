@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from retrieval import query_pipeline
-from retrieval.graph_edges import WIKILINK, PageLink, extract_page_links, resolve_wikilink
+from retrieval import graph_retrieval, query_pipeline
+from retrieval.graph_edges import PAGE_TARGET_RELATION_KINDS, WIKILINK, PageLink, extract_page_links, resolve_wikilink
 from retrieval.graph_retrieval import Graph, QueryCandidate, _path_type, build_graph, relationship_evidence_for
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_pipeline import run_query_v2
@@ -90,6 +90,12 @@ def _legacy_wikilink_targets(body: str, path: Path, root: Path, by_rel: dict[str
     return targets
 
 
+def _fresh_build_graph(root: Path, candidates: list[QueryCandidate] | None = None, **_ignored: Any) -> Graph:
+    """Ignore persisted edges and extract everything from the snapshot."""
+
+    return build_graph(root, candidates)
+
+
 # --- vaults ------------------------------------------------------------------
 
 
@@ -127,6 +133,7 @@ def _synthetic_vault(root: Path) -> Path:
         # from ``wiki/concepts/`` and makes the ``node-2`` stem ambiguous.
         ("concepts/entities/node-2.md", {"title": "Shadow Node", "type": "concept", "tags": ["odd"]}, "Shadow of node two, see [[hub]]."),
         ("projects/alpha/specs/alpha-spec.md", {"title": "Alpha Spec", "type": "spec", "project": "alpha", "sources": ["raw/sources/doc/alpha/a.md"], "related_objects": ["wiki/concepts/hub.md"], "applies_to": "alpha", "derived_from": ["wiki/entities/node-1.md"]}, "Alpha spec uses [[node-5]] and [[beta-spec]]."),
+        ("entities/shared-specs/shared-rule.md", {"title": "Shared Rule", "type": "shared_spec", "applies_to": {"languages": ["python", "go"]}, "derived_from": [{"project": "alpha", "path": "wiki/projects/alpha/specs/alpha-spec.md", "rule": "retry"}], "related_objects": ["[[node-3|Node three]]", "not-a-page"]}, "Shared rule body about widgets."),
         ("projects/beta/specs/beta-spec.md", {"title": "Beta Spec", "type": "spec", "project": "beta", "sources": ["raw/sources/doc/beta/a.md", "raw/sources/doc/alpha/a.md"]}, "Beta spec uses [[node-6]] and [[alpha-spec]]."),
     ]
     for index in range(7):
@@ -208,13 +215,18 @@ def test_persisted_edges_rebuild_the_legacy_graph(kind: str, project: str | None
     root = _vault(kind, tmp_path)
     store = RetrievalIndexStore(root)
     candidates, hashes = _candidates(root, store, filters, project)
-    stored = store.graph_links((WIKILINK,))
+    stored = store.graph_links((WIKILINK, *PAGE_TARGET_RELATION_KINDS))
     edges = {path: links for path, (source_hash, links) in stored.items() if hashes.get(path) == source_hash}
 
     assert set(hashes) <= set(edges)
+    persisted = build_graph(root, candidates, edges=edges)
+    # Persisted edges and fresh extraction from the snapshot agree fully,
+    # including typed relations.
+    assert persisted == build_graph(root, candidates)
+    # The wikilink/source/type part still equals the pre-edge-table graph;
+    # typed relations are the only addition.
     legacy = _legacy_build_graph(root, candidates)
-    assert build_graph(root, candidates, edges=edges) == legacy
-    assert build_graph(root, candidates) == legacy
+    assert (persisted.neighbors, persisted.sources, persisted.types) == (legacy.neighbors, legacy.sources, legacy.types)
 
 
 @pytest.mark.parametrize("kind", VAULTS)
@@ -222,17 +234,25 @@ def test_query_rankings_and_scores_match_the_legacy_graph(kind: str, tmp_path: P
     root = _vault(kind, tmp_path)
     questions = _questions(kind)
     current = [_stable(run_query_v2(root, question, retrieval_mode="lexical", debug=True, top_k=10)) for question in questions]
+    monkeypatch.setattr(query_pipeline, "build_graph", _fresh_build_graph)
+    fresh = [_stable(run_query_v2(root, question, retrieval_mode="lexical", debug=True, top_k=10)) for question in questions]
+    assert current == fresh
+
+    # Without typed-relation scoring the persisted graph still reproduces the
+    # pre-edge-table (wikilink-only) rankings and scores exactly.
+    monkeypatch.setattr(graph_retrieval, "TYPED_RELATION_WEIGHTS", {})
+    monkeypatch.setattr(query_pipeline, "build_graph", build_graph)
+    untyped = [_stable(run_query_v2(root, question, retrieval_mode="lexical", debug=True, top_k=10)) for question in questions]
     monkeypatch.setattr(query_pipeline, "build_graph", _legacy_build_graph)
     legacy = [_stable(run_query_v2(root, question, retrieval_mode="lexical", debug=True, top_k=10)) for question in questions]
-
-    assert current == legacy
+    assert untyped == legacy
     if kind != "ci":
         # The CI smoke fixture has no graph-reachable gold; the others must
         # actually exercise graph scoring for the comparison to mean anything.
         assert any(result.get("scores", {}).get("graph", 0) > 0 for payload in current for result in payload["results"])
 
 
-def test_index_records_every_edge_kind_without_scoring_typed_relations(tmp_path: Path) -> None:
+def test_index_records_every_edge_kind_and_resolves_typed_page_targets(tmp_path: Path) -> None:
     root = _vault("synthetic", tmp_path)
     store = RetrievalIndexStore(root)
     links = store.graph_links()
@@ -248,6 +268,23 @@ def test_index_records_every_edge_kind_without_scoring_typed_relations(tmp_path:
         "raw/sources/doc/beta/a.md",
         "raw/sources/doc/alpha/a.md",
     ]
+    shared = links["wiki/entities/shared-specs/shared-rule.md"][1]
+    assert [(link.kind, link.dst) for link in shared] == [
+        ("applies_to", "languages:python"),
+        ("applies_to", "languages:go"),
+        ("derived_from", "wiki/projects/alpha/specs/alpha-spec.md"),
+        ("related_objects", "node-3"),
+        ("related_objects", "not-a-page"),
+    ]
+    candidates, _hashes = _candidates(root, store, QueryFilters(), None)
+    graph = build_graph(root, candidates)
+    assert graph.typed["wiki/entities/shared-specs/shared-rule.md"] == {
+        "wiki/projects/alpha/specs/alpha-spec.md": {"derived_from"},
+        "wiki/entities/node-3.md": {"related_objects"},
+    }
+    assert graph.typed["wiki/entities/node-3.md"]["wiki/entities/shared-specs/shared-rule.md"] == {"related_objects"}
+    # alpha-spec declares derived_from node-1 and related_objects hub.
+    assert graph.typed["wiki/projects/alpha/specs/alpha-spec.md"]["wiki/entities/node-1.md"] == {"derived_from"}
     code_targets = [link.dst for link in links["wiki/concepts/code.md"][1] if link.kind == WIKILINK]
     assert code_targets == ["node-3"]
     paths = {link.dst: link.dst_paths for link in links["wiki/concepts/paths.md"][1] if link.kind == WIKILINK}
@@ -292,9 +329,9 @@ def test_stale_edges_fall_back_to_the_snapshot_body(tmp_path: Path, monkeypatch:
     with sqlite3.connect(store.path) as connection:
         connection.execute("UPDATE links SET source_hash = 'stale', dst_paths = '', dst_stem = 'nothing'")
     expected = [_stable(run_query_v2(root, question, retrieval_mode="lexical", debug=True)) for question in _questions("synthetic")]
-    monkeypatch.setattr(query_pipeline, "build_graph", _legacy_build_graph)
-    legacy = [_stable(run_query_v2(root, question, retrieval_mode="lexical", debug=True)) for question in _questions("synthetic")]
-    assert expected == legacy
+    monkeypatch.setattr(query_pipeline, "build_graph", _fresh_build_graph)
+    fresh = [_stable(run_query_v2(root, question, retrieval_mode="lexical", debug=True)) for question in _questions("synthetic")]
+    assert expected == fresh
 
 
 def test_previous_schema_requires_an_explicit_rebuild(tmp_path: Path) -> None:

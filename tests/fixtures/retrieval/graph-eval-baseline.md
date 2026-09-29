@@ -97,6 +97,7 @@ v2_40 与 1baeb3a 上的早期记录一致（0.750/0.889/0.917/0.944，MRR 0.826
 | step-2 基线（54dbf08） | 0.050 / 0.425 / 0.600 / 0.277 | 0.000 / 0.591 / 0.146 | 0.794 / 0.961 | 0.500 | 0.302 / 0.562 / 0.740 / 0.489 / 0.548 | 0.604 / 0.459 | 0.750 / 0.826 | 0.700 / 0.800 |
 | 修复 1：relaxed 路径图扩展 | 0.050 / 0.400 / 0.675 / 0.279 | 0.000 / 0.591 / 0.146 | 0.794 / 0.961 | 0.500 | 0.302 / 0.552 / 0.771 / 0.490 / 0.555 | 0.604 / 0.459 | 0.750 / 0.826 | 0.700 / 0.800 |
 | 修复 2：纯图分数按证据缩放 | 0.050 / 0.425 / 0.700 / 0.299 | 0.000 / 0.818 / 0.179 | 0.794 / 0.961 | 0.500 | 0.302 / 0.562 / 0.833 / 0.506 / 0.587 | 0.604 / 0.459 | 0.750 / 0.826 | 0.700 / 0.800 |
+| 修复 3：typed 关系计分 | 0.050 / 0.425 / 0.700 / 0.299 | 0.000 / 0.818 / 0.178 | 0.794 / 0.961 | 0.500 | 0.302 / 0.562 / 0.833 / 0.506 / 0.587 | 0.604 / 0.459 | 0.750 / 0.826 | 0.700 / 0.800 |
 
 v2_40 与 CI 冒烟在每一步的全部指标（R@1/3/5/10、MRR、nDCG、无答案误命中）都与 step-2 基线逐位相同；graph_v1 graph off 也不变。
 
@@ -113,6 +114,12 @@ v2_40 与 CI 冒烟在每一步的全部指标（R@1/3/5/10、MRR、nDCG、无�
 - 为什么不直接换成字典序分级（直接链接 > typed > 共享来源 > 公共邻居 > 同类型）：试过把共享来源降为 2.0、同类型降为 0.5 使权重符合该顺序，graph_v1 总体只从 MRR 0.506 变到 0.507、有涨有跌（`owner-journal-exporter`、`kw-invoice-assembly-dependents` 各升 1 名，`kw-journal-exporter-owner` 降 1 名），不足以支持多改两个权重，因此保持原权重，只改截断方式。
 - 结果：keyword-anchor R@10 0.591 → 0.818、MRR 0.146 → 0.179；NL R@10 0.675 → 0.700、MRR 0.279 → 0.299；总体 R@1 不变、R@10 0.771 → 0.833、MRR 0.490 → 0.506；direct 与无答案不变。
 - 变差的 case（相对修复 1）：`kw-exporter-concepts`（第 3、2 → 第 8、7）、`kw-pickup-queue-dedup`（第 3 → 第 6）、`kw-invoice-assembly-dependents`（第 7、5 → 第 6、10）、`dep-pickup-queue-double-dispatch`（第 10 → 未进 top-10）。原因相同：这些金标以前靠路径序排在前面（`wiki/concepts/` 字母序最靠前），而它们与种子只有一条直接链接；现在同样直接相连、又有公共邻居 / 同类型 / 多种子证据的 entity 页面分数更高。这是去掉字母序偶然优势后的真实排序，不是 fixture 可以修正的问题；图是无向的，也区分不了“依赖方 / 被依赖方”。
+
+### 修复 3：typed 关系作为图证据
+
+- 规则：`derived_from`（shared-spec origin 的 `path`，或纯路径）权重 3.0，与正文直接链接相同，因为它是经 `wiki_manage_shared_spec` 校验、指向具体项目 spec 的显式来源声明；`related_objects` 权重 2.0，是较松的关联（值可能是对象名而非页面）。目标与 wikilink 用同一套解析（页面相对 → `wiki/` 相对 → vault 相对 → 候选集内唯一 stem），双向，并作为一跳可遍历边；不参与公共邻居度数。`applies_to` 在本仓库是适用标签（`languages`/`frameworks`），不指向任何页面，因此只以 `key:label` 存储、不计分。检索库 schema 升为 4。
+- 结果：graph_v1 基本持平、略负：总体 MRR 0.50581 → 0.50569、nDCG 0.58737 → 0.58728，其余指标与各组 R@1/R@10 不变。变化的只有三条：`kw-retry-budget-origins` 变好（第 8、9 → 第 7、8，retry-budget 与两个项目 spec 的 `derived_from` 边生效）；`kw-invoice-assembly-dependents` 变差（ledger-sync 第 6 → 第 7：money-decimal、utc-timestamps 通过 `derived_from` 连到同为种子邻居的 invoice-totals/invoice-dates，证据增加后排到金标前面）；`direct-carrier-latency` 第二个金标第 7 → 第 8（首位不变）。
+- 为什么 `frontmatter-only` 组没有改善：两条 case 中 `spec-harbor-errors-shared` 在修复前已由 relaxed 词法排在第 2；`kw-harbor-errors-shared` 中 error-envelope 现在确实经 `derived_from` 边从 api-errors 扩展到（纯图 0.375 分），但 top-10 其余位置被词法 / 标题分约 1.2–1.5 的候选占满，纯图页面整体低于任何词法候选，这是修复 2 保留的上限设计，不是 typed 边缺失。没有为提高该组分数调权重。
 
 ## 复现
 

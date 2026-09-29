@@ -5,6 +5,7 @@
 - 排名版本升为 `query-v2-passage-rrf-11`；质量门控校准产物需按新版本重新生成（旧版本身份不匹配时按既有规则 fail-open）。
 - 自然语言关系问题走 `wiki_relaxed` 恢复分支时也执行有界图扩展（active scope、同一快照/过滤边界/上限），不再只在 strict 种子阶段生效；同一请求内复用已构建的候选边界与图。
 - 纯图候选不再统一截断到 0.75 后按路径排序：累计原始关系证据并以 `0.75 × E / (E + 3)` 单调映射，证据更强的页面排在前面；有词法/向量信号的候选仍按自身分数 15% 截断。
+- frontmatter 类型关系参与图证据：`derived_from`（取 origin 的 `path`）权重 3.0、`related_objects` 权重 2.0，目标与 wikilink 一样按当次候选集解析到页面，并作为可遍历的一跳边；`applies_to` 是适用标签（`languages`/`frameworks`），不指向页面，只以 `key:label` 存储、不计分。检索库 schema 升为 4（边表中类型关系的解析字段变化），旧库需 `llm-wiki-mcp index build`。
 
 ## 2026-09-29 — 检索图边持久化
 
