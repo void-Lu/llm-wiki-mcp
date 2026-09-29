@@ -869,3 +869,29 @@ def test_update_forwards_related_pages(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert result == {"ok": True}
     assert calls["related_pages"] == related_pages
     assert calls["args"] == (root, "wiki/concepts/page.md", "Body", None)
+
+
+def test_query_passes_rrf_weights_with_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from runtime.runtime_config import RRF_WEIGHTS_ENV, RrfWeights
+
+    registry, vault_root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    captured: dict[str, object] = {}
+
+    def fake_run_query(root: Path, question: str, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"ok": True, "question": question, "results": []}
+
+    monkeypatch.setattr("app.server.run_query_v2", fake_run_query)
+    monkeypatch.delenv(RRF_WEIGHTS_ENV, raising=False)
+    assert wiki_query(question="invoice", vault_root=str(vault_root))["ok"] is True
+    assert captured["rrf_weights"] == RrfWeights()
+
+    monkeypatch.setenv(RRF_WEIGHTS_ENV, "vector=0.5")
+    assert wiki_query(question="invoice", vault_root=str(vault_root))["ok"] is True
+    assert captured["rrf_weights"] == RrfWeights(vector=0.5)
+
+    monkeypatch.setenv(RRF_WEIGHTS_ENV, "vector=lots")
+    rejected = wiki_query(question="invoice", vault_root=str(vault_root))
+    assert rejected["ok"] is False
+    assert rejected["code"] == "invalid_config"

@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from retrieval.query_pipeline import run_query_v2
@@ -1756,3 +1757,26 @@ def test_v2_path_prefix_filter_restricts_results(tmp_path: Path) -> None:
     )
     paths = {item["path"] for item in result["results"]}
     assert paths == {"wiki/concepts/domain-a/page.md"}
+
+
+def test_v2_passes_rrf_weights_to_primary_fusion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import retrieval.query_pipeline as query_pipeline
+    from runtime.runtime_config import RrfWeights
+
+    root = tmp_path / "vault"
+    page = root / "wiki/concepts/invoice.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntitle: Invoice Approval\n---\n\n# Invoice Approval\n\ninvoice approval workflow", encoding="utf-8")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+    seen: list[object] = []
+    original = query_pipeline.fusion_score
+
+    def spy(*args: object, **kwargs: object) -> dict[str, object]:
+        seen.append(kwargs.get("rrf_weights"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(query_pipeline, "fusion_score", spy)
+    run_query_v2(root, "invoice approval workflow", retrieval_mode="lexical")
+    run_query_v2(root, "invoice approval workflow", retrieval_mode="lexical", rrf_weights=RrfWeights(fts=2.0))
+    assert seen and set(seen) == {RrfWeights(), RrfWeights(fts=2.0)}

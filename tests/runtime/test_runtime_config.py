@@ -344,6 +344,11 @@ def test_registry_decodes_trusted_query_execution_bounds_without_public_exposure
         ({"quality_gate": {"policy_version": "token=secret"}}, "invalid_config"),
         ({"quality_gate": {"artifact_path": ""}}, "invalid_config"),
         ({"quality_gate": {"artifact_path": 42}}, "invalid_config"),
+        ({"retrieval": {"ranking": {"unknown": 1}}}, "unknown_config_field"),
+        ({"retrieval": {"ranking": {"rrf_weights": {"graph": 1.0}}}}, "unknown_config_field"),
+        ({"retrieval": {"ranking": {"rrf_weights": {"fts": -0.5}}}}, "invalid_config"),
+        ({"retrieval": {"ranking": {"rrf_weights": {"vector": 11}}}}, "invalid_config"),
+        ({"retrieval": {"ranking": {"rrf_weights": {"title": True}}}}, "invalid_config"),
     ],
 )
 def test_registry_rejects_unknown_unsafe_and_out_of_range_profile_fields(tmp_path: Path, patch: dict[str, object], code: str) -> None:
@@ -406,3 +411,41 @@ def test_registry_snapshot_vaults_cannot_be_mutated(tmp_path: Path) -> None:
     registry = ConfigRegistry.from_file(config_path)
     with pytest.raises(TypeError):
         registry.config.vaults["other"] = registry.config.vaults["primary"]  # type: ignore[index]
+
+
+def test_registry_decodes_rrf_weights_with_exact_defaults(tmp_path: Path) -> None:
+    from runtime.runtime_config import RrfWeights
+
+    vault = _make_vault(tmp_path / "vault")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "default_vault": "primary",
+                "vaults": {
+                    "primary": {"root": str(vault), "retrieval": {"ranking": {"rrf_weights": {"fts": 1.5, "vector": 0}}}},
+                    "plain": {"root": str(vault)},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = ConfigRegistry.from_file(config_path)
+    assert registry.resolve_vault().settings.retrieval.ranking.rrf_weights == RrfWeights(fts=1.5, title=1.0, vector=0.0)
+    assert registry.resolve_vault("plain").settings.retrieval.ranking.rrf_weights == RrfWeights(1.0, 1.0, 1.0)
+    assert "ranking" not in registry.public_status(registry.resolve_vault())["retrieval"]
+
+
+def test_rrf_weight_env_override_is_partial_and_validated() -> None:
+    from runtime.runtime_config import RRF_WEIGHTS_ENV, RrfWeights, rrf_weights_with_env
+
+    base = RrfWeights(fts=2.0)
+    assert rrf_weights_with_env(base, {}) is base
+    assert rrf_weights_with_env(base, {RRF_WEIGHTS_ENV: "  "}) is base
+    assert rrf_weights_with_env(base, {RRF_WEIGHTS_ENV: "vector=0.5, title=0"}) == RrfWeights(fts=2.0, title=0.0, vector=0.5)
+    for bad in ("vector", "graph=1", "fts=abc", "fts=-1", "fts=10.5", "fts=nan"):
+        with pytest.raises(RuntimeConfigError) as exc_info:
+            rrf_weights_with_env(base, {RRF_WEIGHTS_ENV: bad})
+        assert exc_info.value.code == "invalid_config"

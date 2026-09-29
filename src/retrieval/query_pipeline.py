@@ -17,6 +17,7 @@ from retrieval.lexical_analyzer import has_qualified_identifier
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_recovery import (
     DEFAULT_RECOVERY_CONDITION,
+    DEFAULT_RRF_WEIGHTS,
     LadderStep,
     assemble_recovery,
     fallback_envelope,
@@ -34,7 +35,7 @@ from retrieval.query_shared import (
 )
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.query_quality_calibration import load_calibration_artifact_once
-from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
+from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, RrfWeights, TelemetrySettings
 from retrieval.query_quality_policy import (
     GATE_FAIL_OPEN_ERROR,
     GATE_WOULD_SUPPRESS_ALL,
@@ -841,6 +842,7 @@ def run_query_v2(
     cancellation: QueryCancellationContext | None = None,
     telemetry_stats: MutableMapping[str, object] | None = None,
     graph_expansion: bool = True,
+    rrf_weights: RrfWeights | None = None,
 ) -> dict[str, Any]:
     """Read existing projections and return one canonical result payload.
 
@@ -973,6 +975,7 @@ def run_query_v2(
                     metadata,
                     item,
                     effective_rrf_k=effective_rrf_k,
+                    rrf_weights=rrf_weights or DEFAULT_RRF_WEIGHTS,
                 ),
                 "graph_score": 0.0,
                 "graph_reasons": [],

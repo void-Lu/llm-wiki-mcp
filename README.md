@@ -225,6 +225,8 @@ wiki_query(
 
 Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，在每个物理 store 上先捕获一次不可变 `QueryCorpusSnapshot`，再做 passage FTS/vector 召回、RRF 融合和有界强-seed graph 扩展排序；退役的 `wiki/sources`、superseded 与 deprecated 页面不会进入 active 正文。每个结果页的正文（`results[].content`）按阅读顺序拼接所选 passage：相邻 chunk 共享的重叠部分（切块时重复的最多 64 个单位）只保留一次；同一次响应中已在前面出现过的长段落（约 8 个英文词或 24 个汉字以上，如模板化样板段落）在后续页面中省略，但每个结果页至少保留其第一段 passage 正文。强相关页面（最高分 ≥ 首页 0.6 倍）的正文在每页约 2400 token 的预算内补全：页面放得下时从页首按阅读顺序补全（与以前相同）；更长的页面先保留页首 passage（不超过预算的 1/4 时），再以命中 passage 为中心交替向后、向前扩展相邻 passage 直到预算用完。排序不受影响。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
 
+主融合的 RRF 各路权重可在全局配置 `vaults.<name>.retrieval.ranking.rrf_weights`（`fts`、`title`、`vector`，0–10 的数，默认均为 `1.0`）或环境变量 `LLM_WIKI_RRF_WEIGHTS`（如 `fts=1,vector=0.8`，只覆盖列出的项，优先于配置文件）中设置；默认值与不设时的排序逐位相同。非法值使 `wiki_query` 返回 `invalid_config`。权重只乘在主 RRF 的 FTS/标题/向量三项上；graph 扩展基于融合后的分数，因此间接受影响；覆盖合并（`merge_coverage_items`）使用的来源 RRF 不受影响。
+
 ### Query V2 质量门禁
 
 Query V2 在完整回退、按页去重之后、公开结果和 context 投影之前执行可选的 page-level 规则质量门禁。门禁配置属于 runtime snapshot，不加入 `wiki_query` 公共参数；当前默认模式为 `off`。

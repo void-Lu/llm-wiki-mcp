@@ -24,6 +24,7 @@ from runtime.runtime_config import (
     ConfigRegistry,
     ResolvedVault,
     RuntimeConfigError,
+    rrf_weights_with_env,
     VaultSettings,
 )
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
@@ -751,6 +752,7 @@ def _run_wiki_query(
             confirmation_token=confirmation_token,
             cancellation=cancellation,
             telemetry_stats=telemetry_stats,
+            rrf_weights=rrf_weights_with_env(settings.ranking.rrf_weights),
         )
         result = attach_no_results_outcome(
             _attach_query_content_refs(result, logical_vault=resolution.logical_name)

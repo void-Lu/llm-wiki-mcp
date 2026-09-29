@@ -18,6 +18,9 @@ from retrieval.body_budget import (
 )
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
+from runtime.runtime_config import RrfWeights
+
+DEFAULT_RRF_WEIGHTS = RrfWeights()
 
 
 FRESHNESS_BONUS_MAX = 12.0
@@ -343,13 +346,18 @@ def fusion_score(
     item: Mapping[str, Any],
     *,
     effective_rrf_k: int,
+    rrf_weights: RrfWeights = DEFAULT_RRF_WEIGHTS,
 ) -> dict[str, Any]:
-    """Compose the primary RRF, exact-match, and total fusion signals."""
+    """Compose the primary RRF, exact-match, and total fusion signals.
+
+    ``rrf_weights`` multiply the FTS, title and vector terms; the default
+    weights of ``1.0`` leave every score bit-for-bit unchanged.
+    """
 
     rrf = (
-        (1 / (effective_rrf_k + item["fts_rank"]) if item["fts_rank"] else 0.0)
-        + (1 / (effective_rrf_k + item["title_rank"]) if item["title_rank"] else 0.0)
-        + (1 / (effective_rrf_k + item["vector_rank"]) if item["vector_rank"] else 0.0)
+        (rrf_weights.fts / (effective_rrf_k + item["fts_rank"]) if item["fts_rank"] else 0.0)
+        + (rrf_weights.title / (effective_rrf_k + item["title_rank"]) if item["title_rank"] else 0.0)
+        + (rrf_weights.vector / (effective_rrf_k + item["vector_rank"]) if item["vector_rank"] else 0.0)
     )
     exact = int(question.casefold() in {hit.title.casefold(), hit.page_path.casefold()})
     total = compose_score(

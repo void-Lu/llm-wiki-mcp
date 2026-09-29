@@ -643,3 +643,16 @@ def test_hit_window_centres_a_long_page_on_its_matched_passage_and_keeps_the_ope
     assert sum(estimate_response_tokens(hit.text) for hit in window if hit is not matched) <= PAGE_TOKEN_BUDGET
     # The following neighbour is preferred when the budget is odd.
     assert max(ordinals) - 12 >= 12 - min(o for o in ordinals if o)
+
+
+def test_fusion_score_default_weights_are_exact_and_weights_scale_each_source() -> None:
+    from runtime.runtime_config import RrfWeights
+
+    hit = PassageHit("p-1", "wiki/concepts/target.md", "Target", (), "", 0.0, "active", "high", "wiki")
+    item = {"fts_rank": 3, "title_rank": 2, "vector_rank": 7}
+    unweighted = fusion_score(hit, "different", "concept", "knowledge", {}, item, effective_rrf_k=60)
+    assert unweighted["rrf"] == 1 / 63 + 1 / 62 + 1 / 67
+    assert fusion_score(hit, "different", "concept", "knowledge", {}, item, effective_rrf_k=60, rrf_weights=RrfWeights()) == unweighted
+
+    weighted = fusion_score(hit, "different", "concept", "knowledge", {}, item, effective_rrf_k=60, rrf_weights=RrfWeights(fts=2.0, title=0.0, vector=0.5))
+    assert weighted["rrf"] == 2.0 / 63 + 0.5 / 67

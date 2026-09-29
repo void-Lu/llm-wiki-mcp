@@ -50,6 +50,28 @@ class EmbeddingSettings:
     min_vector_score: float = 0.5
 
 
+RRF_WEIGHTS_ENV = "LLM_WIKI_RRF_WEIGHTS"
+RRF_WEIGHT_SOURCES = ("fts", "title", "vector")
+RRF_WEIGHT_BOUNDS = (0.0, 10.0)
+
+
+@dataclass(frozen=True)
+class RrfWeights:
+    """Per-source multipliers of the primary reciprocal-rank fusion terms.
+
+    The defaults (all ``1.0``) reproduce the unweighted fusion exactly.
+    """
+
+    fts: float = 1.0
+    title: float = 1.0
+    vector: float = 1.0
+
+
+@dataclass(frozen=True)
+class RankingSettings:
+    rrf_weights: RrfWeights = RrfWeights()
+
+
 @dataclass(frozen=True)
 class ContextSettings:
     response_mode: Literal["context_pack", "legacy"] = "context_pack"
@@ -80,6 +102,7 @@ class RetrievalSettings:
     embedding: EmbeddingSettings = EmbeddingSettings()
     context: ContextSettings = ContextSettings()
     execution: QueryExecutionSettings = QueryExecutionSettings()
+    ranking: RankingSettings = RankingSettings()
 
 
 @dataclass(frozen=True)
@@ -268,6 +291,49 @@ def _decode_embedding(value: object, path: Path) -> EmbeddingSettings:
     )
 
 
+def _decode_ranking(value: object, path: Path) -> RankingSettings:
+    raw = _mapping(value or {}, "retrieval.ranking", path)
+    _unknown_keys(raw, {"rrf_weights"}, "retrieval.ranking", path)
+    weights = _mapping(raw.get("rrf_weights") or {}, "retrieval.ranking.rrf_weights", path)
+    _unknown_keys(weights, set(RRF_WEIGHT_SOURCES), "retrieval.ranking.rrf_weights", path)
+    return RankingSettings(
+        rrf_weights=RrfWeights(
+            **{
+                source: _number(weights.get(source), 1.0, *RRF_WEIGHT_BOUNDS, f"retrieval.ranking.rrf_weights.{source}", path)
+                for source in RRF_WEIGHT_SOURCES
+            }
+        )
+    )
+
+
+def rrf_weights_with_env(base: RrfWeights, environ: Mapping[str, str] | None = None) -> RrfWeights:
+    """Apply the optional ``LLM_WIKI_RRF_WEIGHTS`` override to configured weights.
+
+    The value is a comma-separated list such as ``fts=1.2,vector=0.8``; sources
+    that are not named keep their configured weight.  An unset or blank value
+    returns ``base`` unchanged.
+    """
+
+    text = (os.environ if environ is None else environ).get(RRF_WEIGHTS_ENV, "").strip()
+    if not text:
+        return base
+    values = {source: getattr(base, source) for source in RRF_WEIGHT_SOURCES}
+    for part in text.split(","):
+        key, separator, number = part.partition("=")
+        key = key.strip()
+        try:
+            weight = float(number.strip())
+        except ValueError:
+            weight = -1.0
+        if not separator or key not in values or not RRF_WEIGHT_BOUNDS[0] <= weight <= RRF_WEIGHT_BOUNDS[1]:
+            raise RuntimeConfigError(
+                f"{RRF_WEIGHTS_ENV} must look like fts=1,title=1,vector=1 with weights between {RRF_WEIGHT_BOUNDS[0]} and {RRF_WEIGHT_BOUNDS[1]}",
+                code="invalid_config",
+            )
+        values[key] = weight
+    return RrfWeights(**values)
+
+
 def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     raw = _mapping(value, f"vaults.{name}", path)
     _unknown_keys(raw, {"root", "retrieval", "privacy", "telemetry", "archive", "quality_gate"}, f"vaults.{name}", path)
@@ -275,7 +341,7 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
     if not isinstance(root, str) or not root:
         raise RuntimeConfigError(f"vaults.{name}.root is required", code="invalid_config", config_path=path)
     retrieval_raw = _mapping(raw.get("retrieval", {}), "retrieval", path)
-    _unknown_keys(retrieval_raw, {"lexical_enabled", "query_version", "embedding", "context", "execution"}, "retrieval", path)
+    _unknown_keys(retrieval_raw, {"lexical_enabled", "query_version", "embedding", "context", "execution", "ranking"}, "retrieval", path)
     query_version = retrieval_raw.get("query_version", "v2")
     if query_version != "v2":
         raise RuntimeConfigError("retrieval.query_version only supports v2", code="invalid_config", config_path=path)
@@ -336,6 +402,7 @@ def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
                 max_concurrency=_integer(execution_raw.get("max_concurrency"), 4, 1, 32, "retrieval.execution.max_concurrency", path),
                 cancel_grace_seconds=_number(execution_raw.get("cancel_grace_seconds"), 0.25, 0.01, 5.0, "retrieval.execution.cancel_grace_seconds", path),
             ),
+            ranking=_decode_ranking(retrieval_raw.get("ranking", {}), path),
         ),
         privacy=PrivacySettings(
             credential_redaction_enabled=_bool(privacy_raw.get("credential_redaction_enabled"), True, "privacy.credential_redaction_enabled", path),
