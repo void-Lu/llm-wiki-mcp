@@ -622,6 +622,22 @@ def test_wiki_query_graph_expands_by_sources_and_wikilinks(tmp_path: Path):
     assert neighbor["scores"]["graph"] > 0
 
 
+def test_engine_graph_expansion_switch_is_an_offline_ablation(tmp_path: Path):
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(root, "wiki/concepts/seed.md", "Seed Page", "unique needle links to [[neighbor.md]].", type="concept")
+    _write(root, "wiki/concepts/neighbor.md", "Neighbor Page", "related content", type="concept")
+    refresh_indexes(root)
+
+    enabled = run_query_v2(root, "needle", top_k=3, retrieval_mode="lexical")
+    disabled = run_query_v2(root, "needle", top_k=3, retrieval_mode="lexical", graph_expansion=False)
+
+    assert "wiki/concepts/neighbor.md" in [item["path"] for item in enabled["results"]]
+    assert [item["path"] for item in disabled["results"]] == ["wiki/concepts/seed.md"]
+    assert disabled["pipeline"]["counters"]["graph_hits"] == 0
+    assert all(item["scores"]["graph"] == 0 for item in disabled["results"])
+
+
 def test_wiki_query_graph_expands_by_full_wiki_reference_target(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)

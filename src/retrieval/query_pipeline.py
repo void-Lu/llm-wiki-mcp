@@ -795,12 +795,17 @@ def run_query_v2(
     confirmation_token: str | None = None,
     cancellation: QueryCancellationContext | None = None,
     telemetry_stats: MutableMapping[str, object] | None = None,
+    graph_expansion: bool = True,
 ) -> dict[str, Any]:
     """Read existing projections and return one canonical result payload.
 
     The internal packer still assembles page-ordered evidence, but its body is
     emitted once on each public ``results`` item; the old ``context_pack`` and
     legacy adapter are intentionally not part of the response contract.
+
+    ``graph_expansion`` is an engine-internal switch for offline evaluation
+    ablations (graph on vs off); the MCP ``wiki_query`` boundary never exposes
+    it and always keeps the default bounded graph expansion.
     """
     cancellation = cancellation or QueryCancellationContext.unbounded()
     cancellation.checkpoint("status")
@@ -934,7 +939,7 @@ def run_query_v2(
             root, store, metadata, scope=effective_scope, project=project, filters=filters,
             seed_scores={item["hit"].page_path: item["score"] for item in scored}, debug=debug, snapshot=snapshot, cancellation=cancellation,
         )
-        if effective_scope != "raw"
+        if effective_scope != "raw" and graph_expansion
         else ({}, [])
     )
     existing_by_path = {item["hit"].page_path: item for item in scored}

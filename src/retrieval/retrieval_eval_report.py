@@ -237,6 +237,19 @@ def evaluate_retrieval_gate(
         actual={"retrieval_mode": candidate_parameters.get("retrieval_mode"), "vector_enabled": candidate_parameters.get("vector_enabled")},
         expected={"retrieval_mode": "lexical", "vector_enabled": False},
     )
+    baseline_parameters = baseline_metadata.get("parameters")
+    if not isinstance(baseline_parameters, Mapping):
+        baseline_parameters = {}
+    # 旧报告没有该字段，等价于默认开启图扩展；graph on/off 消融报告不能互为 baseline。
+    candidate_graph = candidate_parameters.get("graph_expansion", True) is not False
+    baseline_graph = baseline_parameters.get("graph_expansion", True) is not False
+    add_check(
+        "graph_expansion_matches",
+        candidate_graph == baseline_graph,
+        actual=candidate_graph,
+        expected=baseline_graph,
+        reason="graph_expansion_mismatch" if candidate_graph != baseline_graph else None,
+    )
     if "side_effects" in candidate_metadata or "side_effects" in baseline_metadata:
         side_effects = candidate_metadata.get("side_effects")
         add_check(
@@ -334,6 +347,7 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         f"- 语料指纹：`{metadata['vault_fingerprint']['value']}`（{metadata['vault_fingerprint']['file_count']} 个 wiki 文件）",
         f"- 运行版本：`{metadata['runtime_provenance']['package_version']}` / `{metadata['runtime_provenance']['revision']}`",
         f"- 排名版本：`{ranking_version}`",
+        f"- 图扩展：{'关闭（离线消融）' if metadata['parameters'].get('graph_expansion') is False else '开启'}",
         "",
         "## 指标",
         "",
@@ -350,6 +364,7 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         f"- 只读副作用检查：{'通过' if metadata.get('side_effects', {}).get('clean') else '失败/未证明'}",
         f"- 低召回诊断：{metrics.get('diagnosis_distribution', {})}",
         "",
+        *_ranking_by_k_lines(metrics.get("ranking_by_k")),
         "## Case 摘要",
         "",
     ]
@@ -390,6 +405,28 @@ def write_retrieval_eval_report(report: Mapping[str, Any], output_dir: str | Pat
         )
     markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"json": str(json_path), "markdown": str(markdown_path)}
+
+
+def _ranking_by_k_lines(ranking_by_k: object) -> list[str]:
+    """把 ``ranking_by_k`` 渲染成 Recall/MRR/nDCG@k 表，与 JSON 报告同源。"""
+
+    if not isinstance(ranking_by_k, Mapping) or not ranking_by_k:
+        return []
+    lines = [
+        "## 按 k 的排名指标",
+        "",
+        "| k | Recall | Precision | MRR | nDCG |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for k, values in sorted(ranking_by_k.items(), key=lambda item: int(item[0]) if str(item[0]).isdigit() else 0):
+        if not isinstance(values, Mapping):
+            continue
+        lines.append(
+            f"| {k} | {_format_metric(values.get('recall'))} | {_format_metric(values.get('precision'))} | "
+            f"{_format_metric(values.get('mrr'))} | {_format_metric(values.get('ndcg'))} |"
+        )
+    lines.append("")
+    return lines
 
 
 def _sanitise_report_for_output(report: Mapping[str, Any]) -> dict[str, Any]:
