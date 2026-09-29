@@ -46,3 +46,44 @@ def test_graph_debug_only_controls_reason_projection_not_contribution() -> None:
     assert with_debug.graph_score == without_debug.graph_score
     assert without_debug.rank_breakdown.graph_reasons == []
     assert with_debug.rank_breakdown.graph_reasons
+
+
+def _candidate(rel: str, fusion_score: float = 0.0) -> QueryCandidate:
+    return QueryCandidate(Path(rel), rel, rel, "", fusion_score=fusion_score, keyword_score=fusion_score)
+
+
+def test_graph_only_scores_follow_raw_evidence_below_the_pure_cap() -> None:
+    seed, strong, weak, far = "wiki/seed.md", "wiki/strong.md", "wiki/weak.md", "wiki/far.md"
+    graph = Graph(
+        neighbors={seed: {strong, weak}, strong: {seed, far}, weak: {seed}, far: {strong}},
+        sources={seed: {"raw/a.md"}, strong: {"raw/a.md"}, weak: set(), far: set()},
+        types={seed: "concept", strong: "concept", weak: "entity", far: "entity"},
+    )
+    candidates = {rel: _candidate(rel) for rel in (strong, weak, far)}
+    seed_candidate = _candidate(seed, fusion_score=10.0)
+    scored = {seed: seed_candidate}
+
+    apply_graph_expansion(scored, [seed_candidate, *candidates.values()], graph, 2, collect_reasons=False)
+
+    strong_score, weak_score, far_score = (candidates[rel].graph_score for rel in (strong, weak, far))
+    # direct + shared source + same type > direct only > two-hop only
+    assert 0.75 > strong_score > weak_score > far_score > 0
+    # one direct wikilink (3.0) from one seed sits at half of the cap
+    assert weak_score == 0.375
+    assert candidates[strong].graph_evidence == 8.0
+
+
+def test_lexical_candidates_keep_the_proportional_graph_cap() -> None:
+    seed, other = "wiki/seed.md", "wiki/other.md"
+    graph = Graph(
+        neighbors={seed: {other}, other: {seed}},
+        sources={seed: set(), other: set()},
+        types={seed: "concept", other: "concept"},
+    )
+    seed_candidate = _candidate(seed, fusion_score=10.0)
+    other_candidate = _candidate(other, fusion_score=2.0)
+
+    apply_graph_expansion({seed: seed_candidate}, [seed_candidate, other_candidate], graph, 1, collect_reasons=False)
+
+    assert other_candidate.graph_score == 0.3  # 15% of its own lexical score
+    assert other_candidate.graph_evidence == 0.0

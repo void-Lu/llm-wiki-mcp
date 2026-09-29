@@ -18,6 +18,10 @@ from retrieval.graph_edges import WIKILINK, PageLink, extract_page_links, frontm
 
 _GRAPH_SCORE_RATIO_CAP = 0.15
 _PURE_GRAPH_SCORE_CAP = 0.75
+# Raw evidence at which a graph-only page reaches half of the pure-graph cap.
+# One direct wikilink from one seed (weight 3.0) lands at 0.375; stronger or
+# repeated evidence approaches, but never reaches, 0.75.
+_PURE_GRAPH_HALF_SATURATION = 3.0
 _MAX_GRAPH_EXPANSIONS_PER_SEED = 64
 _SCORE_PRECISION = 12
 
@@ -48,6 +52,7 @@ class QueryCandidate:
     vector_score: float = 0.0
     fusion_score: float = 0.0
     graph_score: float = 0.0
+    graph_evidence: float = 0.0
     rank_breakdown: RankBreakdown = field(default_factory=RankBreakdown)
 
     @property
@@ -144,7 +149,15 @@ def apply_graph_expansion(
                 relationship_score = evidence.score
                 raw_contribution = relationship_score * decay
                 graph_cap = _graph_score_cap(candidate)
-                applied = max(0.0, min(raw_contribution, graph_cap - candidate.graph_score))
+                if _has_relevance_signal(candidate):
+                    applied = max(0.0, min(raw_contribution, graph_cap - candidate.graph_score))
+                else:
+                    # Graph-only pages accumulate uncapped evidence and map it
+                    # monotonically into [0, cap), so stronger evidence keeps
+                    # ranking above weaker evidence instead of every page
+                    # saturating at the cap and falling back to path order.
+                    candidate.graph_evidence += raw_contribution
+                    applied = max(0.0, _pure_graph_score(candidate.graph_evidence) - candidate.graph_score)
                 if collect_reasons:
                     if not relationship_reasons:
                         relationship_reasons = [{"kind": "graph_path", "source": seed, "target": rel, "score": 0.0}]
@@ -201,6 +214,16 @@ def relationship_score_for(left: str, right: str, graph: Graph) -> float:
     """Compatibility projection of the shared relationship evidence owner."""
 
     return relationship_evidence_for(left, right, graph).score
+
+
+def _has_relevance_signal(candidate: QueryCandidate) -> bool:
+    return max(candidate.fusion_score, candidate.keyword_score, candidate.vector_score) > 0
+
+
+def _pure_graph_score(evidence: float) -> float:
+    if evidence <= 0:
+        return 0.0
+    return _stable_score(_PURE_GRAPH_SCORE_CAP * evidence / (evidence + _PURE_GRAPH_HALF_SATURATION))
 
 
 def _graph_score_cap(candidate: QueryCandidate) -> float:
