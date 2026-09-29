@@ -16,6 +16,7 @@ from wiki.reference_section import build_reference_section, skipped_warnings
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
+from wiki.link_suggestions import unlinked_mention_suggestions
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
 
@@ -246,6 +247,10 @@ def apply_update(
         result["failed_stage"] = mutation.failed_stage
     if resolved_sources is not None:
         result["source_hashes"] = source_hash_map(resolved_sources)
+    _, saved_body = split_frontmatter(prepared.text)
+    link_suggestions = unlinked_mention_suggestions(root, page_path, saved_body)
+    if link_suggestions:
+        result["link_suggestions"] = link_suggestions
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 

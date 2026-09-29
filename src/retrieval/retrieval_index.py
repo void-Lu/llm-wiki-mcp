@@ -446,6 +446,36 @@ class RetrievalIndexStore:
                 entry[1].append(PageLink(kind, dst, decode_paths(dst_paths), dst_stem))
         return {path: (source_hash, tuple(links)) for path, (source_hash, links) in grouped.items()}
 
+    def link_targets(self) -> list[dict[str, object]]:
+        """Return active Wiki page titles and aliases for write-time hints.
+
+        One read-only pages-only query; ``[]`` when the projection has not
+        been built.  Callers treat a missing projection as "no hints", never
+        as an error, and never build it.
+        """
+        if not self.path.exists():
+            return []
+        with self._connection(readonly=True) as connection:
+            self._ensure_schema(connection)
+            rows = connection.execute(
+                "SELECT path, title, page_type, lifecycle_status, json_type(frontmatter_json, '$.aliases'), json_extract(frontmatter_json, '$.aliases') "
+                "FROM pages WHERE path >= 'wiki/' AND path < 'wiki0' ORDER BY path"
+            ).fetchall()
+        targets: list[dict[str, object]] = []
+        for path, title, page_type, lifecycle, alias_type, alias_value in rows:
+            if alias_type == "array":
+                try:
+                    decoded = json.loads(alias_value)
+                except json.JSONDecodeError:
+                    decoded = []
+            elif alias_type == "text":
+                decoded = [alias_value]
+            else:
+                decoded = []
+            aliases = [str(item) for item in decoded if isinstance(item, str) and item.strip()]
+            targets.append({"path": str(path), "title": str(title or ""), "type": str(page_type or ""), "lifecycle": str(lifecycle or ""), "aliases": aliases})
+        return targets
+
     def vector_records(self) -> list[dict[str, str]]:
         """Return only passage metadata/text required by explicit vector lifecycle."""
         if not self.path.exists():

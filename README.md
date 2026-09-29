@@ -181,6 +181,8 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 
 `wiki_write_note` 成功写入后返回 `state`、`operation_id`、`page_hash`；若页面已提交但派生投影待修复，响应会额外给出 `repair_action` 与 `failed_stage`，调用方应执行指定 repair，而不是重复创建整页。
 
+写入提示（只读、可选字段，不改写页面）：`wiki_write_note` 与 `wiki_update(action="apply")` 保存成功后，若正文提到了其他 Wiki 页面的标题、别名或多词文件名（如 `retry-budget` → “retry budget”）但没有链接，响应附带 `link_suggestions`，每个目标页只报告第一次出现：`{"target": "wiki/entities/rate-engine.md", "title": "Rate Engine", "mention": "rate engine", "line": 3, "link": "[[rate-engine|rate engine]]"}`。跳过代码块/行内代码、已有 wikilink 与 Markdown 链接、页面自身、正文已链接的目标、短于 4 个拉丁字符或 2 个汉字的词、指向多个页面的词；拉丁词要求词边界，单个拉丁单词须大小写一致，中文按子串匹配且长词优先。标题/别名来自已构建的检索投影；投影缺失时不返回该字段。没有提示时不出现该字段。
+
 不再注册 `wiki_generation` worker 工具。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 
 旧版 CodeGraph 摄入留下的内容已由用户在真实 vault 中完成迁移；退役清理命令已删除，

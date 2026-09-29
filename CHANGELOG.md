@@ -3,6 +3,7 @@
 ## 2026-09-29 — 向量嵌入文本与写入提示
 
 - 向量索引改为嵌入“页面标题 + 标题路径 + passage 正文”（`embedding_text`；与标题相同的 H1 不重复），存储的 passage 文本与词法检索不变。向量记录的 content hash 同时覆盖嵌入文本，改标题或改小节标题会让对应向量变为 stale。向量索引 schema 升为 3，旧索引报告 `index_incompatible`，需要执行一次 `llm-wiki-mcp vector build`。
+- `wiki_write_note` 与 `wiki_update(action="apply")` 保存成功后返回可选的 `link_suggestions`：正文中提到其他 Wiki 页面标题/别名/多词文件名却未链接的位置（每个目标只报第一次，含 `target`、`title`、`mention`、`line`、`link`）。跳过代码、已有链接、页面自身、已链接目标、过短或指向多页的词；拉丁词按词边界、单词须大小写一致，中文按子串且长词优先。只读取已构建的检索投影，不改写页面；无提示时不出现该字段。
 
 ## 2026-09-29 — 图扩展排序修复
 

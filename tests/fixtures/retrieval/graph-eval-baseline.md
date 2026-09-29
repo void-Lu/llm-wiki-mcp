@@ -160,6 +160,15 @@ graph_v1 总体四位小数（R@1 / R@3 / R@5 / R@10 / MRR / nDCG）：修复 3 
 - 结论：两套 fixture 语料都很小（73 / 4 个 passage），变化方向总体为正（vector MRR +0.016、nDCG +0.015，无答案误命中 0.75 → 0.50），但 R@10 −0.010，hybrid direct 有一条回退；不足以作为大语料上的收益证据。
 - 延迟：查询路径未改动（query embedding 不变）；单次运行的 vector p95 为 105 → 132 ms（graph_v1）、49 → 46 ms（CI），属于单次 CPU 测量噪声范围，未做重复测量。全量建库耗时 9.1 s → 10.1 s（graph_v1，73 passage，嵌入文本变长）。
 
+## 写入提示：未链接提及（`link_suggestions`）
+
+不影响检索：graph_v1 / v2_40 / CI 的 lexical 指标（graph 开/关）与 `b1aec05` 逐位相同。评测脚本在 `/workspace/graph-eval-work/mention_eval.py`、`mention_zh.py`（不入库）。
+
+- graph_v1 剥链测试：对 33 个含正文 wikilink 的页面，把每个能唯一解析到其他页面的 `[[target]]` 替换为纯文本（变体 A：目标页标题；变体 B：文件名短语，如 `retry-budget` → “retry budget”），再对剥链后的正文生成提示，与被剥掉的目标比较（每页每目标计一次）。两种变体结果相同：TP 70、FP 1、FN 0，precision 0.986、recall 1.000。唯一的 FP 是 `invoice-builder` 里原有的 “Invoice dates follow …” → `invoice-dates`（Invoice Dates Spec），属于正文中本来就存在的未链接提及，按严格口径计为 FP。对未剥链的原始页面运行，也只产生这一条提示。
+- 局限：替换文本就是标题或文件名短语，所以 recall 1.000 只说明匹配机制可靠，不代表真实写作中的召回（复数、改写、缩写不会被匹配）。graph_v1 页面标题都是英文，fixture 中没有别名。
+- 中文/混排合成检查（13 个页面，含单字标题“票”、两个页面共享别名“队列”、“发票” ⊂ “发票明细”、代码块与行内代码、中英别名；4 个正文剥链）：TP 12、FP 2、FN 0，precision 0.857、recall 1.000。两条 FP 都是正文中真实存在但未作为金标的提及（“每张发票都带…” → 发票；“与 Circuit Breaker 无关…” → 熔断器）。单字标题、共享别名、代码中的名字、`carrier gatewayed` 这类非词边界都没有产生提示。该集合是为验证规则而构造的，不能当作真实精度估计。
+- 写入延迟（2000 页合成 vault，单次 `save_obsidian_note` 与 `apply_update`，每轮 6 次写入/5 次 apply 取中位数，同一会话前后交替 3 轮）：write_note 中位数 415/426/430 ms → 443/426/454 ms，apply 424/420/413 ms → 436/430/429 ms。单独测量提示本身：读取 2000 个标题/别名约 9–10 ms，匹配约 6–7 ms，合计约 16 ms。
+
 ## 复现
 
 ```bash
