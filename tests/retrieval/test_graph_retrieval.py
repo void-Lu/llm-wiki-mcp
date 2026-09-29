@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from retrieval.graph_retrieval import (
     Graph,
     QueryCandidate,
@@ -52,7 +54,7 @@ def _candidate(rel: str, fusion_score: float = 0.0) -> QueryCandidate:
     return QueryCandidate(Path(rel), rel, rel, "", fusion_score=fusion_score, keyword_score=fusion_score)
 
 
-def test_graph_only_scores_follow_raw_evidence_below_the_pure_cap() -> None:
+def _ranked_graph_only(pure_seed_ratio: float | None) -> dict[str, QueryCandidate]:
     seed, strong, weak, far = "wiki/seed.md", "wiki/strong.md", "wiki/weak.md", "wiki/far.md"
     graph = Graph(
         neighbors={seed: {strong, weak}, strong: {seed, far}, weak: {seed}, far: {strong}},
@@ -61,16 +63,58 @@ def test_graph_only_scores_follow_raw_evidence_below_the_pure_cap() -> None:
     )
     candidates = {rel: _candidate(rel) for rel in (strong, weak, far)}
     seed_candidate = _candidate(seed, fusion_score=10.0)
-    scored = {seed: seed_candidate}
+    apply_graph_expansion(
+        {seed: seed_candidate}, [seed_candidate, *candidates.values()], graph, 2,
+        collect_reasons=False, pure_seed_ratio=pure_seed_ratio,
+    )
+    return {rel.removeprefix("wiki/").removesuffix(".md"): candidate for rel, candidate in candidates.items()}
 
-    apply_graph_expansion(scored, [seed_candidate, *candidates.values()], graph, 2, collect_reasons=False)
 
-    strong_score, weak_score, far_score = (candidates[rel].graph_score for rel in (strong, weak, far))
-    # direct + shared source + same type > direct only > two-hop only
+def test_graph_only_scores_follow_raw_evidence_below_the_seed_relative_cap() -> None:
+    ranked = _ranked_graph_only(0.7)
+    strong_score, weak_score, far_score = (ranked[name].graph_score for name in ("strong", "weak", "far"))
+    # direct + shared source + same type > direct only > two-hop only, and
+    # every graph-only page stays below ratio x seed relevance (0.7 x 10).
+    assert 7.0 > strong_score > weak_score > far_score > 0
+    # one direct wikilink (3.0) from one seed sits at half of the relative cap
+    assert weak_score == 3.5
+    assert ranked["strong"].graph_evidence == 8.0
+    assert ranked["strong"].graph_seed_score == 10.0
+
+
+def test_graph_only_scores_keep_the_fixed_cap_without_a_seed_ratio() -> None:
+    ranked = _ranked_graph_only(None)
+    strong_score, weak_score, far_score = (ranked[name].graph_score for name in ("strong", "weak", "far"))
     assert 0.75 > strong_score > weak_score > far_score > 0
-    # one direct wikilink (3.0) from one seed sits at half of the cap
     assert weak_score == 0.375
-    assert candidates[strong].graph_evidence == 8.0
+
+
+def test_graph_only_cap_follows_the_best_contributing_seed() -> None:
+    strong_seed, weak_seed, near_strong, near_weak, shared = (
+        "wiki/strong-seed.md", "wiki/weak-seed.md", "wiki/near-strong.md", "wiki/near-weak.md", "wiki/shared.md",
+    )
+    graph = Graph(
+        neighbors={
+            strong_seed: {near_strong, shared}, weak_seed: {near_weak, shared},
+            near_strong: {strong_seed}, near_weak: {weak_seed}, shared: {strong_seed, weak_seed},
+        },
+        sources={rel: set() for rel in (strong_seed, weak_seed, near_strong, near_weak, shared)},
+        types={strong_seed: "a", weak_seed: "b", near_strong: "c", near_weak: "d", shared: "e"},
+    )
+    seeds = {strong_seed: _candidate(strong_seed, fusion_score=10.0), weak_seed: _candidate(weak_seed, fusion_score=2.0)}
+    targets = {rel: _candidate(rel) for rel in (near_strong, near_weak, shared)}
+
+    apply_graph_expansion(dict(seeds), [*seeds.values(), *targets.values()], graph, 1, collect_reasons=False)
+
+    # Same evidence (one direct wikilink), different seed strength.
+    assert targets[near_strong].graph_score == 3.5
+    assert targets[near_weak].graph_score == 0.7
+    # Evidence from both seeds accumulates; the cap uses the stronger seed.
+    assert targets[shared].graph_evidence == 6.0
+    assert targets[shared].graph_seed_score == 10.0
+    assert targets[shared].graph_score == pytest.approx(0.7 * 10.0 * 6.0 / (6.0 + 3.0))
+    # A graph-only page never outranks the seed that reached it.
+    assert all(target.graph_score < 10.0 for target in targets.values())
 
 
 def test_lexical_candidates_keep_the_proportional_graph_cap() -> None:

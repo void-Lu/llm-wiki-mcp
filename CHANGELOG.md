@@ -6,6 +6,7 @@
 - 自然语言关系问题走 `wiki_relaxed` 恢复分支时也执行有界图扩展（active scope、同一快照/过滤边界/上限），不再只在 strict 种子阶段生效；同一请求内复用已构建的候选边界与图。
 - 纯图候选不再统一截断到 0.75 后按路径排序：累计原始关系证据并以 `0.75 × E / (E + 3)` 单调映射，证据更强的页面排在前面；有词法/向量信号的候选仍按自身分数 15% 截断。
 - frontmatter 类型关系参与图证据：`derived_from`（取 origin 的 `path`）权重 3.0、`related_objects` 权重 2.0，目标与 wikilink 一样按当次候选集解析到页面，并作为可遍历的一跳边；`applies_to` 是适用标签（`languages`/`frameworks`），不指向页面，只以 `key:label` 存储、不计分。检索库 schema 升为 4（边表中类型关系的解析字段变化），旧库需 `llm-wiki-mcp index build`。
+- 纯图候选的上限改为相对种子：`0.7 × 最强贡献种子的相关分 × E / (E + 3)`（相关分取种子自身的 fusion/keyword/vector 最大值，不含图分），strict 与 relaxed 阶段一致；纯图页面始终低于把它带进来的种子，强种子的邻居可以越过弱词法候选。graph_v1 MRR@10 0.5057 → 0.5351、nDCG@10 0.5873 → 0.6189，R@1、direct R@1/MRR、无答案误命中、v2_40 与 CI 冒烟不变（详见 `tests/fixtures/retrieval/graph-eval-baseline.md`）。
 
 ## 2026-09-29 — 检索图边持久化
 

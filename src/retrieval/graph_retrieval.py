@@ -29,6 +29,12 @@ _PURE_GRAPH_SCORE_CAP = 0.75
 # One direct wikilink from one seed (weight 3.0) lands at 0.375; stronger or
 # repeated evidence approaches, but never reaches, 0.75.
 _PURE_GRAPH_HALF_SATURATION = 3.0
+# Graph-only pages are capped relative to the strongest seed that reached
+# them: ratio x best seed relevance x E/(E+3).  A graph-only page therefore
+# always stays below the seed that reached it, and neighbours of weak seeds
+# stay low instead of sharing one fixed ceiling with neighbours of strong ones.  Chosen on graph_v1 from the
+# grid {0.3, 0.5, 0.7, 0.9}; ``None`` restores the fixed 0.75 ceiling.
+PURE_GRAPH_SEED_RATIO: float | None = 0.7
 _MAX_GRAPH_EXPANSIONS_PER_SEED = 64
 _SCORE_PRECISION = 12
 
@@ -60,6 +66,7 @@ class QueryCandidate:
     fusion_score: float = 0.0
     graph_score: float = 0.0
     graph_evidence: float = 0.0
+    graph_seed_score: float = 0.0
     rank_breakdown: RankBreakdown = field(default_factory=RankBreakdown)
 
     @property
@@ -139,8 +146,14 @@ def apply_graph_expansion(
     max_graph_hops: int,
     *,
     collect_reasons: bool,
+    pure_seed_ratio: float | None = PURE_GRAPH_SEED_RATIO,
 ) -> None:
-    """Add bounded graph evidence without bypassing public query filters."""
+    """Add bounded graph evidence without bypassing public query filters.
+
+    Graph-only pages score ``pure_seed_ratio`` x the best contributing seed's
+    relevance x E/(E+3); ``pure_seed_ratio=None`` keeps the fixed 0.75 ceiling.
+    Pages with their own lexical/vector signal keep the 15% boost cap.
+    """
 
     candidates_by_rel = {candidate.rel: candidate for candidate in all_candidates}
     seeds = sorted(rel for rel, candidate in scored.items() if candidate.source_kind == "wiki")
@@ -179,7 +192,14 @@ def apply_graph_expansion(
                     # ranking above weaker evidence instead of every page
                     # saturating at the cap and falling back to path order.
                     candidate.graph_evidence += raw_contribution
-                    applied = max(0.0, _pure_graph_score(candidate.graph_evidence) - candidate.graph_score)
+                    if raw_contribution > 0:
+                        candidate.graph_seed_score = max(candidate.graph_seed_score, _relevance_base(scored[seed]))
+                    if pure_seed_ratio is None:
+                        target_score = _pure_graph_score(candidate.graph_evidence)
+                    else:
+                        graph_cap = _stable_score(pure_seed_ratio * candidate.graph_seed_score)
+                        target_score = _relative_graph_score(candidate.graph_evidence, graph_cap)
+                    applied = max(0.0, target_score - candidate.graph_score)
                 if collect_reasons:
                     if not relationship_reasons:
                         relationship_reasons = [{"kind": "graph_path", "source": seed, "target": rel, "score": 0.0}]
@@ -242,6 +262,16 @@ def relationship_score_for(left: str, right: str, graph: Graph) -> float:
 
 def _has_relevance_signal(candidate: QueryCandidate) -> bool:
     return max(candidate.fusion_score, candidate.keyword_score, candidate.vector_score) > 0
+
+
+def _relevance_base(candidate: QueryCandidate) -> float:
+    return max(candidate.fusion_score, candidate.keyword_score, candidate.vector_score)
+
+
+def _relative_graph_score(evidence: float, cap: float) -> float:
+    if evidence <= 0 or cap <= 0:
+        return 0.0
+    return _stable_score(cap * evidence / (evidence + _PURE_GRAPH_HALF_SATURATION))
 
 
 def _pure_graph_score(evidence: float) -> float:
