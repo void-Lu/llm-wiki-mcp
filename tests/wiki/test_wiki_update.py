@@ -336,3 +336,30 @@ def test_preview_and_apply_with_custom_heading(tmp_path) -> None:
     )
     assert result["ok"] is True
     assert "## 相关深度文档" in page.read_text(encoding="utf-8")
+
+
+def test_schema_text_describes_the_locked_fields_and_replace_semantics_the_code_uses() -> None:
+    from wiki.wiki_paths import DEFAULT_SCHEMA_TEXT
+    from wiki.wiki_update import LOCKED_FIELDS
+
+    rule = next(line for line in DEFAULT_SCHEMA_TEXT.splitlines() if line.startswith("3. 受控更新"))
+    locked_part = rule.split("锁定字段不可改值：", 1)[1].split("（", 1)[0]
+    assert {item.strip("`") for item in locked_part.split("、")} == LOCKED_FIELDS
+    assert "title" not in LOCKED_FIELDS
+    assert "整体替换原值" in rule and "去重合并" not in rule
+
+
+def test_incoming_title_changes_and_arrays_replace_instead_of_merging(tmp_path) -> None:
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\ntitle: A\naliases:\n- Old One\n- Old Two\n---\n\n# A\n\nold\n", encoding="utf-8")
+    incoming = {"title": "Renamed", "aliases": ["Old Two"]}
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "new", incoming)
+    applied = apply_update(tmp_path, "wiki/concepts/general/a.md", "new", incoming_frontmatter=incoming, plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
+
+    assert applied["ok"] is True
+    frontmatter = yaml.safe_load(page.read_text(encoding="utf-8").split("---\n")[1])
+    assert frontmatter["title"] == "Renamed"
+    assert frontmatter["aliases"] == ["Old Two"]
+    assert "\n# Renamed\n" in page.read_text(encoding="utf-8")

@@ -193,7 +193,7 @@ Wiki 页面；工具会校验目标存在于 `wiki/` 下并写成去掉 `.md` �
 
 1. Wiki 页面只能写入固定结构：`wiki/projects/<project>/{specs,plans,architecture,troubleshooting,researches}/`、`wiki/concepts/<domain>/`、`wiki/entities/<entity>/`。不可变归档内容只能由归档生命周期写入 `archives/bundles/<yyyy>/<mm>/<archive-id>/`。
 2. 工具生成页只能覆盖已有 `generated: true` 页面；遇到 `generated: false` 必须停止并报告。
-3. 受控更新时保留锁定字段：`type`、`title`、`created`、来源和人工维护字段；数组字段采用去重合并。
+3. 受控更新（`wiki_update`）时锁定字段不可改值：`type`、`created`、`concept_id`、`entity_id`、`entity_type`、`source_path`、`source_hash`（改值返回 `locked_field`）。`title`、`aliases` 等其他字段可以通过 `incoming_frontmatter` 修改；改标题只能用 frontmatter `title`，正文开头的 `# H1` 不会改变标题。`incoming_frontmatter` 中给出的字段整体替换原值（数组不合并，因此可以删除别名），未给出的字段保持不变；`sources` 由服务端校验并重算 `source_hashes`；`generated: true` 页面更新后保留该标记并标为 `maintenance: manual`。
 4. 文件名和路径段必须是 Windows 安全的单段名称：不得包含 `<>:"|?*`、控制字符、ADS 冒号、保留设备名、尾随点或空格。
 5. 写入前必须脱敏手机号、邮箱、API key、token 等敏感信息。
 
