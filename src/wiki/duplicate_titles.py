@@ -10,6 +10,7 @@ stem phrase.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -28,6 +29,18 @@ SIMILAR_TITLE_THRESHOLD = 0.6
 CONTAINMENT_MIN_CHARS = 3
 CONTAINMENT_MIN_RATIO = 0.5
 MAX_DUPLICATE_WARNINGS = 5
+# Every warning carries ``confidence``.  "high": the same title/alias, or a
+# spelling variant (plural, hyphenation, typo).  "related": one title is the
+# other plus whole extra words or characters -- containment matches, and
+# bigram-similar titles whose word sets are a strict subset of each other
+# ("Rate Limiting Policy" vs "Rate Limiting"): usually a narrower or wider
+# page worth linking, not a copy.  A project-scoped new page
+# (wiki/projects/...) near a general concept/knowledge page is also only
+# "related" unless the titles are the same: project specs and plans
+# legitimately restate a general concept.
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_RELATED = "related"
+_GENERAL_KNOWLEDGE_TYPES = {"concept", "knowledge"}
 
 
 def bigrams(value: str) -> frozenset[str]:
@@ -38,6 +51,17 @@ def _grams(normalized: str) -> frozenset[str]:
     if len(normalized) < 2:
         return frozenset({normalized}) if normalized else frozenset()
     return frozenset(normalized[index : index + 2] for index in range(len(normalized) - 1))
+
+
+def _words(value: str) -> frozenset[str]:
+    return frozenset(word for word in re.split(r"[\W_]+", value.casefold()) if word)
+
+
+def adds_whole_words(left: str, right: str) -> bool:
+    """True when one title's words are a strict subset of the other's."""
+
+    a, b = _words(left), _words(right)
+    return bool(a) and bool(b) and a != b and (a < b or b < a)
 
 
 def jaccard(left: frozenset[str], right: frozenset[str]) -> float:
@@ -81,8 +105,10 @@ def near_duplicate_titles(
         surfaces_by_path[path] = [page_title, *page_aliases, " ".join(stem.replace("_", "-").split("-"))]
         records.append(ConceptRecord(path, path, page_title, page_aliases, "", (), str(row.get("lifecycle") or "active")))
     titles = {str(row["path"]): str(row.get("title") or "") for row in pages}
+    types = {str(row["path"]): str(row.get("type") or "") for row in pages}
     registry = ConceptRegistry(Path("."), records=records)
     found: dict[str, dict[str, Any]] = {}
+    qualified: set[str] = set()
     new_surfaces = [surface for surface in (title, *aliases) if normalize_alias(surface)]
     for surface in new_surfaces:
         resolved = registry.resolve(surface, collect_evidence=False)
@@ -108,9 +134,17 @@ def near_duplicate_titles(
                     contained = (ratio, surface)
         if best[0] >= threshold:
             found[path] = {"path": path, "title": titles[path], "reason": "similar_title", "score": round(best[0], 3), "matched": best[1]}
+            if adds_whole_words(best[1], best[2]):
+                qualified.add(path)
         elif contained[0] >= CONTAINMENT_MIN_RATIO:
             found[path] = {"path": path, "title": titles[path], "reason": "title_contains", "score": round(contained[0], 3), "matched": contained[1]}
-    return sorted(found.values(), key=lambda item: (-item["score"], item["path"]))[:limit]
+    project_scoped = page_path.startswith("wiki/projects/")
+    for item in found.values():
+        related = item["reason"] == "title_contains" or item["path"] in qualified or (
+            project_scoped and item["reason"] != "same_title_or_alias" and types.get(item["path"]) in _GENERAL_KNOWLEDGE_TYPES
+        )
+        item["confidence"] = CONFIDENCE_RELATED if related else CONFIDENCE_HIGH
+    return sorted(found.values(), key=lambda item: (item["confidence"] != CONFIDENCE_HIGH, -item["score"], item["path"]))[:limit]
 
 
 def duplicate_title_warnings(

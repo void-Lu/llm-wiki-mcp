@@ -48,6 +48,43 @@ def test_plural_typo_suffix_and_chinese_variants_are_near_duplicates() -> None:
     assert _paths("限流器组件") == [("wiki/entities/限流器.md", "title_contains")]
 
 
+def _confidence(title: str, rows: list[dict[str, object]], page: str = "wiki/new/x.md") -> list[tuple[str, str, str]]:
+    return [(item["path"], item["reason"], item["confidence"]) for item in near_duplicate_titles(page, title, rows)]
+
+
+def test_confidence_is_related_for_containment_and_project_pages_near_general_concepts() -> None:
+    rows = [
+        {"path": "wiki/concepts/reliability/rate-limiting.md", "title": "Rate Limiting", "aliases": [], "type": "concept", "lifecycle": "active"},
+        {"path": "wiki/concepts/reliability/circuit-breaker.md", "title": "Circuit Breaker", "aliases": [], "type": "knowledge", "lifecycle": "active"},
+        {"path": "wiki/entities/rate-engine.md", "title": "Rate Engine", "aliases": [], "type": "entity", "lifecycle": "active"},
+    ]
+    concept = "wiki/concepts/reliability/rate-limiting.md"
+    breaker = "wiki/concepts/reliability/circuit-breaker.md"
+    spec = "wiki/projects/harbor/specs/x.md"
+    # Bigram-similar (0.688) but only adds a whole word: "related" anywhere.
+    assert _confidence("Rate Limiting Policy", rows) == [(concept, "similar_title", "related")]
+    assert _confidence("Rate Limiting Policy", rows, spec) == [(concept, "similar_title", "related")]
+    # Containment below the Jaccard threshold is "related" too.
+    assert _confidence("Rate Engine Service", rows) == [("wiki/entities/rate-engine.md", "title_contains", "related")]
+    # Similar titles are "high" for general pages, "related" for a project
+    # page near a concept/knowledge page, "high" again near an entity.
+    assert _confidence("Circuit Breakers", rows) == [(breaker, "similar_title", "high")]
+    assert _confidence("Circuit Breakers", rows, spec) == [(breaker, "similar_title", "related")]
+    assert _confidence("Rate Engines", rows, spec) == [("wiki/entities/rate-engine.md", "similar_title", "high")]
+    # The same title stays "high" even for a project page.
+    assert _confidence("rate limiting", rows, spec) == [(concept, "same_title_or_alias", "high")]
+
+
+def test_high_confidence_warnings_sort_before_related_ones() -> None:
+    # "Rate Limiter Service" scores 0.6 but only adds a word; the plural is a spelling variant.
+    rows = [
+        {"path": "wiki/entities/rate-limiter-service.md", "title": "Rate Limiter Service", "aliases": [], "type": "entity", "lifecycle": "active"},
+        {"path": "wiki/entities/rate-limiters.md", "title": "Rate Limiters", "aliases": [], "type": "entity", "lifecycle": "active"},
+    ]
+    got = _confidence("Rate Limiter", rows)
+    assert [item[2] for item in got] == ["high", "related"]
+
+
 def test_distinct_titles_sharing_words_do_not_warn() -> None:
     # Every existing title checked against the others (leave-one-out) is quiet.
     for row in ROWS:
@@ -79,7 +116,7 @@ def test_write_note_returns_duplicate_warnings_and_still_creates_the_page(tmp_pa
     assert result["ok"] is True
     assert (root / str(result["path"])).is_file()
     assert result["duplicate_warnings"] == [
-        {"path": "wiki/concepts/general/限流器.md", "title": "限流器", "reason": "title_contains", "score": 0.6, "matched": "限流器组件"}
+        {"path": "wiki/concepts/general/限流器.md", "title": "限流器", "reason": "title_contains", "score": 0.6, "matched": "限流器组件", "confidence": "related"}
     ]
     assert existing.read_text(encoding="utf-8").endswith("承运商调用限速。\n")
 
@@ -116,7 +153,7 @@ def test_update_that_retitles_a_page_warns_in_preview_and_apply(tmp_path: Path) 
     root = _update_vault(tmp_path)
     preview, applied = _preview_and_apply(root, "wiki/entities/general/dispatch-queue.md", "Queue.\n", {"title": "Rate Limiting"})
 
-    expected = [{"path": "wiki/concepts/reliability/rate-limiting.md", "title": "Rate Limiting", "reason": "same_title_or_alias", "score": 1.0, "matched": "Rate Limiting"}]
+    expected = [{"path": "wiki/concepts/reliability/rate-limiting.md", "title": "Rate Limiting", "reason": "same_title_or_alias", "score": 1.0, "matched": "Rate Limiting", "confidence": "high"}]
     assert preview["duplicate_warnings"] == expected
     assert applied["duplicate_warnings"] == expected
 

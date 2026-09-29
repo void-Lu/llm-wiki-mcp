@@ -184,6 +184,15 @@ graph_v1 总体四位小数（R@1 / R@3 / R@5 / R@10 / MRR / nDCG）：修复 3 
 | 0.8 | 未测 | 38 / 1 / 2，0.974 / 0.950 |
 
 - 0.6 下唯一 FP 是负例 “Rate Limiting Policy” → Rate Limiting（包含关系，得分 0.688）：按预先标注计为 FP，但实际很可能就是同一主题。唯一 FN 是 “承运网关” → 承运商网关（Jaccard 0.4，也不是子串）。0.4 时 leave-one-out 出现 “Billing Team”/“Routing Team”、“Invoice Dates Spec”/“Invoice Totals Spec” 互相告警，所以不取更低阈值。仅用 Jaccard 时漏掉的 3 条都是短标题加后缀（“Rate Engine Service”、“限流器组件”、“熔断器模式”），因此加了包含关系规则（较短一方 ≥ 3 个归一化字符、占较长一方 ≥ 0.5；因此 “发票” 与 “发票明细” 不会互相告警）。
+- 置信度分层（`confidence`，评测脚本 `/workspace/graph-eval-work/dup_eval2.py`，不入库）：更正上面的归因——“Rate Limiting Policy” → Rate Limiting 实际是 `similar_title`（bigram Jaccard 0.688 ≥ 0.6），包含比 0.667。该例改标为“有歧义/相关”（不再当作纯负例），三种口径（阈值 0.6，同一次运行）：
+
+  | 口径 | 全部警告：TP / FP / FN，P / R | 仅 `high`：TP / FP / FN，P / R |
+  | --- | --- | --- |
+  | 按原标注计负例 | 39 / 1 / 1，0.975 / 0.975 | 30 / 0 / 10，1.000 / 0.750 |
+  | 计为正例 | 40 / 0 / 1，1.000 / 0.976 | 30 / 0 / 11，1.000 / 0.732 |
+  | 排除（有歧义，采用） | 39 / 0 / 1，1.000 / 0.975 | 30 / 0 / 10，1.000 / 0.750 |
+
+  该例现为 `related`。40 条警告中 `high` 30 条、`related` 10 条（该例 + 9 条被标为正例的“加词/加字”变体：“Rate Engine Service”“The Rate Engine”“Circuit-Breaker Pattern”“Exponential Backoff Strategy”“Lane Registry Service”“Ledger Sync Job”“Revenue Recognition Rules”“限流器组件”“熔断器模式”）；`high` 无误报。评测页面路径不在 `wiki/projects/` 下，项目页降级规则未被该评测覆盖（由单元测试覆盖）。
 - 过程说明：包含关系规则和数据集是同一轮看结果后调整的，没有独立的留出集，数字偏乐观。第一轮数据里给 “承运商网关” 写的别名是 “Carrier Gateway 中文”，导致英文 “Carrier Gateway” 相关的正例和 leave-one-out 各多出与该中文页的告警（0.6 时 FP 4）；这是造数据时的别名重叠错误，改为 “承运商接入” 后重跑，上表为重跑结果。
 - 没有对小 vault 跳过：精确/别名匹配在任何规模都有用，检查成本也很低（见下），误报率与 vault 大小无关。
 - 写入延迟（2000 页合成 vault，同一会话前后交替 3 轮）：write_note 中位数 421/418/416 ms → 455/455/455 ms（约 +35–40 ms，其中重复检查约 20 ms、未链接提及约 16 ms，读取标题/别名只做一次）；apply 418/448/418 ms → 440/431/432 ms（apply 只做未链接提及）。
