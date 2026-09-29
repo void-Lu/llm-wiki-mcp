@@ -54,7 +54,7 @@ def _written_path(vault: Path, result: dict[str, object]) -> Path:
 def test_save_note_signature_drops_dead_internal_parameters() -> None:
     parameters = inspect.signature(save_obsidian_note).parameters
 
-    assert len(parameters) == 19
+    assert len(parameters) == 20
     assert {"script_type", "object_type", "decision_status", "overwrite"}.isdisjoint(parameters)
     assert "decision_status" not in inspect.signature(note_writer_module._frontmatter).parameters
 
@@ -553,3 +553,80 @@ def test_write_note_exposes_repair_contract_when_projection_fails(
     assert isinstance(result["page_hash"], str) and len(result["page_hash"]) == 64
     assert result["repair_action"] == "repair_page_operation"
     assert result["failed_stage"] == "dependencies"
+
+
+def _knowledge(vault: Path, title: str = "Rate Engine", **kwargs: Any) -> dict[str, object]:
+    (vault / "wiki/concepts/general").mkdir(parents=True, exist_ok=True)
+    return save_obsidian_note("knowledge", title, "Body.\n", domain="general", vault_root=str(vault), **kwargs)
+
+
+def test_aliases_are_trimmed_deduplicated_redacted_and_stored_after_title(vault: Path) -> None:
+    result = _knowledge(vault, aliases=["  Pricing Core ", "pricing core", "rate engine", "", "Owner alice@example.com", "Tariff Engine"])
+
+    frontmatter, _ = _frontmatter_and_body(_written_path(vault, result))
+    assert frontmatter["aliases"] == ["Pricing Core", "Owner [REDACTED_EMAIL]", "Tariff Engine"]
+    keys = list(frontmatter)
+    assert keys[keys.index("title") + 1] == "aliases"
+    assert "alice@example.com" not in (vault / str(result["path"])).read_text(encoding="utf-8")
+
+
+def test_aliases_reach_the_retrieval_projection(vault: Path) -> None:
+    from retrieval.retrieval_index import RetrievalIndexStore
+
+    (vault / "wiki/concepts/general").mkdir(parents=True, exist_ok=True)
+    store = RetrievalIndexStore(vault)
+    store.build(store.iter_vault_pages())
+    result = _knowledge(vault, aliases=["Pricing Core"])
+
+    rows = {row["path"]: row for row in RetrievalIndexStore(vault).link_targets()}
+    assert rows[str(result["path"])]["aliases"] == ["Pricing Core"]
+
+
+@pytest.mark.parametrize(
+    "aliases",
+    [
+        "Pricing Core",
+        ["Pricing Core", 3],
+        [f"alias {index}" for index in range(note_writer_module.MAX_ALIASES + 1)],
+        ["x" * (note_writer_module.MAX_ALIAS_CHARS + 1)],
+    ],
+)
+def test_invalid_aliases_are_rejected_before_writing(vault: Path, aliases: object) -> None:
+    result = _knowledge(vault, aliases=aliases)
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_aliases"
+    assert not (vault / "wiki/concepts/general/Rate-Engine.md").exists()
+
+
+def test_chat_notes_reject_aliases(vault: Path) -> None:
+    result = save_obsidian_note("chat", "Chat", "hello", vault_root=str(vault), aliases=["Other"])
+    assert result == {"ok": False, "code": "invalid_aliases", "error": "chat sources do not accept aliases"}
+
+
+def test_omitted_empty_or_title_only_aliases_write_identical_pages(tmp_path: Path) -> None:
+    texts = []
+    for index, kwargs in enumerate(({}, {"aliases": None}, {"aliases": []}, {"aliases": ["  rate engine  ", ""]})):
+        root = tmp_path / f"v{index}"
+        root.mkdir()
+        result = _knowledge(root, **kwargs)
+        texts.append((root / str(result["path"])).read_text(encoding="utf-8"))
+    assert len(set(texts)) == 1
+    assert "aliases" not in texts[0]
+
+
+def test_aliases_feed_the_create_time_duplicate_check(vault: Path) -> None:
+    from retrieval.retrieval_index import RetrievalIndexStore
+
+    existing = vault / "wiki/entities/general/carrier-gateway.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text("---\ntitle: Carrier Gateway\ntype: entity\n---\n# Carrier Gateway\n\nBody.\n", encoding="utf-8")
+    store = RetrievalIndexStore(vault)
+    store.build(store.iter_vault_pages())
+
+    result = _knowledge(vault, title="Label Printer Drivers", aliases=["carrier-gateway"])
+
+    assert result["ok"] is True
+    assert [(item["path"], item["reason"], item["matched"]) for item in result["duplicate_warnings"]] == [
+        ("wiki/entities/general/carrier-gateway.md", "same_title_or_alias", "carrier-gateway")
+    ]

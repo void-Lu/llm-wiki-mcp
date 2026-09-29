@@ -19,6 +19,8 @@ from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, Sou
 NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge", "entity", "chat"}
 PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
 DOMAINS = {"common-errors", "integration-patterns"}
+MAX_ALIASES = 20
+MAX_ALIAS_CHARS = 120
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "code": code, "error": message}
 
@@ -66,6 +68,45 @@ def _known_or_existing(value: str, known_values: set[str], directory: Path) -> d
         if value in existing:
             return None
     return _error("unknown_subdir", f"unknown subdir: {value}")
+
+
+def _aliases(value: object, title: str, policy: PrivacyPolicy) -> tuple[list[str], dict[str, Any] | None]:
+    """Validate optional aliases: strings only, trimmed, redacted, deduplicated.
+
+    Case-insensitive duplicates and aliases equal to the title are dropped;
+    an empty result means no ``aliases`` key is written at all.
+    """
+
+    if value is None:
+        return [], None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return [], _error("invalid_aliases", "aliases must be a list of strings")
+    cleaned = [item.strip() for item in value if item.strip()]
+    if len(cleaned) > MAX_ALIASES:
+        return [], _error("invalid_aliases", f"at most {MAX_ALIASES} aliases are allowed")
+    if any(len(item) > MAX_ALIAS_CHARS for item in cleaned):
+        return [], _error("invalid_aliases", f"each alias must be at most {MAX_ALIAS_CHARS} characters")
+    redacted = policy.redact_metadata(cleaned, field="aliases")
+    items = [str(item) for item in redacted] if isinstance(redacted, list) else cleaned
+    seen = {title.strip().casefold(), policy.redact_display_text(title).strip().casefold()}
+    result: list[str] = []
+    for item in items:
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result, None
+
+
+def _with_aliases(frontmatter: dict[str, Any], aliases: list[str]) -> dict[str, Any]:
+    """Insert ``aliases`` right after ``title`` so the key order stays readable."""
+
+    ordered: dict[str, Any] = {}
+    for key, item in frontmatter.items():
+        ordered[key] = item
+        if key == "title":
+            ordered["aliases"] = aliases
+    return ordered
 
 
 def _frontmatter(
@@ -124,15 +165,21 @@ def save_obsidian_note(
     related_pages: list[dict[str, Any]] | None = None,
     related_pages_heading: str | None = None,
     sources: list[str] | None = None,
+    aliases: list[str] | None = None,
 ) -> dict[str, Any]:
     if vault_root is None or not str(vault_root).strip():
         return _error("missing_vault_root", "vault_root is required")
     root = Path(vault_root).expanduser().resolve()
     policy = PrivacyPolicy()
+    alias_values, alias_error = _aliases(aliases, title, policy)
+    if alias_error is not None:
+        return alias_error
 
     if note_type not in NOTE_TYPES:
         return _error("invalid_note_type", f"invalid note_type: {note_type}")
     if note_type == "chat":
+        if alias_values:
+            return _error("invalid_aliases", "chat sources do not accept aliases")
         if chat_derived:
             return _error("invalid_chat_derived", "chat sources cannot be chat-derived pages")
         create_wiki_root(root)
@@ -245,6 +292,8 @@ def save_obsidian_note(
         zentao_urls or [],
         status,
     )
+    if alias_values:
+        frontmatter = _with_aliases(frontmatter, alias_values)
     if chat_derived:
         frontmatter["chat_derived"] = True
         frontmatter["chat_sources"] = [
@@ -325,7 +374,14 @@ def save_obsidian_note(
     link_suggestions = unlinked_mention_suggestions(root, relative_path.as_posix(), prepared_body, rows=hint_rows)
     if link_suggestions:
         result["link_suggestions"] = link_suggestions
-    duplicate_warnings = duplicate_title_warnings(root, relative_path.as_posix(), title, rows=hint_rows)
+    stored_aliases = prepared.frontmatter.get("aliases") if alias_values else None
+    duplicate_warnings = duplicate_title_warnings(
+        root,
+        relative_path.as_posix(),
+        title,
+        rows=hint_rows,
+        aliases=[str(item) for item in stored_aliases] if isinstance(stored_aliases, list) else (),
+    )
     if duplicate_warnings:
         result["duplicate_warnings"] = duplicate_warnings
     if skipped:

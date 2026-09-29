@@ -153,6 +153,7 @@ def duplicate_title_warnings(
     title: str,
     *,
     rows: list[dict[str, Any]] | None = None,
+    aliases: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """Convenience wrapper used by ``wiki_write_note``; never raises."""
 
@@ -161,7 +162,7 @@ def duplicate_title_warnings(
     if not rows:
         return []
     try:
-        return near_duplicate_titles(page_path, title, rows)
+        return near_duplicate_titles(page_path, title, rows, aliases=aliases)
     except Exception:  # advisory only: a hint failure must not fail a write
         return []
 
