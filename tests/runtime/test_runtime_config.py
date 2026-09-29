@@ -435,7 +435,7 @@ def test_registry_decodes_rrf_weights_with_exact_defaults(tmp_path: Path) -> Non
     registry = ConfigRegistry.from_file(config_path)
     assert registry.resolve_vault().settings.retrieval.ranking.rrf_weights == RrfWeights(fts=1.5, title=1.0, vector=0.0)
     assert registry.resolve_vault("plain").settings.retrieval.ranking.rrf_weights == RrfWeights(1.0, 1.0, 1.0)
-    assert "ranking" not in registry.public_status(registry.resolve_vault())["retrieval"]
+    assert registry.resolve_vault().settings.retrieval.ranking.configured_sources == frozenset({"fts", "vector"})
 
 
 def test_rrf_weight_env_override_is_partial_and_validated() -> None:
@@ -449,3 +449,47 @@ def test_rrf_weight_env_override_is_partial_and_validated() -> None:
         with pytest.raises(RuntimeConfigError) as exc_info:
             rrf_weights_with_env(base, {RRF_WEIGHTS_ENV: bad})
         assert exc_info.value.code == "invalid_config"
+
+
+def test_public_status_reports_effective_rrf_weights_and_their_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runtime.runtime_config import RRF_WEIGHTS_ENV
+
+    vault = _make_vault(tmp_path / "vault")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "default_vault": "primary",
+                "vaults": {
+                    "primary": {"root": str(vault), "retrieval": {"ranking": {"rrf_weights": {"fts": 1.5, "title": 1.0}}}},
+                    "plain": {"root": str(vault)},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = ConfigRegistry.from_file(config_path)
+    monkeypatch.delenv(RRF_WEIGHTS_ENV, raising=False)
+
+    assert registry.public_status(registry.resolve_vault("plain"))["retrieval"]["ranking"] == {
+        "rrf_weights": {"fts": 1.0, "title": 1.0, "vector": 1.0},
+        "rrf_weight_sources": {"fts": "default", "title": "default", "vector": "default"},
+    }
+    assert registry.public_status(registry.resolve_vault())["retrieval"]["ranking"] == {
+        "rrf_weights": {"fts": 1.5, "title": 1.0, "vector": 1.0},
+        "rrf_weight_sources": {"fts": "config", "title": "config", "vector": "default"},
+    }
+
+    monkeypatch.setenv(RRF_WEIGHTS_ENV, "fts=2, vector=0.5")
+    assert registry.public_status(registry.resolve_vault())["retrieval"]["ranking"] == {
+        "rrf_weights": {"fts": 2.0, "title": 1.0, "vector": 0.5},
+        "rrf_weight_sources": {"fts": "env", "title": "config", "vector": "env"},
+    }
+
+    monkeypatch.setenv(RRF_WEIGHTS_ENV, "vector=lots")
+    assert registry.public_status(registry.resolve_vault())["retrieval"]["ranking"] == {
+        "rrf_weights": {"fts": 1.5, "title": 1.0, "vector": 1.0},
+        "rrf_weight_sources": {"fts": "config", "title": "config", "vector": "default"},
+        "env_error": "invalid_config",
+    }

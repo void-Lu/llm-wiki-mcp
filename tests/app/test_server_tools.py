@@ -182,6 +182,7 @@ def test_wiki_status_does_not_materialize_query_registry(monkeypatch: pytest.Mon
     registry, _ = _registry(tmp_path)
     monkeypatch.setattr(server_module, "CONFIG_REGISTRY", registry)
     monkeypatch.setattr(server_module, "_QUERY_REGISTRIES", {})
+    monkeypatch.delenv("LLM_WIKI_RRF_WEIGHTS", raising=False)
     monkeypatch.setattr(
         server_module,
         "wiki_status_tool",
@@ -198,6 +199,7 @@ def test_wiki_status_does_not_materialize_query_registry(monkeypatch: pytest.Mon
     result = server_module.wiki_status(vault="primary")
 
     assert result["query_execution"] == {"active": 0, "pending": 0}
+    assert result["config"]["retrieval"]["ranking"]["rrf_weight_sources"] == {"fts": "default", "title": "default", "vector": "default"}
     assert server_module._QUERY_REGISTRIES == {}
 
 

@@ -70,6 +70,9 @@ class RrfWeights:
 @dataclass(frozen=True)
 class RankingSettings:
     rrf_weights: RrfWeights = RrfWeights()
+    # Sources whose weight was set explicitly in the config file; used only to
+    # report where each effective weight comes from.
+    configured_sources: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -302,7 +305,8 @@ def _decode_ranking(value: object, path: Path) -> RankingSettings:
                 source: _number(weights.get(source), 1.0, *RRF_WEIGHT_BOUNDS, f"retrieval.ranking.rrf_weights.{source}", path)
                 for source in RRF_WEIGHT_SOURCES
             }
-        )
+        ),
+        configured_sources=frozenset(source for source in RRF_WEIGHT_SOURCES if weights.get(source) is not None),
     )
 
 
@@ -332,6 +336,36 @@ def rrf_weights_with_env(base: RrfWeights, environ: Mapping[str, str] | None = N
             )
         values[key] = weight
     return RrfWeights(**values)
+
+
+def ranking_public_status(ranking: RankingSettings, environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Describe the effective RRF weights and where each one comes from.
+
+    Mirrors the query path (config weights overlaid by ``LLM_WIKI_RRF_WEIGHTS``).
+    An invalid environment value is reported instead of raised so that status
+    stays readable; queries reject it with ``invalid_config``.
+    """
+
+    env = os.environ if environ is None else environ
+    raw_env = env.get(RRF_WEIGHTS_ENV, "").strip()
+    env_sources = {part.partition("=")[0].strip() for part in raw_env.split(",")} if raw_env else set()
+    status: dict[str, object] = {}
+    try:
+        weights = rrf_weights_with_env(ranking.rrf_weights, env)
+    except RuntimeConfigError:
+        weights = ranking.rrf_weights
+        env_sources = set()
+        status["env_error"] = "invalid_config"
+    sources = {
+        source: "env" if source in env_sources else "config" if source in ranking.configured_sources else "default"
+        for source in RRF_WEIGHT_SOURCES
+    }
+    status = {
+        "rrf_weights": {source: getattr(weights, source) for source in RRF_WEIGHT_SOURCES},
+        "rrf_weight_sources": sources,
+        **status,
+    }
+    return status
 
 
 def _decode_vault(name: str, value: object, path: Path) -> VaultSettings:
@@ -521,6 +555,7 @@ class ConfigRegistry:
                     "device": settings.retrieval.embedding.device,
                 },
                 "context": {"response_mode": settings.retrieval.context.response_mode, "hard_budget_tokens": settings.retrieval.context.hard_budget_tokens},
+                "ranking": ranking_public_status(settings.retrieval.ranking),
             },
             "privacy": {"credential_redaction_enabled": settings.privacy.credential_redaction_enabled, "redaction_rule_version": settings.privacy.redaction_rule_version, "pii_policy": settings.privacy.pii_policy},
             "telemetry": {"enabled": settings.telemetry.enabled, "retention_days": settings.telemetry.retention_days, "store_query_body": settings.telemetry.store_query_body},
