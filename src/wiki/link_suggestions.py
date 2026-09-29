@@ -40,20 +40,26 @@ class LinkTarget:
     terms: tuple[str, ...]
 
 
+def is_hint_target(row: dict[str, Any]) -> bool:
+    """True for active, non-structural Wiki pages outside sources/archives."""
+
+    path = str(row.get("path") or "")
+    if not path.startswith("wiki/") or path.startswith(_EXCLUDED_PREFIXES) or not path.endswith(".md"):
+        return False
+    if path.rsplit("/", 1)[-1].casefold() in _STRUCTURAL_NAMES or str(row.get("type") or "") in _STRUCTURAL_TYPES:
+        return False
+    return str(row.get("lifecycle") or "").casefold() not in _INACTIVE_LIFECYCLES
+
+
 def eligible_link_targets(rows: Iterable[dict[str, Any]]) -> list[LinkTarget]:
     """Project index rows into link targets (active, non-structural pages)."""
 
     targets: list[LinkTarget] = []
     for row in rows:
-        path = str(row.get("path") or "")
-        if not path.startswith("wiki/") or path.startswith(_EXCLUDED_PREFIXES) or not path.endswith(".md"):
+        if not is_hint_target(row):
             continue
-        name = path.rsplit("/", 1)[-1]
-        stem = name[:-3]
-        if name.casefold() in _STRUCTURAL_NAMES or str(row.get("type") or "") in _STRUCTURAL_TYPES:
-            continue
-        if str(row.get("lifecycle") or "").casefold() in _INACTIVE_LIFECYCLES:
-            continue
+        path = str(row["path"])
+        stem = path.rsplit("/", 1)[-1][:-3]
         title = " ".join(str(row.get("title") or "").split())
         terms = [title, *(" ".join(str(alias).split()) for alias in row.get("aliases") or ())]
         # A multi-word filename stem ("retry-budget") is how the page is
@@ -68,16 +74,22 @@ def eligible_link_targets(rows: Iterable[dict[str, Any]]) -> list[LinkTarget]:
     return targets
 
 
-def load_link_targets(root: str | Path) -> list[LinkTarget] | None:
-    """Read link targets from the retrieval projection; ``None`` if unavailable."""
+def load_target_rows(root: str | Path) -> list[dict[str, Any]] | None:
+    """Read page titles/aliases from the retrieval projection; ``None`` if unavailable."""
 
     from retrieval.retrieval_index import RetrievalIndexError, RetrievalIndexStore
 
     try:
-        rows = RetrievalIndexStore(Path(root).expanduser().resolve()).link_targets()
+        return RetrievalIndexStore(Path(root).expanduser().resolve()).link_targets()
     except (RetrievalIndexError, sqlite3.Error, OSError, ValueError):
         return None
-    return eligible_link_targets(rows)
+
+
+def load_link_targets(root: str | Path) -> list[LinkTarget] | None:
+    """Read link targets from the retrieval projection; ``None`` if unavailable."""
+
+    rows = load_target_rows(root)
+    return None if rows is None else eligible_link_targets(rows)
 
 
 def suggest_unlinked_mentions(
@@ -149,14 +161,21 @@ def suggest_unlinked_mentions(
     return ordered
 
 
-def unlinked_mention_suggestions(root: str | Path, page_path: str, body: str) -> list[dict[str, Any]]:
+def unlinked_mention_suggestions(
+    root: str | Path,
+    page_path: str,
+    body: str,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Convenience wrapper used by the write tools; never raises."""
 
-    targets = load_link_targets(root)
-    if not targets:
+    if rows is None:
+        rows = load_target_rows(root)
+    if not rows:
         return []
     try:
-        return suggest_unlinked_mentions(page_path, body, targets)
+        return suggest_unlinked_mentions(page_path, body, eligible_link_targets(rows))
     except Exception:  # advisory only: a hint failure must not fail a write
         return []
 

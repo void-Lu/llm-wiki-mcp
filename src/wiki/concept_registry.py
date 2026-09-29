@@ -33,10 +33,15 @@ class ConceptRecord:
 
 
 class ConceptRegistry:
-    def __init__(self, vault_root: str | Path):
+    def __init__(self, vault_root: str | Path, *, records: Iterable[ConceptRecord] | None = None):
         self.root = Path(vault_root).expanduser().resolve()
         self.records: list[ConceptRecord] = []
-        self.rebuild()
+        if records is None:
+            self.rebuild()
+        else:
+            # Callers that already hold page titles/aliases (for example from
+            # the retrieval projection) skip the concept-directory scan.
+            self.records = list(records)
 
     def rebuild(self) -> list[ConceptRecord]:
         records: list[ConceptRecord] = []
@@ -51,7 +56,13 @@ class ConceptRegistry:
         self.records = records
         return records
 
-    def resolve(self, candidate: str) -> dict[str, Any]:
+    def resolve(self, candidate: str, *, collect_evidence: bool = True) -> dict[str, Any]:
+        """Resolve *candidate* to existing records.
+
+        ``collect_evidence=False`` keeps the exact/alias and title-substring
+        checks but skips the FTS lookup and the full-vault wikilink scan, for
+        latency-sensitive callers such as write-time hints.
+        """
         normalized = normalize_alias(candidate)
         exact = [record for record in self.records if candidate == record.concept_id]
         aliases = [record for record in self.records if normalized in {normalize_alias(record.title), *(normalize_alias(alias) for alias in record.aliases)}]
@@ -59,8 +70,8 @@ class ConceptRegistry:
         if matches:
             return {"action": "existing", "record": matches[0], "matches": matches, "evidence": {"canonical_or_alias": [record.path for record in matches], "fts": [], "wikilinks": [], "embedding": self._embedding_status()}}
         fuzzy = [record for record in self.records if normalized and normalized in normalize_alias(record.title)]
-        fts = self._fts_candidates(candidate)
-        links = self._wikilink_candidates(candidate)
+        fts = self._fts_candidates(candidate) if collect_evidence else []
+        links = self._wikilink_candidates(candidate) if collect_evidence else []
         paths = {record.path for record in fuzzy} | set(fts) | set(links)
         matches = [record for record in self.records if record.path in paths]
         return {"action": "candidate", "matches": matches, "evidence": {"canonical_or_alias": [], "fts": fts, "wikilinks": links, "embedding": self._embedding_status()}}

@@ -10,7 +10,8 @@ from wiki.page_policy import provenance_status, stamp_page_policy
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import WikiPathError, create_wiki_root, resolve_within_root, safe_segment, slug, translate_path_error
-from wiki.link_suggestions import unlinked_mention_suggestions
+from wiki.duplicate_titles import duplicate_title_warnings
+from wiki.link_suggestions import load_target_rows, unlinked_mention_suggestions
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 from wiki.reference_section import build_reference_section, skipped_warnings
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
@@ -320,9 +321,13 @@ def save_obsidian_note(
     if sources is not None and not chat_derived:
         result["sources_skipped"] = sources_skipped
     skipped = [*related_pages_skipped, *sources_skipped]
-    link_suggestions = unlinked_mention_suggestions(root, relative_path.as_posix(), prepared_body)
+    hint_rows = load_target_rows(root)
+    link_suggestions = unlinked_mention_suggestions(root, relative_path.as_posix(), prepared_body, rows=hint_rows)
     if link_suggestions:
         result["link_suggestions"] = link_suggestions
+    duplicate_warnings = duplicate_title_warnings(root, relative_path.as_posix(), title, rows=hint_rows)
+    if duplicate_warnings:
+        result["duplicate_warnings"] = duplicate_warnings
     if skipped:
         result["warnings"] = [
             *skipped_warnings("related_pages", related_pages_skipped),
