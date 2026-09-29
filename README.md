@@ -337,6 +337,8 @@ wiki_restore(plan)   → 从 bundle 生成恢复计划
 wiki_restore(apply)  → 恢复页面 + 更新 active/archive index
 ```
 
+页面的 `# 标题` 行总是由 frontmatter `title` 渲染：`incoming_body` 开头的 H1 若与将保留的标题不同会被丢弃，preview 与 apply 都在 `warnings` 中返回 `title_heading_ignored: ...`（页面照常写入）；改名请用 `incoming_frontmatter={"title": ...}`。
+
 普通页面提交不调用全量 `refresh_indexes`。缺失、不兼容或损坏的检索库必须通过 `index build|update` 或 admin repair 显式恢复；页面事实与派生索引的状态以 operation result 中的 `state`、`failed_stage`、`repair_action` 为准。
 
 ### 查询流水线

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from common.privacy_policy import PrivacyPolicy
 from wiki.atomic_file import sha256_file
 from wiki.page_mutation import PageMutationCoordinator, explain_stage
 from wiki.page_mutation_adapters import build_plan_intent
@@ -138,6 +139,7 @@ def preview_update(
     rendered = _render_final(root, page_path, target, fm, incoming, resolved_sources, incoming_body)
     if not isinstance(rendered, dict):
         _attach_write_hints(result, root, page_path, rendered[0], existing=fm, incoming=incoming, target=target)
+        _attach_heading_warning(result, incoming_body, rendered[0].title)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 
@@ -235,6 +237,7 @@ def apply_update(
     if resolved_sources is not None:
         result["source_hashes"] = source_hash_map(resolved_sources)
     _attach_write_hints(result, root, page_path, prepared, existing=existing, incoming=incoming, target=target)
+    _attach_heading_warning(result, incoming_body, prepared.title)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 
@@ -304,6 +307,34 @@ def _attach_write_hints(
         duplicate_warnings = surface_duplicate_warnings(root, page_path, gained, rows=rows)
         if duplicate_warnings:
             result["duplicate_warnings"] = duplicate_warnings
+
+
+def _attach_heading_warning(result: dict[str, Any], body: str, title: str) -> None:
+    """Warn when the body's leading H1 differs from the title that will be kept.
+
+    The page heading is always rendered from the frontmatter title, so a
+    different leading ``# H1`` in ``incoming_body`` is dropped.  The page is
+    still written; the warning tells the caller how to rename instead.
+    """
+
+    heading = _leading_h1(PrivacyPolicy().redact_display_text(body))
+    if heading is None or heading == title.strip():
+        return
+    result["warnings"] = [
+        *result.get("warnings", []),
+        f"title_heading_ignored: body heading '# {heading}' is not the page title '{title.strip()}'; "
+        "the heading is rendered from frontmatter, set incoming_frontmatter.title to rename the page",
+    ]
+
+
+def _leading_h1(body: str) -> str | None:
+    """Text of the leading H1 that ``strip_leading_h1`` would remove, if any."""
+
+    for line in body.splitlines():
+        if not line.strip():
+            continue
+        return line[2:].strip() if line.startswith("# ") else None
+    return None
 
 
 def _current_title(existing: Mapping[str, Any], target: Path) -> str:

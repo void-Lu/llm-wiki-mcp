@@ -363,3 +363,53 @@ def test_incoming_title_changes_and_arrays_replace_instead_of_merging(tmp_path) 
     assert frontmatter["title"] == "Renamed"
     assert frontmatter["aliases"] == ["Old Two"]
     assert "\n# Renamed\n" in page.read_text(encoding="utf-8")
+
+
+def _heading_page(tmp_path):
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\ntitle: Rate Engine\n---\n\n# Rate Engine\n\nold\n", encoding="utf-8")
+    return page
+
+
+def test_differing_body_heading_is_dropped_with_a_warning_in_preview_and_apply(tmp_path) -> None:
+    page = _heading_page(tmp_path)
+    body = "\n# Pricing Service\n\nnew\n"
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", body)
+    applied = apply_update(tmp_path, "wiki/concepts/general/a.md", body, expected_hash=preview["current_hash"])
+
+    expected = [
+        "title_heading_ignored: body heading '# Pricing Service' is not the page title 'Rate Engine'; "
+        "the heading is rendered from frontmatter, set incoming_frontmatter.title to rename the page"
+    ]
+    assert preview["warnings"] == expected
+    assert applied["ok"] is True and applied["warnings"] == expected
+    text = page.read_text(encoding="utf-8")
+    assert "title: Rate Engine" in text and "# Rate Engine" in text and "Pricing Service" not in text
+
+
+@pytest.mark.parametrize(
+    ("body", "incoming"),
+    [
+        ("# Rate Engine\n\nnew\n", None),
+        ("new\n\n# Later Heading\n", None),
+        ("## Section\n\nnew\n", None),
+        ("# Pricing Service\n\nnew\n", {"title": "Pricing Service"}),
+    ],
+)
+def test_no_heading_warning_when_the_heading_matches_or_is_not_leading(tmp_path, body, incoming) -> None:
+    _heading_page(tmp_path)
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", body, incoming)
+    applied = apply_update(tmp_path, "wiki/concepts/general/a.md", body, incoming_frontmatter=incoming, plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
+
+    assert applied["ok"] is True
+    assert "warnings" not in preview and "warnings" not in applied
+
+
+def test_heading_warning_uses_redacted_text(tmp_path) -> None:
+    _heading_page(tmp_path)
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "# Owner bob@example.com\n\nnew\n")
+    assert "bob@example.com" not in preview["warnings"][0]
+    assert "[REDACTED_EMAIL]" in preview["warnings"][0]
