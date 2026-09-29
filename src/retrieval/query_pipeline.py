@@ -401,37 +401,41 @@ def _graph_expand(
     debug: bool,
     snapshot: QueryCorpusSnapshot | None = None,
     cancellation: QueryCancellationContext | None = None,
+    graph_cache: dict[str, Any] | None = None,
 ) -> tuple[dict[str, QueryCandidate], list[PassageHit]]:
     """Reuse the legacy bounded expander over DB projections, never files.
 
     The expander owns the existing two-hop, fan-out and score-cap behaviour;
     this adapter only supplies its already-filtered candidate boundary.
+    ``graph_cache`` lets later stages of the same request (relaxed recovery)
+    reuse the eligible candidate boundary and graph built for the seed stage;
+    candidate objects are recreated per call because expansion mutates them.
     """
     if scope in {"archive", "raw"} or not seed_scores:
         return {}, []
-    candidates: list[QueryCandidate] = []
-    candidate_hashes: dict[str, str] = {}
-    pages = snapshot.pages if snapshot is not None else store.page_candidates()
-    for index, page in enumerate(pages):
-        if cancellation is not None:
-            cancellation.checkpoint_batch(index, every=16, stage="graph")
-        path = str(page["path"])
-        frontmatter = metadata.get(path, {})
-        if (
-            not path.startswith("wiki/")
-            or not snapshot_page_eligible(page, metadata, scope=scope, project=project, filters=filters)
-        ):
-            continue
-        candidate_hashes[path] = str(page.get("content_hash") or "")
-        candidates.append(
-            QueryCandidate(
-                path=root / path,
-                rel=path,
-                title=str(page["title"]),
-                body=str(page["body"]),
-                frontmatter=dict(frontmatter),
-            )
-        )
+    cache = graph_cache if graph_cache is not None else {}
+    if "templates" not in cache:
+        templates: list[tuple[str, str, str, dict[str, Any]]] = []
+        candidate_hashes: dict[str, str] = {}
+        pages = snapshot.pages if snapshot is not None else store.page_candidates()
+        for index, page in enumerate(pages):
+            if cancellation is not None:
+                cancellation.checkpoint_batch(index, every=16, stage="graph")
+            path = str(page["path"])
+            frontmatter = metadata.get(path, {})
+            if (
+                not path.startswith("wiki/")
+                or not snapshot_page_eligible(page, metadata, scope=scope, project=project, filters=filters)
+            ):
+                continue
+            candidate_hashes[path] = str(page.get("content_hash") or "")
+            templates.append((path, str(page["title"]), str(page["body"]), dict(frontmatter)))
+        cache["templates"] = templates
+        cache["hashes"] = candidate_hashes
+    candidates = [
+        QueryCandidate(path=root / path, rel=path, title=title, body=body, frontmatter=frontmatter)
+        for path, title, body, frontmatter in cache["templates"]
+    ]
     by_path = {candidate.rel: candidate for candidate in candidates}
     scored = {path: by_path[path] for path in seed_scores if path in by_path}
     for path, candidate in scored.items():
@@ -439,17 +443,46 @@ def _graph_expand(
         candidate.fusion_score = seed_scores[path]
     if not scored:
         return {}, []
-    stored = snapshot.graph_links(store) if snapshot is not None else store.graph_links((WIKILINK,))
-    # Only trust persisted edges extracted from the exact projection this
-    # query sees; anything else is parsed from the snapshot body instead.
-    edges = {
-        path: links
-        for path, (source_hash, links) in stored.items()
-        if path in candidate_hashes and source_hash == candidate_hashes[path]
-    }
-    apply_graph_expansion(scored, candidates, build_graph(root, candidates, edges=edges), max_graph_hops=2, collect_reasons=debug)
+    if "graph" not in cache:
+        candidate_hashes = cache["hashes"]
+        stored = snapshot.graph_links(store) if snapshot is not None else store.graph_links((WIKILINK,))
+        # Only trust persisted edges extracted from the exact projection this
+        # query sees; anything else is parsed from the snapshot body instead.
+        edges = {
+            path: links
+            for path, (source_hash, links) in stored.items()
+            if path in candidate_hashes and source_hash == candidate_hashes[path]
+        }
+        cache["graph"] = build_graph(root, candidates, edges=edges)
+    apply_graph_expansion(scored, candidates, cache["graph"], max_graph_hops=2, collect_reasons=debug)
     added = [path for path in scored if path not in seed_scores]
     return scored, store.passages_for_pages(added, limit_per_page=1)
+
+
+def _merge_graph_expansion(
+    scored: list[dict[str, Any]],
+    graph_candidates: dict[str, QueryCandidate],
+    graph_passages: list[PassageHit],
+    cancellation: QueryCancellationContext,
+) -> None:
+    existing_by_path = {item["hit"].page_path: item for item in scored}
+    for index, (path, candidate) in enumerate(graph_candidates.items()):
+        cancellation.checkpoint_batch(index, every=16, stage="graph")
+        if path in existing_by_path:
+            existing_by_path[path]["graph_score"] = candidate.graph_score
+            existing_by_path[path]["graph_reasons"] = list(candidate.rank_breakdown.graph_reasons)
+            existing_by_path[path]["score"] = round(existing_by_path[path]["score"] + candidate.graph_score, 12)
+    for index, hit in enumerate(graph_passages):
+        cancellation.checkpoint_batch(index, every=16, stage="graph")
+        candidate = graph_candidates[hit.page_path]
+        scored.append(
+            candidate_item(
+                hit,
+                score=candidate.total_score,
+                graph_score=candidate.graph_score,
+                graph_reasons=list(candidate.rank_breakdown.graph_reasons),
+            )
+        )
 
 
 def _stage_one_fts_hits(
@@ -944,33 +977,26 @@ def run_query_v2(
                 "graph_reasons": [],
             }
         )
-    cancellation.checkpoint("graph")
-    graph_candidates, graph_passages = (
-        _graph_expand(
+    graph_cache: dict[str, Any] = {}
+
+    def expand_graph(items: list[dict[str, Any]]) -> None:
+        """Add bounded graph evidence to one scored candidate list in place.
+
+        The strict seed stage and the relaxed Wiki recovery stage share this
+        closure so both use the same snapshot, filters and caps.
+        """
+
+        cancellation.checkpoint("graph")
+        if effective_scope == "raw" or not graph_expansion:
+            return
+        graph_candidates, graph_passages = _graph_expand(
             root, store, metadata, scope=effective_scope, project=project, filters=filters,
-            seed_scores={item["hit"].page_path: item["score"] for item in scored}, debug=debug, snapshot=snapshot, cancellation=cancellation,
+            seed_scores={item["hit"].page_path: item["score"] for item in items}, debug=debug, snapshot=snapshot, cancellation=cancellation,
+            graph_cache=graph_cache,
         )
-        if effective_scope != "raw" and graph_expansion
-        else ({}, [])
-    )
-    existing_by_path = {item["hit"].page_path: item for item in scored}
-    for index, (path, candidate) in enumerate(graph_candidates.items()):
-        cancellation.checkpoint_batch(index, every=16, stage="graph")
-        if path in existing_by_path:
-            existing_by_path[path]["graph_score"] = candidate.graph_score
-            existing_by_path[path]["graph_reasons"] = list(candidate.rank_breakdown.graph_reasons)
-            existing_by_path[path]["score"] = round(existing_by_path[path]["score"] + candidate.graph_score, 12)
-    for index, hit in enumerate(graph_passages):
-        cancellation.checkpoint_batch(index, every=16, stage="graph")
-        candidate = graph_candidates[hit.page_path]
-        scored.append(
-            candidate_item(
-                hit,
-                score=candidate.total_score,
-                graph_score=candidate.graph_score,
-                graph_reasons=list(candidate.rank_breakdown.graph_reasons),
-            )
-        )
+        _merge_graph_expansion(items, graph_candidates, graph_passages, cancellation)
+
+    expand_graph(scored)
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     # Retrieval is page-first: the public result list keeps one best passage
     # per page, while the internal pack is assembled page-by-page in reading
@@ -1016,6 +1042,7 @@ def run_query_v2(
         snapshot=snapshot,
         seed_lexical_mode=stage_lexical_mode,
         seed_has_primary_recall=has_primary_recall,
+        graph_expander=expand_graph,
     )
     execution_view = execution.execute(request_view)
     quality_gate_evaluation = _quality_gate_evaluation(

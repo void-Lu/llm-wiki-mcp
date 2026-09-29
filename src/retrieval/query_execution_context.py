@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -158,6 +158,10 @@ class QueryExecutionContext:
     snapshot: QueryCorpusSnapshot | None = field(default=None, repr=False)
     seed_lexical_mode: str = field(default="strict", repr=False)
     seed_has_primary_recall: bool = field(default=False, repr=False)
+    # Adds bounded graph evidence to a scored candidate list in place.  The
+    # engine supplies it so relaxed Wiki recovery reuses the seed stage's
+    # snapshot, filters and caps; ``None`` keeps recovery lexical-only.
+    graph_expander: Callable[[list[dict[str, Any]]], None] | None = field(default=None, repr=False)
     raw_store: RetrievalIndexStore | None = field(default=None, init=False)
     raw_snapshot: QueryCorpusSnapshot | None = field(default=None, init=False)
     selected: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -524,6 +528,8 @@ class QueryExecutionContext:
                         freshness=True,
                         step_bonus=step_bonus(count),
                     )
+                if self.graph_expander is not None:
+                    self.graph_expander(wiki_relaxed_items)
                 wiki_relaxed_items.sort(
                     key=lambda item: (
                         -item["score"],

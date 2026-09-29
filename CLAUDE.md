@@ -60,7 +60,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### 查询与图谱能力
 
-[query_pipeline.py](src/retrieval/query_pipeline.py) 是唯一查询引擎入口（Query V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 构造冻结 `QueryRequestView` -> context 执行 fallback/discovery/batch -> 上下文预算裁剪 -> compact context pack，并将紧凑正文直接放入结果项；MCP 工具 `wiki_query` 只负责公共边界与运行时配置解析。
+[query_pipeline.py](src/retrieval/query_pipeline.py) 是唯一查询引擎入口（Query V2）：passage FTS/vector 召回 -> RRF 融合 -> 有界强-seed 图扩展 -> 构造冻结 `QueryRequestView` -> context 执行 fallback/discovery/batch（`wiki_relaxed` 恢复分支复用同一图扩展闭包） -> 上下文预算裁剪 -> compact context pack，并将紧凑正文直接放入结果项；MCP 工具 `wiki_query` 只负责公共边界与运行时配置解析。
 
 [query_quality_policy.py](src/retrieval/query_quality_policy.py) 是 page-level 质量门禁的纯策略 owner；门禁在完整 recovery、page dedup 后、public results/context projection 前运行，消费同一次 `QueryCorpusSnapshot`。`QualityGateSettings` 属于 runtime snapshot，默认 `off`，不进入 `wiki_query` 公共参数；`shadow` 只产生有界摘要，`enforce` 只投影 accepted 页面，并在非空 baseline 全拒绝时 fail-open 返回 baseline、记录 `gate_would_suppress_all`。门禁不接管 eligibility/filter、fallback/discovery 或 no-result/cancel/timeout 语义。
 

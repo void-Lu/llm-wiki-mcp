@@ -88,6 +88,24 @@ v2_40 与 1baeb3a 上的早期记录一致（0.750/0.889/0.917/0.944，MRR 0.826
 - P95 为单次运行的墙钟时间，未做多次采样或隔离负载。
 - `graph_v1` 的 keyword-anchor 组是“短锚点 + 关系意图写在 `notes`”的建模，查询文本本身不含关系词；解读时需与自然语言组分开看。
 
+## 排序修复记录（branch `feat/graph-ranking-fixes`）
+
+在 step-2（`54dbf08`，边表持久化 + `sources` tuple 修复）之上按顺序做三项排序修复，每项一个提交，提交后重跑同一套评测（`retrieval_mode=lexical`、`top_k=10`、`repeats=3`，graph_v1 开/关、v2_40 archive、CI 冒烟）。分组按 case 标签：NL relationship = `natural-language`（20），keyword-anchor（11），direct（17），no-answer（4）。R@k/MRR 为该组可回答 case 的 macro 平均；无答案误命中口径同上。排名版本自修复 1 起为 `query-v2-passage-rrf-11`。
+
+| 阶段 | NL R@1 / R@3 / R@10 / MRR | keyword-anchor R@1 / R@10 / MRR | direct R@1 / MRR | 无答案误命中 | graph_v1 on 总体 R@1 / R@3 / R@10 / MRR / nDCG | graph_v1 off 总体 R@10 / MRR | v2_40 R@1 / MRR | CI R@1 / MRR |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| step-2 基线（54dbf08） | 0.050 / 0.425 / 0.600 / 0.277 | 0.000 / 0.591 / 0.146 | 0.794 / 0.961 | 0.500 | 0.302 / 0.562 / 0.740 / 0.489 / 0.548 | 0.604 / 0.459 | 0.750 / 0.826 | 0.700 / 0.800 |
+| 修复 1：relaxed 路径图扩展 | 0.050 / 0.400 / 0.675 / 0.279 | 0.000 / 0.591 / 0.146 | 0.794 / 0.961 | 0.500 | 0.302 / 0.552 / 0.771 / 0.490 / 0.555 | 0.604 / 0.459 | 0.750 / 0.826 | 0.700 / 0.800 |
+
+v2_40 与 CI 冒烟在每一步的全部指标（R@1/3/5/10、MRR、nDCG、无答案误命中）都与 step-2 基线逐位相同；graph_v1 graph off 也不变。
+
+### 修复 1：relaxed 恢复路径也做图扩展
+
+- 做法：`run_query_v2` 把种子阶段的图扩展封装为同一个闭包，交给 `QueryExecutionContext`；`wiki_relaxed` 分支在 relaxed 候选打分后、排序前调用它。仍只在 active 非 raw scope 执行，沿用同一快照、过滤边界、两跳 / 每种子 64 个扩展、15% 比例上限与 0.75 纯图上限；第二次调用复用种子阶段已建好的候选边界与图。
+- 结果：NL 组 R@10 0.600 → 0.675，但 R@3 0.425 → 0.400，MRR 基本持平（0.277 → 0.279）；direct、keyword-anchor、无答案不变。只有 5 条 NL case 名次变化：`dep-tariff-consumers-zh`（未命中 → 第 9）、`dep-pickup-queue-double-dispatch`（未命中 → 第 10）、`spec-retry-origins`（第 8 → 第 6）变好；`dep-pickup-queue-channels`（第 3 → 第 4）、`owner-journal-exporter`（第 4 → 第 6）变差。
+- 原因：relaxed 候选的 BM25 + 加分量级通常为 2–12，而纯图页面上限固定为 0.75，所以图只能对已在 relaxed 候选里的页面按其自身分数加 ≤15%，高连接度页面（如 routing-overview、ledger-sync）获益更多，会越过金标；纯图页面只能落在尾部。没有为此放宽上限。
+- 延迟：2000 页合成 vault（`scale.py` 同源数据），走 relaxed 的三条自然语言查询中位数 170 ms → 243 ms（graph off 93 ms）；strict 查询 166/164 ms 不变。新增开销主要是对大量 relaxed 种子执行 `apply_graph_expansion`。
+
 ## 复现
 
 ```bash

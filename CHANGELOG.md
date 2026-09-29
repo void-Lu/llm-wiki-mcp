@@ -1,5 +1,10 @@
 # 变更记录
 
+## 2026-09-29 — 图扩展排序修复
+
+- 排名版本升为 `query-v2-passage-rrf-11`；质量门控校准产物需按新版本重新生成（旧版本身份不匹配时按既有规则 fail-open）。
+- 自然语言关系问题走 `wiki_relaxed` 恢复分支时也执行有界图扩展（active scope、同一快照/过滤边界/上限），不再只在 strict 种子阶段生效；同一请求内复用已构建的候选边界与图。
+
 ## 2026-09-29 — 检索图边持久化
 
 - 检索 store 新增 `links` 表（schema version 3）：wikilink、`sources` 来源边以及 `related_objects`/`applies_to`/`derived_from` 类型关系在页面投影时抽取，随 build、单页 update、rename 与 delete 同事务维护；类型关系暂只存储、不参与图评分。

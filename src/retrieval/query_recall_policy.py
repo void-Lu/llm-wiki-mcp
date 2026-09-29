@@ -34,7 +34,7 @@ from retrieval.retrieval_index import PassageHit, RetrievalIndexError, Retrieval
 
 
 DEFAULT_TOP_K = 10
-RANKING_POLICY_VERSION = "query-v2-passage-rrf-10"
+RANKING_POLICY_VERSION = "query-v2-passage-rrf-11"
 RRF_K = 60
 PASSAGE_SCAN_LIMIT = 500
 PASSAGE_PROBE_LIMIT = 20
