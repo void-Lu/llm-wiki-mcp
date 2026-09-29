@@ -21,6 +21,8 @@ PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
 DOMAINS = {"common-errors", "integration-patterns"}
 MAX_ALIASES = 20
 MAX_ALIAS_CHARS = 120
+MAX_QUESTIONS = 20
+MAX_QUESTION_CHARS = 300
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "code": code, "error": message}
 
@@ -98,6 +100,47 @@ def _aliases(value: object, title: str, policy: PrivacyPolicy) -> tuple[list[str
     return result, None
 
 
+def _questions(value: object, policy: PrivacyPolicy) -> tuple[list[str], dict[str, Any] | None]:
+    """Validate optional questions the page answers.
+
+    Mirrors ``_aliases``: strings only, trimmed, empty entries dropped,
+    redacted and de-duplicated case-insensitively; an empty result means no
+    ``questions`` key is written at all.
+    """
+
+    if value is None:
+        return [], None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return [], _error("invalid_questions", "questions must be a list of strings")
+    cleaned = [item.strip() for item in value if item.strip()]
+    if len(cleaned) > MAX_QUESTIONS:
+        return [], _error("invalid_questions", f"at most {MAX_QUESTIONS} questions are allowed")
+    if any(len(item) > MAX_QUESTION_CHARS for item in cleaned):
+        return [], _error("invalid_questions", f"each question must be at most {MAX_QUESTION_CHARS} characters")
+    redacted = policy.redact_metadata(cleaned, field="questions")
+    items = [str(item) for item in redacted] if isinstance(redacted, list) else cleaned
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result, None
+
+
+def _with_questions(frontmatter: dict[str, Any], questions: list[str]) -> dict[str, Any]:
+    """Insert ``questions`` after ``aliases`` (or ``title``) for readability."""
+
+    anchor = "aliases" if "aliases" in frontmatter else "title"
+    ordered: dict[str, Any] = {}
+    for key, item in frontmatter.items():
+        ordered[key] = item
+        if key == anchor:
+            ordered["questions"] = questions
+    return ordered
+
+
 def _with_aliases(frontmatter: dict[str, Any], aliases: list[str]) -> dict[str, Any]:
     """Insert ``aliases`` right after ``title`` so the key order stays readable."""
 
@@ -166,6 +209,7 @@ def save_obsidian_note(
     related_pages_heading: str | None = None,
     sources: list[str] | None = None,
     aliases: list[str] | None = None,
+    questions: list[str] | None = None,
 ) -> dict[str, Any]:
     if vault_root is None or not str(vault_root).strip():
         return _error("missing_vault_root", "vault_root is required")
@@ -174,12 +218,17 @@ def save_obsidian_note(
     alias_values, alias_error = _aliases(aliases, title, policy)
     if alias_error is not None:
         return alias_error
+    question_values, question_error = _questions(questions, policy)
+    if question_error is not None:
+        return question_error
 
     if note_type not in NOTE_TYPES:
         return _error("invalid_note_type", f"invalid note_type: {note_type}")
     if note_type == "chat":
         if alias_values:
             return _error("invalid_aliases", "chat sources do not accept aliases")
+        if question_values:
+            return _error("invalid_questions", "chat sources do not accept questions")
         if chat_derived:
             return _error("invalid_chat_derived", "chat sources cannot be chat-derived pages")
         create_wiki_root(root)
@@ -294,6 +343,8 @@ def save_obsidian_note(
     )
     if alias_values:
         frontmatter = _with_aliases(frontmatter, alias_values)
+    if question_values:
+        frontmatter = _with_questions(frontmatter, question_values)
     if chat_derived:
         frontmatter["chat_derived"] = True
         frontmatter["chat_sources"] = [

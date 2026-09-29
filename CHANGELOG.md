@@ -2,6 +2,7 @@
 
 ## 2026-09-29 — 检索上下文
 
+- `wiki_write_note`（`save_obsidian_note`）新增可选参数 `questions: list[str] | None`：与 `aliases` 同样校验（去空白、去空串、≤ 20 项 × 300 字符、脱敏、大小写不敏感去重），写入 frontmatter `questions`（在 `aliases` 或 `title` 之后）；非法输入返回 `invalid_questions` 且不写入，chat 类型拒绝。不传、`None`、`[]` 时页面逐字节不变。
 - 可配置主融合 RRF 权重：`retrieval.ranking.rrf_weights`（`fts`/`title`/`vector`，默认 1.0）与环境变量 `LLM_WIKI_RRF_WEIGHTS`；默认排序逐位不变。`run_query_v2` 新增可选参数 `rrf_weights`，`fusion_score` 新增可选参数 `rrf_weights`。
 - 超过页面正文预算（约 2400 token）的强相关长页面，不再只从页首补全：保留页首 passage 后，以命中 passage 为中心交替扩展前后相邻 passage。放得下预算的页面行为不变；排序不变，无需重建索引。
 - 可选 frontmatter `questions`（本页能回答的问题）进入检索：并入页面第一个 passage 的 FTS `aliases` 列。无 schema 变更；没有该字段的页面索引不变，已有 `questions` 的 vault 需要一次增量/全量重建才会生效。

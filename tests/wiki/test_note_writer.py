@@ -54,7 +54,7 @@ def _written_path(vault: Path, result: dict[str, object]) -> Path:
 def test_save_note_signature_drops_dead_internal_parameters() -> None:
     parameters = inspect.signature(save_obsidian_note).parameters
 
-    assert len(parameters) == 20
+    assert len(parameters) == 21
     assert {"script_type", "object_type", "decision_status", "overwrite"}.isdisjoint(parameters)
     assert "decision_status" not in inspect.signature(note_writer_module._frontmatter).parameters
 
@@ -630,3 +630,65 @@ def test_aliases_feed_the_create_time_duplicate_check(vault: Path) -> None:
     assert [(item["path"], item["reason"], item["matched"]) for item in result["duplicate_warnings"]] == [
         ("wiki/entities/general/carrier-gateway.md", "same_title_or_alias", "carrier-gateway")
     ]
+
+
+def test_questions_are_trimmed_deduplicated_redacted_and_stored_after_aliases(vault: Path) -> None:
+    result = _knowledge(
+        vault,
+        aliases=["Pricing Core"],
+        questions=["  How are tariffs priced? ", "how are tariffs priced?", "", "Who owns it? mail alice@example.com", "Rate Engine"],
+    )
+
+    frontmatter, _ = _frontmatter_and_body(_written_path(vault, result))
+    assert frontmatter["questions"] == ["How are tariffs priced?", "Who owns it? mail [REDACTED_EMAIL]", "Rate Engine"]
+    keys = list(frontmatter)
+    assert keys[keys.index("title") + 1 : keys.index("title") + 3] == ["aliases", "questions"]
+    assert "alice@example.com" not in (vault / str(result["path"])).read_text(encoding="utf-8")
+
+
+def test_questions_follow_title_without_aliases_and_reach_the_retrieval_index(vault: Path) -> None:
+    from retrieval.retrieval_index import RetrievalIndexStore
+
+    (vault / "wiki/concepts/general").mkdir(parents=True, exist_ok=True)
+    store = RetrievalIndexStore(vault)
+    store.build(store.iter_vault_pages())
+    result = _knowledge(vault, questions=["Which tariff table applies to oversized parcels?"])
+
+    frontmatter, _ = _frontmatter_and_body(_written_path(vault, result))
+    keys = list(frontmatter)
+    assert keys[keys.index("title") + 1] == "questions"
+    hits = RetrievalIndexStore(vault).search_fts("oversized parcels tariff table")
+    assert [hit.page_path for hit in hits] == [str(result["path"])]
+
+
+@pytest.mark.parametrize(
+    "questions",
+    [
+        "How are tariffs priced?",
+        ["How?", 3],
+        [f"question {index}?" for index in range(note_writer_module.MAX_QUESTIONS + 1)],
+        ["x" * (note_writer_module.MAX_QUESTION_CHARS + 1)],
+    ],
+)
+def test_invalid_questions_are_rejected_before_writing(vault: Path, questions: object) -> None:
+    result = _knowledge(vault, questions=questions)
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_questions"
+    assert not (vault / "wiki/concepts/general/Rate-Engine.md").exists()
+
+
+def test_chat_notes_reject_questions(vault: Path) -> None:
+    result = save_obsidian_note("chat", "Chat", "hello", vault_root=str(vault), questions=["Why?"])
+    assert result == {"ok": False, "code": "invalid_questions", "error": "chat sources do not accept questions"}
+
+
+def test_omitted_or_empty_questions_write_identical_pages(tmp_path: Path) -> None:
+    texts = []
+    for index, kwargs in enumerate(({}, {"questions": None}, {"questions": []}, {"questions": ["  ", ""]})):
+        root = tmp_path / f"v{index}"
+        root.mkdir()
+        result = _knowledge(root, **kwargs)
+        texts.append((root / str(result["path"])).read_text(encoding="utf-8"))
+    assert len(set(texts)) == 1
+    assert "questions" not in texts[0]

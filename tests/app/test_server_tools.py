@@ -574,6 +574,7 @@ def test_write_and_update_schemas_expose_related_page_arguments() -> None:
                 "noteType",
                 "note_type",
                 "project",
+                "questions",
                 "related_pages",
                 "related_pages_heading",
                 "sources",
@@ -586,6 +587,7 @@ def test_write_and_update_schemas_expose_related_page_arguments() -> None:
             assert tools["wiki_write_note"].input_schema["required"] == ["title", "content"]
             assert {"related_pages", "sources"} <= set(write_properties)
             assert "aliases" not in tools["wiki_write_note"].input_schema["required"]
+            assert "questions" not in tools["wiki_write_note"].input_schema["required"]
             assert "related_pages" in update_properties
 
     anyio.run(assert_schema)

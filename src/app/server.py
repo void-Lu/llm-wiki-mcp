@@ -858,7 +858,7 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
 
 
 @_register()
-def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None, sources: list[str] | None = None, aliases: list[str] | None = None) -> dict[str, Any]:
+def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None, sources: list[str] | None = None, aliases: list[str] | None = None, questions: list[str] | None = None) -> dict[str, Any]:
     """Create a manual page, optionally linking adopted Wiki pages and raw sources.
 
     ``related_pages`` accepts existing ``wiki/**`` paths and creates a
@@ -867,6 +867,9 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
     ``chat_sources``.  Optional ``aliases`` (other names for the page, at most
     20 strings of 120 characters) are stored in frontmatter after trimming,
     redaction and case-insensitive de-duplication; omitting it changes nothing.
+    Optional ``questions`` (questions the page answers, at most 20 strings of
+    300 characters) follow the same rules, are stored in frontmatter
+    ``questions`` and make question-style queries match the page.
     """
     # note_type is canonical: falsy values fall back to noteType, and two empty
     # values must report missing_note_type. The aliases mechanism cannot express
@@ -892,6 +895,7 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
         related_pages_heading=related_pages_heading,
         sources=sources,
         aliases=aliases,
+        questions=questions,
         vault_root=str(resolution.root),
     )
 
