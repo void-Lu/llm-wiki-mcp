@@ -141,6 +141,25 @@ graph_v1 总体四位小数（R@1 / R@3 / R@5 / R@10 / MRR / nDCG）：修复 3 
 - 变差的 case：`dep-invoice-assembly-downstream`（第二个金标第 10 → 未进 top-10）；`direct-cut-off` 第二个金标第 3 → 第 5、`direct-token-bucket` 第二个金标第 2 → 第 4（首位不变，所以 direct R@1/MRR 不变，但 direct R@3 0.971 → 0.912、nDCG 0.961 → 0.951）；`dep-exporter-concepts`（两个金标第 —、10 → 10、—）与 `spec-retry-origins`（第 6、4 → 第 7、4）MRR 不变。原因：强种子的纯图邻居现在可以排到弱词法候选前面，direct 查询里首位种子的图邻居因此插到了第二个金标之前。
 - 延迟：2000 页合成 vault，同一会话交替运行 3 次（固定上限 / 0.7）：strict graph_on 中位数 166/176/172 ms vs 178/171/170 ms，relaxed NL 查询 278/279/280 ms vs 288/287/283 ms（约 +7 ms）。本次会话整体比修复 3 当时的测量（约 170 / 260 ms）慢，比较以同一会话交替运行为准。
 
+## 向量嵌入文本：标题 + 标题路径前缀（branch `feat/embed-and-write-hints`）
+
+在 `b1aec05` 之上，向量记录的嵌入文本从 passage 正文改为 `标题\n标题路径\n正文`（WeKnora `Chunk.EmbeddingContent` 思路）。本机可运行本地 BGE-M3（`BAAI/bge-m3`，`max_sequence_length=256`，CPU，模型下载到盒子内 `/workspace/vec/bge-m3`，仅用于评测，未改动依赖），因此做了实测。前后两次都用同一模型、同一 fixture 副本、`repeats=1`（向量排序是确定的），graph expansion 开。graph_v1 73 个向量 passage，CI 冒烟 4 个。
+
+| fixture / 模式 | 前：R@1 / R@3 / R@5 / R@10 / MRR / nDCG / 无答案误命中 | 后：R@1 / R@3 / R@5 / R@10 / MRR / nDCG / 无答案误命中 |
+| --- | --- | --- |
+| graph_v1 lexical | 0.3021 / 0.6042 / 0.6979 / 0.8750 / 0.5351 / 0.6189 / 0.500 | 同左（逐位相同） |
+| graph_v1 vector | 0.3021 / 0.4479 / 0.6146 / 0.9062 / 0.4990 / 0.5895 / 0.750 | 0.3229 / 0.4583 / 0.6458 / 0.8958 / 0.5151 / 0.6046 / 0.500 |
+| graph_v1 hybrid | 0.3438 / 0.5000 / 0.6458 / 0.9062 / 0.5309 / 0.6163 / 0.750 | 0.3438 / 0.5000 / 0.6875 / 0.8958 / 0.5326 / 0.6197 / 0.500 |
+| CI lexical | 0.7000 / 0.8000 / 0.8000 / 0.8000 / 0.8000 / 0.8000 / 0.000 | 同左 |
+| CI vector | 0.5000 / 0.8000 / 0.8000 / 0.8000 / 0.7000 / 0.7262 / 0.000 | 0.7000 / 0.8000 / 0.8000 / 0.8000 / 0.8000 / 0.8000 / 0.000 |
+| CI hybrid | 0.7000 / 0.8000 / 0.8000 / 0.8000 / 0.8000 / 0.8000 / 0.000 | 同左 |
+
+- v2_40 只在 archive scope 评测，而 Query V2 的向量召回只对 active scope 生效（archive/raw 直接跳过），`vector_index_records` 也排除 `wiki/sources/`，所以 v2_40 的 vector/hybrid 结果不受该改动影响、未测量；其 lexical 指标与改动前逐位相同。
+- graph_v1 vector：13 条 case 变好、4 条变差（22 条名次有变化）。变好如 `spec-retry-origins`（第 7、4 → 第 2、3）、`kw-tariff-calculator-consumers`（第 7、8 → 第 4、5）、`kw-throttler-incident`（未进 top-10 → 第 6）、`owner-lane-picker-heuristic`（第 2 → 第 1），无答案 `none-payroll` 不再误命中；变差为 `dep-pickup-queue-double-dispatch`（第 8 → 未进 top-10）、`owner-lane-catalog`（第 3 → 第 6）、`kw-exporter-concepts`（第二个金标第 4 → 未进 top-10）、`kw-retry-budget-origins`（第二个金标第 6 → 第 7）。
+- graph_v1 hybrid：11 条变好、6 条变差；除上述外 `kw-lane-catalog-owner`（第 3 → 第 4）与 `direct-carrier-credentials`（第 1 → 第 3）变差，因此 hybrid 下 direct 组 MRR 1.000 → 0.961。
+- 结论：两套 fixture 语料都很小（73 / 4 个 passage），变化方向总体为正（vector MRR +0.016、nDCG +0.015，无答案误命中 0.75 → 0.50），但 R@10 −0.010，hybrid direct 有一条回退；不足以作为大语料上的收益证据。
+- 延迟：查询路径未改动（query embedding 不变）；单次运行的 vector p95 为 105 → 132 ms（graph_v1）、49 → 46 ms（CI），属于单次 CPU 测量噪声范围，未做重复测量。全量建库耗时 9.1 s → 10.1 s（graph_v1，73 passage，嵌入文本变长）。
+
 ## 复现
 
 ```bash

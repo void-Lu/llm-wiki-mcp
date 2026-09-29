@@ -1,5 +1,9 @@
 # 变更记录
 
+## 2026-09-29 — 向量嵌入文本与写入提示
+
+- 向量索引改为嵌入“页面标题 + 标题路径 + passage 正文”（`embedding_text`；与标题相同的 H1 不重复），存储的 passage 文本与词法检索不变。向量记录的 content hash 同时覆盖嵌入文本，改标题或改小节标题会让对应向量变为 stale。向量索引 schema 升为 3，旧索引报告 `index_incompatible`，需要执行一次 `llm-wiki-mcp vector build`。
+
 ## 2026-09-29 — 图扩展排序修复
 
 - 排名版本升为 `query-v2-passage-rrf-11`；质量门控校准产物需按新版本重新生成（旧版本身份不匹配时按既有规则 fail-open）。

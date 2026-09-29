@@ -451,8 +451,14 @@ class RetrievalIndexStore:
         if not self.path.exists():
             return []
         with self._connection(readonly=True) as connection:
-            rows = connection.execute("SELECT passages.passage_id, passages.page_path, passages.content_hash, passages.text, pages.source_kind, pages.corpus FROM passages JOIN pages ON pages.path=passages.page_path ORDER BY passages.page_path, passages.ordinal").fetchall()
-        return [{"passage_id": row[0], "page_path": row[1], "content_hash": row[2], "text": row[3], "source_kind": row[4], "corpus": row[5]} for row in rows]
+            rows = connection.execute("SELECT passages.passage_id, passages.page_path, passages.content_hash, passages.text, pages.source_kind, pages.corpus, pages.title, passages.heading_path_json FROM passages JOIN pages ON pages.path=passages.page_path ORDER BY passages.page_path, passages.ordinal").fetchall()
+        return [
+            {
+                "passage_id": row[0], "page_path": row[1], "content_hash": row[2], "text": row[3], "source_kind": row[4], "corpus": row[5],
+                "title": row[6] or "", "heading_path": [str(item) for item in json.loads(row[7] or "[]")],
+            }
+            for row in rows
+        ]
 
     def list_catalog_items(
         self,

@@ -203,7 +203,7 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 
 向量检索默认关闭。唯一支持的 provider 是本地 `local_bge_m3`；模型目录在 `config set-retrieval` 写入用户级配置，加载时启用离线模式和 `local_files_only`，缺模型或未安装 `vector` extra 时只会结构化降级到关键词/图结果。为使 BGE-M3 的 CPU 全量建库可控，文档 embedding 默认上限为 256 tokens；该值是索引身份的一部分，改变后必须执行 full build。
 
-先通过 `vector build` 显式构建索引；`wiki_query` 从不构建、更新索引或下载模型。索引保存于 vault 的 `.llm-wiki/vector-index/`，仅含相对路径、内容哈希、元数据和归一化向量，不保存正文。默认 `include_raw_sources=false`，这会同时约束建库、更新和查询。
+先通过 `vector build` 显式构建索引；`wiki_query` 从不构建、更新索引或下载模型。索引保存于 vault 的 `.llm-wiki/vector-index/`，仅含相对路径、内容哈希、元数据和归一化向量，不保存正文。默认 `include_raw_sources=false`，这会同时约束建库、更新和查询。每个 passage 按“页面标题、标题路径（`A > B`）、正文”三行拼接后嵌入，使切在小节下的 passage 仍带有主题上下文；向量索引 schema 为 3，旧版（v2，只嵌入正文）索引会被报告为 `index_incompatible`，需重新 `vector build`。
 
 配置本地模型后，普通查询不再传模型或索引参数：
 
