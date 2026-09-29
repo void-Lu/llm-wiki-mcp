@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from retrieval.graph_edges import WIKILINK, PageLink, extract_page_links, resolve_wikilink
+from retrieval.graph_edges import WIKILINK, PageLink, extract_page_links, frontmatter_values, resolve_wikilink
 
 _GRAPH_SCORE_RATIO_CAP = 0.15
 _PURE_GRAPH_SCORE_CAP = 0.75
@@ -89,7 +89,8 @@ def build_graph(
     sources: dict[str, set[str]] = {}
     types: dict[str, str] = {}
     for rel, candidate in by_rel.items():
-        sources[rel] = {str(item) for item in _as_list(candidate.frontmatter.get("sources"))}
+        # Snapshot metadata freezes YAML lists into tuples; normalise both.
+        sources[rel] = {str(item) for item in frontmatter_values(candidate.frontmatter.get("sources"))}
         types[rel] = str(candidate.frontmatter.get("type") or _path_type(rel))
         page_links = edges.get(rel) if edges is not None else None
         if page_links is None:
@@ -212,14 +213,6 @@ def _graph_score_cap(candidate: QueryCandidate) -> float:
     if base > 0:
         return _stable_score(base * _GRAPH_SCORE_RATIO_CAP)
     return _PURE_GRAPH_SCORE_CAP
-
-
-def _as_list(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    if value in (None, ""):
-        return []
-    return [value]
 
 
 def _path_type(rel: str) -> str:

@@ -1,8 +1,9 @@
 """Persisted graph edges must reproduce the former per-query graph exactly.
 
-``_legacy_build_graph`` is a verbatim copy of the pre-edge-table
-``build_graph`` (body parsing with ``Path.resolve`` on every query).  It is kept
-here only as the reference for the identity checks below.
+``_legacy_build_graph`` is a copy of the pre-edge-table ``build_graph`` (body
+parsing with ``Path.resolve`` on every query), with only the later ``sources``
+tuple fix applied.  It is kept here only as the reference for the identity
+checks below.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import pytest
 
 from retrieval import query_pipeline
 from retrieval.graph_edges import WIKILINK, PageLink, extract_page_links, resolve_wikilink
-from retrieval.graph_retrieval import Graph, QueryCandidate, _as_list, _path_type, build_graph
+from retrieval.graph_retrieval import Graph, QueryCandidate, _path_type, build_graph, relationship_evidence_for
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_pipeline import run_query_v2
 from retrieval.query_shared import QueryFilters, snapshot_page_eligible
@@ -46,12 +47,21 @@ def _legacy_build_graph(root: Path, candidates: list[QueryCandidate] | None = No
     types: dict[str, str] = {}
     for rel, path in by_rel.items():
         candidate = by_candidate[rel]
-        sources[rel] = {str(item) for item in _as_list(candidate.frontmatter.get("sources"))}
+        sources[rel] = {str(item) for item in _sources_as_list(candidate.frontmatter.get("sources"))}
         types[rel] = str(candidate.frontmatter.get("type") or _path_type(rel))
         for target in _legacy_wikilink_targets(candidate.body, path, root, by_rel, by_stem):
             neighbors[rel].add(target)
             neighbors.setdefault(target, set()).add(rel)
     return Graph(neighbors=neighbors, sources=sources, types=types)
+
+
+def _sources_as_list(value: Any) -> list[Any]:
+    # Includes the tuple fix: snapshot metadata freezes YAML lists to tuples.
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if value in (None, ""):
+        return []
+    return [value]
 
 
 def _legacy_wikilink_targets(body: str, path: Path, root: Path, by_rel: dict[str, Path], by_stem: dict[str, list[str]]) -> list[str]:
@@ -365,3 +375,24 @@ def test_formal_delete_operation_removes_page_edges(tmp_path: Path, monkeypatch:
     links = store.graph_links()
     assert "wiki/concepts/general/page.md" not in links
     assert [link.dst for link in links["wiki/concepts/general/other.md"][1] if link.kind == WIKILINK] == ["page"]
+
+
+def test_frozen_multi_source_frontmatter_yields_shared_source_evidence(tmp_path: Path) -> None:
+    root = _vault("synthetic", tmp_path)
+    store = RetrievalIndexStore(root)
+    candidates, _hashes = _candidates(root, store, QueryFilters(), None)
+    by_rel = {candidate.rel: candidate for candidate in candidates}
+    beta = "wiki/projects/beta/specs/beta-spec.md"
+    long_page = "wiki/concepts/long-page.md"
+    paths = "wiki/concepts/paths.md"
+    # Snapshot metadata stores YAML lists as tuples.
+    assert isinstance(by_rel[beta].frontmatter["sources"], tuple)
+
+    graph = build_graph(root, candidates)
+
+    assert graph.sources[beta] == {"raw/sources/doc/beta/a.md", "raw/sources/doc/alpha/a.md"}
+    assert graph.sources[paths] == {"raw/sources/doc/alpha/a.md"}
+    shared = [reason["value"] for reason in relationship_evidence_for(beta, long_page, graph).reasons if reason["kind"] == "shared_source"]
+    assert shared == ["raw/sources/doc/alpha/a.md", "raw/sources/doc/beta/a.md"]
+    scalar_vs_list = [reason for reason in relationship_evidence_for(paths, beta, graph).reasons if reason["kind"] == "shared_source"]
+    assert [reason["value"] for reason in scalar_vs_list] == ["raw/sources/doc/alpha/a.md"]
