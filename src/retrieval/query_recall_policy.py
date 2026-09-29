@@ -239,7 +239,9 @@ def query_expansion(
             close = [
                 word
                 for word in title_words
-                if word != term and len(word) >= 4 and edit_distance(term, word) <= 1
+                # Levenshtein distance is at least the length difference, so
+                # the cheap length check only skips words that cannot match.
+                if word != term and len(word) >= 4 and abs(len(word) - len(term)) <= 1 and edit_distance(term, word) <= 1
             ]
         for alias in (request.agent_terms or {}).get(term, ()):
             if alias != term and alias not in close:

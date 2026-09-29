@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from retrieval.graph_edges import WIKILINK, PageLink
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import RetrievalIndexStore
 
@@ -29,6 +30,22 @@ class QueryCorpusSnapshot:
     pages: tuple[Mapping[str, object], ...]
     metadata: Mapping[str, Mapping[str, Any]]
     provenance: Mapping[str, Mapping[str, str]]
+    _graph_links: dict[str, dict[str, tuple[str, tuple[PageLink, ...]]]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def graph_links(self, store: RetrievalIndexStore) -> Mapping[str, tuple[str, tuple[PageLink, ...]]]:
+        """Load persisted wikilink edges once per snapshot.
+
+        Batched queries share one snapshot, so the edge table is read at most
+        once per batch.  Callers still verify each page's ``source_hash``
+        against the snapshot before trusting the edges.
+        """
+
+        key = str(store.path)
+        if key not in self._graph_links:
+            self._graph_links[key] = store.graph_links((WIKILINK,))
+        return self._graph_links[key]
 
     @classmethod
     def empty(cls, scope: str) -> "QueryCorpusSnapshot":

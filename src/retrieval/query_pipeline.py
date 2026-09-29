@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 from retrieval.body_budget import result_floor_budget
 from retrieval.candidate_items import candidate_item
 from retrieval.context_packer import ContextPassage, pack_context
+from retrieval.graph_edges import WIKILINK
 from retrieval.graph_retrieval import QueryCandidate, apply_graph_expansion, build_graph
 from retrieval.lexical_analyzer import has_qualified_identifier
 from retrieval.query_cancellation import QueryCancellationContext
@@ -409,6 +410,7 @@ def _graph_expand(
     if scope in {"archive", "raw"} or not seed_scores:
         return {}, []
     candidates: list[QueryCandidate] = []
+    candidate_hashes: dict[str, str] = {}
     pages = snapshot.pages if snapshot is not None else store.page_candidates()
     for index, page in enumerate(pages):
         if cancellation is not None:
@@ -420,6 +422,7 @@ def _graph_expand(
             or not snapshot_page_eligible(page, metadata, scope=scope, project=project, filters=filters)
         ):
             continue
+        candidate_hashes[path] = str(page.get("content_hash") or "")
         candidates.append(
             QueryCandidate(
                 path=root / path,
@@ -436,7 +439,15 @@ def _graph_expand(
         candidate.fusion_score = seed_scores[path]
     if not scored:
         return {}, []
-    apply_graph_expansion(scored, candidates, build_graph(root, candidates), max_graph_hops=2, collect_reasons=debug)
+    stored = snapshot.graph_links(store) if snapshot is not None else store.graph_links((WIKILINK,))
+    # Only trust persisted edges extracted from the exact projection this
+    # query sees; anything else is parsed from the snapshot body instead.
+    edges = {
+        path: links
+        for path, (source_hash, links) in stored.items()
+        if path in candidate_hashes and source_hash == candidate_hashes[path]
+    }
+    apply_graph_expansion(scored, candidates, build_graph(root, candidates, edges=edges), max_graph_hops=2, collect_reasons=debug)
     added = [path for path in scored if path not in seed_scores]
     return scored, store.passages_for_pages(added, limit_per_page=1)
 

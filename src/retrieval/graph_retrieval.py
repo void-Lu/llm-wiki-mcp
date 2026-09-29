@@ -1,6 +1,7 @@
 """Bounded graph expansion shared by Query V2 retrieval stages.
 
-The graph operates on already indexed candidate projections.  It does not
+The graph operates on already indexed candidate projections and the link
+edges persisted at index time (see ``retrieval.graph_edges``).  It does not
 read Wiki source files during a query and it never widens the candidate set
 past the caller-provided eligibility boundary.
 """
@@ -8,11 +9,12 @@ past the caller-provided eligibility boundary.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from wiki.wikilinks import wikilink_targets
+from retrieval.graph_edges import WIKILINK, PageLink, extract_page_links, resolve_wikilink
 
 _GRAPH_SCORE_RATIO_CAP = 0.15
 _PURE_GRAPH_SCORE_CAP = 0.75
@@ -60,28 +62,45 @@ class Graph:
     types: dict[str, str]
 
 
-def build_graph(root: Path, candidates: list[QueryCandidate] | None = None) -> Graph:
-    """Build graph relationships from indexed candidate projections."""
+def build_graph(
+    root: Path,
+    candidates: list[QueryCandidate] | None = None,
+    *,
+    edges: Mapping[str, Sequence[PageLink]] | None = None,
+) -> Graph:
+    """Build graph relationships over the caller's candidate boundary.
+
+    ``edges`` are the persisted index-time links keyed by page path.  Pages
+    missing from ``edges`` (or every page, when ``edges`` is omitted) are
+    parsed from their candidate body with the same extractor the index uses.
+    Wikilink targets are resolved against the current candidates only, so a
+    filtered-out page can never become a graph neighbour.
+    """
 
     if candidates is None:
         candidates = []
     wiki_candidates = [candidate for candidate in candidates if candidate.rel.startswith("wiki/")]
-    by_rel = {candidate.rel: candidate.path for candidate in wiki_candidates}
-    by_candidate = {candidate.rel: candidate for candidate in wiki_candidates}
+    by_rel = {candidate.rel: candidate for candidate in wiki_candidates}
     by_stem: dict[str, list[str]] = {}
-    for rel, path in by_rel.items():
-        by_stem.setdefault(path.stem.casefold(), []).append(rel)
+    for rel, candidate in by_rel.items():
+        by_stem.setdefault(candidate.path.stem.casefold(), []).append(rel)
 
     neighbors = {rel: set() for rel in by_rel}
     sources: dict[str, set[str]] = {}
     types: dict[str, str] = {}
-    for rel, path in by_rel.items():
-        candidate = by_candidate[rel]
+    for rel, candidate in by_rel.items():
         sources[rel] = {str(item) for item in _as_list(candidate.frontmatter.get("sources"))}
         types[rel] = str(candidate.frontmatter.get("type") or _path_type(rel))
-        for target in _wikilink_targets(candidate.body, path, root, by_rel, by_stem):
-            neighbors[rel].add(target)
-            neighbors.setdefault(target, set()).add(rel)
+        page_links = edges.get(rel) if edges is not None else None
+        if page_links is None:
+            page_links = extract_page_links(rel, candidate.body, candidate.frontmatter, root=root)
+        for link in page_links:
+            if link.kind != WIKILINK:
+                continue
+            target = resolve_wikilink(link, by_rel, by_stem)
+            if target:
+                neighbors[rel].add(target)
+                neighbors.setdefault(target, set()).add(rel)
     return Graph(neighbors=neighbors, sources=sources, types=types)
 
 
@@ -193,32 +212,6 @@ def _graph_score_cap(candidate: QueryCandidate) -> float:
     if base > 0:
         return _stable_score(base * _GRAPH_SCORE_RATIO_CAP)
     return _PURE_GRAPH_SCORE_CAP
-
-
-def _wikilink_targets(body: str, path: Path, root: Path, by_rel: dict[str, Path], by_stem: dict[str, list[str]]) -> list[str]:
-    targets = []
-    for target in wikilink_targets(body):
-        target_path = Path(target)
-        candidates: list[Path] = []
-        if target_path.suffix != ".md":
-            target_path = target_path.with_suffix(".md")
-        candidates.extend([(path.parent / target_path).resolve(), (root / "wiki" / target_path).resolve(), (root / target_path).resolve()])
-        matched = ""
-        for candidate in candidates:
-            try:
-                rel = candidate.relative_to(root).as_posix()
-            except ValueError:
-                continue
-            if rel in by_rel:
-                matched = rel
-                break
-        if not matched:
-            stem_matches = by_stem.get(Path(target).stem.casefold(), [])
-            if len(stem_matches) == 1:
-                matched = stem_matches[0]
-        if matched:
-            targets.append(matched)
-    return targets
 
 
 def _as_list(value: Any) -> list[Any]:

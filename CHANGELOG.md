@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-09-29 — 检索图边持久化
+
+- 检索 store 新增 `links` 表（schema version 3）：wikilink、`sources` 来源边以及 `related_objects`/`applies_to`/`derived_from` 类型关系在页面投影时抽取，随 build、单页 update、rename 与 delete 同事务维护；类型关系暂只存储、不参与图评分。
+- Query V2 图扩展改读持久化边，不再每次查询解析全部页面正文；wikilink 仍按当次已过滤候选集解析，图分数与排序保持逐位不变，边的 `source_hash` 与查询快照不一致时回退解析快照正文。
+- 升级后旧检索库报告 `index_incompatible`，写路径返回 `rebuild_required`，需要运行一次 `llm-wiki-mcp index build`；不做隐式迁移。
+
 ## 2026-09-20 — 规范镜像与公共规范维护
 
 - 新增 core MCP 工具 `wiki_sync_specs` 与 `wiki_manage_shared_spec`（均为 preview/apply/discard 两阶段），core profile 从 9 个业务工具变为 11 个；README、CLAUDE.md 与 `.trellis/scripts/spec_lint.py` 的冻结集合同步。

@@ -21,6 +21,14 @@ from typing import Any, Iterable, Literal
 
 from common.content_redaction import REDACTION_POLICY_VERSION
 from common.privacy_policy import PrivacyPolicy, project_public_value
+from retrieval.graph_edges import (
+    GRAPH_EDGE_KINDS,
+    PageLink,
+    decode_paths,
+    encode_paths,
+    extract_page_links,
+    graph_body,
+)
 from retrieval.lexical_analyzer import (
     expanded_identifier_phrase_fts_query,
     expanded_relaxed_fts_query,
@@ -37,7 +45,7 @@ from retrieval.metadata_filters import normalize_metadata_filters
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_paths import RETRIEVAL_DB_BY_SCOPE, filesystem_path
 
-RETRIEVAL_SCHEMA_VERSION = 2
+RETRIEVAL_SCHEMA_VERSION = 3
 StoreScope = Literal["active", "archive", "raw"]
 RAW_AUXILIARY_SEGMENTS = frozenset({"manifest", "_deprecated_archive"})
 
@@ -407,6 +415,37 @@ class RetrievalIndexStore:
             for row in rows
         ]
 
+    def graph_links(self, kinds: Iterable[str] = GRAPH_EDGE_KINDS) -> dict[str, tuple[str, tuple[PageLink, ...]]]:
+        """Return persisted outgoing edges as ``page -> (source_hash, links)``.
+
+        Every indexed ``wiki/`` page is present, including pages without
+        edges.  ``source_hash`` is the ``redacted_content_hash`` the edges were
+        extracted from, so a caller holding an older snapshot can detect a
+        projection that changed after its capture and fall back to parsing
+        its own snapshot body for that page.
+        """
+        selected = tuple(dict.fromkeys(kinds))
+        if not self.path.exists():
+            return {}
+        marks = ",".join("?" for _ in selected) or "NULL"
+        with self._connection(readonly=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT pages.path, pages.redacted_content_hash, links.source_hash,
+                       links.kind, links.dst, links.dst_paths, links.dst_stem
+                FROM pages LEFT JOIN links ON links.src = pages.path AND links.kind IN ({marks})
+                WHERE pages.path >= 'wiki/' AND pages.path < 'wiki0'
+                ORDER BY pages.path, links.kind, links.ordinal
+                """,
+                selected,
+            ).fetchall()
+        grouped: dict[str, tuple[str, list[PageLink]]] = {}
+        for path, page_hash, source_hash, kind, dst, dst_paths, dst_stem in rows:
+            entry = grouped.setdefault(path, (source_hash or page_hash, []))
+            if kind is not None:
+                entry[1].append(PageLink(kind, dst, decode_paths(dst_paths), dst_stem))
+        return {path: (source_hash, tuple(links)) for path, (source_hash, links) in grouped.items()}
+
     def vector_records(self) -> list[dict[str, str]]:
         """Return only passage metadata/text required by explicit vector lifecycle."""
         if not self.path.exists():
@@ -609,6 +648,8 @@ class RetrievalIndexStore:
             CREATE VIRTUAL TABLE passages_fts USING fts5(passage_id UNINDEXED, title, aliases, keywords, heading, normalized_terms);
             CREATE TABLE vector_dirty(passage_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, reason TEXT NOT NULL);
             CREATE INDEX passages_page_ordinal ON passages(page_path, ordinal);
+            CREATE TABLE links(src TEXT NOT NULL REFERENCES pages(path) ON DELETE CASCADE, kind TEXT NOT NULL, ordinal INTEGER NOT NULL, dst TEXT NOT NULL, dst_paths TEXT NOT NULL, dst_stem TEXT NOT NULL, source_hash TEXT NOT NULL, PRIMARY KEY(src, kind, ordinal));
+            CREATE INDEX links_kind_dst ON links(kind, dst);
         """)
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
@@ -631,14 +672,30 @@ class RetrievalIndexStore:
         keywords = page.frontmatter.get("tags", [])
         aliases_text = " ".join(map(str, aliases if isinstance(aliases, list) else [aliases]))
         keywords_text = " ".join(map(str, keywords if isinstance(keywords, list) else [keywords]))
-        for chunk in chunk_markdown(page.path, page.body):
+        chunks = chunk_markdown(page.path, page.body)
+        for chunk in chunks:
             self._insert_chunk(connection, chunk, page.title, aliases_text, keywords_text)
+        if chunks:
+            # Pages without passages never become query candidates, so they
+            # carry no edges either.  Links are removed with the page row via
+            # the ``ON DELETE CASCADE`` foreign key.
+            self._insert_links(connection, page, extract_page_links(page.path, graph_body(chunk.text for chunk in chunks), page.frontmatter, root=self.root))
 
     @staticmethod
     def _insert_chunk(connection: sqlite3.Connection, chunk: PassageChunk, title: str, aliases: str, keywords: str) -> None:
         connection.execute("INSERT INTO passages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (chunk.passage_id, chunk.page_path, json.dumps(chunk.heading_path, ensure_ascii=False), chunk.heading_anchor, chunk.ordinal, chunk.text, normalize(chunk.text), chunk.token_count, chunk.content_hash, chunk.chunk_schema_version))
         connection.execute("INSERT INTO passages_fts VALUES (?, ?, ?, ?, ?, ?)", (chunk.passage_id, normalize(title), normalize(aliases), normalize(keywords), normalize(" ".join(chunk.heading_path)), normalize(chunk.text)))
         connection.execute("INSERT INTO vector_dirty VALUES (?, ?, ?)", (chunk.passage_id, chunk.content_hash, "page_updated"))
+
+    @staticmethod
+    def _insert_links(connection: sqlite3.Connection, page: IndexedPage, links: list[PageLink]) -> None:
+        ordinals: dict[str, int] = {}
+        rows = []
+        for link in links:
+            ordinal = ordinals.get(link.kind, 0)
+            ordinals[link.kind] = ordinal + 1
+            rows.append((page.path, link.kind, ordinal, link.dst, encode_paths(link.dst_paths), link.dst_stem, page.redacted_content_hash))
+        connection.executemany("INSERT INTO links VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
 
     def _page_stats(self) -> dict[str, tuple[int, int]]:
         with self._connection(readonly=True) as connection:

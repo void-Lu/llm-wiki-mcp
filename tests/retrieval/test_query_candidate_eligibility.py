@@ -135,6 +135,11 @@ class _SnapshotStore:
     def page_candidates(self) -> list[dict[str, Any]]:
         return self.pages
 
+    def graph_links(self, kinds: tuple[str, ...] = ()) -> dict[str, Any]:
+        del kinds
+        # No persisted edges: the graph parses the candidate bodies instead.
+        return {}
+
     def passages_for_pages(self, paths: list[str], *, limit_per_page: int = 1) -> list[PassageHit]:
         del limit_per_page
         normalized = sorted(paths)
