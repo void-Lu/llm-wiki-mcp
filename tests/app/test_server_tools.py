@@ -28,6 +28,8 @@ from app.server import (
     wiki_query,
     wiki_update,
     wiki_write_note,
+    wiki_sync_specs,
+    wiki_manage_shared_spec,
     wiki_list,
     wiki_get,
 )
@@ -43,6 +45,8 @@ CORE_TOOLS = {
     "wiki_get",
     "wiki_archive",
     "wiki_restore",
+    "wiki_sync_specs",
+    "wiki_manage_shared_spec",
 }
 
 
@@ -340,6 +344,14 @@ def test_archive_rejects_invalid_reason_before_resolving_vault() -> None:
 
     assert result["ok"] is False
     assert result["code"] == "invalid_archive_reason"
+
+
+def test_spec_reuse_tools_validate_actions_before_resolving_vault() -> None:
+    sync = wiki_sync_specs(source_root="C:/project/.trellis/spec", project="demo", action="invalid")
+    shared = wiki_manage_shared_spec(operation="upsert", page_path="wiki/entities/shared-specs/python.md", action="invalid")
+
+    assert sync["code"] == "invalid_action"
+    assert shared["code"] == "invalid_action"
 
 
 @pytest.mark.parametrize(

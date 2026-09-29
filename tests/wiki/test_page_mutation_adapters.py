@@ -6,7 +6,13 @@ from pathlib import Path
 
 from wiki.atomic_file import sha256_file
 from wiki.page_mutation_adapters import build_plan_intent
-from wiki.page_mutation import ChatSourceAdapter, FormalPageAdapter, PageMutationCoordinator, PlanIntent
+from wiki.page_mutation import (
+    DELETED_PAGE_HASH,
+    ChatSourceAdapter,
+    FormalPageAdapter,
+    PageMutationCoordinator,
+    PlanIntent,
+)
 from wiki.page_operation_store import PageOperationStore
 from wiki.projection_profile import projection_stages
 from wiki.wiki_paths import create_wiki_root
@@ -109,6 +115,37 @@ def test_chat_existing_projection_does_not_consume_formal_plan(tmp_path: Path) -
 
 def test_coordinator_has_no_concrete_chat_kind_branch() -> None:
     assert "chat_source" not in inspect.getsource(PageMutationCoordinator)
+
+
+def test_formal_delete_unlinks_page_and_projects_as_not_created(tmp_path: Path, monkeypatch) -> None:
+    create_wiki_root(tmp_path)
+    page_path = "wiki/concepts/general/page.md"
+    page = tmp_path / page_path
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\ntype: concept\ntitle: Page\ngenerated: false\n---\n\n# Page\n", encoding="utf-8")
+    overview_calls: list[tuple[str, bool | None]] = []
+
+    def fake_overview(root: Path, *, changed_path: str, created: bool | None = None) -> dict[str, object]:
+        del root
+        overview_calls.append((changed_path, created))
+        return {"ok": True}
+
+    monkeypatch.setattr("wiki.page_mutation_adapters.refresh_overview", fake_overview)
+    page_hash = sha256_file(page)
+    coordinator = PageMutationCoordinator(tmp_path)
+
+    result = coordinator.write_and_project(
+        operation_kind="delete",
+        page_path=page_path,
+        base_hash=page_hash,
+        text="",
+        intended_hash=DELETED_PAGE_HASH,
+        expected_hash=page_hash,
+    )
+
+    assert result.ok is True
+    assert not page.exists()
+    assert overview_calls == [(page_path, False)]
 
 
 def test_formal_projection_callbacks_forward_operation_page_path_on_replay(

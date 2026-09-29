@@ -36,6 +36,7 @@ def test_projection_profile_registry_locks_each_change_kind(kind: str, expected:
     ("alias", "canonical"),
     [
         ("create", "formal"),
+        ("delete", "formal"),
         ("note", "formal"),
         ("update", "formal"),
         ("chat_source", "chat"),

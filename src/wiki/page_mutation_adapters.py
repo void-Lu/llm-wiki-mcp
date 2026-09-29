@@ -97,7 +97,7 @@ class FormalPageAdapter:
 
     name = "formal"
     replay_existing_requests = False
-    _operation_kinds = frozenset({"formal", "create", "note", "update"})
+    _operation_kinds = frozenset({"formal", "create", "note", "update", "delete"})
 
     def handles_operation_kind(self, operation_kind: str) -> bool:
         return operation_kind in self._operation_kinds
@@ -134,6 +134,8 @@ class FormalPageAdapter:
             return plan_id
         if operation_kind == "note":
             return f"note:{page_path}:{base_hash or 'missing'}:{intended_hash}"
+        if operation_kind == "delete":
+            return f"delete:{page_path}:{base_hash or 'missing'}"
         # A body-only update intentionally opts out of idempotence.  The
         # random token is a policy choice owned by the formal adapter rather
         # than a request-key format leaked into wiki_update.
@@ -147,6 +149,8 @@ class FormalPageAdapter:
         return "formal"
 
     def build_projections(self, context: ProjectionContext, operation: PageOperation, target: Path) -> dict[str, Projection]:
+        if operation.operation_kind == "delete":
+            return self._delete_projections(context, operation)
         page = read_markdown_page(target, context.root)
         source_hashes = _source_hashes(page.frontmatter)
         sources = _sources(page.frontmatter)
@@ -212,6 +216,67 @@ class FormalPageAdapter:
             "audit_log": audit_log,
         }
 
+    def _delete_projections(self, context: ProjectionContext, operation: PageOperation) -> dict[str, Projection]:
+        title = Path(operation.page_path).stem
+
+        def dependencies() -> dict[str, object]:
+            KnowledgeDependencies(context.root).remove_page(operation.page_path)
+            return {"ok": True, "state": "ready"}
+
+        def retrieval() -> dict[str, object]:
+            from retrieval.retrieval_index import RetrievalIndexStore
+
+            store = RetrievalIndexStore(context.root, scope="active")
+            status = store.status()
+            if not status.get("ok"):
+                code = str(status.get("code") or "index_missing")
+                return {
+                    "ok": True,
+                    "state": "rebuild_required",
+                    "code": code,
+                    "operation": "delete",
+                    "repair_action": "rebuild_retrieval_index",
+                }
+            return store.delete_page(operation.page_path)
+
+        def navigation() -> dict[str, object]:
+            result = refresh_navigation(context.root, changed_path=operation.page_path)
+            return _escalate_incremental_projection(
+                context,
+                result,
+                full_rebuild=lambda: refresh_navigation(context.root),
+            )
+
+        def overview() -> dict[str, object]:
+            result = refresh_overview(context.root, changed_path=operation.page_path, created=False)
+            return _escalate_incremental_projection(
+                context,
+                result,
+                full_rebuild=lambda: refresh_overview(context.root),
+            )
+
+        def audit_log() -> dict[str, object]:
+            return append_log_entry(
+                context.root,
+                WikiLogEntry(
+                    operation="delete",
+                    title=title,
+                    paths=[operation.page_path],
+                    sources=[],
+                    project="",
+                    status="ok",
+                    operation_id=operation.operation_id,
+                ),
+                log_store=context.log_store,
+            )
+
+        return {
+            "dependencies": dependencies,
+            "retrieval": retrieval,
+            "navigation": navigation,
+            "overview": overview,
+            "audit_log": audit_log,
+        }
 
 _ESCALATABLE_INCREMENTAL_CODES = frozenset(
     {
