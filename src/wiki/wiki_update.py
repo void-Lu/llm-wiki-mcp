@@ -16,6 +16,7 @@ from wiki.reference_section import build_reference_section, skipped_warnings
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
 from wiki.wiki_io import PreparedWikiPage, WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
+from wiki.duplicate_titles import new_title_surfaces, surface_duplicate_warnings
 from wiki.link_suggestions import load_target_rows, unlinked_mention_suggestions
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 from wiki.wiki_paths import WikiPathError, resolve_within_root, translate_path_error, validate_wiki_page_path
@@ -136,7 +137,7 @@ def preview_update(
     # change in between.  Render problems are reported by apply, not here.
     rendered = _render_final(root, page_path, target, fm, incoming, resolved_sources, incoming_body)
     if not isinstance(rendered, dict):
-        _attach_write_hints(result, root, page_path, rendered[0])
+        _attach_write_hints(result, root, page_path, rendered[0], existing=fm, incoming=incoming, target=target)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 
@@ -233,7 +234,7 @@ def apply_update(
         result["failed_stage"] = mutation.failed_stage
     if resolved_sources is not None:
         result["source_hashes"] = source_hash_map(resolved_sources)
-    _attach_write_hints(result, root, page_path, prepared)
+    _attach_write_hints(result, root, page_path, prepared, existing=existing, incoming=incoming, target=target)
     return _attach_related_page_skips(result, related_pages, related_pages_skipped)
 
 
@@ -276,14 +277,42 @@ def _render_final(
     return prepared, policy_stamp
 
 
-def _attach_write_hints(result: dict[str, Any], root: Path, page_path: str, prepared: PreparedWikiPage) -> None:
-    """Add advisory ``link_suggestions`` (omitted when empty); never raises."""
+def _attach_write_hints(
+    result: dict[str, Any],
+    root: Path,
+    page_path: str,
+    prepared: PreparedWikiPage,
+    *,
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+    target: Path,
+) -> None:
+    """Add advisory ``link_suggestions`` and ``duplicate_warnings``; never raises.
+
+    Both keys are omitted when empty.  Duplicate warnings are only computed
+    when ``incoming_frontmatter`` sets ``title`` or ``aliases`` and only for
+    the title/aliases the page gains; body-only updates never produce them.
+    """
 
     _, saved_body = split_frontmatter(prepared.text)
     rows = _hint_rows(root, page_path, prepared)
     link_suggestions = unlinked_mention_suggestions(root, page_path, saved_body, rows=rows)
     if link_suggestions:
         result["link_suggestions"] = link_suggestions
+    if "title" in incoming or "aliases" in incoming:
+        gained = new_title_surfaces(_current_title(existing, target), _aliases(existing), prepared.title, _aliases(prepared.frontmatter))
+        duplicate_warnings = surface_duplicate_warnings(root, page_path, gained, rows=rows)
+        if duplicate_warnings:
+            result["duplicate_warnings"] = duplicate_warnings
+
+
+def _current_title(existing: Mapping[str, Any], target: Path) -> str:
+    return str(existing.get("title") or target.stem)
+
+
+def _aliases(frontmatter: Mapping[str, Any]) -> list[str]:
+    value = frontmatter.get("aliases")
+    return [str(item) for item in value if isinstance(item, str) and item.strip()] if isinstance(value, list) else []
 
 
 def _hint_rows(root: Path, page_path: str, prepared: PreparedWikiPage) -> list[dict[str, Any]] | None:
@@ -297,8 +326,7 @@ def _hint_rows(root: Path, page_path: str, prepared: PreparedWikiPage) -> list[d
     rows = load_target_rows(root)
     if not rows:
         return rows
-    aliases = prepared.frontmatter.get("aliases")
-    own_aliases = [str(item) for item in aliases if isinstance(item, str) and item.strip()] if isinstance(aliases, list) else []
+    own_aliases = _aliases(prepared.frontmatter)
     replaced: list[dict[str, Any]] = []
     for row in rows:
         if str(row.get("path")) == page_path:

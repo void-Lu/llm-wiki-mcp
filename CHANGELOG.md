@@ -5,6 +5,7 @@
 - 向量索引改为嵌入“页面标题 + 标题路径 + passage 正文”（`embedding_text`；与标题相同的 H1 不重复），存储的 passage 文本与词法检索不变。向量记录的 content hash 同时覆盖嵌入文本，改标题或改小节标题会让对应向量变为 stale。向量索引 schema 升为 3，旧索引报告 `index_incompatible`，需要执行一次 `llm-wiki-mcp vector build`。
 - `wiki_update(action="preview")` 也返回可选的 `link_suggestions`：按 apply 将写入的页面渲染结果（frontmatter 合并、标题行、脱敏）计算，页面自身的索引行替换为新标题/别名；同一 plan 的 preview 与 apply 返回相同提示（期间其他页面未变化时）。
 - `wiki_write_note` 与 `wiki_update(action="apply")` 保存成功后返回可选的 `link_suggestions`：正文中提到其他 Wiki 页面标题/别名/多词文件名却未链接的位置（每个目标只报第一次，含 `target`、`title`、`mention`、`line`、`link`）。跳过代码、已有链接、页面自身、已链接目标、过短或指向多页的词；拉丁词按词边界、单词须大小写一致，中文按子串且长词优先。只读取已构建的检索投影，不改写页面；无提示时不出现该字段。
+- `wiki_update` preview/apply 在 `incoming_frontmatter` 改动 `title`/`aliases` 时、`wiki_manage_shared_spec` upsert preview 在新建或改名时，对页面新增的标题/别名返回可选的 `duplicate_warnings`（排除页面自身；纯正文更新不返回）。
 - `wiki_write_note` 新建页面后返回可选的 `duplicate_warnings`（最多 5 条，页面照常创建）：标题经 `ConceptRegistry.resolve` 与已有标题/别名归一化后相同（`same_title_or_alias`），或字符 bigram Jaccard ≥ 0.6（`similar_title`），或一方包含另一方且较短一方 ≥ 3 字符、占比 ≥ 0.5（`title_contains`）。`ConceptRegistry` 新增可直接传入记录的构造方式与 `resolve(..., collect_evidence=False)`（跳过 FTS 与全库 wikilink 扫描）。
 
 ## 2026-09-29 — 图扩展排序修复

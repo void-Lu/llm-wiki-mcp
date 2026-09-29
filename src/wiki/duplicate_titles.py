@@ -1,6 +1,6 @@
-"""Write-time hints: near-duplicate titles for newly created pages.
+"""Write-time hints: near-duplicate titles for new or renamed pages.
 
-Advisory only: the page is still created, and nothing is rewritten.  Exact
+Advisory only: the page is still written, and nothing is rewritten.  Exact
 title/alias matches come from ``ConceptRegistry.resolve`` (the same
 normalisation used for concept aliases, applied to every active Wiki page in
 the retrieval projection).  Near matches use a character-bigram Jaccard
@@ -128,5 +128,49 @@ def duplicate_title_warnings(
         return []
     try:
         return near_duplicate_titles(page_path, title, rows)
+    except Exception:  # advisory only: a hint failure must not fail a write
+        return []
+
+
+def new_title_surfaces(
+    old_title: str,
+    old_aliases: Sequence[str],
+    new_title: str,
+    new_aliases: Sequence[str],
+) -> list[str]:
+    """Title/aliases a page gains in an update, in order (title first).
+
+    A surface counts as new when its normalised form was neither the old
+    title nor an old alias, so keeping the old title as an alias or
+    reordering aliases adds nothing to check.
+    """
+
+    known = {normalize_alias(surface) for surface in (old_title, *old_aliases)}
+    gained: list[str] = []
+    for surface in (new_title, *new_aliases):
+        norm = normalize_alias(surface)
+        if norm and norm not in known:
+            known.add(norm)
+            gained.append(surface)
+    return gained
+
+
+def surface_duplicate_warnings(
+    root: str | Path,
+    page_path: str,
+    surfaces: Sequence[str],
+    *,
+    rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Warnings for *surfaces* a page is gaining (the page itself is excluded); never raises."""
+
+    if not surfaces:
+        return []
+    if rows is None:
+        rows = load_target_rows(root)
+    if not rows:
+        return []
+    try:
+        return near_duplicate_titles(page_path, surfaces[0], rows, aliases=surfaces[1:])
     except Exception:  # advisory only: a hint failure must not fail a write
         return []
