@@ -595,6 +595,54 @@ def test_write_and_update_schemas_expose_related_page_arguments() -> None:
     anyio.run(assert_schema)
 
 
+def test_mcp_tool_schemas_strip_json_schema_title_annotations() -> None:
+    """SuiteCloud DA 204s on parameters.title annotations; keep real title params."""
+
+    def count_annotation_titles(node: object, *, under_properties: bool = False) -> tuple[int, int]:
+        annotations = 0
+        property_titles = 0
+        if isinstance(node, list):
+            for item in node:
+                a, p = count_annotation_titles(item, under_properties=under_properties)
+                annotations += a
+                property_titles += p
+            return annotations, property_titles
+        if not isinstance(node, dict):
+            return 0, 0
+        for key, value in node.items():
+            if key == 'title':
+                if under_properties:
+                    property_titles += 1
+                    a, p = count_annotation_titles(value, under_properties=False)
+                    annotations += a
+                    property_titles += p
+                else:
+                    annotations += 1
+                continue
+            a, p = count_annotation_titles(value, under_properties=(key == 'properties'))
+            annotations += a
+            property_titles += p
+        return annotations, property_titles
+
+    async def assert_schema() -> None:
+        async with Client(mcp) as client:
+            tools = {item.name: item for item in (await client.list_tools()).tools}
+            write_schema = tools['wiki_write_note'].input_schema
+            assert 'title' not in write_schema
+            assert write_schema['properties']['title'] == {'type': 'string'}
+            assert write_schema['required'] == ['title', 'content']
+            annotations, property_titles = count_annotation_titles(write_schema)
+            assert annotations == 0
+            assert property_titles == 1
+            for name, tool in tools.items():
+                schema = tool.input_schema
+                ann, _ = count_annotation_titles(schema)
+                assert ann == 0, f'{name} still has annotation titles'
+                assert 'title' not in schema
+
+    anyio.run(assert_schema)
+
+
 def test_registry_exposes_strict_ingest_schema_and_tool_contract_annotations() -> None:
     async def assert_schema() -> None:
         async with Client(mcp) as client:

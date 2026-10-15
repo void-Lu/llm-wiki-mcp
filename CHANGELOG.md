@@ -1,5 +1,12 @@
 # 变更记录
 
+## 2026-10-15 — MCP 工具 schema 去掉 JSON Schema title 注解
+
+- MCP 导出的工具 inputSchema/parameters 在注册时去掉 Pydantic 生成的 JSON Schema 注解字段 	itle（根级如 wiki_write_noteArguments、属性级如 Title），避免 SuiteCloud Developer Assistant 因 	ools[].function.parameters.title 返回 HTTP 204 空响应。
+- 名为 	itle 的真实参数（如 wiki_write_note）保留在 properties 与 
+equired 中；仅去掉其 schema 内部的注解 	itle。
+- 新增 common.json_schema_sanitize.strip_json_schema_title_annotations；工具调用行为与参数校验不变。
+
 ## 2026-09-29 — 检索上下文
 
 - 公开状态（`wiki_status` 的 `config.retrieval.ranking`、CLI `status`/`config show`）新增生效 RRF 权重 `rrf_weights` 与每项来源 `rrf_weight_sources`（`default`/`config`/`env`），环境变量非法时带 `env_error`。仅新增字段。

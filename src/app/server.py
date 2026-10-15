@@ -49,6 +49,7 @@ from retrieval.metadata_filters import (
     normalize_metadata_filters,
 )
 from archive.archive_models import ARCHIVE_REASONS, is_archive_reason
+from common.json_schema_sanitize import strip_json_schema_title_annotations
 from archive.archive_service import ArchiveService
 from wiki.spec_reuse import SharedSpecService, SpecMirrorService
 
@@ -457,6 +458,13 @@ def _register(
         argument_model = tool.fn_metadata.arg_model
         argument_model.model_config["extra"] = "forbid"
         argument_model.model_rebuild(force=True)
+        # Re-export parameters without JSON Schema annotation titles. Pydantic
+        # adds them by default; SuiteCloud DA returns HTTP 204 for schemas that
+        # include tools[].function.parameters.title. Keep a real property named
+        # title (e.g. wiki_write_note).
+        tool.parameters = strip_json_schema_title_annotations(
+            argument_model.model_json_schema(by_alias=True)
+        )
     return registered_tool
 
 
