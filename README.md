@@ -289,7 +289,7 @@ vault_root/
 推荐循环：
 
 1. 用 CLI 注册 vault：`llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
-2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
+2. 摄入明确文件：项目证据用 `wiki_ingest(source_path=..., source_name=..., project=..., source_type="projects")`，落到 `raw/sources/projects/<project>/<source_name>/`。`source_type="file"` 只用于非项目文件语料（例如导入的帮助文档），落到 `raw/sources/file/<corpus>/...`。已登记的项目若仍传入 `file`，会被改写到 `projects`。同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
 3. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。
 4. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
 5. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑。

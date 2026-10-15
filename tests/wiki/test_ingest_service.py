@@ -74,6 +74,63 @@ def test_single_file_ingest_indexes_non_chat_sources_in_the_raw_store(tmp_path: 
     assert not RetrievalIndexStore(root).search_fts("raw-only invoice")
 
 
+def test_registered_project_file_ingest_lands_under_projects(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    (root / "wiki" / "projects" / "Blue-Bottle-Coffee").mkdir(parents=True)
+    source = tmp_path / "evidence.md"
+    source.write_text("transfer evidence", encoding="utf-8")
+
+    result = ingest_file(
+        vault_root=root,
+        source_path=source,
+        source_name="2026-10-13-transfer",
+        project="blue-bottle-coffee",
+        source_type="file",
+    )
+
+    assert result["ok"] is True
+    assert result["source"] == (
+        "raw/sources/projects/Blue-Bottle-Coffee/2026-10-13-transfer/evidence.md"
+    )
+    assert result["source_type"] == "projects"
+    assert result["source_type_routed_from"] == "file"
+    assert (root / result["source"]).is_file()
+
+
+def test_project_raw_namespace_also_routes_file_ingest_to_projects(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    (root / "raw" / "sources" / "projects" / "huideng").mkdir(parents=True)
+    source = tmp_path / "note.md"
+    source.write_text("project evidence", encoding="utf-8")
+
+    result = ingest_file(
+        vault_root=root,
+        source_path=source,
+        source_name="sdf",
+        project="huideng",
+        source_type="file",
+    )
+
+    assert result["source"] == "raw/sources/projects/huideng/sdf/note.md"
+
+
+def test_non_project_file_corpus_stays_under_file(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    source = tmp_path / "help.md"
+    source.write_text("help", encoding="utf-8")
+
+    result = ingest_file(
+        vault_root=root,
+        source_path=source,
+        source_name="suitecloud",
+        project="NetSuite Help Docs",
+        source_type="file",
+    )
+
+    assert result["source"] == "raw/sources/file/NetSuite Help Docs/suitecloud/help.md"
+    assert "source_type_routed_from" not in result
+
+
 def test_modified_source_reports_stale_pages_and_generation_state(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     source = tmp_path / "manual.txt"

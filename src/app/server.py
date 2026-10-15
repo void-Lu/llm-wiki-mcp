@@ -902,7 +902,14 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
 
 @_register()
 def wiki_ingest(source_path: str, source_name: str, project: str = "", source_type: str = "file", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
-    """Ingest one explicit file; text is indexed and other files become raw assets."""
+    """Ingest one explicit file; text is indexed and other files become raw assets.
+
+    Use source_type="projects" for project-owned evidence so it is stored at
+    raw/sources/projects/<project>/. source_type="file" is only for non-project
+    file corpora such as imported help docs. A file ingest for a project that
+    already exists under wiki/projects or raw/sources/projects is stored as
+    projects instead of file.
+    """
     resolution = _registered_resolution()
     result = run_ingest_file(vault_root=resolution.root, project=project, source_name=source_name, source_path=source_path, source_type=source_type)
     return result

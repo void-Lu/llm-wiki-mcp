@@ -164,7 +164,7 @@ domain: suitescript       # knowledge/concept 可选
 source_name: docs         # 来源命名空间，可选
 source_hash: sha256...    # source snapshot hash，可选
 sources:
-    - raw/sources/file/project-a/docs/source.md
+    - raw/sources/projects/project-a/docs/source.md
 summary: 一句话摘要
 tags:
     - netsuite
@@ -245,9 +245,9 @@ wiki_ingest
 - project: project-a
 - status: ok
 - paths:
-    - raw/sources/file/project-a/docs/source.md
+    - raw/sources/projects/project-a/docs/source.md
 - sources:
-    - raw/sources/file/project-a/docs/source.md
+    - raw/sources/projects/project-a/docs/source.md
 ```
 
 ## 硬阻断

@@ -44,7 +44,7 @@ Python 3.11+，`src/` layout，运行依赖只有 `mcp` 和 `PyYAML`，dev 依�
 
 ### 写入与维护流水线
 
-- 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。非 chat 且内容变化时只标记 KnowledgeDependencies 的 stale 页面；知识编译/generation 已停用（`generation: enabled: false`）。MCP 工具名为 `wiki_ingest`。
+- 单文件摄入在 [ingest_service.py](src/wiki/ingest_service.py)：`ingest_file` 只接受一个已存在文件，按字节复制到 `raw/sources/<source_type>/<project>/<source_name>/`，然后增量更新 RetrievalIndexStore。项目证据使用 `source_type=projects`；`file` 只用于非项目文件语料。`project` 已存在于 `wiki/projects/` 或 `raw/sources/projects/` 时，传入 `file` 也会改写入 `projects`。非 chat 且内容变化时只标记 KnowledgeDependencies 的 stale 页面；知识编译/generation 已停用（`generation: enabled: false`）。MCP 工具名为 `wiki_ingest`。
 - 人工笔记写入在 [note_writer.py](src/wiki/note_writer.py)：note 类型为 `spec`/`plan`/`troubleshooting`/`researches`（项目级，写入 `wiki/projects/<project>/` 对应子目录）和 `knowledge`（写入 `wiki/concepts/<domain>/`，不接受 `project`）。MCP 入口为 `wiki_write_note` 工具，server 层接受 `note_type`/`noteType` 等双参数兼容。
 - 页面事实提交统一在 [page_mutation.py](src/wiki/page_mutation.py) 的 `PageMutationCoordinator`：CAS 原子写入后按 durable operation journal 执行 dependencies、retrieval、navigation、overview 和 audit log 投影；任一派生阶段失败都保留已提交页面并返回 `repair_pending`，由同一个 operation 走 `repair_page_operation` 恢复。
 - 正式知识页日志按职责分开：[wiki_log.py](src/wiki/wiki_log.py) 只负责条目渲染、脱敏、journal 去重和 operation index；[log_volume.py](src/wiki/log_volume.py) 独占 UTF-8 字节分卷、轮转、月度归档、`archives/log.md`、归档索引与逐文件原子写，`publish` 完成一次日志卷宗布局。
@@ -138,4 +138,4 @@ Default five canonical triage labels (`needs-triage`, `needs-info`, `ready-for-a
 
 ### Domain docs
 
-Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context layout: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
