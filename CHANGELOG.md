@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-10-19 — 检索 P2：簇 C（primary 强信号收紧 / coverage 抬 raw）
+
+- primary「强」不再把仅 body 的 phrase/identifier 命中当作已回答；无 title/path 证据且无 qualified 时走既有弱 primary → 有限额 `raw_zero`（`wiki_weak_primary`）。
+- coverage 合并时：覆盖未覆盖拉丁词的 raw 页按覆盖比例获得与 wiki 同档的 authority 偏移（`0.35 × coverage_ratio`），便于 Help Docs 进入 top-k；wiki authority 公式不变。
+- 本轮不加粘连模块名别名、不加向量、不处理无答案强噪声；查询时生效，**无需**为 P2 重建索引。
+
 ## 2026-10-19 — 检索 P1：弱 primary 探测 raw 升梯
 
 - 弱 primary（无 qualified / title / identifier / phrase 强信号）时可探测有限额的 `raw_zero`，reason 为 `wiki_weak_primary`。
