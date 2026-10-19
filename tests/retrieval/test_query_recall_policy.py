@@ -800,6 +800,74 @@ def test_primary_fill_is_strong_uses_qualified_hits_and_relaxed_signals() -> Non
     assert primary_fill_is_strong(question, [{"hit": title_hit}])
 
 
+
+
+def test_primary_fill_is_strong_ignores_body_only_phrase() -> None:
+    body_phrase_hit = PassageHit(
+        passage_id="p-body",
+        page_path="wiki/concepts/noise.md",
+        title="杂谈笔记",
+        heading_path=(),
+        text="see Custom Record Type Object Custom Fields in passing",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    title_phrase_hit = PassageHit(
+        passage_id="p-title",
+        page_path="wiki/concepts/custom-fields.md",
+        title="Custom Record Type Object Custom Fields",
+        heading_path=(),
+        text="unrelated",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    q = "Custom Record Type Object Custom Fields"
+    assert not primary_fill_is_strong(q, [{"hit": body_phrase_hit}])
+    assert primary_fill_is_strong(q, [{"hit": title_phrase_hit}])
+    # relaxed path still treats body phrase as strong (P0 default)
+    assert relaxed_fill_is_strong(q, [{"hit": body_phrase_hit}])
+
+
+def test_v2_body_only_primary_phrase_allows_raw_zero(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/noise-primary.md",
+        "杂谈笔记",
+        "see Custom Record Type Object Custom Fields mentioned once",
+        type="concept",
+    )
+    raw = (
+        root
+        / "raw/sources/file/NetSuite Help Docs"
+        / "Custom Record Type Object Custom Fields.md"
+    )
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# Custom Record Type Object Custom Fields\n\n"
+        "SDF customrecordcustomfields XML example and role limits.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+    result = run_query_v2(
+        root,
+        '"Custom Record Type Object Custom Fields"',
+        scope="knowledge",
+        retrieval_mode="lexical",
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert any(path.startswith("raw/") for path in paths), paths
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert "wiki_weak_primary" in result["pipeline"]["fallback"]["reasons"]
+
+
 def test_v2_weak_primary_allows_capped_raw_zero(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)

@@ -154,15 +154,18 @@ def primary_fill_is_strong(
     """True when stage-one primary should block raw_zero.
 
     Qualified FTS hits count as strong when any primary items remain; otherwise
-    reuse ``relaxed_fill_is_strong`` title/phrase/identifier signals (no BM25
-    cutoff).
+    reuse ``relaxed_fill_is_strong`` title/phrase/identifier signals with
+    ``body_evidence=False`` so body-only phrase/id cannot block raw_zero
+    (P2 knife 1 / cluster C). No BM25 cutoff.
     """
 
     if not items:
         return False
     if qualified_fts_hits > 0:
         return True
-    return relaxed_fill_is_strong(question, items, extra_terms=extra_terms)
+    return relaxed_fill_is_strong(
+        question, items, extra_terms=extra_terms, body_evidence=False
+    )
 
 
 def relaxed_fill_is_strong(
@@ -170,6 +173,7 @@ def relaxed_fill_is_strong(
     items: Sequence[Mapping[str, Any]],
     *,
     extra_terms: Sequence[str] = (),
+    body_evidence: bool = True,
 ) -> bool:
     """True when a wiki_relaxed fill has identifier/phrase/exact/title evidence.
 
@@ -180,6 +184,10 @@ def relaxed_fill_is_strong(
     ``suitelet``) matched against title/path (or title tokens) only — never
     body-only substring. Title evidence also includes edit-distance-1 bridges
     matching ``query_expansion``.
+
+    ``body_evidence`` (default True) keeps P0 relaxed abstain semantics: phrase
+    and qualified-id aliases may match title/path/body. When False (primary
+    path), phrase and qualified-id match title/path only.
     """
 
     if not items:
@@ -198,20 +206,22 @@ def relaxed_fill_is_strong(
         page_path = str(getattr(hit, "page_path", "") or "").casefold()
         body = str(getattr(hit, "text", "") or "").casefold()
         blob = f"{title}\n{page_path}\n{body}"
+        title_path = f"{title}\n{page_path}"
+        phrase_blob = blob if body_evidence else title_path
+        ident_blob = blob if body_evidence else title_path
         # exact: question substring equals/contained in title, or title in question
         if title and (title in q or q in title):
             return True
         if len(q) >= 4 and q in {title, page_path}:
             return True
-        # phrase: multiword English identifier run appears in title/path/body
-        if any(p in blob for p in phrases):
+        # phrase: multiword English identifier run (body optional via body_evidence)
+        if any(p in phrase_blob for p in phrases):
             return True
-        # identifier: qualified-id alias appears in title/path/body
+        # identifier: qualified-id alias (body optional via body_evidence)
         for ident in qualified:
-            if any(alias.casefold() in blob for alias in ident.aliases):
+            if any(alias.casefold() in ident_blob for alias in ident.aliases):
                 return True
         # expansion alias: title/path (or title tokens) only — not body substring
-        title_path = f"{title}\n{page_path}"
         if any(term and term in title_path for term in expansion_tokens):
             return True
         # title token overlap (exact or edit-distance-1, matching query_expansion)
