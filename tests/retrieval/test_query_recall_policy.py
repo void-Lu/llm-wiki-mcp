@@ -693,9 +693,27 @@ def test_relaxed_fill_is_strong_detects_title_phrase_and_identifier() -> None:
         "我想写一个llm chatbox的sl页面脚本",
         [{"hit": fuzzy_hit}],
     )
-    assert relaxed_fill_is_strong(
+    # Body-only expansion alias must stay weak (title/path evidence only).
+    assert not relaxed_fill_is_strong(
         "sl 页面脚本",
         [{"hit": fuzzy_hit}],
+        extra_terms=["suitelet"],
+    )
+    suitelet_hit = PassageHit(
+        passage_id="p-suitelet",
+        page_path="wiki/concepts/suitelet-guide.md",
+        title="Suitelet Guide",
+        heading_path=(),
+        text="unrelated body without the expansion cue",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    assert relaxed_fill_is_strong(
+        "sl 页面脚本",
+        [{"hit": suitelet_hit}],
         extra_terms=["suitelet"],
     )
 
@@ -740,10 +758,9 @@ def test_v2_weak_wiki_relaxed_abstains_and_allows_raw_zero(tmp_path: Path) -> No
     assert "wiki/concepts/noise-a.md" not in paths
     assert "wiki/concepts/noise-b.md" not in paths
     assert result["pipeline"]["counters"]["fts_hits"] == 0
-    # If raw store built by refresh_indexes: expect raw hit + fallback raw
-    if paths:
-        assert paths[0].startswith("raw/")
-        assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert paths, "expected raw_zero fill after weak abstain"
+    assert paths[0].startswith("raw/")
+    assert result["pipeline"]["fallback"]["level"] == "raw"
 
 
 def test_v2_raw_fallback_combines_identifier_phrase_docs_above_bigram_noise(

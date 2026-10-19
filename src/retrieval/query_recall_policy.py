@@ -155,9 +155,9 @@ def relaxed_fill_is_strong(
     Used to abstain (clear selection) instead of blocking raw_zero.
 
     ``extra_terms`` covers agent/corpus expansion aliases (for example ``sl`` →
-    ``suitelet``) so a fill that only matches after expansion stays strong.
-    Title evidence includes exact token overlap and the same edit-distance-1
-    bridge ``query_expansion`` uses for corpus title words.
+    ``suitelet``) matched against title/path (or title tokens) only — never
+    body-only substring. Title evidence also includes edit-distance-1 bridges
+    matching ``query_expansion``.
     """
 
     if not items:
@@ -188,8 +188,9 @@ def relaxed_fill_is_strong(
         for ident in qualified:
             if any(alias.casefold() in blob for alias in ident.aliases):
                 return True
-        # expansion alias lands in title/path/body
-        if any(term and term in blob for term in expansion_tokens):
+        # expansion alias: title/path (or title tokens) only — not body substring
+        title_path = f"{title}\n{page_path}"
+        if any(term and term in title_path for term in expansion_tokens):
             return True
         # title token overlap (exact or edit-distance-1, matching query_expansion)
         title_tokens = {tok.casefold() for tok in tokens(title) if tok}
