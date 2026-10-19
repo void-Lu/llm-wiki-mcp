@@ -216,6 +216,23 @@ def test_plan_fallback_strong_wiki_blocks_raw_zero() -> None:
         assert plan is None or plan.branch != "raw_zero"
 
 
+def test_plan_fallback_coverage_not_blocked_by_wiki_strong_flag() -> None:
+    """Coverage is planned from primary+uncovered; strong flag must not steal the branch."""
+    plan = plan_fallback(
+        _state(
+            has_primary_recall=True,
+            effective_scope="knowledge",
+            uncovered_latin_terms=("unauthenticated",),
+            wiki_relaxed_answered=False,
+            wiki_strong_answered=True,  # as if primary were strong
+            raw_available="yes",
+            relaxed_available=False,
+        )
+    )
+    assert plan is not None
+    assert plan.branch == "coverage"
+
+
 def test_plan_fallback_zero_results_still_uses_wiki_zero_results() -> None:
     plan = plan_fallback(
         _state(

@@ -606,7 +606,11 @@ def merge_coverage_items(
             continue
         coverage_ratio = len(covered) / total_terms
         source_rrf = (rrf_k + 1) / (rrf_k + source_rank)
-        authority = 0.0 if is_raw else min(max(float(item.get("score", 0.0)) / 100.0, 0.0), 0.35)
+        if is_raw:
+            # Offset wiki formal authority so full-coverage raw can surface in top-k.
+            authority = 0.35 * coverage_ratio
+        else:
+            authority = min(max(float(item.get("score", 0.0)) / 100.0, 0.0), 0.35)
         fused_score = round(coverage_ratio + source_rrf + authority, 12)
         ranked.append(
             with_fusion(

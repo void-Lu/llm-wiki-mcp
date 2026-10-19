@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from retrieval.candidate_items import candidate_item
 from retrieval.query_pipeline import run_query_v2
 from retrieval.query_recall_policy import (
     MAX_ADAPTIVE_SCORE_RATIO,
@@ -429,6 +430,83 @@ def test_coverage_fusion_uses_effective_rrf_k() -> None:
     )
     assert small_second["source_local_rrf"] != large_second["source_local_rrf"]
     assert small_second["score"] != large_second["score"]
+
+
+def test_merge_coverage_items_prefers_high_coverage_raw_over_padding_wiki() -> None:
+    wiki = candidate_item(
+        PassageHit(
+            passage_id="w1",
+            page_path="wiki/concepts/n-search.md",
+            title="N/search",
+            heading_path=(),
+            text="unauthenticated client module search APIs only",  # 2/3 uncovered; tips old formula to wiki
+            score=80.0,
+            corpus="active",
+            authority="formal",
+            source_kind="wiki",
+            ordinal=0,
+        ),
+        score=80.0,
+    )
+    raw = candidate_item(
+        PassageHit(
+            passage_id="r1",
+            page_path="raw/sources/file/Help/Nsearch Module.md",
+            title="N/search Module",
+            heading_path=(),
+            text="unauthenticated client-side contexts are not supported",
+            score=5.0,
+            corpus="raw",
+            authority="",
+            source_kind="raw",
+            ordinal=0,
+        ),
+        score=5.0,
+    )
+    merged = merge_coverage_items(
+        [wiki],
+        [raw],
+        uncovered_terms=["unauthenticated", "client", "contexts"],
+        rrf_k=10,
+    )
+    assert merged, "expected fused rows"
+    assert merged[0]["hit"].source_kind == "raw"
+    assert merged[0]["coverage_ratio"] == 1.0
+
+def test_v2_coverage_merge_surfaces_raw_help_doc(tmp_path: Path) -> None:
+    """0015-shaped: strong-ish wiki covers search/module; raw Help fills uncovered Latin."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/n-search.md",
+        "N/search",
+        "module search APIs only",
+        type="concept",
+    )
+    raw = (
+        root
+        / "raw/sources/file/NetSuite Help Docs"
+        / "Nsearch Module.md"
+    )
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# N/search Module\n\n"
+        "unauthenticated client-side contexts are not supported for the N/search module.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "unauthenticated client-side contexts N/search module",
+        scope="knowledge",
+        retrieval_mode="lexical",
+        top_k=10,
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert any(path.startswith("raw/") for path in paths), paths
+    assert result["pipeline"]["coverage"]["triggered"] is True
 
 
 def test_v2_raw_fallback_uses_raw_documents_after_formal_miss(tmp_path: Path) -> None:
