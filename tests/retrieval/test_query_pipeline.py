@@ -640,7 +640,8 @@ def test_v2_wiki_result_does_not_mix_raw_list_record_evidence(tmp_path: Path) ->
 
     assert result["results"][0]["path"] == note
     assert all(not item["path"].startswith("raw/") for item in result["results"])
-    assert result["pipeline"]["lexical"]["mode"] == "relaxed"
+    # List/Record is a qualified identifier; stage-one uses qualified_code on active.
+    assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
     assert result["pipeline"]["fallback"]["level"] == "none"
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
 
@@ -773,11 +774,11 @@ def test_v2_freshness_ranks_newer_fix_note_above_older_one(tmp_path: Path) -> No
         "重新安装 resolver 并重建索引。\n"
     )
     older.write_text(
-        f"---\ntitle: \"旧补丁\"\nupdated_at: \"2026-06-01\"\n---\n\n{body}",
+        f"---\ntitle: \"CodeGraph 旧补丁：SuiteScript 解析\"\nupdated_at: \"2026-06-01\"\n---\n\n{body}",
         encoding="utf-8",
     )
     newer.write_text(
-        f"---\ntitle: \"新补丁\"\nupdated_at: \"2026-07-22\"\n---\n\n{body}",
+        f"---\ntitle: \"CodeGraph 新补丁：SuiteScript 解析\"\nupdated_at: \"2026-07-22\"\n---\n\n{body}",
         encoding="utf-8",
     )
     refresh_indexes(root)
@@ -802,7 +803,7 @@ def test_v2_two_phase_pack_keeps_every_selected_page_represented(tmp_path: Path)
     _write(
         root,
         long_page,
-        "Long guide",
+        "CodeGraph Long guide：SuiteScript 解析",
         (
             "## 背景\n\n"
             + "这是很长的背景段落，包含大量填充词。" * 80
@@ -815,7 +816,7 @@ def test_v2_two_phase_pack_keeps_every_selected_page_represented(tmp_path: Path)
     _write(
         root,
         second,
-        "Second note",
+        "CodeGraph Second note：SuiteScript 验证",
         "codegraph 重建索引后，需要验证 SuiteScript 函数关系恢复。",
         type="troubleshooting",
     )
