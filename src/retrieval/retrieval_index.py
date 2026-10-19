@@ -383,6 +383,42 @@ class RetrievalIndexStore:
             rows = connection.execute(f"SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json, passages.text, 0.0, pages.corpus, pages.authority, pages.source_kind, passages.ordinal FROM passages JOIN pages ON pages.path=passages.page_path WHERE passages.passage_id IN ({marks}) ORDER BY passages.page_path, passages.ordinal", values).fetchall()
         return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8], int(row[9])) for row in rows]
 
+    def passages_at_ordinals(self, page_path: str, ordinals: Iterable[int]) -> list[PassageHit]:
+        """Load same-page passages by reading-order ordinals (no schema change).
+
+        Missing ordinals are omitted. Used by Small-to-Big parent expansion so
+        callers can fetch `ordinal ± window` neighbors without a full page scan.
+        """
+        values = sorted({int(item) for item in ordinals if int(item) >= 0})
+        if not page_path or not values or not self.path.exists():
+            return []
+        marks = ",".join("?" for _ in values)
+        sql = (
+            "SELECT passages.passage_id, passages.page_path, pages.title, "
+            "passages.heading_path_json, passages.text, 0.0, pages.corpus, "
+            "pages.authority, pages.source_kind, passages.ordinal "
+            "FROM passages JOIN pages ON pages.path = passages.page_path "
+            f"WHERE passages.page_path = ? AND passages.ordinal IN ({marks}) "
+            "ORDER BY passages.ordinal"
+        )
+        with self._connection(readonly=True) as connection:
+            rows = connection.execute(sql, [page_path, *values]).fetchall()
+        return [
+            PassageHit(
+                row[0],
+                row[1],
+                row[2],
+                tuple(json.loads(row[3])),
+                row[4],
+                float(row[5]),
+                row[6],
+                row[7],
+                row[8],
+                int(row[9]),
+            )
+            for row in rows
+        ]
+
     def passages_for_pages(self, page_paths: Iterable[str], *, limit_per_page: int = 1) -> list[PassageHit]:
         """Return bounded passage projections for already-selected pages.
 

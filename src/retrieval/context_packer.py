@@ -37,6 +37,10 @@ class ContextPassage:
     evidence_kind: str
     citation_metadata: Mapping[str, str] = field(default_factory=dict)
     ordinal: int = -1
+    # Small-to-Big parent expansion (reading text only; citation stays on hit).
+    expanded: bool = False
+    neighbor_ordinals: tuple[int, ...] = ()
+    expansion_chars: int = 0
 
 
 def estimate_response_tokens(value: str) -> int:
