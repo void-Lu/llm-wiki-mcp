@@ -193,7 +193,7 @@ def test_plan_fallback_weak_primary_schedules_raw_zero() -> None:
         )
     )
     assert plan is not None and plan.branch == "raw_zero"
-    assert plan.candidates_kind == "raw_only"
+    assert plan.candidates_kind == "combined_active_raw"
     assert "wiki_weak_primary" in plan.condition.reasons
 
 

@@ -3,6 +3,7 @@
 ## 2026-10-19 — 检索 P1：弱 primary 探测 raw 升梯
 
 - 弱 primary（无 qualified / title / identifier / phrase 强信号）时可探测有限额的 `raw_zero`，reason 为 `wiki_weak_primary`。
+- **弱 primary 升 raw 时与现有 wiki 命中 RRF 合并**（`combined_active_raw`），不再整页 `raw_only` 替换，避免金标仍在 wiki 时被冲掉（如 0002）。真正 wiki 零结果仍 `raw_only`。
 - 强 relaxed / 强 primary / 成功的 coverage merge 仍阻止 raw-only 替换。
 - 本轮不加粘连模块名别名；查询时生效，**无需**为升梯重建索引。
 

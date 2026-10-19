@@ -119,11 +119,14 @@ def plan_fallback(state: FallbackState) -> FallbackPlan | None:
         and state.raw_available in {"unknown", "yes"}
     ):
         reason = "wiki_weak_primary" if state.has_primary_recall else "wiki_zero_results"
+        kind: CandidatesKind = (
+            "combined_active_raw" if state.has_primary_recall else "raw_only"
+        )
         return FallbackPlan(
             "raw_zero",
             RecoveryCondition("raw", (reason,), "item"),
             "raw",
-            "raw_only",
+            kind,
         )
     return None
 

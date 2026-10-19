@@ -107,6 +107,7 @@ __all__ = [
     "adaptive_expand",
     "classify_intent",
     "merge_coverage_items",
+    "merge_weak_primary_raw",
     "query_expansion",
     "raw_recovery_candidates",
     "relaxed_recovery_items",
@@ -610,4 +611,60 @@ def merge_coverage_items(
             )
         )
     ranked.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
+    return ranked
+
+
+def merge_weak_primary_raw(
+    wiki_items: Sequence[dict[str, Any]],
+    raw_items: Sequence[dict[str, Any]],
+    *,
+    rrf_k: int = RRF_K,
+    raw_cap: int = RAW_FALLBACK_LIMIT,
+) -> list[dict[str, Any]]:
+    """RRF-fuse weak wiki primary with capped raw; keep wiki pages in the pool.
+
+    Unlike ``merge_coverage_items``, this does **not** filter raw by uncovered
+    Latin terms. Used when ``wiki_weak_primary`` probes ``raw_zero`` so a useful
+    weak wiki hit (e.g. gold still on wiki) is not wholesale-replaced by raw.
+    """
+
+    wiki_pages = select_best_per_page(list(wiki_items))
+    raw_pages = select_best_per_page(list(raw_items))
+    raw_pages.sort(
+        key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id)
+    )
+    if raw_cap >= 0:
+        raw_pages = raw_pages[:raw_cap]
+    wiki_pages.sort(
+        key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id)
+    )
+    ranked: list[dict[str, Any]] = []
+    for local_rank, item in enumerate([*wiki_pages, *raw_pages], 1):
+        is_raw = item["hit"].source_kind == "raw"
+        if is_raw:
+            source_rank = raw_pages.index(item) + 1
+        else:
+            source_rank = wiki_pages.index(item) + 1
+        source_rrf = (rrf_k + 1) / (rrf_k + source_rank)
+        authority = (
+            0.0
+            if is_raw
+            else min(max(float(item.get("score", 0.0)) / 100.0, 0.0), 0.35)
+        )
+        fused_score = round(source_rrf + authority, 12)
+        ranked.append(
+            with_fusion(
+                {**item, "score": fused_score},
+                coverage_terms=[],
+                coverage_ratio=0.0,
+                source_local_rank=source_rank,
+                source_local_rrf=source_rrf,
+                fusion_score=fused_score,
+                fusion_source="raw" if is_raw else "active",
+                fusion_local_position=local_rank,
+            )
+        )
+    ranked.sort(
+        key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id)
+    )
     return ranked

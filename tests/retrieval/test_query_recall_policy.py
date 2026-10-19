@@ -8,6 +8,7 @@ from retrieval.query_recall_policy import (
     adaptive_expand,
     classify_intent,
     merge_coverage_items,
+    merge_weak_primary_raw,
     primary_fill_is_strong,
     relaxed_fill_is_strong,
     uncovered_latin_terms,
@@ -829,10 +830,82 @@ def test_v2_weak_primary_allows_capped_raw_zero(tmp_path: Path) -> None:
     )
     paths = [item["path"] for item in result["results"]]
     assert paths, "expected results"
-    assert paths[0].startswith("raw/"), paths
+    # Merge path: raw must enter the pool; wiki may remain (not wholesale replace).
+    assert any(path.startswith("raw/") for path in paths), paths
     assert result["pipeline"]["fallback"]["level"] == "raw"
     assert "wiki_weak_primary" in result["pipeline"]["fallback"]["reasons"]
     assert result["pipeline"]["counters"]["fts_hits"] > 0
+
+
+
+
+def test_v2_weak_primary_raw_merge_keeps_wiki(tmp_path: Path) -> None:
+    """Weak primary + raw must MERGE: wiki paths stay when raw also fills."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/noise-primary.md",
+        "杂谈笔记",
+        "mcp 部署 standard 权限 tools 勾选 server 说明 suitescript guide 安装清单",
+        type="concept",
+    )
+    raw = root / "raw/sources/references/mcp-install-checklist.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# MCP Standard Tools 安装清单\n\n"
+        "Server SuiteScript 与 REST Web Services 勾选后安装 MCP Standard Tools。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "MCP Standard Tools 安装清单 Server SuiteScript",
+        scope="knowledge",
+        retrieval_mode="lexical",
+        top_k=10,
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert paths, "expected results"
+    assert any(path.startswith("wiki/") for path in paths), paths
+    assert any(path.startswith("raw/") for path in paths), paths
+    assert "wiki_weak_primary" in result["pipeline"]["fallback"]["reasons"]
+
+
+def test_merge_weak_primary_raw_keeps_wiki_and_caps_raw() -> None:
+    wiki_hit = PassageHit(
+        passage_id="p-wiki",
+        page_path="wiki/concepts/noise-primary.md",
+        title="杂谈笔记",
+        heading_path=(),
+        text="mcp standard tools server suitescript",
+        score=12.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    raw_hit = PassageHit(
+        passage_id="p-raw",
+        page_path="raw/sources/references/mcp-install-checklist.md",
+        title="MCP Standard Tools 安装清单",
+        heading_path=(),
+        text="Server SuiteScript checklist",
+        score=40.0,
+        corpus="raw",
+        authority="",
+        source_kind="raw",
+        ordinal=0,
+    )
+    merged = merge_weak_primary_raw(
+        [{"hit": wiki_hit, "score": 12.0}],
+        [{"hit": raw_hit, "score": 40.0}],
+        raw_cap=20,
+    )
+    paths = [item["hit"].page_path for item in merged]
+    assert "wiki/concepts/noise-primary.md" in paths
+    assert "raw/sources/references/mcp-install-checklist.md" in paths
 
 
 def test_v2_strong_primary_still_blocks_raw_zero(tmp_path: Path) -> None:

@@ -325,11 +325,29 @@ class QueryExecutionContext:
                 item["hit"].source_kind == "raw" for item in selected
             )
         else:
-            selected = select_best_per_page(raw_candidate_items)
-            selected = recall_policy.adaptive_expand(selected, request_view.top_k)[
-                : request_view.top_k
-            ]
-            candidates = raw_candidate_items
+            # raw_zero: true wiki-zero stays raw_only replace; weak primary MERGES
+            # so useful wiki hits (e.g. gold still on wiki) are not wiped by raw.
+            weak_primary = (
+                bool(selected)
+                and "wiki_weak_primary" in plan.condition.reasons
+            )
+            if weak_primary:
+                merged = recall_policy.merge_weak_primary_raw(
+                    selected,
+                    raw_candidate_items,
+                    rrf_k=request_view.effective_rrf_k,
+                    raw_cap=recall_policy.RAW_FALLBACK_LIMIT,
+                )
+                selected = recall_policy.adaptive_expand(merged, request_view.top_k)[
+                    : request_view.top_k
+                ]
+                candidates = [*list(candidate_pool), *list(selected), *raw_candidate_items]
+            else:
+                selected = select_best_per_page(raw_candidate_items)
+                selected = recall_policy.adaptive_expand(selected, request_view.top_k)[
+                    : request_view.top_k
+                ]
+                candidates = raw_candidate_items
             lexical_mode = (
                 resolve_fallback_lexical_mode(
                     plan,
