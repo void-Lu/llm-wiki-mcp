@@ -1122,6 +1122,7 @@ def run_query_v2(
         snapshot=snapshot,
         seed_lexical_mode=stage_lexical_mode,
         seed_has_primary_recall=has_primary_recall,
+        seed_qualified_fts_hits=qualified_fts_hits,
         graph_expander=expand_graph,
     )
     execution_view = execution.execute(request_view)

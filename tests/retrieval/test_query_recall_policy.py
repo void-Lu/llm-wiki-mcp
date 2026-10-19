@@ -8,6 +8,7 @@ from retrieval.query_recall_policy import (
     adaptive_expand,
     classify_intent,
     merge_coverage_items,
+    primary_fill_is_strong,
     relaxed_fill_is_strong,
     uncovered_latin_terms,
 )
@@ -761,6 +762,109 @@ def test_v2_weak_wiki_relaxed_abstains_and_allows_raw_zero(tmp_path: Path) -> No
     assert paths, "expected raw_zero fill after weak abstain"
     assert paths[0].startswith("raw/")
     assert result["pipeline"]["fallback"]["level"] == "raw"
+
+
+
+def test_primary_fill_is_strong_uses_qualified_hits_and_relaxed_signals() -> None:
+    weak_hit = PassageHit(
+        passage_id="p-weak",
+        page_path="wiki/concepts/noise.md",
+        title="杂谈笔记",
+        heading_path=(),
+        text="mcp 部署 standard 权限 tools 勾选 server 说明 suitescript guide 安装清单",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    title_hit = PassageHit(
+        passage_id="p-title",
+        page_path="wiki/concepts/suitescript-guide.md",
+        title="SuiteScript Guide",
+        heading_path=(),
+        text="unrelated body noise only",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    question = "MCP Standard Tools 安装清单 Server SuiteScript"
+    assert not primary_fill_is_strong(question, [])
+    assert not primary_fill_is_strong(question, [{"hit": weak_hit}])
+    assert primary_fill_is_strong(
+        question, [{"hit": weak_hit}], qualified_fts_hits=1
+    )
+    assert primary_fill_is_strong(question, [{"hit": title_hit}])
+
+
+def test_v2_weak_primary_allows_capped_raw_zero(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # Strict AND hits via scattered Latin tokens + contiguous CJK; no title /
+    # identifier-phrase overlap so primary_fill_is_strong stays false. All
+    # Latin query terms appear in the wiki body so coverage does not schedule.
+    _write(
+        root,
+        "wiki/concepts/noise-primary.md",
+        "杂谈笔记",
+        "mcp 部署 standard 权限 tools 勾选 server 说明 suitescript guide 安装清单",
+        type="concept",
+    )
+    raw = root / "raw/sources/references/mcp-install-checklist.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# MCP Standard Tools 安装清单\n\n"
+        "Server SuiteScript 与 REST Web Services 勾选后安装 MCP Standard Tools。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "MCP Standard Tools 安装清单 Server SuiteScript",
+        scope="knowledge",
+        retrieval_mode="lexical",
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert paths, "expected results"
+    assert paths[0].startswith("raw/"), paths
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert "wiki_weak_primary" in result["pipeline"]["fallback"]["reasons"]
+    assert result["pipeline"]["counters"]["fts_hits"] > 0
+
+
+def test_v2_strong_primary_still_blocks_raw_zero(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/suitescript-guide.md",
+        "SuiteScript Guide",
+        "Server SuiteScript notes for MCP Standard Tools install checklist.",
+        type="concept",
+    )
+    raw = root / "raw/sources/references/mcp-install-checklist.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# MCP Standard Tools 安装清单\n\n"
+        "Server SuiteScript 与 REST Web Services 勾选后安装 MCP Standard Tools。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "MCP Standard Tools 安装清单 Server SuiteScript",
+        scope="knowledge",
+        retrieval_mode="lexical",
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert paths, "expected results"
+    assert paths[0].startswith("wiki/"), paths
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
+    assert result["pipeline"]["fallback"]["level"] != "raw"
 
 
 def test_v2_raw_fallback_combines_identifier_phrase_docs_above_bigram_noise(

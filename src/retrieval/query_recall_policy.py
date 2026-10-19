@@ -143,6 +143,27 @@ def step_counts_for_pages(
     return counts
 
 
+def primary_fill_is_strong(
+    question: str,
+    items: Sequence[Mapping[str, Any]],
+    *,
+    qualified_fts_hits: int = 0,
+    extra_terms: Sequence[str] = (),
+) -> bool:
+    """True when stage-one primary should block raw_zero.
+
+    Qualified FTS hits count as strong when any primary items remain; otherwise
+    reuse ``relaxed_fill_is_strong`` title/phrase/identifier signals (no BM25
+    cutoff).
+    """
+
+    if not items:
+        return False
+    if qualified_fts_hits > 0:
+        return True
+    return relaxed_fill_is_strong(question, items, extra_terms=extra_terms)
+
+
 def relaxed_fill_is_strong(
     question: str,
     items: Sequence[Mapping[str, Any]],

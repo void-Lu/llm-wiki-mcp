@@ -163,6 +163,7 @@ class QueryExecutionContext:
     snapshot: QueryCorpusSnapshot | None = field(default=None, repr=False)
     seed_lexical_mode: str = field(default="strict", repr=False)
     seed_has_primary_recall: bool = field(default=False, repr=False)
+    seed_qualified_fts_hits: int = field(default=0, repr=False)
     # Adds bounded graph evidence to a scored candidate list in place.  The
     # engine supplies it so relaxed Wiki recovery reuses the seed stage's
     # snapshot, filters and caps; ``None`` keeps recovery lexical-only.
@@ -592,7 +593,19 @@ class QueryExecutionContext:
                             plan=all_coverage_plan,
                         )
 
-        # Task 1: preserve pre-P1 gate until Task 2 computes real strength.
+        primary_strong = (
+            self.seed_has_primary_recall
+            and recall_policy.primary_fill_is_strong(
+                request_view.question,
+                self.seed_selected,
+                qualified_fts_hits=self.seed_qualified_fts_hits,
+            )
+        )
+        wiki_strong_answered = (
+            wiki_relaxed_answered
+            or primary_strong
+            or self.coverage_fallback
+        )
         raw_zero_state = FallbackState(
             has_primary_recall=self.seed_has_primary_recall,
             effective_scope=request_view.effective_scope,
@@ -600,7 +613,7 @@ class QueryExecutionContext:
             wiki_relaxed_answered=wiki_relaxed_answered,
             raw_available="unknown",
             relaxed_available=wiki_relaxed_answered,
-            wiki_strong_answered=self.seed_has_primary_recall or wiki_relaxed_answered,
+            wiki_strong_answered=wiki_strong_answered,
         )
         raw_zero_plan = plan_fallback(raw_zero_state)
         if raw_zero_plan is not None and raw_zero_plan.branch == "raw_zero":
