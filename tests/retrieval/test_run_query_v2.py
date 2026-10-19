@@ -563,8 +563,9 @@ def test_wiki_query_uses_frontmatter_tags_and_index(tmp_path: Path):
 def test_wiki_query_includes_project_scoped_raw_sources_when_explicitly_requested(tmp_path: Path):
     root = tmp_path / "vault"
     create_wiki_root(root)
-    alpha = root / "raw/sources/file/alpha/docs"
-    beta = root / "raw/sources/file/beta/docs"
+    # Path-inferred project only applies to ingest snapshots, not vendor file trees.
+    alpha = root / "raw/sources/projects/alpha/docs"
+    beta = root / "raw/sources/projects/beta/docs"
     alpha.mkdir(parents=True, exist_ok=True)
     beta.mkdir(parents=True, exist_ok=True)
     (alpha / "alpha.md").write_text("alpha raw invoice", encoding="utf-8")
@@ -574,7 +575,7 @@ def test_wiki_query_includes_project_scoped_raw_sources_when_explicitly_requeste
     result = run_query_v2(root, "invoice", scope="raw", project="alpha", top_k=5, retrieval_mode="lexical")
 
     paths = [item["path"] for item in result["results"]]
-    assert paths == ["raw/sources/file/alpha/docs/alpha.md"]
+    assert paths == ["raw/sources/projects/alpha/docs/alpha.md"]
     assert result["results"][0]["source_kind"] == "raw"
 
 

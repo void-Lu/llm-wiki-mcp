@@ -850,10 +850,10 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
         frontmatter.setdefault("project", "unknown")
     elif is_raw:
         parts = rel.split("/")
-        # Ingest snapshots use raw/sources/<type>/<project>/<name>/... .
-        # Preserve an explicit frontmatter project, but make that stable path
-        # projection available to FTS filtering when no frontmatter exists.
-        if len(parts) >= 5:
+        # Vendor file trees (raw/sources/file/...) are shared docs — do not
+        # treat the next path segment (e.g. "NetSuite Help Docs") as project.
+        # Ingest snapshots keep raw/sources/<type>/<project>/... inference.
+        if len(parts) >= 5 and parts[2].casefold() != "file":
             frontmatter.setdefault("project", parts[3])
         frontmatter.setdefault("type", "raw")
     elif rel.startswith("wiki/projects/"):

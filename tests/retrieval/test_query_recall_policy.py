@@ -922,10 +922,12 @@ def test_v2_raw_index_unavailable_yields_structured_warning(tmp_path: Path) -> N
 def test_v2_raw_fallback_respects_project_and_type_filters(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
-    alpha = root / "raw" / "sources" / "file" / "alpha" / "manual" / "a.txt"
+    # Project filtering applies to ingest snapshots under raw/sources/projects/.
+    # Vendor file trees (raw/sources/file/) intentionally leave project empty.
+    alpha = root / "raw" / "sources" / "projects" / "alpha" / "manual" / "a.txt"
     alpha.parent.mkdir(parents=True, exist_ok=True)
     alpha.write_text("unique raw retrieval needle alpha", encoding="utf-8")
-    beta = root / "raw" / "sources" / "file" / "beta" / "manual" / "b.txt"
+    beta = root / "raw" / "sources" / "projects" / "beta" / "manual" / "b.txt"
     beta.parent.mkdir(parents=True, exist_ok=True)
     beta.write_text("unique raw retrieval needle beta", encoding="utf-8")
     refresh_indexes(root)
@@ -947,7 +949,7 @@ def test_v2_raw_fallback_respects_project_and_type_filters(tmp_path: Path) -> No
     )
 
     assert [item["path"] for item in scoped["results"]] == [
-        "raw/sources/file/alpha/manual/a.txt"
+        "raw/sources/projects/alpha/manual/a.txt"
     ]
     assert len(raw_type["results"]) == 2
     assert other_type["results"] == []

@@ -170,6 +170,66 @@ def test_reconcile_detects_content_changes_with_unchanged_file_stats(tmp_path: P
     assert before["content_hash"] != after["content_hash"]
 
 
+def test_raw_file_tree_does_not_infer_project_from_path_segment(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(
+        root,
+        "raw/sources/file/NetSuite Help Docs/01_SuiteCloud/NuiserverWidget Module.md",
+        "# N/ui/serverWidget\n\nForm Field API",
+    )
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    page = next(p for p in store.page_candidates() if "NuiserverWidget" in p["path"])
+    assert page["project"] == ""
+
+
+def test_raw_projects_snapshot_still_infers_project(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(root, "raw/sources/projects/demo/notes/a.md", "# Demo\n\nbody")
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    assert store.page_candidates()[0]["project"] == "demo"
+
+
+def test_raw_file_frontmatter_project_is_respected(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(
+        root,
+        "raw/sources/file/NetSuite Help Docs/x.md",
+        "---\nproject: codingwork\n---\n\n# X\n\nbody",
+    )
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    assert store.page_candidates()[0]["project"] == "codingwork"
+
+
+def test_raw_file_empty_project_passes_project_filter(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(
+        root,
+        "raw/sources/file/NetSuite Help Docs/01_SuiteCloud/NuiserverWidget Module.md",
+        "# N/ui/serverWidget\n\nunique help docs needle for codingwork filter",
+    )
+    _write(
+        root,
+        "raw/sources/projects/other/notes/a.md",
+        "# Other\n\nunique help docs needle for codingwork filter",
+    )
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    hits = store.search_fts(
+        "unique help docs needle for codingwork filter",
+        project="codingwork",
+        limit=10,
+    )
+    paths = [hit.page_path for hit in hits]
+    assert (
+        "raw/sources/file/NetSuite Help Docs/01_SuiteCloud/NuiserverWidget Module.md"
+        in paths
+    )
+    assert "raw/sources/projects/other/notes/a.md" not in paths
+
+
 def test_chat_projection_uses_a_full_session_locator_and_never_uses_year_as_project(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     _write(root, "raw/sources/chat/2026/07/31/session/a.md", "# Review\n\nprovisional approval")
