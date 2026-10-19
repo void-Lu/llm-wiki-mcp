@@ -95,6 +95,7 @@ class QueryRequestView:
     expand_parents: bool = True
     parent_window: int = 1
     same_heading_only: bool = False
+    dump_citation_trace: bool = False
 
     def __post_init__(self) -> None:
         # Freeze the view boundary while preserving list-valued frontmatter

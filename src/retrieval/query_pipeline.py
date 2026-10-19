@@ -12,6 +12,7 @@ from retrieval.body_budget import result_floor_budget
 from retrieval.candidate_items import candidate_item
 from retrieval.context_packer import ContextPassage, pack_context
 from retrieval.parent_expansion import expand_hit_texts
+from retrieval.citation_trace import build_citation_trace, write_citation_trace_dump
 from retrieval.graph_edges import PAGE_TARGET_RELATION_KINDS, WIKILINK
 from retrieval.graph_retrieval import QueryCandidate, apply_graph_expansion, build_graph
 from retrieval.lexical_analyzer import has_qualified_identifier
@@ -537,6 +538,7 @@ def assemble_public_projection(
     seed_stats: QuerySeedStats,
     quality_gate_evaluation: _QualityGateEvaluation | None,
     load_passages_at_ordinals: Callable[[str, Sequence[int]], Sequence[PassageHit]] | None = None,
+    vault_root: Path | None = None,
 ) -> PublicQueryProjection:
     """Assemble the public envelope from the still-open execution view.
 
@@ -658,6 +660,15 @@ def assemble_public_projection(
 
     metadata = request_view.metadata
 
+    expansion_meta: dict[str, dict[str, Any]] = {
+        passage_id: {
+            "expanded": bool(expanded.expanded),
+            "neighbor_ordinals": tuple(expanded.neighbor_ordinals),
+            "expansion_chars": int(expanded.expansion_chars),
+        }
+        for passage_id, expanded in expanded_by_id.items()
+    }
+
     def result_item(
         item: Mapping[str, Any], *, citation: str, include_content: bool
     ) -> dict[str, Any]:
@@ -674,8 +685,10 @@ def assemble_public_projection(
         citation_metadata = _citation_metadata(hit, provenance)
         if citation_metadata:
             result_metadata["provenance"] = citation_metadata
+        expansion = expansion_meta.get(hit.passage_id)
         result: dict[str, Any] = {
             "citation": citation,
+            "passage_id": hit.passage_id,
             "path": hit.page_path,
             "heading": heading(hit),
             "score": item["score"],
@@ -687,6 +700,9 @@ def assemble_public_projection(
             },
             "source_kind": hit.source_kind,
             "metadata": result_metadata,
+            "expanded": bool(expansion["expanded"]) if expansion else False,
+            "neighbor_ordinals": list(expansion["neighbor_ordinals"]) if expansion else [],
+            "expansion_chars": int(expansion["expansion_chars"]) if expansion else 0,
         }
         if include_content:
             context = next(
@@ -809,6 +825,17 @@ def assemble_public_projection(
             for item in baseline_selected
         ]
 
+    citation_trace = build_citation_trace(
+        question=request_view.question,
+        public_scope=request_view.public_scope,
+        intent=request_view.intent,
+        retrieval_mode=request_view.retrieval_mode,
+        lexical_mode=view.lexical_mode,
+        public_selected=public_selected,
+        expansion_by_passage_id=expansion_meta,
+        heading_of=heading,
+    )
+
     response: dict[str, Any] = {
         "ok": True,
         "question": request_view.question,
@@ -819,7 +846,13 @@ def assemble_public_projection(
         "expansion_suggestions": list(view.expansion_suggestions),
         "budget": packed["budget"],
         "pipeline": pipeline,
+        "citation_trace": citation_trace,
     }
+    if request_view.dump_citation_trace:
+        dump_root = vault_root
+        if dump_root is None:
+            raise ValueError("vault_root is required when dump_citation_trace is enabled")
+        response["citation_trace_path"] = write_citation_trace_dump(dump_root, citation_trace)
     if not results:
         has_discovery_entities = bool(discovery_entities) or bool(
             discovery.get("candidate_entities")
@@ -867,6 +900,7 @@ def run_query_v2(
     expand_parents: bool = True,
     parent_window: int = 1,
     same_heading_only: bool = False,
+    dump_citation_trace: bool = False,
     lexical_enabled: bool = True,
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid",
     expansion_terms: dict[str, list[str]] | None = None,
@@ -1069,6 +1103,7 @@ def run_query_v2(
         expand_parents=expand_parents,
         parent_window=parent_window,
         same_heading_only=same_heading_only,
+        dump_citation_trace=dump_citation_trace,
     )
     execution = QueryExecutionContext(
         root=root,
@@ -1106,6 +1141,7 @@ def run_query_v2(
         ),
         quality_gate_evaluation=quality_gate_evaluation,
         load_passages_at_ordinals=store.passages_at_ordinals,
+        vault_root=root,
     )
     execution.outcome()
     if telemetry_stats is not None:

@@ -29,21 +29,22 @@
 
 ### Task 1: Docs
 
-- [ ] Write design + plan; `git add -f` under ignored `docs/*`; commit docs
+- [x] Write design + plan; `git add -f` under ignored `docs/*`; commit docs
 
 ### Task 2: Pure builder + dump (TDD)
 
-- [ ] Failing tests for shape, no body keys, dump on/off
-- [ ] Implement `build_citation_trace` / `write_citation_trace_dump`
-- [ ] Green + commit helpers if split
+- [x] Failing tests for shape, no body keys, dump on/off
+- [x] Implement `build_citation_trace` / `write_citation_trace_dump`
+- [x] Green + commit helpers if split
 
 ### Task 3: Wire projection
 
-- [ ] Surface `passage_id` + expansion fields on results
-- [ ] Attach `citation_trace`; honor `dump_citation_trace`
-- [ ] Extend projection tests (incl. parent expansion case)
-- [ ] Targeted pytest green; commit
+- [x] Surface `passage_id` + expansion fields on results
+- [x] Attach `citation_trace`; honor `dump_citation_trace`
+- [x] Extend projection tests (incl. parent expansion case)
+- [x] Targeted pytest green; commit
 
 ### Task 4: Report
 
-- [ ] Summarize files, tests, commits, deviations
+- [x] Summarize files, tests, commits, deviations
+
