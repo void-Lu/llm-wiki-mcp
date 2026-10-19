@@ -1,5 +1,9 @@
 # 变更记录
 
+## 2026-10-19 — 检索父块扩展
+
+- Small-to-Big 父块扩展：`pack_context` 前按同页 `ordinal±window`（默认 1）拼接邻块正文（去 overlap、有字符预算）；公开 citation / `passage_id` 仍指向命中小块。新增 `retrieval.parent_expansion` 与 `RetrievalIndexStore.passages_at_ordinals`；无 schema / 向量变更。可通过 `expand_parents` / `parent_window` / `same_heading_only` 关闭或调整。
+
 ## 2026-10-15 — MCP 工具 schema 去掉 JSON Schema title 注解
 
 - MCP 导出的工具 inputSchema/parameters 在注册时去掉 Pydantic 生成的 JSON Schema 注解字段 	itle（根级如 wiki_write_noteArguments、属性级如 Title），避免 SuiteCloud Developer Assistant 因 	ools[].function.parameters.title 返回 HTTP 204 空响应。

@@ -1,6 +1,6 @@
 # Parent Expansion (Small-to-Big) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Expand FTS-selected small passages with same-page ordinal neighbors before context packing, without schema changes, keeping citations on the hit passage.
 
@@ -38,12 +38,12 @@
 - Create: `src/retrieval/parent_expansion.py`
 - Modify: `src/retrieval/retrieval_index.py` (optional small getter)
 
-- [ ] Write failing tests for: expand ±1; missing neighbors; `same_heading_only=True`; budget drops `+1` before hit; citation/`passage_id` unchanged; overlap stripped between parts
-- [ ] Run `python -m pytest tests/retrieval/test_parent_expansion.py -q` and confirm fail
-- [ ] Implement `expand_hit_texts(...)` (name as fits codebase style) returning expanded text + metadata
-- [ ] Add `RetrievalIndexStore` method e.g. `passages_at_ordinals(page_path, ordinals) -> list[PassageHit]` using existing index
-- [ ] Re-run tests until green
-- [ ] Commit: `feat(retrieval): add parent passage expansion helpers`
+- [x] Write failing tests for: expand ±1; missing neighbors; `same_heading_only=True`; budget drops `+1` before hit; citation/`passage_id` unchanged; overlap stripped between parts
+- [x] Run `python -m pytest tests/retrieval/test_parent_expansion.py -q` and confirm fail
+- [x] Implement `expand_hit_texts(...)` (name as fits codebase style) returning expanded text + metadata
+- [x] Add `RetrievalIndexStore` method e.g. `passages_at_ordinals(page_path, ordinals) -> list[PassageHit]` using existing index
+- [x] Re-run tests until green
+- [x] Commit: `feat(retrieval): add parent passage expansion helpers`
 
 ### Task 2: Wire into query pipeline
 
@@ -51,18 +51,18 @@
 - Modify: `src/retrieval/query_pipeline.py`
 - Modify: `tests/retrieval/test_parent_expansion.py` or a thin pipeline test if one exists that asserts packed content
 
-- [ ] Before `pack_context`, expand `public_context_items` / `ContextPassage` content using store lookup
-- [ ] Pass through expansion metadata into packed passage dicts or citation_metadata without breaking public MCP contracts
-- [ ] Default `expand_parents=True`, `parent_window=1`, `same_heading_only=False`
-- [ ] Add/adjust test proving packed body includes neighbor sentence while citation id is hit id
-- [ ] Run targeted pytest green
-- [ ] Commit: `feat(retrieval): expand parent context before pack_context`
+- [x] Before `pack_context`, expand `public_context_items` / `ContextPassage` content using store lookup
+- [x] Pass through expansion metadata into packed passage dicts or citation_metadata without breaking public MCP contracts
+- [x] Default `expand_parents=True`, `parent_window=1`, `same_heading_only=False`
+- [x] Add/adjust test proving packed body includes neighbor sentence while citation id is hit id
+- [x] Run targeted pytest green
+- [x] Commit: `feat(retrieval): expand parent context before pack_context`
 
 ### Task 3: Verify + docs touch
 
-- [ ] Run `python -m pytest tests/retrieval/test_parent_expansion.py tests/retrieval/test_context_packer.py -q`
-- [ ] If CHANGELOG is maintained for minor feats, add a short bullet under unreleased/v0.9.36
-- [ ] Report: files changed, test results, any follow-ups
+- [x] Run `python -m pytest tests/retrieval/test_parent_expansion.py tests/retrieval/test_context_packer.py -q`
+- [x] If CHANGELOG is maintained for minor feats, add a short bullet under unreleased/v0.9.36
+- [x] Report: files changed, test results, any follow-ups
 
 ---
 

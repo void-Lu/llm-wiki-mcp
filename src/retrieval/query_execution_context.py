@@ -91,6 +91,10 @@ class QueryRequestView:
     lexical_enabled: bool = True
     include_context_pack: bool = True
     debug: bool = False
+    # Small-to-Big parent expansion before pack_context (citation stays on hit).
+    expand_parents: bool = True
+    parent_window: int = 1
+    same_heading_only: bool = False
 
     def __post_init__(self) -> None:
         # Freeze the view boundary while preserving list-valued frontmatter

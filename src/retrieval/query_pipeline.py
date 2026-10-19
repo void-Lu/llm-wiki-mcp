@@ -6,11 +6,12 @@ import re
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Callable, Literal, cast
 
 from retrieval.body_budget import result_floor_budget
 from retrieval.candidate_items import candidate_item
 from retrieval.context_packer import ContextPassage, pack_context
+from retrieval.parent_expansion import expand_hit_texts
 from retrieval.graph_edges import PAGE_TARGET_RELATION_KINDS, WIKILINK
 from retrieval.graph_retrieval import QueryCandidate, apply_graph_expansion, build_graph
 from retrieval.lexical_analyzer import has_qualified_identifier
@@ -535,6 +536,7 @@ def assemble_public_projection(
     provenance: Mapping[str, Mapping[str, str]],
     seed_stats: QuerySeedStats,
     quality_gate_evaluation: _QualityGateEvaluation | None,
+    load_passages_at_ordinals: Callable[[str, Sequence[int]], Sequence[PassageHit]] | None = None,
 ) -> PublicQueryProjection:
     """Assemble the public envelope from the still-open execution view.
 
@@ -574,24 +576,51 @@ def assemble_public_projection(
         for item in view.context_items
         if item["hit"].page_path in public_paths
     ]
-    passages = [
-        ContextPassage(
-            item["hit"].passage_id,
-            item["hit"].page_path,
-            heading(item["hit"]),
-            item["hit"].text,
-            item["score"],
-            (
-                "raw_evidence"
-                if item["hit"].source_kind == "raw"
-                else "history_evidence"
-                if item["hit"].corpus == "history"
-                else "formal_knowledge"
-            ),
-            ordinal=item["hit"].ordinal,
+    expanded_by_id: dict[str, Any] = {}
+    if (
+        request_view.include_context_pack
+        and request_view.expand_parents
+        and load_passages_at_ordinals is not None
+        and public_context_items
+    ):
+        expanded_by_id = {
+            item.passage_id: item
+            for item in expand_hit_texts(
+                [entry["hit"] for entry in public_context_items],
+                load_passages=load_passages_at_ordinals,
+                window=request_view.parent_window,
+                same_heading_only=request_view.same_heading_only,
+            )
+        }
+    passages = []
+    for item in public_context_items:
+        hit = item["hit"]
+        expanded = expanded_by_id.get(hit.passage_id)
+        content = expanded.text if expanded is not None else hit.text
+        passages.append(
+            ContextPassage(
+                hit.passage_id,
+                hit.page_path,
+                heading(hit),
+                content,
+                item["score"],
+                (
+                    "raw_evidence"
+                    if hit.source_kind == "raw"
+                    else "history_evidence"
+                    if hit.corpus == "history"
+                    else "formal_knowledge"
+                ),
+                ordinal=hit.ordinal,
+                expanded=bool(expanded.expanded) if expanded is not None else False,
+                neighbor_ordinals=(
+                    expanded.neighbor_ordinals if expanded is not None else ()
+                ),
+                expansion_chars=(
+                    int(expanded.expansion_chars) if expanded is not None else 0
+                ),
+            )
         )
-        for item in public_context_items
-    ]
     k_budget = result_floor_budget(request_view.top_k, request_view.hard_budget_tokens)
     packed: dict[str, Any] = (
         pack_context(
@@ -835,6 +864,9 @@ def run_query_v2(
     quality_gate: QualityGateSettings | None = None,
     debug: bool = False,
     include_context_pack: bool = True,
+    expand_parents: bool = True,
+    parent_window: int = 1,
+    same_heading_only: bool = False,
     lexical_enabled: bool = True,
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid",
     expansion_terms: dict[str, list[str]] | None = None,
@@ -1034,6 +1066,9 @@ def run_query_v2(
         lexical_enabled=lexical_enabled,
         include_context_pack=include_context_pack,
         debug=debug,
+        expand_parents=expand_parents,
+        parent_window=parent_window,
+        same_heading_only=same_heading_only,
     )
     execution = QueryExecutionContext(
         root=root,
@@ -1070,6 +1105,7 @@ def run_query_v2(
             scope_rules=tuple(scope_rules),
         ),
         quality_gate_evaluation=quality_gate_evaluation,
+        load_passages_at_ordinals=store.passages_at_ordinals,
     )
     execution.outcome()
     if telemetry_stats is not None:
