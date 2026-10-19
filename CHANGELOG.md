@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-10-19 — 检索 P0：file 不推断 project / active 挂 qualified_code / 弱 relaxed 弃权
+
+- `raw/sources/file/` 路径索引时不再把路径段写成 `project`（如 NetSuite Help Docs）；`wiki/projects/`、chat 与 frontmatter `project` 规则不变。`project=codingwork` 等过滤可命中共享 vendor Help。**已有 raw 索引需重建**（`llm-wiki-mcp index build --scope raw`）才会清掉旧的路径推断 project。
+- Stage-one `qualified_code`（如 `N/workflow`）在 `active` / `auto` / `knowledge` / `all` 与 `raw` 一样启用，避免中文问法把限定符冲出 top-k。
+- 仅有弱 `wiki_relaxed` 填充（strict 与 qualified 皆空、无 title/限定符强信号）时返回空结果（真弃权），不再把噪声当作已回答；带 title/限定符等强信号的 relaxed 行为不变。
+
 ## 2026-10-19 — 检索父块扩展
 
 - Small-to-Big 父块扩展：`pack_context` 前按同页 `ordinal±window`（默认 1）拼接邻块正文（去 overlap、有字符预算）；公开 citation / `passage_id` 仍指向命中小块。新增 `retrieval.parent_expansion` 与 `RetrievalIndexStore.passages_at_ordinals`；无 schema / 向量变更。可通过 `expand_parents` / `parent_window` / `same_heading_only` 关闭或调整。
