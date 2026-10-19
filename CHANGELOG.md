@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-10-19 — 检索 P1：弱 primary 探测 raw 升梯
+
+- 弱 primary（无 qualified / title / identifier / phrase 强信号）时可探测有限额的 `raw_zero`，reason 为 `wiki_weak_primary`。
+- 强 relaxed / 强 primary / 成功的 coverage merge 仍阻止 raw-only 替换。
+- 本轮不加粘连模块名别名；查询时生效，**无需**为升梯重建索引。
+
 ## 2026-10-19 — 检索 P0：file 不推断 project / active 挂 qualified_code / 弱 relaxed 弃权
 
 - `raw/sources/file/` 路径索引时不再把路径段写成 `project`（如 NetSuite Help Docs）；`wiki/projects/`、chat 与 frontmatter `project` 规则不变。`project=codingwork` 等过滤可命中共享 vendor Help。**已有 raw 索引需重建**（`llm-wiki-mcp index build --scope raw`）才会清掉旧的路径推断 project。
