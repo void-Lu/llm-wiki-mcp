@@ -69,6 +69,7 @@ def _state(
     wiki_relaxed_answered: bool,
     raw_available: Literal["unknown", "yes", "no"],
     relaxed_available: bool,
+    wiki_strong_answered: bool = False,
 ) -> FallbackState:
     return FallbackState(
         has_primary_recall=has_primary_recall,
@@ -77,10 +78,11 @@ def _state(
         wiki_relaxed_answered=wiki_relaxed_answered,
         raw_available=raw_available,
         relaxed_available=relaxed_available,
+        wiki_strong_answered=wiki_strong_answered,
     )
 
 
-def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
+def test_fallback_state_is_frozen_and_has_seven_evidence_fields() -> None:
     state = _state(
         has_primary_recall=False,
         effective_scope="all",
@@ -88,6 +90,7 @@ def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
         wiki_relaxed_answered=True,
         raw_available="unknown",
         relaxed_available=True,
+        wiki_strong_answered=True,
     )
 
     assert state == FallbackState(
@@ -97,6 +100,7 @@ def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
         True,
         "unknown",
         True,
+        True,
     )
     assert state.__dataclass_fields__.keys() == {
         "has_primary_recall",
@@ -105,6 +109,7 @@ def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
         "wiki_relaxed_answered",
         "raw_available",
         "relaxed_available",
+        "wiki_strong_answered",
     }
     with pytest.raises(FrozenInstanceError):
         state.raw_available = "yes"  # type: ignore[misc]
@@ -170,8 +175,61 @@ def test_plan_fallback_covers_each_branch_and_none_path() -> None:
             wiki_relaxed_answered=False,
             raw_available="no",
             relaxed_available=False,
+            wiki_strong_answered=False,
         )
     ) is None
+
+
+def test_plan_fallback_weak_primary_schedules_raw_zero() -> None:
+    plan = plan_fallback(
+        _state(
+            has_primary_recall=True,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            wiki_strong_answered=False,
+            raw_available="yes",
+            relaxed_available=False,
+        )
+    )
+    assert plan is not None and plan.branch == "raw_zero"
+    assert plan.candidates_kind == "raw_only"
+    assert "wiki_weak_primary" in plan.condition.reasons
+
+
+def test_plan_fallback_strong_wiki_blocks_raw_zero() -> None:
+    for overrides in (
+        dict(has_primary_recall=True, wiki_strong_answered=True),
+        dict(has_primary_recall=False, wiki_relaxed_answered=True, wiki_strong_answered=True),
+    ):
+        args = dict(
+            has_primary_recall=False,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            raw_available="yes",
+            relaxed_available=False,
+            wiki_strong_answered=False,
+        )
+        args.update(overrides)
+        plan = plan_fallback(_state(**args))
+        assert plan is None or plan.branch != "raw_zero"
+
+
+def test_plan_fallback_zero_results_still_uses_wiki_zero_results() -> None:
+    plan = plan_fallback(
+        _state(
+            has_primary_recall=False,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            wiki_strong_answered=False,
+            raw_available="yes",
+            relaxed_available=False,
+        )
+    )
+    assert plan is not None and plan.branch == "raw_zero"
+    assert "wiki_zero_results" in plan.condition.reasons
 
 
 def test_plan_fallback_exhausts_the_decision_matrix() -> None:
@@ -184,6 +242,7 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
             (False, True),
             ("unknown", "yes", "no"),
             (False, True),
+            (False, True),
         )
     )
     cases.extend(
@@ -194,9 +253,10 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
             (False, True),
             ("yes", "no"),
             (False,),
+            (False, True),
         )
     )
-    assert len(cases) == 320
+    assert len(cases) == 640
 
     for (
         has_primary_recall,
@@ -205,6 +265,7 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
         wiki_relaxed_answered,
         raw_available,
         relaxed_available,
+        wiki_strong_answered,
     ) in cases:
         state = _state(
             has_primary_recall=has_primary_recall,
@@ -213,6 +274,7 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
             wiki_relaxed_answered=wiki_relaxed_answered,
             raw_available=raw_available,
             relaxed_available=relaxed_available,
+            wiki_strong_answered=wiki_strong_answered,
         )
         plan = plan_fallback(state)
         raw_ready = raw_available in {"unknown", "yes"}
@@ -222,7 +284,7 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
             assert plan is not None and plan.branch == "all_coverage"
         elif not has_primary_recall and effective_scope in {"knowledge", "all"} and relaxed_available:
             assert plan is not None and plan.branch == "wiki_relaxed"
-        elif not has_primary_recall and not wiki_relaxed_answered and effective_scope in {"knowledge", "all"} and raw_ready:
+        elif not wiki_strong_answered and effective_scope in {"knowledge", "all"} and raw_ready:
             assert plan is not None and plan.branch == "raw_zero"
         else:
             assert plan is None

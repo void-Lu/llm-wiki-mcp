@@ -56,6 +56,7 @@ class FallbackState:
     wiki_relaxed_answered: bool
     raw_available: Literal["unknown", "yes", "no"]
     relaxed_available: bool
+    wiki_strong_answered: bool
 
 
 @dataclass(frozen=True)
@@ -113,14 +114,14 @@ def plan_fallback(state: FallbackState) -> FallbackPlan | None:
     ):
         return FallbackPlan("wiki_relaxed", RecoveryCondition(), "relaxed", "wiki_relaxed")
     if (
-        not state.has_primary_recall
-        and not state.wiki_relaxed_answered
+        not state.wiki_strong_answered
         and state.effective_scope in {"knowledge", "all"}
         and state.raw_available in {"unknown", "yes"}
     ):
+        reason = "wiki_weak_primary" if state.has_primary_recall else "wiki_zero_results"
         return FallbackPlan(
             "raw_zero",
-            RecoveryCondition("raw", ("wiki_zero_results",), "item"),
+            RecoveryCondition("raw", (reason,), "item"),
             "raw",
             "raw_only",
         )

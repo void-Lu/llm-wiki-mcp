@@ -461,6 +461,7 @@ class QueryExecutionContext:
             wiki_relaxed_answered=False,
             raw_available="unknown",
             relaxed_available=False,
+            wiki_strong_answered=False,
         )
         coverage_plan = plan_fallback(coverage_state)
         if coverage_plan is not None and coverage_plan.branch == "coverage":
@@ -480,6 +481,7 @@ class QueryExecutionContext:
             wiki_relaxed_answered=False,
             raw_available="unknown",
             relaxed_available=True,
+            wiki_strong_answered=False,
         )
         relaxed_plan = plan_fallback(relaxed_state)
         if relaxed_plan is not None and relaxed_plan.branch == "wiki_relaxed":
@@ -574,6 +576,7 @@ class QueryExecutionContext:
                         wiki_relaxed_answered=True,
                         raw_available="unknown",
                         relaxed_available=True,
+                        wiki_strong_answered=True,
                     )
                     all_coverage_plan = plan_fallback(all_coverage_state)
                     if (
@@ -589,6 +592,7 @@ class QueryExecutionContext:
                             plan=all_coverage_plan,
                         )
 
+        # Task 1: preserve pre-P1 gate until Task 2 computes real strength.
         raw_zero_state = FallbackState(
             has_primary_recall=self.seed_has_primary_recall,
             effective_scope=request_view.effective_scope,
@@ -596,6 +600,7 @@ class QueryExecutionContext:
             wiki_relaxed_answered=wiki_relaxed_answered,
             raw_available="unknown",
             relaxed_available=wiki_relaxed_answered,
+            wiki_strong_answered=self.seed_has_primary_recall or wiki_relaxed_answered,
         )
         raw_zero_plan = plan_fallback(raw_zero_state)
         if raw_zero_plan is not None and raw_zero_plan.branch == "raw_zero":
