@@ -488,6 +488,9 @@ def _merge_graph_expansion(
         )
 
 
+_QUALIFIED_STAGE_ONE_SCOPES = frozenset({"raw", "auto", "knowledge", "all"})
+
+
 def _stage_one_fts_hits(
     store: RetrievalIndexStore,
     question: str,
@@ -504,7 +507,10 @@ def _stage_one_fts_hits(
         "tags": list(filters.tags),
     }
     steps: list[LadderStep] = [LadderStep("strict", "strict", question, common_kwargs)]
-    if effective_scope == "raw" and has_qualified_identifier(question):
+    if (
+        has_qualified_identifier(question)
+        and effective_scope in _QUALIFIED_STAGE_ONE_SCOPES
+    ):
         steps.append(LadderStep("qualified_code", "qualified_code", question, common_kwargs))
     counts: dict[str, int] = {}
     hits, mode = search_ladder(

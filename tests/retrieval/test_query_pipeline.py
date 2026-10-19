@@ -1359,6 +1359,39 @@ def test_v2_raw_scope_uses_qualified_aliases_on_the_primary_path(tmp_path: Path)
         assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
 
 
+
+def test_v2_active_scope_uses_qualified_code_for_chinese_module_question(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/netsuite-ss-modules/n-record.md",
+        "N/record",
+        "N/record module methods: create load submitFields.",
+        type="concept",
+    )
+    _write(
+        root,
+        "wiki/concepts/noise-methods.md",
+        "方法列表",
+        "各种方法 模块 有哪些 列表 noise only chinese bigrams.",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "n/record模块有哪些方法",
+        scope="knowledge",  # also parametrize auto if cheap
+        retrieval_mode="lexical",
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/netsuite-ss-modules/n-record.md" in paths
+    assert result["pipeline"]["counters"]["qualified_fts_hits"] > 0
+    # Prefer module page near top (strict CJK AND alone often misses)
+    assert paths[0] == "wiki/concepts/netsuite-ss-modules/n-record.md"
+
+
 def test_v2_namespace_wildcard_discovers_raw_catalog_before_entity_batch(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
