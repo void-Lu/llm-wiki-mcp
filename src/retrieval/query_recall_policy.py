@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 from retrieval.candidate_items import candidate_item, with_fusion
 from retrieval.lexical_analyzer import (
     edit_distance,
+    extract_qualified_identifiers,
     has_qualified_identifier,
     identifier_phrases,
     tokens,
@@ -140,6 +141,73 @@ def step_counts_for_pages(
         for hit in hits:
             counts[hit.page_path] = counts.get(hit.page_path, 0) + len(_STEP_ITEM_RE.findall(hit.text))
     return counts
+
+
+def relaxed_fill_is_strong(
+    question: str,
+    items: Sequence[Mapping[str, Any]],
+    *,
+    extra_terms: Sequence[str] = (),
+) -> bool:
+    """True when a wiki_relaxed fill has identifier/phrase/exact/title evidence.
+
+    Weak fills are pure OR-token / CJK-bigram noise with none of these signals.
+    Used to abstain (clear selection) instead of blocking raw_zero.
+
+    ``extra_terms`` covers agent/corpus expansion aliases (for example ``sl`` →
+    ``suitelet``) so a fill that only matches after expansion stays strong.
+    Title evidence includes exact token overlap and the same edit-distance-1
+    bridge ``query_expansion`` uses for corpus title words.
+    """
+
+    if not items:
+        return False
+    q = question.casefold().strip()
+    if not q:
+        return False
+    phrases = [p.casefold() for p in identifier_phrases(question) if p]
+    qualified = extract_qualified_identifiers(question)
+    question_tokens = {tok.casefold() for tok in tokens(question) if tok}
+    expansion_tokens = {str(term).casefold() for term in extra_terms if str(term).strip()}
+    evidence_tokens = question_tokens | expansion_tokens
+    for item in items:
+        hit = item["hit"] if isinstance(item, Mapping) and "hit" in item else item
+        title = str(getattr(hit, "title", "") or "").casefold()
+        page_path = str(getattr(hit, "page_path", "") or "").casefold()
+        body = str(getattr(hit, "text", "") or "").casefold()
+        blob = f"{title}\n{page_path}\n{body}"
+        # exact: question substring equals/contained in title, or title in question
+        if title and (title in q or q in title):
+            return True
+        if len(q) >= 4 and q in {title, page_path}:
+            return True
+        # phrase: multiword English identifier run appears in title/path/body
+        if any(p in blob for p in phrases):
+            return True
+        # identifier: qualified-id alias appears in title/path/body
+        for ident in qualified:
+            if any(alias.casefold() in blob for alias in ident.aliases):
+                return True
+        # expansion alias lands in title/path/body
+        if any(term and term in blob for term in expansion_tokens):
+            return True
+        # title token overlap (exact or edit-distance-1, matching query_expansion)
+        title_tokens = {tok.casefold() for tok in tokens(title) if tok}
+        if title_tokens & evidence_tokens:
+            return True
+        for title_tok in title_tokens:
+            if len(title_tok) < 4:
+                continue
+            for term in question_tokens:
+                if (
+                    term != title_tok
+                    and len(term) >= 4
+                    and abs(len(term) - len(title_tok)) <= 1
+                    and edit_distance(term, title_tok) <= 1
+                ):
+                    return True
+    return False
+
 
 
 def adaptive_expand(

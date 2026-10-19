@@ -545,40 +545,49 @@ class QueryExecutionContext:
                 self.selected = recall_policy.adaptive_expand(
                     select_best_per_page(wiki_relaxed_items), request_view.top_k
                 )
-                self.recovery = assemble_recovery(
+                if not recall_policy.relaxed_fill_is_strong(
+                    request_view.question,
                     self.selected,
-                    condition=relaxed_plan.condition,
-                    candidates=wiki_relaxed_items,
-                    store=self.store,
-                    cancellation=self.cancellation,
-                )
-                self.context_items = self.recovery.context_items
-                self.lexical_mode = relaxed_plan.lexical_mode or self.lexical_mode
-                wiki_relaxed_answered = True
-                self.uncovered_latin_terms = recall_policy.uncovered_latin_terms(
-                    request_view.question, self.selected
-                )
-                all_coverage_state = FallbackState(
-                    has_primary_recall=self.seed_has_primary_recall,
-                    effective_scope=request_view.effective_scope,
-                    uncovered_latin_terms=tuple(self.uncovered_latin_terms),
-                    wiki_relaxed_answered=True,
-                    raw_available="unknown",
-                    relaxed_available=True,
-                )
-                all_coverage_plan = plan_fallback(all_coverage_state)
-                if (
-                    all_coverage_plan is not None
-                    and all_coverage_plan.branch == "all_coverage"
+                    extra_terms=query_extra_terms,
                 ):
-                    self.run_raw_branch(
-                        request_view,
-                        branch="all_coverage",
-                        extra_terms=query_extra_terms,
-                        term_variants=query_term_variants,
-                        candidate_pool=wiki_relaxed_items,
-                        plan=all_coverage_plan,
+                    # Weak OR/CJK-bigram noise only: true abstain so raw_zero may run.
+                    self.selected = []
+                    self.context_items = []
+                else:
+                    self.recovery = assemble_recovery(
+                        self.selected,
+                        condition=relaxed_plan.condition,
+                        candidates=wiki_relaxed_items,
+                        store=self.store,
+                        cancellation=self.cancellation,
                     )
+                    self.context_items = self.recovery.context_items
+                    self.lexical_mode = relaxed_plan.lexical_mode or self.lexical_mode
+                    wiki_relaxed_answered = True
+                    self.uncovered_latin_terms = recall_policy.uncovered_latin_terms(
+                        request_view.question, self.selected
+                    )
+                    all_coverage_state = FallbackState(
+                        has_primary_recall=self.seed_has_primary_recall,
+                        effective_scope=request_view.effective_scope,
+                        uncovered_latin_terms=tuple(self.uncovered_latin_terms),
+                        wiki_relaxed_answered=True,
+                        raw_available="unknown",
+                        relaxed_available=True,
+                    )
+                    all_coverage_plan = plan_fallback(all_coverage_state)
+                    if (
+                        all_coverage_plan is not None
+                        and all_coverage_plan.branch == "all_coverage"
+                    ):
+                        self.run_raw_branch(
+                            request_view,
+                            branch="all_coverage",
+                            extra_terms=query_extra_terms,
+                            term_variants=query_term_variants,
+                            candidate_pool=wiki_relaxed_items,
+                            plan=all_coverage_plan,
+                        )
 
         raw_zero_state = FallbackState(
             has_primary_recall=self.seed_has_primary_recall,

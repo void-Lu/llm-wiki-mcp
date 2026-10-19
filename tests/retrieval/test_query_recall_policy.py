@@ -8,6 +8,7 @@ from retrieval.query_recall_policy import (
     adaptive_expand,
     classify_intent,
     merge_coverage_items,
+    relaxed_fill_is_strong,
     uncovered_latin_terms,
 )
 from retrieval.query_shared import QueryFilters
@@ -595,7 +596,7 @@ def test_v2_wiki_relaxed_answer_blocks_raw_fallback(tmp_path: Path) -> None:
 
     result = run_query_v2(
         root,
-        "NetSuite 的 Location List/Record 字段 selectrecordtype 数字 ID 是多少？",
+        "NetSuite 的 Location 字段 selectrecordtype 数字 ID 是多少？",
         retrieval_mode="lexical",
     )
 
@@ -605,6 +606,144 @@ def test_v2_wiki_relaxed_answer_blocks_raw_fallback(tmp_path: Path) -> None:
     assert result["pipeline"]["lexical"]["mode"] == "relaxed"
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
     assert result["pipeline"]["counters"]["relaxed_fts_hits"] > 0
+
+
+
+def test_relaxed_fill_is_strong_detects_title_phrase_and_identifier() -> None:
+    weak_hit = PassageHit(
+        passage_id="p-weak",
+        page_path="wiki/concepts/noise.md",
+        title="杂谈",
+        heading_path=(),
+        text="治理 单位 列表 摩擦 owner 模块 深度",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    title_hit = PassageHit(
+        passage_id="p-title",
+        page_path="wiki/concepts/location.md",
+        title="Location overview",
+        heading_path=(),
+        text="unrelated body noise only",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    phrase_hit = PassageHit(
+        passage_id="p-phrase",
+        page_path="wiki/concepts/connector.md",
+        title="misc",
+        heading_path=(),
+        text="Configure the NetSuite AI Connector before enabling MCP tools.",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    ident_hit = PassageHit(
+        passage_id="p-ident",
+        page_path="wiki/concepts/n-record.md",
+        title="record helpers",
+        heading_path=(),
+        text="Use N/record create and load for standard records.",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+
+    assert not relaxed_fill_is_strong(
+        "架构深化 技术债 剩余摩擦 owner 模块",
+        [{"hit": weak_hit}],
+    )
+    assert relaxed_fill_is_strong(
+        "NetSuite 的 Location 字段 selectrecordtype 数字 ID 是多少？",
+        [{"hit": title_hit}],
+    )
+    assert relaxed_fill_is_strong(
+        "配置 NetSuite AI Connector 需要哪些权限",
+        [{"hit": phrase_hit}],
+    )
+    assert relaxed_fill_is_strong(
+        "n/record模块有哪些方法",
+        [{"hit": ident_hit}],
+    )
+    assert not relaxed_fill_is_strong("anything", [])
+
+    fuzzy_hit = PassageHit(
+        passage_id="p-fuzzy",
+        page_path="wiki/concepts/chatbot-guide.md",
+        title="NetSuite ChatBot Guide",
+        heading_path=(),
+        text="Suitelet page script notes.",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    assert relaxed_fill_is_strong(
+        "我想写一个llm chatbox的sl页面脚本",
+        [{"hit": fuzzy_hit}],
+    )
+    assert relaxed_fill_is_strong(
+        "sl 页面脚本",
+        [{"hit": fuzzy_hit}],
+        extra_terms=["suitelet"],
+    )
+
+
+def test_v2_weak_wiki_relaxed_abstains_and_allows_raw_zero(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # Wiki pages share only loose OR tokens with the query — no identifier/title hit
+    _write(
+        root,
+        "wiki/concepts/noise-a.md",
+        "杂谈",
+        "治理 单位 列表 摩擦 owner 模块 深度",
+        type="concept",
+    )
+    _write(
+        root,
+        "wiki/concepts/noise-b.md",
+        "随笔",
+        "架构 剩余 技术债 思考 guide",
+        type="concept",
+    )
+    raw = root / "raw/sources/references/architecture-debt.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# 架构深化 技术债\n\nowner 模块 剩余摩擦 权威说明。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    # Query with no N/… and no multiword English identifier phrase;
+    # strict misses; relaxed would only OR-match noise; raw has topical doc.
+    result = run_query_v2(
+        root,
+        "架构深化 技术债 剩余摩擦 owner 模块",
+        scope="knowledge",
+        retrieval_mode="lexical",
+    )
+    # After weak abstain, either empty (if raw unavailable in fixture path)
+    # or raw_zero filled — never the noise-only wiki pages as a fake answer.
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/noise-a.md" not in paths
+    assert "wiki/concepts/noise-b.md" not in paths
+    assert result["pipeline"]["counters"]["fts_hits"] == 0
+    # If raw store built by refresh_indexes: expect raw hit + fallback raw
+    if paths:
+        assert paths[0].startswith("raw/")
+        assert result["pipeline"]["fallback"]["level"] == "raw"
 
 
 def test_v2_raw_fallback_combines_identifier_phrase_docs_above_bigram_noise(
