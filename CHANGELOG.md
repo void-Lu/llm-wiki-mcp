@@ -1,5 +1,12 @@
 # 变更记录
 
+## 2026-10-20 — 检索 P2：coverage 未覆盖拉丁词改为页级并集（0015）
+
+- `merge_coverage_items` 对 raw 是否盖住 uncovered latin：按同 `page_path` 全部候选 passage 的 token **并集**判定，不再只看 `select_best_per_page` 选中块。
+- 展示/融合载体仍用 page-best；刀2 `authority = 0.35 × coverage_ratio` 公式不变（ratio 用页级 covered）。
+- `raw_recovery_candidates` 向 coverage 传递多 ordinal FTS 命中（不再提前压成一页一条）；缺兄弟时行为与旧 passage 门一致。
+- 本刀不修 0008 池召回、不做刀3、不动 denylist / FTS strong-slice。
+
 ## 2026-10-20 — 检索 P2：primary 强证据仅 FTS 切片（0018）
 
 - `primary_fill_is_strong` 只看 `fts_rank is not None` 的 seed；title-candidate / 仅 graph 页不能单独把 `wiki_strong` 拉真挡住 `raw_zero`。
