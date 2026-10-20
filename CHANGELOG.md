@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-10-20 — 检索 P2：primary title-token 泛化 denylist（0018）
+
+- primary「强」的 title-token / ED-1 臂：去掉泛化词后至少 1 个实词，或重叠 ≥2 个 token（含全泛化多词例外）；单点 `{record}` 不再挡住 `raw_zero`。
+- **仅** `body_evidence=False`（primary）；relaxed 任意 title-token 重叠仍强。
+- 名单不全时加词、不改公式；不动 coverage / qualified 短路 / 刀1 body 门。
+
 ## 2026-10-19 — 检索 P2：簇 C（primary 强信号收紧 / coverage 抬 raw）
 
 - primary「强」不再把仅 body 的 phrase/identifier 命中当作已回答；无 title/path 证据且无 qualified 时走既有弱 primary → 有限额 `raw_zero`（`wiki_weak_primary`）。
