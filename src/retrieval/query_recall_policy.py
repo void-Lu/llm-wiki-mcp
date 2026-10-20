@@ -19,6 +19,7 @@ from retrieval.lexical_analyzer import (
     edit_distance,
     extract_qualified_identifiers,
     has_qualified_identifier,
+    identifier_phrase_tokens,
     identifier_phrases,
     tokens,
 )
@@ -133,8 +134,10 @@ __all__ = [
     "query_expansion",
     "raw_recovery_candidates",
     "relaxed_recovery_items",
+    "should_augment_raw_phrase_cooccur",
     "step_counts_for_pages",
     "uncovered_latin_terms",
+    "union_passage_hits_by_id",
 ]
 
 
@@ -478,6 +481,32 @@ def _raw_recovery_bonus(hit: PassageHit, question: str, identifier_terms: list[s
     return min(title_overlap, 3) * 4.0 + min(heading_overlap, 3) * 2.0 + phrase_bonus + anchor_bonus + exact_phrase_bonus
 
 
+
+def should_augment_raw_phrase_cooccur(question: str) -> bool:
+    """True when the question has a multi-word Latin entity worth phrase FTS."""
+
+    return len(identifier_phrase_tokens(question)) >= 2
+
+
+def union_passage_hits_by_id(
+    primary: Sequence[PassageHit],
+    secondary: Sequence[PassageHit],
+) -> list[PassageHit]:
+    """Merge FTS hits by passage_id, keeping the higher score (primary on ties)."""
+
+    by_id: dict[str, PassageHit] = {}
+    for hit in primary:
+        by_id[hit.passage_id] = hit
+    for hit in secondary:
+        cur = by_id.get(hit.passage_id)
+        if cur is None or hit.score > cur.score:
+            by_id[hit.passage_id] = hit
+    return sorted(
+        by_id.values(),
+        key=lambda h: (-h.score, h.page_path, h.passage_id),
+    )
+
+
 def raw_recovery_candidates(
     raw_store: RetrievalIndexStore,
     request: RawRecoveryRequestView,
@@ -565,13 +594,23 @@ def raw_recovery_candidates(
     if raw_lexical_mode.startswith("error:"):
         return raw_store, [], raw_fts_hits, raw_lexical_mode[6:], "strict"
 
+    if should_augment_raw_phrase_cooccur(request.question):
+        try:
+            phrase_hits = raw_store.search_fts(
+                request.question,
+                limit=candidate_limit,
+                mode="identifier_phrase",
+                term_variants=term_variants or {},
+                **common_kwargs,
+            )
+        except RetrievalIndexError:
+            phrase_hits = []
+        if phrase_hits:
+            raw_hits = union_passage_hits_by_id(raw_hits, phrase_hits)
+
     raw_fts_hits = len(raw_hits)
     raw_items: list[dict[str, Any]] = []
-    query_identifier_phrases = (
-        identifier_phrases(request.question)
-        if raw_lexical_mode == "identifier_phrase"
-        else []
-    )
+    query_identifier_phrases = identifier_phrases(request.question)
     for rank, hit in enumerate(raw_hits, 1):
         if cancellation is not None:
             cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")

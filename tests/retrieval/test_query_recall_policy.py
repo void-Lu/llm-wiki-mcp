@@ -2,6 +2,8 @@ from pathlib import Path
 
 from retrieval.candidate_items import candidate_item
 from retrieval.query_pipeline import run_query_v2
+from retrieval.lexical_analyzer import identifier_phrase_tokens
+from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_recall_policy import (
     MAX_ADAPTIVE_SCORE_RATIO,
     PASSAGE_PROBE_LIMIT,
@@ -13,10 +15,15 @@ from retrieval.query_recall_policy import (
     merge_weak_primary_raw,
     page_coverage_terms,
     primary_fill_is_strong,
+    raw_recovery_candidates,
     relaxed_fill_is_strong,
+    should_augment_raw_phrase_cooccur,
     uncovered_latin_terms,
+    union_passage_hits_by_id,
     _title_token_overlap_is_strong,
 )
+from retrieval.query_snapshot import QueryCorpusSnapshot
+from types import SimpleNamespace
 from retrieval.query_shared import QueryFilters
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
 from runtime.runtime_config import EmbeddingSettings
@@ -1660,3 +1667,158 @@ def test_v2_raw_fallback_respects_project_and_type_filters(tmp_path: Path) -> No
     ]
     assert len(raw_type["results"]) == 2
     assert other_type["results"] == []
+
+
+def _cooccur_hit(pid: str, path: str, title: str, text: str, score: float) -> PassageHit:
+    return PassageHit(
+        passage_id=pid,
+        page_path=path,
+        title=title,
+        heading_path=(),
+        text=text,
+        score=score,
+        corpus="raw",
+        authority="",
+        source_kind="raw",
+        ordinal=0,
+    )
+
+
+def test_should_augment_raw_phrase_cooccur_for_multiword_entity() -> None:
+    q = "email capture plug-in implementation"
+    assert len(identifier_phrase_tokens(q)) >= 2
+    assert should_augment_raw_phrase_cooccur(q) is True
+    assert should_augment_raw_phrase_cooccur("N/record") is False
+    assert should_augment_raw_phrase_cooccur("plugin") is False
+
+
+def test_union_passage_hits_by_id_keeps_higher_score_and_adds_missing() -> None:
+    primary = [
+        _cooccur_hit("a", "raw/a.md", "Enable Plug-in", "plugin enable", 10.0),
+        _cooccur_hit("b", "raw/b.md", "Custom Plug-in", "generic", 8.0),
+    ]
+    secondary = [
+        _cooccur_hit("b", "raw/b.md", "Custom Plug-in", "generic", 9.5),
+        _cooccur_hit(
+            "g",
+            "raw/Developing an Email Capture Plug-in Implementation.md",
+            "Developing an Email Capture Plug-in Implementation",
+            "process(email) capture",
+            7.0,
+        ),
+    ]
+    merged = union_passage_hits_by_id(primary, secondary)
+    by_id = {h.passage_id: h for h in merged}
+    assert set(by_id) == {"a", "b", "g"}
+    assert by_id["b"].score == 9.5
+    assert "Email Capture" in by_id["g"].title
+
+
+def test_union_passage_hits_by_id_fail_open_on_empty_secondary() -> None:
+    primary = [_cooccur_hit("a", "raw/a.md", "A", "a", 1.0)]
+    assert [h.passage_id for h in union_passage_hits_by_id(primary, [])] == ["a"]
+
+
+def test_raw_recovery_merges_phrase_cooccur_when_qualified_code_filled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """plug-in QI fills qualified_code; gold only arrives via identifier_phrase union."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    noise = root / "raw/sources/noise/custom-plugin.md"
+    noise.parent.mkdir(parents=True, exist_ok=True)
+    noise.write_text(
+        "# Custom Plug-in Implementation\n\nGeneric plug-in implementation sample.\n",
+        encoding="utf-8",
+    )
+    gold_rel = (
+        "raw/sources/ecp/Developing an Email Capture Plug-in Implementation.md"
+    )
+    gold = root / gold_rel
+    gold.parent.mkdir(parents=True, exist_ok=True)
+    gold.write_text(
+        "# Developing an Email Capture Plug-in Implementation\n\n"
+        "Use process(email) to capture inbound messages during implementation.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    raw_store = RetrievalIndexStore(root, scope="raw")
+    noise_hit = next(
+        h for h in raw_store.search_fts("plug-in", limit=20, mode="relaxed")
+        if "custom-plugin" in h.page_path
+    )
+
+    import retrieval.query_recall_policy as policy
+
+    def fake_ladder(store, *, steps, merge, limit, swallow_index_errors=True):
+        return [noise_hit], "qualified_code"
+
+    monkeypatch.setattr(policy, "search_ladder", fake_ladder)
+
+    cancel = QueryCancellationContext.unbounded()
+    snap = QueryCorpusSnapshot.capture(raw_store, cancellation=cancel)
+    req = SimpleNamespace(
+        question="email capture plug-in implementation",
+        project=None,
+        filters=QueryFilters(),
+        top_k=10,
+    )
+    _, items, _, _, mode = raw_recovery_candidates(
+        raw_store,
+        req,
+        snapshot=snap,
+        raw_availability="fresh",
+        cancellation=cancel,
+    )
+    paths = {item["hit"].page_path for item in items}
+    assert mode == "qualified_code"
+    assert any("Email Capture" in path for path in paths), paths
+    assert any("custom-plugin" in path for path in paths)
+
+
+def test_raw_recovery_phrase_cooccur_fail_open_when_phrase_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    noise = root / "raw/sources/noise/custom-plugin.md"
+    noise.parent.mkdir(parents=True, exist_ok=True)
+    noise.write_text(
+        "# Custom Plug-in Implementation\n\nGeneric plug-in implementation sample.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+    raw_store = RetrievalIndexStore(root, scope="raw")
+    noise_hit = raw_store.search_fts("plug-in", limit=5, mode="relaxed")[0]
+
+    import retrieval.query_recall_policy as policy
+
+    def fake_ladder(store, *, steps, merge, limit, swallow_index_errors=True):
+        return [noise_hit], "qualified_code"
+
+    def fake_search_fts(self, question, *, limit, mode="strict", **kwargs):
+        if mode == "identifier_phrase":
+            return []
+        raise AssertionError(f"unexpected mode {mode}")
+
+    monkeypatch.setattr(policy, "search_ladder", fake_ladder)
+    monkeypatch.setattr(RetrievalIndexStore, "search_fts", fake_search_fts)
+
+    cancel = QueryCancellationContext.unbounded()
+    snap = QueryCorpusSnapshot.capture(raw_store, cancellation=cancel)
+    req = SimpleNamespace(
+        question="email capture plug-in implementation",
+        project=None,
+        filters=QueryFilters(),
+        top_k=10,
+    )
+    _, items, _, _, mode = raw_recovery_candidates(
+        raw_store,
+        req,
+        snapshot=snap,
+        raw_availability="fresh",
+        cancellation=cancel,
+    )
+    assert mode == "qualified_code"
+    assert [item["hit"].passage_id for item in items] == [noise_hit.passage_id]
