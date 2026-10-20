@@ -1,5 +1,11 @@
 # 变更记录
 
+## 2026-10-20 — 检索 P2：primary 强证据仅 FTS 切片（0018）
+
+- `primary_fill_is_strong` 只看 `fts_rank is not None` 的 seed；title-candidate / 仅 graph 页不能单独把 `wiki_strong` 拉真挡住 `raw_zero`。
+- 与 `has_primary_recall = bool(ranked)`（title merge 前）对齐；denylist / GENERIC / relaxed / 刀1 body 门不变。
+- 结果里仍可保留 title/graph 页；本刀不加 `custom` 等泛化词。
+
 ## 2026-10-20 — 检索 P2：primary title-token 泛化 denylist（0018）
 
 - primary「强」的 title-token / ED-1 臂：去掉泛化词后至少 1 个实词，或重叠 ≥2 个 token（含全泛化多词例外）；单点 `{record}` 不再挡住 `raw_zero`。
