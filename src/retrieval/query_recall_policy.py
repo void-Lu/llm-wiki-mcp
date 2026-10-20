@@ -9,6 +9,7 @@ snapshot、取消上下文和 recovery primitive；不得依赖 QueryExecutionCo
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -590,7 +591,9 @@ def raw_recovery_candidates(
             ):
                 score += IDENTIFIER_PHRASE_BONUS * 0.5
         raw_items.append(candidate_item(hit, score=score, fts_rank=rank))
-    raw_candidate_items = select_best_per_page(raw_items)
+    # Keep multi-ordinal FTS hits so coverage page-union can see sibling passages.
+    # Callers that need one-per-page re-run select_best_per_page.
+    raw_candidate_items = list(raw_items)
     if raw_candidate_items and raw_lexical_mode != "qualified_code":
         step_counts = step_counts_for_pages(
             sorted({item["hit"].page_path for item in raw_candidate_items}),
@@ -636,6 +639,21 @@ def _coverage_terms(item: dict[str, Any], terms: Sequence[str]) -> set[str]:
     return {term for term in terms if term in available}
 
 
+def page_coverage_terms(
+    page_items: Sequence[Mapping[str, Any]],
+    terms: Sequence[str],
+) -> set[str]:
+    """Uncovered-latin hits using the union of all passages on one page."""
+
+    if not page_items or not terms:
+        return set()
+    available: set[str] = set()
+    for item in page_items:
+        hit = item["hit"]
+        available.update(tokens(f"{hit.title} {hit.text}"))
+    return {term for term in terms if term in available}
+
+
 def merge_coverage_items(
     active_items: Sequence[dict[str, Any]],
     raw_items: Sequence[dict[str, Any]],
@@ -644,6 +662,10 @@ def merge_coverage_items(
     rrf_k: int = RRF_K,
 ) -> list[dict[str, Any]]:
     """Fuse active and raw page ranks using normalized, source-local signals."""
+
+    raw_by_page: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in raw_items:
+        raw_by_page[item["hit"].page_path].append(item)
 
     active_pages = select_best_per_page(list(active_items))
     raw_pages = select_best_per_page(list(raw_items))
@@ -657,7 +679,13 @@ def merge_coverage_items(
             source_rank = raw_pages.index(item) + 1
         else:
             source_rank = active_pages.index(item) + 1
-        covered = _coverage_terms(item, uncovered_terms)
+        if is_raw:
+            covered = page_coverage_terms(
+                raw_by_page.get(item["hit"].page_path, [item]),
+                uncovered_terms,
+            )
+        else:
+            covered = _coverage_terms(item, uncovered_terms)
         if is_raw and not covered:
             continue
         coverage_ratio = len(covered) / total_terms

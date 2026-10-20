@@ -296,11 +296,13 @@ class QueryExecutionContext:
                 uncovered_latin_terms,
                 rrf_k=request_view.effective_rrf_k,
             )
-            covered_ids = {item["hit"].passage_id for item in covered_raw_items}
+            # Admit by page_path so sibling ordinals that fed page-union stay
+            # available for the second merge / pooling; display still page-best.
+            covered_paths = {item["hit"].page_path for item in covered_raw_items}
             raw_candidate_items = [
                 item
                 for item in raw_candidate_items
-                if item["hit"].passage_id in covered_ids
+                if item["hit"].page_path in covered_paths
             ]
         if not raw_candidate_items:
             self.selected = selected
