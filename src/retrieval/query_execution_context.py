@@ -615,7 +615,7 @@ class QueryExecutionContext:
             self.seed_has_primary_recall
             and recall_policy.primary_fill_is_strong(
                 request_view.question,
-                self.seed_selected,
+                recall_policy.fts_ranked_evidence(self.seed_selected),
                 qualified_fts_hits=self.seed_qualified_fts_hits,
             )
         )

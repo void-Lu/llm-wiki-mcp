@@ -181,6 +181,14 @@ def _title_token_overlap_is_strong(ov: set[str], *, body_evidence: bool) -> bool
     return len(content) >= 1 or len(ov) >= 2
 
 
+
+def fts_ranked_evidence(
+    items: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Primary-strong evidence: stage-one FTS hits only (fts_rank is not None)."""
+    return [item for item in items if item.get("fts_rank") is not None]
+
+
 def primary_fill_is_strong(
     question: str,
     items: Sequence[Mapping[str, Any]],
