@@ -1,5 +1,13 @@
 # 变更记录
 
+## 2026-10-20 — 检索 P2：raw 池多词实体共现 / 短语召回（0008）
+
+- 
+aw_recovery_candidates：问句含多词拉丁实体（identifier_phrase_tokens ≥ 2）时，在 ladder 结果上**并入**一次 identifier_phrase FTS（按 passage_id 取高分），避免 plug-in 等误触发的 qualified_code 挤掉 mail+capture 共现页。
+- 短语加分不再仅限 
+aw_lexical_mode == identifier_phrase；ladder 上报 mode 不变。
+- 二次检索空/失败 fail-open；不动 0015 page-union、0018 denylist / FTS-slice、刀2 公式、池内去重配额。
+
 ## 2026-10-20 — 检索 P2：coverage 未覆盖拉丁词改为页级并集（0015）
 
 - `merge_coverage_items` 对 raw 是否盖住 uncovered latin：按同 `page_path` 全部候选 passage 的 token **并集**判定，不再只看 `select_best_per_page` 选中块。
