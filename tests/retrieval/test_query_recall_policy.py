@@ -11,6 +11,7 @@ from retrieval.query_recall_policy import (
     fts_ranked_evidence,
     merge_coverage_items,
     merge_weak_primary_raw,
+    page_coverage_terms,
     primary_fill_is_strong,
     relaxed_fill_is_strong,
     uncovered_latin_terms,
@@ -474,6 +475,106 @@ def test_merge_coverage_items_prefers_high_coverage_raw_over_padding_wiki() -> N
     assert merged, "expected fused rows"
     assert merged[0]["hit"].source_kind == "raw"
     assert merged[0]["coverage_ratio"] == 1.0
+
+
+def _raw_hit(
+    path: str,
+    *,
+    passage_id: str,
+    title: str,
+    text: str,
+    ordinal: int,
+    score: float,
+) -> dict:
+    return candidate_item(
+        PassageHit(
+            passage_id=passage_id,
+            page_path=path,
+            title=title,
+            heading_path=(),
+            text=text,
+            score=score,
+            corpus="raw",
+            authority="",
+            source_kind="raw",
+            ordinal=ordinal,
+        ),
+        score=score,
+        fts_rank=ordinal + 1,
+    )
+
+
+PAGE_NSEARCH = "raw/sources/file/NetSuite Help Docs/41_Nsearch Module/Nsearch Module.md"
+
+
+def test_page_coverage_terms_unions_sibling_passages() -> None:
+    best_junk = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-junk",
+        title="N/search Module",
+        text="/ docs . oracle . com / en / cloud / table junk",
+        ordinal=0,
+        score=50.0,
+    )
+    sibling = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-limit",
+        title="N/search Module",
+        text="unsupported in unauthenticated client-side contexts",
+        ordinal=3,
+        score=5.0,
+    )
+    uncovered = ["unauthenticated", "side", "contexts"]
+    assert page_coverage_terms([best_junk], uncovered) == set()
+    assert page_coverage_terms([best_junk, sibling], uncovered) == {
+        "unauthenticated",
+        "side",
+        "contexts",
+    }
+
+
+def test_merge_coverage_admits_raw_when_sibling_passage_covers_uncovered() -> None:
+    """Best ordinal misses uncovered; sibling on same page hits -> page admitted."""
+    best_junk = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-junk",
+        title="N/search Module",
+        text="/ docs . oracle . com / en / cloud / table junk",
+        ordinal=0,
+        score=50.0,
+    )
+    sibling = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-limit",
+        title="N/search Module",
+        text="unsupported in unauthenticated client-side contexts",
+        ordinal=3,
+        score=5.0,
+    )
+    uncovered = ["unauthenticated", "side", "contexts"]
+    merged = merge_coverage_items([], [best_junk, sibling], uncovered, rrf_k=10)
+    assert len(merged) == 1
+    assert merged[0]["hit"].page_path == PAGE_NSEARCH
+    # Display carrier remains page-best (higher score), not the sibling
+    assert merged[0]["hit"].passage_id == "p-junk"
+    assert merged[0]["coverage_ratio"] == 1.0
+    assert set(merged[0]["coverage_terms"]) == set(uncovered)
+
+
+def test_merge_coverage_still_filters_raw_when_no_passage_covers() -> None:
+    only_junk = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-junk",
+        title="N/search Module",
+        text="/ docs . oracle . com / en / cloud / table junk",
+        ordinal=0,
+        score=50.0,
+    )
+    merged = merge_coverage_items(
+        [], [only_junk], ["unauthenticated", "contexts"], rrf_k=10
+    )
+    assert merged == []
+
 
 def test_v2_coverage_merge_surfaces_raw_help_doc(tmp_path: Path) -> None:
     """0015-shaped: strong-ish wiki covers search/module; raw Help fills uncovered Latin."""
