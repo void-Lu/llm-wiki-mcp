@@ -912,6 +912,45 @@ def test_primary_fill_is_strong_ignores_body_only_phrase() -> None:
     assert relaxed_fill_is_strong(q, [{"hit": body_phrase_hit}])
 
 
+def test_primary_fill_is_strong_rejects_single_generic_title_token() -> None:
+    """0018: N/record 模块 ∩ Custom Record… → {record} must not be primary-strong."""
+    hit = PassageHit(
+        passage_id="p-n-record",
+        page_path="wiki/concepts/netsuite-ss-modules/n-record.md",
+        title="N/record 模块",
+        heading_path=(),
+        text="unrelated body noise only",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    q = "Custom Record Type Object Custom Fields"
+    assert not primary_fill_is_strong(q, [{"hit": hit}])
+    # relaxed path unchanged: single title-token overlap still strong
+    assert relaxed_fill_is_strong(q, [{"hit": hit}])
+
+
+def test_primary_fill_is_strong_accepts_multi_generic_title_token_overlap() -> None:
+    """All-generic overlap with |ov|≥2 stays primary-strong (approved exception)."""
+    hit = PassageHit(
+        passage_id="p-record-type",
+        page_path="wiki/concepts/record-type.md",
+        title="Record Type helpers",
+        heading_path=(),
+        text="unrelated body noise only",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    # tokens(title) ⊇ {record, type, helpers}; ∩ query → {record, type} (|ov|=2)
+    q = "Custom Record Type Object Custom Fields"
+    assert primary_fill_is_strong(q, [{"hit": hit}])
+
+
 def test_v2_body_only_primary_phrase_allows_raw_zero(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
