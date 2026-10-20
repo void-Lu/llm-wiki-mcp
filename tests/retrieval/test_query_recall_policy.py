@@ -13,6 +13,7 @@ from retrieval.query_recall_policy import (
     primary_fill_is_strong,
     relaxed_fill_is_strong,
     uncovered_latin_terms,
+    _title_token_overlap_is_strong,
 )
 from retrieval.query_shared import QueryFilters
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
@@ -910,6 +911,13 @@ def test_primary_fill_is_strong_ignores_body_only_phrase() -> None:
     assert primary_fill_is_strong(q, [{"hit": title_phrase_hit}])
     # relaxed path still treats body phrase as strong (P0 default)
     assert relaxed_fill_is_strong(q, [{"hit": body_phrase_hit}])
+
+
+def test_title_token_overlap_strong_formula() -> None:
+    assert not _title_token_overlap_is_strong({"record"}, body_evidence=False)
+    assert _title_token_overlap_is_strong({"record", "type"}, body_evidence=False)
+    assert _title_token_overlap_is_strong({"suitescript"}, body_evidence=False)
+    assert _title_token_overlap_is_strong({"record"}, body_evidence=True)
 
 
 def test_primary_fill_is_strong_rejects_single_generic_title_token() -> None:

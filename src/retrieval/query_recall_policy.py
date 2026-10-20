@@ -47,6 +47,27 @@ ADAPTIVE_EXPAND_MAX = 40
 ADAPTIVE_SCORE_RATIO = 0.9
 MAX_ADAPTIVE_SCORE_RATIO = 0.7
 
+# Primary title-token denylist (P2 title-token bar / 0018). English lowercase;
+# aligned with tokens() casefold. Used only when body_evidence=False.
+GENERIC_TITLE_TOKENS: frozenset[str] = frozenset(
+    {
+        "record",
+        "type",
+        "object",
+        "field",
+        "fields",
+        "module",
+        "guide",
+        "overview",
+        "helper",
+        "helpers",
+        "api",
+        "doc",
+        "docs",
+    }
+)
+
+
 
 class RawRecoveryRequestView(Protocol):
     """Structural request slice consumed by the raw recovery ladder."""
@@ -144,6 +165,22 @@ def step_counts_for_pages(
     return counts
 
 
+
+def _title_token_overlap_is_strong(ov: set[str], *, body_evidence: bool) -> bool:
+    """Primary title-token / ED-1 bar; relaxed keeps any non-empty overlap.
+
+    Formula (primary only): content = ov - GENERIC_TITLE_TOKENS;
+    strong iff len(content) >= 1 or len(ov) >= 2.
+    """
+
+    if not ov:
+        return False
+    if body_evidence:
+        return True
+    content = ov - GENERIC_TITLE_TOKENS
+    return len(content) >= 1 or len(ov) >= 2
+
+
 def primary_fill_is_strong(
     question: str,
     items: Sequence[Mapping[str, Any]],
@@ -187,7 +224,8 @@ def relaxed_fill_is_strong(
 
     ``body_evidence`` (default True) keeps P0 relaxed abstain semantics: phrase
     and qualified-id aliases may match title/path/body. When False (primary
-    path), phrase and qualified-id match title/path only.
+    path), phrase and qualified-id match title/path only, and title-token /
+    ED-1 arms use GENERIC_TITLE_TOKENS (len(content)>=1 or len(ov)>=2).
     """
 
     if not items:
@@ -225,9 +263,13 @@ def relaxed_fill_is_strong(
         if any(term and term in title_path for term in expansion_tokens):
             return True
         # title token overlap (exact or edit-distance-1, matching query_expansion)
+        # Primary (body_evidence=False): GENERIC denylist bar — content = ov-GENERIC;
+        # strong iff len(content)>=1 or len(ov)>=2. Relaxed: any non-empty ov.
         title_tokens = {tok.casefold() for tok in tokens(title) if tok}
-        if title_tokens & evidence_tokens:
+        ov = title_tokens & evidence_tokens
+        if _title_token_overlap_is_strong(ov, body_evidence=body_evidence):
             return True
+        ed_hits: set[str] = set()
         for title_tok in title_tokens:
             if len(title_tok) < 4:
                 continue
@@ -238,7 +280,13 @@ def relaxed_fill_is_strong(
                     and abs(len(term) - len(title_tok)) <= 1
                     and edit_distance(term, title_tok) <= 1
                 ):
-                    return True
+                    if body_evidence:
+                        return True
+                    ed_hits.add(title_tok)
+        if ed_hits and _title_token_overlap_is_strong(
+            ov | ed_hits, body_evidence=False
+        ):
+            return True
     return False
 
 
