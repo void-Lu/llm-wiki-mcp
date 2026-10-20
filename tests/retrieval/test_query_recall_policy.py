@@ -8,6 +8,7 @@ from retrieval.query_recall_policy import (
     PASSAGE_SCAN_LIMIT,
     adaptive_expand,
     classify_intent,
+    fts_ranked_evidence,
     merge_coverage_items,
     merge_weak_primary_raw,
     primary_fill_is_strong,
@@ -957,6 +958,85 @@ def test_primary_fill_is_strong_accepts_multi_generic_title_token_overlap() -> N
     # tokens(title) ⊇ {record, type, helpers}; ∩ query → {record, type} (|ov|=2)
     q = "Custom Record Type Object Custom Fields"
     assert primary_fill_is_strong(q, [{"hit": hit}])
+
+
+def _passage_hit(path: str, title: str, text: str = "unrelated body noise only") -> PassageHit:
+    return PassageHit(
+        passage_id=f"p-{path}",
+        page_path=path,
+        title=title,
+        heading_path=(),
+        text=text,
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+
+
+def test_fts_ranked_evidence_keeps_only_fts_rank() -> None:
+    fts = candidate_item(
+        _passage_hit("wiki/concepts/netsuite-ss-modules/n-record.md", "N/record 模块"),
+        score=1.0,
+        fts_rank=2,
+    )
+    title_only = candidate_item(
+        _passage_hit(
+            "wiki/concepts/script-types/Custom-Tool-Script.md",
+            "SuiteScript 2.1 脚本类型：Custom Tool Script",
+        ),
+        score=0.5,
+        title_rank=9,
+    )
+    graphish = candidate_item(
+        _passage_hit("wiki/other.md", "Other"),
+        score=0.1,
+        # fts_rank left None — not FTS evidence
+    )
+    out = fts_ranked_evidence([fts, title_only, graphish])
+    assert out == [fts]
+    assert fts_ranked_evidence([]) == []
+    # is not None: fts_rank=0 must be kept (truthiness would wrongly drop it)
+    zero = candidate_item(
+        _passage_hit("wiki/concepts/zero.md", "Zero"),
+        score=1.0,
+        fts_rank=0,
+    )
+    assert fts_ranked_evidence([zero, title_only]) == [zero]
+
+
+def test_primary_strong_evidence_ignores_title_only_custom_token() -> None:
+    """0018 residual: title-candidate {custom} must not make primary strong
+    when FTS slice is only weak {record}.
+    """
+    fts_weak = candidate_item(
+        _passage_hit("wiki/concepts/netsuite-ss-modules/n-record.md", "N/record 模块"),
+        score=1.0,
+        fts_rank=2,
+    )
+    title_custom = candidate_item(
+        _passage_hit(
+            "wiki/concepts/script-types/Custom-Tool-Script.md",
+            "SuiteScript 2.1 脚本类型：Custom Tool Script",
+        ),
+        score=0.5,
+        title_rank=9,
+    )
+    q = "Custom Record Type Object Custom Fields"
+    # Alone-strong lock: title-only {custom} is still "strong" as a page today
+    # (custom ∉ GENERIC); call site must not pass it as primary-strong evidence.
+    assert primary_fill_is_strong(q, [title_custom])
+    assert not primary_fill_is_strong(q, fts_ranked_evidence([fts_weak, title_custom]))
+    # FTS non-generic still strong even if title-only noise is in the seed
+    suitescript = candidate_item(
+        _passage_hit("wiki/guides/suitescript.md", "SuiteScript Guide"),
+        score=1.0,
+        fts_rank=1,
+    )
+    assert primary_fill_is_strong(
+        "How does SuiteScript work?", fts_ranked_evidence([suitescript, title_custom])
+    )
 
 
 def test_v2_body_only_primary_phrase_allows_raw_zero(tmp_path: Path) -> None:
