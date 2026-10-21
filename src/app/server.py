@@ -24,6 +24,7 @@ from runtime.runtime_config import (
     ConfigRegistry,
     ResolvedVault,
     RuntimeConfigError,
+    rrf_weights_with_env,
     VaultSettings,
 )
 from runtime.runtime_provenance import RUNTIME_PROVENANCE
@@ -48,6 +49,7 @@ from retrieval.metadata_filters import (
     normalize_metadata_filters,
 )
 from archive.archive_models import ARCHIVE_REASONS, is_archive_reason
+from common.json_schema_sanitize import strip_json_schema_title_annotations
 from archive.archive_service import ArchiveService
 from wiki.spec_reuse import SharedSpecService, SpecMirrorService
 
@@ -456,6 +458,13 @@ def _register(
         argument_model = tool.fn_metadata.arg_model
         argument_model.model_config["extra"] = "forbid"
         argument_model.model_rebuild(force=True)
+        # Re-export parameters without JSON Schema annotation titles. Pydantic
+        # adds them by default; SuiteCloud DA returns HTTP 204 for schemas that
+        # include tools[].function.parameters.title. Keep a real property named
+        # title (e.g. wiki_write_note).
+        tool.parameters = strip_json_schema_title_annotations(
+            argument_model.model_json_schema(by_alias=True)
+        )
     return registered_tool
 
 
@@ -751,6 +760,7 @@ def _run_wiki_query(
             confirmation_token=confirmation_token,
             cancellation=cancellation,
             telemetry_stats=telemetry_stats,
+            rrf_weights=rrf_weights_with_env(settings.ranking.rrf_weights),
         )
         result = attach_no_results_outcome(
             _attach_query_content_refs(result, logical_vault=resolution.logical_name)
@@ -856,13 +866,18 @@ def wiki_query(question: str, scope: QueryScope = "auto", project: str | None = 
 
 
 @_register()
-def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None, sources: list[str] | None = None) -> dict[str, Any]:
+def wiki_write_note(title: str, content: str, note_type: str | None = None, noteType: str | None = None, vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None, project: str | None = None, domain: str | None = None, tags: list[str] | None = None, filename: str | None = None, chat_metadata: dict[str, Any] | None = None, chat_derived: bool = False, chat_sources: list[dict[str, str]] | None = None, related_pages: list[dict[str, Any]] | None = None, related_pages_heading: str | None = None, sources: list[str] | None = None, aliases: list[str] | None = None, questions: list[str] | None = None) -> dict[str, Any]:
     """Create a manual page, optionally linking adopted Wiki pages and raw sources.
 
     ``related_pages`` accepts existing ``wiki/**`` paths and creates a
     ``## 参考来源`` wikilink section (override with ``related_pages_heading``).
     Raw provenance belongs in ``sources``; chat-derived pages continue to use
-    ``chat_sources``.
+    ``chat_sources``.  Optional ``aliases`` (other names for the page, at most
+    20 strings of 120 characters) are stored in frontmatter after trimming,
+    redaction and case-insensitive de-duplication; omitting it changes nothing.
+    Optional ``questions`` (questions the page answers, at most 20 strings of
+    300 characters) follow the same rules, are stored in frontmatter
+    ``questions`` and make question-style queries match the page.
     """
     # note_type is canonical: falsy values fall back to noteType, and two empty
     # values must report missing_note_type. The aliases mechanism cannot express
@@ -887,13 +902,22 @@ def wiki_write_note(title: str, content: str, note_type: str | None = None, note
         related_pages=related_pages,
         related_pages_heading=related_pages_heading,
         sources=sources,
+        aliases=aliases,
+        questions=questions,
         vault_root=str(resolution.root),
     )
 
 
 @_register()
 def wiki_ingest(source_path: str, source_name: str, project: str = "", source_type: str = "file", vault: str | None = None, vault_root: str | None = None, vaultRoot: str | None = None) -> dict[str, Any]:
-    """Ingest one explicit file; text is indexed and other files become raw assets."""
+    """Ingest one explicit file; text is indexed and other files become raw assets.
+
+    Use source_type="projects" for project-owned evidence so it is stored at
+    raw/sources/projects/<project>/. source_type="file" is only for non-project
+    file corpora such as imported help docs. A file ingest for a project that
+    already exists under wiki/projects or raw/sources/projects is stored as
+    projects instead of file.
+    """
     resolution = _registered_resolution()
     result = run_ingest_file(vault_root=resolution.root, project=project, source_name=source_name, source_path=source_path, source_type=source_type)
     return result

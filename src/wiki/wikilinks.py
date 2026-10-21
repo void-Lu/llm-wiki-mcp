@@ -130,6 +130,11 @@ def _replace_wikilink_targets(text: str, replace_target: Callable[[str], str]) -
     return "".join(parts)
 
 
+def code_ranges(text: str) -> list[tuple[int, int]]:
+    """Return sorted ``(start, end)`` spans of fenced blocks and inline code."""
+    return _code_ranges(text)
+
+
 def _code_ranges(text: str) -> list[tuple[int, int]]:
     fenced = _fenced_code_ranges(text)
     inline: list[tuple[int, int]] = []

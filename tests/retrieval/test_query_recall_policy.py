@@ -1,15 +1,29 @@
 from pathlib import Path
 
+from retrieval.candidate_items import candidate_item
 from retrieval.query_pipeline import run_query_v2
+from retrieval.lexical_analyzer import identifier_phrase_tokens
+from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_recall_policy import (
     MAX_ADAPTIVE_SCORE_RATIO,
     PASSAGE_PROBE_LIMIT,
     PASSAGE_SCAN_LIMIT,
     adaptive_expand,
     classify_intent,
+    fts_ranked_evidence,
     merge_coverage_items,
+    merge_weak_primary_raw,
+    page_coverage_terms,
+    primary_fill_is_strong,
+    raw_recovery_candidates,
+    relaxed_fill_is_strong,
+    should_augment_raw_phrase_cooccur,
     uncovered_latin_terms,
+    union_passage_hits_by_id,
+    _title_token_overlap_is_strong,
 )
+from retrieval.query_snapshot import QueryCorpusSnapshot
+from types import SimpleNamespace
 from retrieval.query_shared import QueryFilters
 from retrieval.retrieval_index import PassageHit, RetrievalIndexStore
 from runtime.runtime_config import EmbeddingSettings
@@ -428,6 +442,183 @@ def test_coverage_fusion_uses_effective_rrf_k() -> None:
     assert small_second["score"] != large_second["score"]
 
 
+def test_merge_coverage_items_prefers_high_coverage_raw_over_padding_wiki() -> None:
+    wiki = candidate_item(
+        PassageHit(
+            passage_id="w1",
+            page_path="wiki/concepts/n-search.md",
+            title="N/search",
+            heading_path=(),
+            text="unauthenticated client module search APIs only",  # 2/3 uncovered; tips old formula to wiki
+            score=80.0,
+            corpus="active",
+            authority="formal",
+            source_kind="wiki",
+            ordinal=0,
+        ),
+        score=80.0,
+    )
+    raw = candidate_item(
+        PassageHit(
+            passage_id="r1",
+            page_path="raw/sources/file/Help/Nsearch Module.md",
+            title="N/search Module",
+            heading_path=(),
+            text="unauthenticated client-side contexts are not supported",
+            score=5.0,
+            corpus="raw",
+            authority="",
+            source_kind="raw",
+            ordinal=0,
+        ),
+        score=5.0,
+    )
+    merged = merge_coverage_items(
+        [wiki],
+        [raw],
+        uncovered_terms=["unauthenticated", "client", "contexts"],
+        rrf_k=10,
+    )
+    assert merged, "expected fused rows"
+    assert merged[0]["hit"].source_kind == "raw"
+    assert merged[0]["coverage_ratio"] == 1.0
+
+
+def _raw_hit(
+    path: str,
+    *,
+    passage_id: str,
+    title: str,
+    text: str,
+    ordinal: int,
+    score: float,
+) -> dict:
+    return candidate_item(
+        PassageHit(
+            passage_id=passage_id,
+            page_path=path,
+            title=title,
+            heading_path=(),
+            text=text,
+            score=score,
+            corpus="raw",
+            authority="",
+            source_kind="raw",
+            ordinal=ordinal,
+        ),
+        score=score,
+        fts_rank=ordinal + 1,
+    )
+
+
+PAGE_NSEARCH = "raw/sources/file/NetSuite Help Docs/41_Nsearch Module/Nsearch Module.md"
+
+
+def test_page_coverage_terms_unions_sibling_passages() -> None:
+    best_junk = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-junk",
+        title="N/search Module",
+        text="/ docs . oracle . com / en / cloud / table junk",
+        ordinal=0,
+        score=50.0,
+    )
+    sibling = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-limit",
+        title="N/search Module",
+        text="unsupported in unauthenticated client-side contexts",
+        ordinal=3,
+        score=5.0,
+    )
+    uncovered = ["unauthenticated", "side", "contexts"]
+    assert page_coverage_terms([best_junk], uncovered) == set()
+    assert page_coverage_terms([best_junk, sibling], uncovered) == {
+        "unauthenticated",
+        "side",
+        "contexts",
+    }
+
+
+def test_merge_coverage_admits_raw_when_sibling_passage_covers_uncovered() -> None:
+    """Best ordinal misses uncovered; sibling on same page hits -> page admitted."""
+    best_junk = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-junk",
+        title="N/search Module",
+        text="/ docs . oracle . com / en / cloud / table junk",
+        ordinal=0,
+        score=50.0,
+    )
+    sibling = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-limit",
+        title="N/search Module",
+        text="unsupported in unauthenticated client-side contexts",
+        ordinal=3,
+        score=5.0,
+    )
+    uncovered = ["unauthenticated", "side", "contexts"]
+    merged = merge_coverage_items([], [best_junk, sibling], uncovered, rrf_k=10)
+    assert len(merged) == 1
+    assert merged[0]["hit"].page_path == PAGE_NSEARCH
+    # Display carrier remains page-best (higher score), not the sibling
+    assert merged[0]["hit"].passage_id == "p-junk"
+    assert merged[0]["coverage_ratio"] == 1.0
+    assert set(merged[0]["coverage_terms"]) == set(uncovered)
+
+
+def test_merge_coverage_still_filters_raw_when_no_passage_covers() -> None:
+    only_junk = _raw_hit(
+        PAGE_NSEARCH,
+        passage_id="p-junk",
+        title="N/search Module",
+        text="/ docs . oracle . com / en / cloud / table junk",
+        ordinal=0,
+        score=50.0,
+    )
+    merged = merge_coverage_items(
+        [], [only_junk], ["unauthenticated", "contexts"], rrf_k=10
+    )
+    assert merged == []
+
+
+def test_v2_coverage_merge_surfaces_raw_help_doc(tmp_path: Path) -> None:
+    """0015-shaped: strong-ish wiki covers search/module; raw Help fills uncovered Latin."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/n-search.md",
+        "N/search",
+        "module search APIs only",
+        type="concept",
+    )
+    raw = (
+        root
+        / "raw/sources/file/NetSuite Help Docs"
+        / "Nsearch Module.md"
+    )
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# N/search Module\n\n"
+        "unauthenticated client-side contexts are not supported for the N/search module.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "unauthenticated client-side contexts N/search module",
+        scope="knowledge",
+        retrieval_mode="lexical",
+        top_k=10,
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert any(path.startswith("raw/") for path in paths), paths
+    assert result["pipeline"]["coverage"]["triggered"] is True
+
+
 def test_v2_raw_fallback_uses_raw_documents_after_formal_miss(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -595,7 +786,7 @@ def test_v2_wiki_relaxed_answer_blocks_raw_fallback(tmp_path: Path) -> None:
 
     result = run_query_v2(
         root,
-        "NetSuite 的 Location List/Record 字段 selectrecordtype 数字 ID 是多少？",
+        "NetSuite 的 Location 字段 selectrecordtype 数字 ID 是多少？",
         retrieval_mode="lexical",
     )
 
@@ -605,6 +796,529 @@ def test_v2_wiki_relaxed_answer_blocks_raw_fallback(tmp_path: Path) -> None:
     assert result["pipeline"]["lexical"]["mode"] == "relaxed"
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
     assert result["pipeline"]["counters"]["relaxed_fts_hits"] > 0
+
+
+
+def test_relaxed_fill_is_strong_detects_title_phrase_and_identifier() -> None:
+    weak_hit = PassageHit(
+        passage_id="p-weak",
+        page_path="wiki/concepts/noise.md",
+        title="杂谈",
+        heading_path=(),
+        text="治理 单位 列表 摩擦 owner 模块 深度",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    title_hit = PassageHit(
+        passage_id="p-title",
+        page_path="wiki/concepts/location.md",
+        title="Location overview",
+        heading_path=(),
+        text="unrelated body noise only",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    phrase_hit = PassageHit(
+        passage_id="p-phrase",
+        page_path="wiki/concepts/connector.md",
+        title="misc",
+        heading_path=(),
+        text="Configure the NetSuite AI Connector before enabling MCP tools.",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    ident_hit = PassageHit(
+        passage_id="p-ident",
+        page_path="wiki/concepts/n-record.md",
+        title="record helpers",
+        heading_path=(),
+        text="Use N/record create and load for standard records.",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+
+    assert not relaxed_fill_is_strong(
+        "架构深化 技术债 剩余摩擦 owner 模块",
+        [{"hit": weak_hit}],
+    )
+    assert relaxed_fill_is_strong(
+        "NetSuite 的 Location 字段 selectrecordtype 数字 ID 是多少？",
+        [{"hit": title_hit}],
+    )
+    assert relaxed_fill_is_strong(
+        "配置 NetSuite AI Connector 需要哪些权限",
+        [{"hit": phrase_hit}],
+    )
+    assert relaxed_fill_is_strong(
+        "n/record模块有哪些方法",
+        [{"hit": ident_hit}],
+    )
+    assert not relaxed_fill_is_strong("anything", [])
+
+    fuzzy_hit = PassageHit(
+        passage_id="p-fuzzy",
+        page_path="wiki/concepts/chatbot-guide.md",
+        title="NetSuite ChatBot Guide",
+        heading_path=(),
+        text="Suitelet page script notes.",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    assert relaxed_fill_is_strong(
+        "我想写一个llm chatbox的sl页面脚本",
+        [{"hit": fuzzy_hit}],
+    )
+    # Body-only expansion alias must stay weak (title/path evidence only).
+    assert not relaxed_fill_is_strong(
+        "sl 页面脚本",
+        [{"hit": fuzzy_hit}],
+        extra_terms=["suitelet"],
+    )
+    suitelet_hit = PassageHit(
+        passage_id="p-suitelet",
+        page_path="wiki/concepts/suitelet-guide.md",
+        title="Suitelet Guide",
+        heading_path=(),
+        text="unrelated body without the expansion cue",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    assert relaxed_fill_is_strong(
+        "sl 页面脚本",
+        [{"hit": suitelet_hit}],
+        extra_terms=["suitelet"],
+    )
+
+
+def test_v2_weak_wiki_relaxed_abstains_and_allows_raw_zero(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # Wiki pages share only loose OR tokens with the query — no identifier/title hit
+    _write(
+        root,
+        "wiki/concepts/noise-a.md",
+        "杂谈",
+        "治理 单位 列表 摩擦 owner 模块 深度",
+        type="concept",
+    )
+    _write(
+        root,
+        "wiki/concepts/noise-b.md",
+        "随笔",
+        "架构 剩余 技术债 思考 guide",
+        type="concept",
+    )
+    raw = root / "raw/sources/references/architecture-debt.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# 架构深化 技术债\n\nowner 模块 剩余摩擦 权威说明。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    # Query with no N/… and no multiword English identifier phrase;
+    # strict misses; relaxed would only OR-match noise; raw has topical doc.
+    result = run_query_v2(
+        root,
+        "架构深化 技术债 剩余摩擦 owner 模块",
+        scope="knowledge",
+        retrieval_mode="lexical",
+    )
+    # After weak abstain, either empty (if raw unavailable in fixture path)
+    # or raw_zero filled — never the noise-only wiki pages as a fake answer.
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/noise-a.md" not in paths
+    assert "wiki/concepts/noise-b.md" not in paths
+    assert result["pipeline"]["counters"]["fts_hits"] == 0
+    assert paths, "expected raw_zero fill after weak abstain"
+    assert paths[0].startswith("raw/")
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+
+
+
+def test_primary_fill_is_strong_uses_qualified_hits_and_relaxed_signals() -> None:
+    weak_hit = PassageHit(
+        passage_id="p-weak",
+        page_path="wiki/concepts/noise.md",
+        title="杂谈笔记",
+        heading_path=(),
+        text="mcp 部署 standard 权限 tools 勾选 server 说明 suitescript guide 安装清单",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    title_hit = PassageHit(
+        passage_id="p-title",
+        page_path="wiki/concepts/suitescript-guide.md",
+        title="SuiteScript Guide",
+        heading_path=(),
+        text="unrelated body noise only",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    question = "MCP Standard Tools 安装清单 Server SuiteScript"
+    assert not primary_fill_is_strong(question, [])
+    assert not primary_fill_is_strong(question, [{"hit": weak_hit}])
+    assert primary_fill_is_strong(
+        question, [{"hit": weak_hit}], qualified_fts_hits=1
+    )
+    assert primary_fill_is_strong(question, [{"hit": title_hit}])
+
+
+
+
+def test_primary_fill_is_strong_ignores_body_only_phrase() -> None:
+    body_phrase_hit = PassageHit(
+        passage_id="p-body",
+        page_path="wiki/concepts/noise.md",
+        title="杂谈笔记",
+        heading_path=(),
+        text="see Custom Record Type Object Custom Fields in passing",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    title_phrase_hit = PassageHit(
+        passage_id="p-title",
+        page_path="wiki/concepts/custom-fields.md",
+        title="Custom Record Type Object Custom Fields",
+        heading_path=(),
+        text="unrelated",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    q = "Custom Record Type Object Custom Fields"
+    assert not primary_fill_is_strong(q, [{"hit": body_phrase_hit}])
+    assert primary_fill_is_strong(q, [{"hit": title_phrase_hit}])
+    # relaxed path still treats body phrase as strong (P0 default)
+    assert relaxed_fill_is_strong(q, [{"hit": body_phrase_hit}])
+
+
+def test_title_token_overlap_strong_formula() -> None:
+    assert not _title_token_overlap_is_strong({"record"}, body_evidence=False)
+    assert _title_token_overlap_is_strong({"record", "type"}, body_evidence=False)
+    assert _title_token_overlap_is_strong({"suitescript"}, body_evidence=False)
+    assert _title_token_overlap_is_strong({"record"}, body_evidence=True)
+
+
+def test_primary_fill_is_strong_rejects_single_generic_title_token() -> None:
+    """0018: N/record 模块 ∩ Custom Record… → {record} must not be primary-strong."""
+    hit = PassageHit(
+        passage_id="p-n-record",
+        page_path="wiki/concepts/netsuite-ss-modules/n-record.md",
+        title="N/record 模块",
+        heading_path=(),
+        text="unrelated body noise only",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    q = "Custom Record Type Object Custom Fields"
+    assert not primary_fill_is_strong(q, [{"hit": hit}])
+    # relaxed path unchanged: single title-token overlap still strong
+    assert relaxed_fill_is_strong(q, [{"hit": hit}])
+
+
+def test_primary_fill_is_strong_accepts_multi_generic_title_token_overlap() -> None:
+    """All-generic overlap with |ov|≥2 stays primary-strong (approved exception)."""
+    hit = PassageHit(
+        passage_id="p-record-type",
+        page_path="wiki/concepts/record-type.md",
+        title="Record Type helpers",
+        heading_path=(),
+        text="unrelated body noise only",
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    # tokens(title) ⊇ {record, type, helpers}; ∩ query → {record, type} (|ov|=2)
+    q = "Custom Record Type Object Custom Fields"
+    assert primary_fill_is_strong(q, [{"hit": hit}])
+
+
+def _passage_hit(path: str, title: str, text: str = "unrelated body noise only") -> PassageHit:
+    return PassageHit(
+        passage_id=f"p-{path}",
+        page_path=path,
+        title=title,
+        heading_path=(),
+        text=text,
+        score=1.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+
+
+def test_fts_ranked_evidence_keeps_only_fts_rank() -> None:
+    fts = candidate_item(
+        _passage_hit("wiki/concepts/netsuite-ss-modules/n-record.md", "N/record 模块"),
+        score=1.0,
+        fts_rank=2,
+    )
+    title_only = candidate_item(
+        _passage_hit(
+            "wiki/concepts/script-types/Custom-Tool-Script.md",
+            "SuiteScript 2.1 脚本类型：Custom Tool Script",
+        ),
+        score=0.5,
+        title_rank=9,
+    )
+    graphish = candidate_item(
+        _passage_hit("wiki/other.md", "Other"),
+        score=0.1,
+        # fts_rank left None — not FTS evidence
+    )
+    out = fts_ranked_evidence([fts, title_only, graphish])
+    assert out == [fts]
+    assert fts_ranked_evidence([]) == []
+    # is not None: fts_rank=0 must be kept (truthiness would wrongly drop it)
+    zero = candidate_item(
+        _passage_hit("wiki/concepts/zero.md", "Zero"),
+        score=1.0,
+        fts_rank=0,
+    )
+    assert fts_ranked_evidence([zero, title_only]) == [zero]
+
+
+def test_primary_strong_evidence_ignores_title_only_custom_token() -> None:
+    """0018 residual: title-candidate {custom} must not make primary strong
+    when FTS slice is only weak {record}.
+    """
+    fts_weak = candidate_item(
+        _passage_hit("wiki/concepts/netsuite-ss-modules/n-record.md", "N/record 模块"),
+        score=1.0,
+        fts_rank=2,
+    )
+    title_custom = candidate_item(
+        _passage_hit(
+            "wiki/concepts/script-types/Custom-Tool-Script.md",
+            "SuiteScript 2.1 脚本类型：Custom Tool Script",
+        ),
+        score=0.5,
+        title_rank=9,
+    )
+    q = "Custom Record Type Object Custom Fields"
+    # Alone-strong lock: title-only {custom} is still "strong" as a page today
+    # (custom ∉ GENERIC); call site must not pass it as primary-strong evidence.
+    assert primary_fill_is_strong(q, [title_custom])
+    assert not primary_fill_is_strong(q, fts_ranked_evidence([fts_weak, title_custom]))
+    # FTS non-generic still strong even if title-only noise is in the seed
+    suitescript = candidate_item(
+        _passage_hit("wiki/guides/suitescript.md", "SuiteScript Guide"),
+        score=1.0,
+        fts_rank=1,
+    )
+    assert primary_fill_is_strong(
+        "How does SuiteScript work?", fts_ranked_evidence([suitescript, title_custom])
+    )
+
+
+def test_v2_body_only_primary_phrase_allows_raw_zero(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/noise-primary.md",
+        "杂谈笔记",
+        "see Custom Record Type Object Custom Fields mentioned once",
+        type="concept",
+    )
+    raw = (
+        root
+        / "raw/sources/file/NetSuite Help Docs"
+        / "Custom Record Type Object Custom Fields.md"
+    )
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# Custom Record Type Object Custom Fields\n\n"
+        "SDF customrecordcustomfields XML example and role limits.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+    result = run_query_v2(
+        root,
+        '"Custom Record Type Object Custom Fields"',
+        scope="knowledge",
+        retrieval_mode="lexical",
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert any(path.startswith("raw/") for path in paths), paths
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert "wiki_weak_primary" in result["pipeline"]["fallback"]["reasons"]
+
+
+def test_v2_weak_primary_allows_capped_raw_zero(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # Strict AND hits via scattered Latin tokens + contiguous CJK; no title /
+    # identifier-phrase overlap so primary_fill_is_strong stays false. All
+    # Latin query terms appear in the wiki body so coverage does not schedule.
+    _write(
+        root,
+        "wiki/concepts/noise-primary.md",
+        "杂谈笔记",
+        "mcp 部署 standard 权限 tools 勾选 server 说明 suitescript guide 安装清单",
+        type="concept",
+    )
+    raw = root / "raw/sources/references/mcp-install-checklist.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# MCP Standard Tools 安装清单\n\n"
+        "Server SuiteScript 与 REST Web Services 勾选后安装 MCP Standard Tools。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "MCP Standard Tools 安装清单 Server SuiteScript",
+        scope="knowledge",
+        retrieval_mode="lexical",
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert paths, "expected results"
+    # Merge path: raw must enter the pool; wiki may remain (not wholesale replace).
+    assert any(path.startswith("raw/") for path in paths), paths
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert "wiki_weak_primary" in result["pipeline"]["fallback"]["reasons"]
+    assert result["pipeline"]["counters"]["fts_hits"] > 0
+
+
+
+
+def test_v2_weak_primary_raw_merge_keeps_wiki(tmp_path: Path) -> None:
+    """Weak primary + raw must MERGE: wiki paths stay when raw also fills."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/noise-primary.md",
+        "杂谈笔记",
+        "mcp 部署 standard 权限 tools 勾选 server 说明 suitescript guide 安装清单",
+        type="concept",
+    )
+    raw = root / "raw/sources/references/mcp-install-checklist.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# MCP Standard Tools 安装清单\n\n"
+        "Server SuiteScript 与 REST Web Services 勾选后安装 MCP Standard Tools。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "MCP Standard Tools 安装清单 Server SuiteScript",
+        scope="knowledge",
+        retrieval_mode="lexical",
+        top_k=10,
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert paths, "expected results"
+    assert any(path.startswith("wiki/") for path in paths), paths
+    assert any(path.startswith("raw/") for path in paths), paths
+    assert "wiki_weak_primary" in result["pipeline"]["fallback"]["reasons"]
+
+
+def test_merge_weak_primary_raw_keeps_wiki_and_caps_raw() -> None:
+    wiki_hit = PassageHit(
+        passage_id="p-wiki",
+        page_path="wiki/concepts/noise-primary.md",
+        title="杂谈笔记",
+        heading_path=(),
+        text="mcp standard tools server suitescript",
+        score=12.0,
+        corpus="active",
+        authority="",
+        source_kind="wiki",
+        ordinal=0,
+    )
+    raw_hit = PassageHit(
+        passage_id="p-raw",
+        page_path="raw/sources/references/mcp-install-checklist.md",
+        title="MCP Standard Tools 安装清单",
+        heading_path=(),
+        text="Server SuiteScript checklist",
+        score=40.0,
+        corpus="raw",
+        authority="",
+        source_kind="raw",
+        ordinal=0,
+    )
+    merged = merge_weak_primary_raw(
+        [{"hit": wiki_hit, "score": 12.0}],
+        [{"hit": raw_hit, "score": 40.0}],
+        raw_cap=20,
+    )
+    paths = [item["hit"].page_path for item in merged]
+    assert "wiki/concepts/noise-primary.md" in paths
+    assert "raw/sources/references/mcp-install-checklist.md" in paths
+
+
+def test_v2_strong_primary_still_blocks_raw_zero(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/suitescript-guide.md",
+        "SuiteScript Guide",
+        "Server SuiteScript notes for MCP Standard Tools install checklist.",
+        type="concept",
+    )
+    raw = root / "raw/sources/references/mcp-install-checklist.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "# MCP Standard Tools 安装清单\n\n"
+        "Server SuiteScript 与 REST Web Services 勾选后安装 MCP Standard Tools。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "MCP Standard Tools 安装清单 Server SuiteScript",
+        scope="knowledge",
+        retrieval_mode="lexical",
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert paths, "expected results"
+    assert paths[0].startswith("wiki/"), paths
+    assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
+    assert result["pipeline"]["fallback"]["level"] != "raw"
 
 
 def test_v2_raw_fallback_combines_identifier_phrase_docs_above_bigram_noise(
@@ -922,10 +1636,12 @@ def test_v2_raw_index_unavailable_yields_structured_warning(tmp_path: Path) -> N
 def test_v2_raw_fallback_respects_project_and_type_filters(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
-    alpha = root / "raw" / "sources" / "file" / "alpha" / "manual" / "a.txt"
+    # Project filtering applies to ingest snapshots under raw/sources/projects/.
+    # Vendor file trees (raw/sources/file/) intentionally leave project empty.
+    alpha = root / "raw" / "sources" / "projects" / "alpha" / "manual" / "a.txt"
     alpha.parent.mkdir(parents=True, exist_ok=True)
     alpha.write_text("unique raw retrieval needle alpha", encoding="utf-8")
-    beta = root / "raw" / "sources" / "file" / "beta" / "manual" / "b.txt"
+    beta = root / "raw" / "sources" / "projects" / "beta" / "manual" / "b.txt"
     beta.parent.mkdir(parents=True, exist_ok=True)
     beta.write_text("unique raw retrieval needle beta", encoding="utf-8")
     refresh_indexes(root)
@@ -947,7 +1663,162 @@ def test_v2_raw_fallback_respects_project_and_type_filters(tmp_path: Path) -> No
     )
 
     assert [item["path"] for item in scoped["results"]] == [
-        "raw/sources/file/alpha/manual/a.txt"
+        "raw/sources/projects/alpha/manual/a.txt"
     ]
     assert len(raw_type["results"]) == 2
     assert other_type["results"] == []
+
+
+def _cooccur_hit(pid: str, path: str, title: str, text: str, score: float) -> PassageHit:
+    return PassageHit(
+        passage_id=pid,
+        page_path=path,
+        title=title,
+        heading_path=(),
+        text=text,
+        score=score,
+        corpus="raw",
+        authority="",
+        source_kind="raw",
+        ordinal=0,
+    )
+
+
+def test_should_augment_raw_phrase_cooccur_for_multiword_entity() -> None:
+    q = "email capture plug-in implementation"
+    assert len(identifier_phrase_tokens(q)) >= 2
+    assert should_augment_raw_phrase_cooccur(q) is True
+    assert should_augment_raw_phrase_cooccur("N/record") is False
+    assert should_augment_raw_phrase_cooccur("plugin") is False
+
+
+def test_union_passage_hits_by_id_keeps_higher_score_and_adds_missing() -> None:
+    primary = [
+        _cooccur_hit("a", "raw/a.md", "Enable Plug-in", "plugin enable", 10.0),
+        _cooccur_hit("b", "raw/b.md", "Custom Plug-in", "generic", 8.0),
+    ]
+    secondary = [
+        _cooccur_hit("b", "raw/b.md", "Custom Plug-in", "generic", 9.5),
+        _cooccur_hit(
+            "g",
+            "raw/Developing an Email Capture Plug-in Implementation.md",
+            "Developing an Email Capture Plug-in Implementation",
+            "process(email) capture",
+            7.0,
+        ),
+    ]
+    merged = union_passage_hits_by_id(primary, secondary)
+    by_id = {h.passage_id: h for h in merged}
+    assert set(by_id) == {"a", "b", "g"}
+    assert by_id["b"].score == 9.5
+    assert "Email Capture" in by_id["g"].title
+
+
+def test_union_passage_hits_by_id_fail_open_on_empty_secondary() -> None:
+    primary = [_cooccur_hit("a", "raw/a.md", "A", "a", 1.0)]
+    assert [h.passage_id for h in union_passage_hits_by_id(primary, [])] == ["a"]
+
+
+def test_raw_recovery_merges_phrase_cooccur_when_qualified_code_filled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """plug-in QI fills qualified_code; gold only arrives via identifier_phrase union."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    noise = root / "raw/sources/noise/custom-plugin.md"
+    noise.parent.mkdir(parents=True, exist_ok=True)
+    noise.write_text(
+        "# Custom Plug-in Implementation\n\nGeneric plug-in implementation sample.\n",
+        encoding="utf-8",
+    )
+    gold_rel = (
+        "raw/sources/ecp/Developing an Email Capture Plug-in Implementation.md"
+    )
+    gold = root / gold_rel
+    gold.parent.mkdir(parents=True, exist_ok=True)
+    gold.write_text(
+        "# Developing an Email Capture Plug-in Implementation\n\n"
+        "Use process(email) to capture inbound messages during implementation.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    raw_store = RetrievalIndexStore(root, scope="raw")
+    noise_hit = next(
+        h for h in raw_store.search_fts("plug-in", limit=20, mode="relaxed")
+        if "custom-plugin" in h.page_path
+    )
+
+    import retrieval.query_recall_policy as policy
+
+    def fake_ladder(store, *, steps, merge, limit, swallow_index_errors=True):
+        return [noise_hit], "qualified_code"
+
+    monkeypatch.setattr(policy, "search_ladder", fake_ladder)
+
+    cancel = QueryCancellationContext.unbounded()
+    snap = QueryCorpusSnapshot.capture(raw_store, cancellation=cancel)
+    req = SimpleNamespace(
+        question="email capture plug-in implementation",
+        project=None,
+        filters=QueryFilters(),
+        top_k=10,
+    )
+    _, items, _, _, mode = raw_recovery_candidates(
+        raw_store,
+        req,
+        snapshot=snap,
+        raw_availability="fresh",
+        cancellation=cancel,
+    )
+    paths = {item["hit"].page_path for item in items}
+    assert mode == "qualified_code"
+    assert any("Email Capture" in path for path in paths), paths
+    assert any("custom-plugin" in path for path in paths)
+
+
+def test_raw_recovery_phrase_cooccur_fail_open_when_phrase_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    noise = root / "raw/sources/noise/custom-plugin.md"
+    noise.parent.mkdir(parents=True, exist_ok=True)
+    noise.write_text(
+        "# Custom Plug-in Implementation\n\nGeneric plug-in implementation sample.\n",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+    raw_store = RetrievalIndexStore(root, scope="raw")
+    noise_hit = raw_store.search_fts("plug-in", limit=5, mode="relaxed")[0]
+
+    import retrieval.query_recall_policy as policy
+
+    def fake_ladder(store, *, steps, merge, limit, swallow_index_errors=True):
+        return [noise_hit], "qualified_code"
+
+    def fake_search_fts(self, question, *, limit, mode="strict", **kwargs):
+        if mode == "identifier_phrase":
+            return []
+        raise AssertionError(f"unexpected mode {mode}")
+
+    monkeypatch.setattr(policy, "search_ladder", fake_ladder)
+    monkeypatch.setattr(RetrievalIndexStore, "search_fts", fake_search_fts)
+
+    cancel = QueryCancellationContext.unbounded()
+    snap = QueryCorpusSnapshot.capture(raw_store, cancellation=cancel)
+    req = SimpleNamespace(
+        question="email capture plug-in implementation",
+        project=None,
+        filters=QueryFilters(),
+        top_k=10,
+    )
+    _, items, _, _, mode = raw_recovery_candidates(
+        raw_store,
+        req,
+        snapshot=snap,
+        raw_availability="fresh",
+        cancellation=cancel,
+    )
+    assert mode == "qualified_code"
+    assert [item["hit"].passage_id for item in items] == [noise_hit.passage_id]

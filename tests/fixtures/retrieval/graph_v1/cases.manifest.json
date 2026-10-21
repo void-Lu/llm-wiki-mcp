@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "dataset_id": "ci-graph-retrieval-fixture",
+  "revision": "2026-09-29.1",
+  "status": "synthetic_ci_fixture",
+  "abstention_threshold": 0.5,
+  "case_count": 52,
+  "answerable_count": 48,
+  "no_answer_count": 4,
+  "graph_case_count": 31,
+  "direct_case_count": 17,
+  "label_type": "synthetic_active_wiki_page",
+  "scope": "knowledge"
+}

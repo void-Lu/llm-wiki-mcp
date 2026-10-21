@@ -182,6 +182,7 @@ def test_wiki_status_does_not_materialize_query_registry(monkeypatch: pytest.Mon
     registry, _ = _registry(tmp_path)
     monkeypatch.setattr(server_module, "CONFIG_REGISTRY", registry)
     monkeypatch.setattr(server_module, "_QUERY_REGISTRIES", {})
+    monkeypatch.delenv("LLM_WIKI_RRF_WEIGHTS", raising=False)
     monkeypatch.setattr(
         server_module,
         "wiki_status_tool",
@@ -198,6 +199,7 @@ def test_wiki_status_does_not_materialize_query_registry(monkeypatch: pytest.Mon
     result = server_module.wiki_status(vault="primary")
 
     assert result["query_execution"] == {"active": 0, "pending": 0}
+    assert result["config"]["retrieval"]["ranking"]["rrf_weight_sources"] == {"fts": "default", "title": "default", "vector": "default"}
     assert server_module._QUERY_REGISTRIES == {}
 
 
@@ -564,6 +566,7 @@ def test_write_and_update_schemas_expose_related_page_arguments() -> None:
             write_properties = tools["wiki_write_note"].input_schema["properties"]
             update_properties = tools["wiki_update"].input_schema["properties"]
             assert set(write_properties) == {
+                "aliases",
                 "chat_derived",
                 "chat_metadata",
                 "chat_sources",
@@ -573,6 +576,7 @@ def test_write_and_update_schemas_expose_related_page_arguments() -> None:
                 "noteType",
                 "note_type",
                 "project",
+                "questions",
                 "related_pages",
                 "related_pages_heading",
                 "sources",
@@ -584,7 +588,57 @@ def test_write_and_update_schemas_expose_related_page_arguments() -> None:
             }
             assert tools["wiki_write_note"].input_schema["required"] == ["title", "content"]
             assert {"related_pages", "sources"} <= set(write_properties)
+            assert "aliases" not in tools["wiki_write_note"].input_schema["required"]
+            assert "questions" not in tools["wiki_write_note"].input_schema["required"]
             assert "related_pages" in update_properties
+
+    anyio.run(assert_schema)
+
+
+def test_mcp_tool_schemas_strip_json_schema_title_annotations() -> None:
+    """SuiteCloud DA 204s on parameters.title annotations; keep real title params."""
+
+    def count_annotation_titles(node: object, *, under_properties: bool = False) -> tuple[int, int]:
+        annotations = 0
+        property_titles = 0
+        if isinstance(node, list):
+            for item in node:
+                a, p = count_annotation_titles(item, under_properties=under_properties)
+                annotations += a
+                property_titles += p
+            return annotations, property_titles
+        if not isinstance(node, dict):
+            return 0, 0
+        for key, value in node.items():
+            if key == 'title':
+                if under_properties:
+                    property_titles += 1
+                    a, p = count_annotation_titles(value, under_properties=False)
+                    annotations += a
+                    property_titles += p
+                else:
+                    annotations += 1
+                continue
+            a, p = count_annotation_titles(value, under_properties=(key == 'properties'))
+            annotations += a
+            property_titles += p
+        return annotations, property_titles
+
+    async def assert_schema() -> None:
+        async with Client(mcp) as client:
+            tools = {item.name: item for item in (await client.list_tools()).tools}
+            write_schema = tools['wiki_write_note'].input_schema
+            assert 'title' not in write_schema
+            assert write_schema['properties']['title'] == {'type': 'string'}
+            assert write_schema['required'] == ['title', 'content']
+            annotations, property_titles = count_annotation_titles(write_schema)
+            assert annotations == 0
+            assert property_titles == 1
+            for name, tool in tools.items():
+                schema = tool.input_schema
+                ann, _ = count_annotation_titles(schema)
+                assert ann == 0, f'{name} still has annotation titles'
+                assert 'title' not in schema
 
     anyio.run(assert_schema)
 
@@ -867,3 +921,29 @@ def test_update_forwards_related_pages(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert result == {"ok": True}
     assert calls["related_pages"] == related_pages
     assert calls["args"] == (root, "wiki/concepts/page.md", "Body", None)
+
+
+def test_query_passes_rrf_weights_with_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from runtime.runtime_config import RRF_WEIGHTS_ENV, RrfWeights
+
+    registry, vault_root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    captured: dict[str, object] = {}
+
+    def fake_run_query(root: Path, question: str, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"ok": True, "question": question, "results": []}
+
+    monkeypatch.setattr("app.server.run_query_v2", fake_run_query)
+    monkeypatch.delenv(RRF_WEIGHTS_ENV, raising=False)
+    assert wiki_query(question="invoice", vault_root=str(vault_root))["ok"] is True
+    assert captured["rrf_weights"] == RrfWeights()
+
+    monkeypatch.setenv(RRF_WEIGHTS_ENV, "vector=0.5")
+    assert wiki_query(question="invoice", vault_root=str(vault_root))["ok"] is True
+    assert captured["rrf_weights"] == RrfWeights(vector=0.5)
+
+    monkeypatch.setenv(RRF_WEIGHTS_ENV, "vector=lots")
+    rejected = wiki_query(question="invoice", vault_root=str(vault_root))
+    assert rejected["ok"] is False
+    assert rejected["code"] == "invalid_config"

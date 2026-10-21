@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -91,6 +91,11 @@ class QueryRequestView:
     lexical_enabled: bool = True
     include_context_pack: bool = True
     debug: bool = False
+    # Small-to-Big parent expansion before pack_context (citation stays on hit).
+    expand_parents: bool = True
+    parent_window: int = 1
+    same_heading_only: bool = False
+    dump_citation_trace: bool = False
 
     def __post_init__(self) -> None:
         # Freeze the view boundary while preserving list-valued frontmatter
@@ -158,6 +163,11 @@ class QueryExecutionContext:
     snapshot: QueryCorpusSnapshot | None = field(default=None, repr=False)
     seed_lexical_mode: str = field(default="strict", repr=False)
     seed_has_primary_recall: bool = field(default=False, repr=False)
+    seed_qualified_fts_hits: int = field(default=0, repr=False)
+    # Adds bounded graph evidence to a scored candidate list in place.  The
+    # engine supplies it so relaxed Wiki recovery reuses the seed stage's
+    # snapshot, filters and caps; ``None`` keeps recovery lexical-only.
+    graph_expander: Callable[[list[dict[str, Any]]], None] | None = field(default=None, repr=False)
     raw_store: RetrievalIndexStore | None = field(default=None, init=False)
     raw_snapshot: QueryCorpusSnapshot | None = field(default=None, init=False)
     selected: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -286,11 +296,13 @@ class QueryExecutionContext:
                 uncovered_latin_terms,
                 rrf_k=request_view.effective_rrf_k,
             )
-            covered_ids = {item["hit"].passage_id for item in covered_raw_items}
+            # Admit by page_path so sibling ordinals that fed page-union stay
+            # available for the second merge / pooling; display still page-best.
+            covered_paths = {item["hit"].page_path for item in covered_raw_items}
             raw_candidate_items = [
                 item
                 for item in raw_candidate_items
-                if item["hit"].passage_id in covered_ids
+                if item["hit"].page_path in covered_paths
             ]
         if not raw_candidate_items:
             self.selected = selected
@@ -315,11 +327,29 @@ class QueryExecutionContext:
                 item["hit"].source_kind == "raw" for item in selected
             )
         else:
-            selected = select_best_per_page(raw_candidate_items)
-            selected = recall_policy.adaptive_expand(selected, request_view.top_k)[
-                : request_view.top_k
-            ]
-            candidates = raw_candidate_items
+            # raw_zero: true wiki-zero stays raw_only replace; weak primary MERGES
+            # so useful wiki hits (e.g. gold still on wiki) are not wiped by raw.
+            weak_primary = (
+                bool(selected)
+                and "wiki_weak_primary" in plan.condition.reasons
+            )
+            if weak_primary:
+                merged = recall_policy.merge_weak_primary_raw(
+                    selected,
+                    raw_candidate_items,
+                    rrf_k=request_view.effective_rrf_k,
+                    raw_cap=recall_policy.RAW_FALLBACK_LIMIT,
+                )
+                selected = recall_policy.adaptive_expand(merged, request_view.top_k)[
+                    : request_view.top_k
+                ]
+                candidates = [*list(candidate_pool), *list(selected), *raw_candidate_items]
+            else:
+                selected = select_best_per_page(raw_candidate_items)
+                selected = recall_policy.adaptive_expand(selected, request_view.top_k)[
+                    : request_view.top_k
+                ]
+                candidates = raw_candidate_items
             lexical_mode = (
                 resolve_fallback_lexical_mode(
                     plan,
@@ -452,6 +482,7 @@ class QueryExecutionContext:
             wiki_relaxed_answered=False,
             raw_available="unknown",
             relaxed_available=False,
+            wiki_strong_answered=False,
         )
         coverage_plan = plan_fallback(coverage_state)
         if coverage_plan is not None and coverage_plan.branch == "coverage":
@@ -471,6 +502,7 @@ class QueryExecutionContext:
             wiki_relaxed_answered=False,
             raw_available="unknown",
             relaxed_available=True,
+            wiki_strong_answered=False,
         )
         relaxed_plan = plan_fallback(relaxed_state)
         if relaxed_plan is not None and relaxed_plan.branch == "wiki_relaxed":
@@ -524,6 +556,8 @@ class QueryExecutionContext:
                         freshness=True,
                         step_bonus=step_bonus(count),
                     )
+                if self.graph_expander is not None:
+                    self.graph_expander(wiki_relaxed_items)
                 wiki_relaxed_items.sort(
                     key=lambda item: (
                         -item["score"],
@@ -534,41 +568,64 @@ class QueryExecutionContext:
                 self.selected = recall_policy.adaptive_expand(
                     select_best_per_page(wiki_relaxed_items), request_view.top_k
                 )
-                self.recovery = assemble_recovery(
+                if not recall_policy.relaxed_fill_is_strong(
+                    request_view.question,
                     self.selected,
-                    condition=relaxed_plan.condition,
-                    candidates=wiki_relaxed_items,
-                    store=self.store,
-                    cancellation=self.cancellation,
-                )
-                self.context_items = self.recovery.context_items
-                self.lexical_mode = relaxed_plan.lexical_mode or self.lexical_mode
-                wiki_relaxed_answered = True
-                self.uncovered_latin_terms = recall_policy.uncovered_latin_terms(
-                    request_view.question, self.selected
-                )
-                all_coverage_state = FallbackState(
-                    has_primary_recall=self.seed_has_primary_recall,
-                    effective_scope=request_view.effective_scope,
-                    uncovered_latin_terms=tuple(self.uncovered_latin_terms),
-                    wiki_relaxed_answered=True,
-                    raw_available="unknown",
-                    relaxed_available=True,
-                )
-                all_coverage_plan = plan_fallback(all_coverage_state)
-                if (
-                    all_coverage_plan is not None
-                    and all_coverage_plan.branch == "all_coverage"
+                    extra_terms=query_extra_terms,
                 ):
-                    self.run_raw_branch(
-                        request_view,
-                        branch="all_coverage",
-                        extra_terms=query_extra_terms,
-                        term_variants=query_term_variants,
-                        candidate_pool=wiki_relaxed_items,
-                        plan=all_coverage_plan,
+                    # Weak OR/CJK-bigram noise only: true abstain so raw_zero may run.
+                    self.selected = []
+                    self.context_items = []
+                else:
+                    self.recovery = assemble_recovery(
+                        self.selected,
+                        condition=relaxed_plan.condition,
+                        candidates=wiki_relaxed_items,
+                        store=self.store,
+                        cancellation=self.cancellation,
                     )
+                    self.context_items = self.recovery.context_items
+                    self.lexical_mode = relaxed_plan.lexical_mode or self.lexical_mode
+                    wiki_relaxed_answered = True
+                    self.uncovered_latin_terms = recall_policy.uncovered_latin_terms(
+                        request_view.question, self.selected
+                    )
+                    all_coverage_state = FallbackState(
+                        has_primary_recall=self.seed_has_primary_recall,
+                        effective_scope=request_view.effective_scope,
+                        uncovered_latin_terms=tuple(self.uncovered_latin_terms),
+                        wiki_relaxed_answered=True,
+                        raw_available="unknown",
+                        relaxed_available=True,
+                        wiki_strong_answered=True,
+                    )
+                    all_coverage_plan = plan_fallback(all_coverage_state)
+                    if (
+                        all_coverage_plan is not None
+                        and all_coverage_plan.branch == "all_coverage"
+                    ):
+                        self.run_raw_branch(
+                            request_view,
+                            branch="all_coverage",
+                            extra_terms=query_extra_terms,
+                            term_variants=query_term_variants,
+                            candidate_pool=wiki_relaxed_items,
+                            plan=all_coverage_plan,
+                        )
 
+        primary_strong = (
+            self.seed_has_primary_recall
+            and recall_policy.primary_fill_is_strong(
+                request_view.question,
+                recall_policy.fts_ranked_evidence(self.seed_selected),
+                qualified_fts_hits=self.seed_qualified_fts_hits,
+            )
+        )
+        wiki_strong_answered = (
+            wiki_relaxed_answered
+            or primary_strong
+            or self.coverage_fallback
+        )
         raw_zero_state = FallbackState(
             has_primary_recall=self.seed_has_primary_recall,
             effective_scope=request_view.effective_scope,
@@ -576,6 +633,7 @@ class QueryExecutionContext:
             wiki_relaxed_answered=wiki_relaxed_answered,
             raw_available="unknown",
             relaxed_available=wiki_relaxed_answered,
+            wiki_strong_answered=wiki_strong_answered,
         )
         raw_zero_plan = plan_fallback(raw_zero_state)
         if raw_zero_plan is not None and raw_zero_plan.branch == "raw_zero":

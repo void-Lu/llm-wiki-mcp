@@ -1,5 +1,99 @@
 # 变更记录
 
+## 2026-10-20 — 检索 P2：raw 池多词实体共现 / 短语召回（0008）
+
+- 
+aw_recovery_candidates：问句含多词拉丁实体（identifier_phrase_tokens ≥ 2）时，在 ladder 结果上**并入**一次 identifier_phrase FTS（按 passage_id 取高分），避免 plug-in 等误触发的 qualified_code 挤掉 mail+capture 共现页。
+- 短语加分不再仅限 
+aw_lexical_mode == identifier_phrase；ladder 上报 mode 不变。
+- 二次检索空/失败 fail-open；不动 0015 page-union、0018 denylist / FTS-slice、刀2 公式、池内去重配额。
+
+## 2026-10-20 — 检索 P2：coverage 未覆盖拉丁词改为页级并集（0015）
+
+- `merge_coverage_items` 对 raw 是否盖住 uncovered latin：按同 `page_path` 全部候选 passage 的 token **并集**判定，不再只看 `select_best_per_page` 选中块。
+- 展示/融合载体仍用 page-best；刀2 `authority = 0.35 × coverage_ratio` 公式不变（ratio 用页级 covered）。
+- `raw_recovery_candidates` 向 coverage 传递多 ordinal FTS 命中（不再提前压成一页一条）；缺兄弟时行为与旧 passage 门一致。
+- 本刀不修 0008 池召回、不做刀3、不动 denylist / FTS strong-slice。
+
+## 2026-10-20 — 检索 P2：primary 强证据仅 FTS 切片（0018）
+
+- `primary_fill_is_strong` 只看 `fts_rank is not None` 的 seed；title-candidate / 仅 graph 页不能单独把 `wiki_strong` 拉真挡住 `raw_zero`。
+- 与 `has_primary_recall = bool(ranked)`（title merge 前）对齐；denylist / GENERIC / relaxed / 刀1 body 门不变。
+- 结果里仍可保留 title/graph 页；本刀不加 `custom` 等泛化词。
+
+## 2026-10-20 — 检索 P2：primary title-token 泛化 denylist（0018）
+
+- primary「强」的 title-token / ED-1 臂：去掉泛化词后至少 1 个实词，或重叠 ≥2 个 token（含全泛化多词例外）；单点 `{record}` 不再挡住 `raw_zero`。
+- **仅** `body_evidence=False`（primary）；relaxed 任意 title-token 重叠仍强。
+- 名单不全时加词、不改公式；不动 coverage / qualified 短路 / 刀1 body 门。
+
+## 2026-10-19 — 检索 P2：簇 C（primary 强信号收紧 / coverage 抬 raw）
+
+- primary「强」不再把仅 body 的 phrase/identifier 命中当作已回答；无 title/path 证据且无 qualified 时走既有弱 primary → 有限额 `raw_zero`（`wiki_weak_primary`）。
+- coverage 合并时：覆盖未覆盖拉丁词的 raw 页按覆盖比例获得与 wiki 同档的 authority 偏移（`0.35 × coverage_ratio`），便于 Help Docs 进入 top-k；wiki authority 公式不变。
+- 本轮不加粘连模块名别名、不加向量、不处理无答案强噪声；查询时生效，**无需**为 P2 重建索引。
+
+## 2026-10-19 — 检索 P1：弱 primary 探测 raw 升梯
+
+- 弱 primary（无 qualified / title / identifier / phrase 强信号）时可探测有限额的 `raw_zero`，reason 为 `wiki_weak_primary`。
+- **弱 primary 升 raw 时与现有 wiki 命中 RRF 合并**（`combined_active_raw`），不再整页 `raw_only` 替换，避免金标仍在 wiki 时被冲掉（如 0002）。真正 wiki 零结果仍 `raw_only`。
+- 强 relaxed / 强 primary / 成功的 coverage merge 仍阻止 raw-only 替换。
+- 本轮不加粘连模块名别名；查询时生效，**无需**为升梯重建索引。
+
+## 2026-10-19 — 检索 P0：file 不推断 project / active 挂 qualified_code / 弱 relaxed 弃权
+
+- `raw/sources/file/` 路径索引时不再把路径段写成 `project`（如 NetSuite Help Docs）；`wiki/projects/`、chat 与 frontmatter `project` 规则不变。`project=codingwork` 等过滤可命中共享 vendor Help。**已有 raw 索引需重建**（`llm-wiki-mcp index build --scope raw`）才会清掉旧的路径推断 project。
+- Stage-one `qualified_code`（如 `N/workflow`）在 `active` / `auto` / `knowledge` / `all` 与 `raw` 一样启用，避免中文问法把限定符冲出 top-k。
+- 仅有弱 `wiki_relaxed` 填充（strict 与 qualified 皆空、无 title/限定符强信号）时返回空结果（真弃权），不再把噪声当作已回答；带 title/限定符等强信号的 relaxed 行为不变。
+
+## 2026-10-19 — 检索父块扩展
+
+- Small-to-Big 父块扩展：`pack_context` 前按同页 `ordinal±window`（默认 1）拼接邻块正文（去 overlap、有字符预算）；公开 citation / `passage_id` 仍指向命中小块。新增 `retrieval.parent_expansion` 与 `RetrievalIndexStore.passages_at_ordinals`；无 schema / 向量变更。可通过 `expand_parents` / `parent_window` / `same_heading_only` 关闭或调整。
+
+## 2026-10-15 — MCP 工具 schema 去掉 JSON Schema title 注解
+
+- MCP 导出的工具 inputSchema/parameters 在注册时去掉 Pydantic 生成的 JSON Schema 注解字段 	itle（根级如 wiki_write_noteArguments、属性级如 Title），避免 SuiteCloud Developer Assistant 因 	ools[].function.parameters.title 返回 HTTP 204 空响应。
+- 名为 	itle 的真实参数（如 wiki_write_note）保留在 properties 与 
+equired 中；仅去掉其 schema 内部的注解 	itle。
+- 新增 common.json_schema_sanitize.strip_json_schema_title_annotations；工具调用行为与参数校验不变。
+
+## 2026-09-29 — 检索上下文
+
+- 公开状态（`wiki_status` 的 `config.retrieval.ranking`、CLI `status`/`config show`）新增生效 RRF 权重 `rrf_weights` 与每项来源 `rrf_weight_sources`（`default`/`config`/`env`），环境变量非法时带 `env_error`。仅新增字段。
+- `wiki_write_note`（`save_obsidian_note`）新增可选参数 `questions: list[str] | None`：与 `aliases` 同样校验（去空白、去空串、≤ 20 项 × 300 字符、脱敏、大小写不敏感去重），写入 frontmatter `questions`（在 `aliases` 或 `title` 之后）；非法输入返回 `invalid_questions` 且不写入，chat 类型拒绝。不传、`None`、`[]` 时页面逐字节不变。
+- 可配置主融合 RRF 权重：`retrieval.ranking.rrf_weights`（`fts`/`title`/`vector`，默认 1.0）与环境变量 `LLM_WIKI_RRF_WEIGHTS`；默认排序逐位不变。`run_query_v2` 新增可选参数 `rrf_weights`，`fusion_score` 新增可选参数 `rrf_weights`。
+- 超过页面正文预算（约 2400 token）的强相关长页面，不再只从页首补全：保留页首 passage 后，以命中 passage 为中心交替扩展前后相邻 passage。放得下预算的页面行为不变；排序不变，无需重建索引。
+- 可选 frontmatter `questions`（本页能回答的问题）进入检索：并入页面第一个 passage 的 FTS `aliases` 列。无 schema 变更；没有该字段的页面索引不变，已有 `questions` 的 vault 需要一次增量/全量重建才会生效。
+- 查询结果正文按阅读顺序拼接同页 passage，并去掉相邻 chunk 的重叠（按 passage 单位比较，8–128 个单位）；同一次响应中已出现过的长段落（字母数字 ≥ 48，汉字计 2）在后续页面省略，结果页至少保留第一段正文。`PassageHit` 新增 `ordinal`（默认 -1），`ContextPassage` 新增可选 `ordinal`。排序不变，无需重建索引。
+
+## 2026-09-29 — 向量嵌入文本与写入提示
+
+- 向量索引改为嵌入“页面标题 + 标题路径 + passage 正文”（`embedding_text`；与标题相同的 H1 不重复），存储的 passage 文本与词法检索不变。向量记录的 content hash 同时覆盖嵌入文本，改标题或改小节标题会让对应向量变为 stale。向量索引 schema 升为 3，旧索引报告 `index_incompatible`，需要执行一次 `llm-wiki-mcp vector build`。
+- `wiki_update(action="preview")` 也返回可选的 `link_suggestions`：按 apply 将写入的页面渲染结果（frontmatter 合并、标题行、脱敏）计算，页面自身的索引行替换为新标题/别名；同一 plan 的 preview 与 apply 返回相同提示（期间其他页面未变化时）。
+- `wiki_write_note` 与 `wiki_update(action="apply")` 保存成功后返回可选的 `link_suggestions`：正文中提到其他 Wiki 页面标题/别名/多词文件名却未链接的位置（每个目标只报第一次，含 `target`、`title`、`mention`、`line`、`link`）。跳过代码、已有链接、页面自身、已链接目标、过短或指向多页的词；拉丁词按词边界、单词须大小写一致，中文按子串且长词优先。只读取已构建的检索投影，不改写页面；无提示时不出现该字段。
+- 修复：没有 frontmatter `title` 的旧页面（标题来自正文 H1）经 `wiki_update` 纯正文更新后，标题被改成文件名（如 “Legacy Heading Title” → “legacy”）。现在按 frontmatter `title` → 原页面第一个 H1 → 文件名的顺序确定标题，并把该标题写入 frontmatter。
+- `wiki_update` preview/apply：`incoming_body` 开头的 `# H1` 与将保留的页面标题不同时（该行会按原有行为被 frontmatter 标题替换），在 `warnings` 中返回 `title_heading_ignored: ...`，提示改用 `incoming_frontmatter.title`。标题行为不变。
+- 修正默认 `schema.md` 模板（`DEFAULT_SCHEMA_TEXT`）对受控更新的描述，使其与代码一致：锁定字段为 `type`、`created`、`concept_id`、`entity_id`、`entity_type`、`source_path`、`source_hash`，`title` 不锁定（改名通过 `incoming_frontmatter.title`）；`incoming_frontmatter` 字段整体替换原值，数组不做去重合并。行为不变；已有 vault 的 `schema.md` 不会被改写。
+- `wiki_write_note` 新增可选参数 `aliases: list[str] | None`：去空白、脱敏、大小写不敏感去重、去掉与标题相同项，≤ 20 项且每项 ≤ 120 字符（否则 `invalid_aliases`）；写入 frontmatter `aliases` 并参与新建时的重复标题检查。不传或结果为空时输出与此前逐字节相同。
+- `duplicate_warnings` 每条新增可选的 `confidence`（`high`/`related`）：拼写变体与相同标题为 `high`；只多出整词/字（`title_contains`，或词集合互为真子集的 `similar_title`）为 `related`；`wiki/projects/` 下的新页面对 concept/knowledge 页的非相同标题匹配为 `related`。`high` 排前。
+- `wiki_update` preview/apply 在 `incoming_frontmatter` 改动 `title`/`aliases` 时、`wiki_manage_shared_spec` upsert preview 在新建或改名时，对页面新增的标题/别名返回可选的 `duplicate_warnings`（排除页面自身；纯正文更新不返回）。
+- `wiki_write_note` 新建页面后返回可选的 `duplicate_warnings`（最多 5 条，页面照常创建）：标题经 `ConceptRegistry.resolve` 与已有标题/别名归一化后相同（`same_title_or_alias`），或字符 bigram Jaccard ≥ 0.6（`similar_title`），或一方包含另一方且较短一方 ≥ 3 字符、占比 ≥ 0.5（`title_contains`）。`ConceptRegistry` 新增可直接传入记录的构造方式与 `resolve(..., collect_evidence=False)`（跳过 FTS 与全库 wikilink 扫描）。
+
+## 2026-09-29 — 图扩展排序修复
+
+- 排名版本升为 `query-v2-passage-rrf-11`；质量门控校准产物需按新版本重新生成（旧版本身份不匹配时按既有规则 fail-open）。
+- 自然语言关系问题走 `wiki_relaxed` 恢复分支时也执行有界图扩展（active scope、同一快照/过滤边界/上限），不再只在 strict 种子阶段生效；同一请求内复用已构建的候选边界与图。
+- 纯图候选不再统一截断到 0.75 后按路径排序：累计原始关系证据并以 `0.75 × E / (E + 3)` 单调映射，证据更强的页面排在前面；有词法/向量信号的候选仍按自身分数 15% 截断。
+- frontmatter 类型关系参与图证据：`derived_from`（取 origin 的 `path`）权重 3.0、`related_objects` 权重 2.0，目标与 wikilink 一样按当次候选集解析到页面，并作为可遍历的一跳边；`applies_to` 是适用标签（`languages`/`frameworks`），不指向页面，只以 `key:label` 存储、不计分。检索库 schema 升为 4（边表中类型关系的解析字段变化），旧库需 `llm-wiki-mcp index build`。
+- 纯图候选的上限改为相对种子：`0.7 × 最强贡献种子的相关分 × E / (E + 3)`（相关分取种子自身的 fusion/keyword/vector 最大值，不含图分），strict 与 relaxed 阶段一致；纯图页面始终低于把它带进来的种子，强种子的邻居可以越过弱词法候选。graph_v1 MRR@10 0.5057 → 0.5351、nDCG@10 0.5873 → 0.6189，R@1、direct R@1/MRR、无答案误命中、v2_40 与 CI 冒烟不变（详见 `tests/fixtures/retrieval/graph-eval-baseline.md`）。
+
+## 2026-09-29 — 检索图边持久化
+
+- 检索 store 新增 `links` 表（schema version 3）：wikilink、`sources` 来源边以及 `related_objects`/`applies_to`/`derived_from` 类型关系在页面投影时抽取，随 build、单页 update、rename 与 delete 同事务维护；类型关系暂只存储、不参与图评分。
+- Query V2 图扩展改读持久化边，不再每次查询解析全部页面正文；wikilink 仍按当次已过滤候选集解析，图分数与排序保持逐位不变，边的 `source_hash` 与查询快照不一致时回退解析快照正文。
+- 修复图扩展 `shared_source` 证据：查询快照把 frontmatter `sources` 列表冻结为 tuple 后被当作单个值比较，多来源页面之间无法匹配、标量与单元素列表也互不匹配；现在逐项比较来源。
+- 升级后旧检索库报告 `index_incompatible`，写路径返回 `rebuild_required`，需要运行一次 `llm-wiki-mcp index build`；不做隐式迁移。
+
 ## 2026-09-20 — 规范镜像与公共规范维护
 
 - 新增 core MCP 工具 `wiki_sync_specs` 与 `wiki_manage_shared_spec`（均为 preview/apply/discard 两阶段），core profile 从 9 个业务工具变为 11 个；README、CLAUDE.md 与 `.trellis/scripts/spec_lint.py` 的冻结集合同步。

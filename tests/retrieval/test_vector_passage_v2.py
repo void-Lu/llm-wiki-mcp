@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from retrieval.vector_index import VectorIndexStore, VectorRecord
@@ -14,7 +15,7 @@ def test_vector_v2_allows_multiple_passages_for_one_page_without_text_on_disk(tm
     result = store.build(records, DeterministicFakeProvider(), include_raw_sources=False)
     documents = store.documents_path.read_text(encoding="utf-8")
 
-    assert result["schema_version"] == 2
+    assert result["schema_version"] == 3
     assert '"passage_id": "a-1"' in documents
     assert "first passage" not in documents
 
@@ -26,3 +27,19 @@ def test_vector_v1_manifest_is_explicitly_incompatible(tmp_path: Path) -> None:
     store.documents_path.write_text("", encoding="utf-8")
 
     assert store.status()["code"] == "index_incompatible"
+
+
+def test_vector_v2_manifest_is_incompatible_after_embedding_text_change(tmp_path: Path) -> None:
+    store = VectorIndexStore(tmp_path)
+    store.build(
+        [VectorRecord("wiki/concepts/a.md", "one", "first passage", "concept", passage_id="a-1", page_path="wiki/concepts/a.md")],
+        DeterministicFakeProvider(),
+        include_raw_sources=False,
+    )
+    manifest = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 2
+    store.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = store.status()
+    assert status["code"] == "index_incompatible"
+    assert status["ok"] is False

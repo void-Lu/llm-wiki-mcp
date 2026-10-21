@@ -50,6 +50,7 @@ from wiki.wiki_paths import create_wiki_root
 
 _FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "retrieval"
 _V2_40_FIXTURE_ROOT = _FIXTURE_ROOT / "v2_40"
+_GRAPH_V1_FIXTURE_ROOT = _FIXTURE_ROOT / "graph_v1"
 
 
 def _copy_vault(tmp_path: Path) -> Path:
@@ -80,6 +81,17 @@ def _copy_v2_40_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     shutil.copy2(_V2_40_FIXTURE_ROOT / "cases.jsonl", dataset)
     shutil.copy2(_V2_40_FIXTURE_ROOT / "cases.manifest.json", manifest)
     return vault, dataset, manifest
+
+
+def _copy_graph_v1_fixture(tmp_path: Path) -> tuple[Path, RetrievalEvalDataset]:
+    """Copy the synthetic interlinked active-scope fixture and build its passage store."""
+    vault = tmp_path / "graph-v1-vault"
+    shutil.copytree(_GRAPH_V1_FIXTURE_ROOT / "vault", vault)
+    dataset = load_retrieval_dataset(
+        _GRAPH_V1_FIXTURE_ROOT / "cases.jsonl",
+        _GRAPH_V1_FIXTURE_ROOT / "cases.manifest.json",
+    )
+    return vault, dataset
 
 
 def test_v2_report_fields_mark_missing_frozen_comparison_unproven(tmp_path: Path) -> None:
@@ -227,6 +239,99 @@ def test_reviewed_v2_forty_case_fixture_is_archive_only(tmp_path: Path) -> None:
     assert report["metrics"]["latency_sample_count"] == 40
     assert all(len(case["ranking_runs"]) == 1 for case in report["cases"])
 
+
+
+def test_graph_v1_fixture_is_a_self_consistent_active_scope_vault(tmp_path: Path) -> None:
+    """The graph fixture must stay active-scope, interlinked and label-consistent."""
+    from wiki.wikilinks import wikilink_targets
+
+    vault, dataset = _copy_graph_v1_fixture(tmp_path)
+    manifest = json.loads((_GRAPH_V1_FIXTURE_ROOT / "cases.manifest.json").read_text(encoding="utf-8"))
+
+    assert dataset.manifest.status == "synthetic_ci_fixture"
+    assert len(dataset.cases) == manifest["case_count"]
+    assert sum(case.answerable for case in dataset.cases) == manifest["answerable_count"]
+    assert sum(not case.answerable for case in dataset.cases) == manifest["no_answer_count"]
+    assert sum("graph" in case.tags for case in dataset.cases) == manifest["graph_case_count"]
+    assert sum("direct" in case.tags for case in dataset.cases) == manifest["direct_case_count"]
+    assert {case.scope for case in dataset.cases} == {"knowledge"}
+    validate_dataset_paths(dataset, vault)
+    assert not any(item.path.startswith("wiki/sources/") for case in dataset.cases for item in case.relevant)
+
+    pages = sorted((vault / "wiki").rglob("*.md"))
+    assert 40 <= len(pages) <= 80
+    stems: dict[str, list[Path]] = {}
+    for page in pages:
+        stems.setdefault(page.stem.casefold(), []).append(page)
+    link_count = 0
+    for page in pages:
+        text = page.read_text(encoding="utf-8")
+        frontmatter = text.split("---", 2)[1]
+        for source in [line.strip()[2:] for line in frontmatter.splitlines() if line.strip().startswith("- raw/")]:
+            assert (vault / source).is_file(), f"{page.name} cites a missing raw source"
+        for target in wikilink_targets(text):
+            link_count += 1
+            resolved = (vault / "wiki" / f"{target}.md").is_file() or len(stems.get(Path(target).stem.casefold(), [])) == 1
+            assert resolved, f"{page.name} links to unresolved [[{target}]]"
+    assert link_count >= 60
+
+    _build_passage_store(vault)
+    status = RetrievalIndexStore(vault).status()
+    assert status["ok"] is True
+    assert not (vault / ".llm-wiki" / "raw-retrieval.sqlite3").exists()
+
+
+def test_graph_v1_evaluation_supports_graph_on_off_ablation(tmp_path: Path) -> None:
+    """Graph on/off runs share one dataset; off must carry zero graph evidence."""
+    vault, dataset = _copy_graph_v1_fixture(tmp_path)
+    _build_passage_store(vault)
+
+    reports = {
+        enabled: run_retrieval_evaluation(
+            vault,
+            dataset,
+            query_version="v2",
+            retrieval_mode="lexical",
+            measure_context_budget=False,
+            graph_expansion=enabled,
+        )
+        for enabled in (True, False)
+    }
+
+    for enabled, report in reports.items():
+        metrics = report["metrics"]
+        assert report["metadata"]["parameters"]["graph_expansion"] is enabled
+        assert report["metadata"]["side_effects"]["clean"] is True
+        assert set(metrics["ranking_by_k"]) == {"1", "3", "5", "10"}
+        for values in metrics["ranking_by_k"].values():
+            assert {"recall", "mrr", "ndcg"} <= set(values)
+        assert metrics["mrr_at_k_macro"] == metrics["ranking_by_k"]["10"]["mrr"]
+        assert metrics["ndcg_at_k_macro"] == metrics["ranking_by_k"]["10"]["ndcg"]
+        assert metrics["no_answer_cases"] == 4
+        assert metrics["no_answer_false_positive_rate"] is not None
+        assert metrics["p95_latency_ms"] > 0
+        assert metrics["latency_sample_count"] == len(dataset.cases)
+        assert {"tag:graph", "tag:direct", "tag:keyword-anchor", "tag:natural-language"} <= set(metrics["slice_metrics"])
+
+    off_graph_hits = [case["pipeline"]["counters"]["graph_hits"] for case in reports[False]["cases"]]
+    on_graph_hits = [case["pipeline"]["counters"]["graph_hits"] for case in reports[True]["cases"]]
+    assert set(off_graph_hits) == {0}
+    assert any(on_graph_hits)
+    # The fixture must keep exercising expansion: link-anchored cases gain
+    # recall when the bounded graph stage is enabled.
+    anchored_on = reports[True]["metrics"]["slice_metrics"]["tag:keyword-anchor"]["recall_at_k_macro"]
+    anchored_off = reports[False]["metrics"]["slice_metrics"]["tag:keyword-anchor"]["recall_at_k_macro"]
+    assert anchored_on > anchored_off
+
+
+def test_graph_expansion_ablation_is_engine_only(tmp_path: Path) -> None:
+    dataset = RetrievalEvalDataset(
+        RetrievalEvalManifest("graph", "1", 0.5),
+        (RetrievalEvalCase("case", "query", (), {}, False, "en", (), ""),),
+    )
+    with pytest.raises(RetrievalEvalError) as error:
+        run_retrieval_evaluation(tmp_path, dataset, entrypoint="mcp", graph_expansion=False)
+    assert error.value.code == "mcp_graph_toggle_unsupported"
 
 
 def test_v2_vector_evaluation_uses_the_requested_vault_relative_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

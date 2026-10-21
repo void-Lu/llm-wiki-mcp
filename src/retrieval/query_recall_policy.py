@@ -9,6 +9,7 @@ snapshot、取消上下文和 recovery primitive；不得依赖 QueryExecutionCo
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -16,7 +17,9 @@ from typing import Any, Literal, Protocol
 from retrieval.candidate_items import candidate_item, with_fusion
 from retrieval.lexical_analyzer import (
     edit_distance,
+    extract_qualified_identifiers,
     has_qualified_identifier,
+    identifier_phrase_tokens,
     identifier_phrases,
     tokens,
 )
@@ -34,7 +37,7 @@ from retrieval.retrieval_index import PassageHit, RetrievalIndexError, Retrieval
 
 
 DEFAULT_TOP_K = 10
-RANKING_POLICY_VERSION = "query-v2-passage-rrf-10"
+RANKING_POLICY_VERSION = "query-v2-passage-rrf-11"
 RRF_K = 60
 PASSAGE_SCAN_LIMIT = 500
 PASSAGE_PROBE_LIMIT = 20
@@ -45,6 +48,27 @@ IDENTIFIER_PHRASE_CANDIDATES = 200
 ADAPTIVE_EXPAND_MAX = 40
 ADAPTIVE_SCORE_RATIO = 0.9
 MAX_ADAPTIVE_SCORE_RATIO = 0.7
+
+# Primary title-token denylist (P2 title-token bar / 0018). English lowercase;
+# aligned with tokens() casefold. Used only when body_evidence=False.
+GENERIC_TITLE_TOKENS: frozenset[str] = frozenset(
+    {
+        "record",
+        "type",
+        "object",
+        "field",
+        "fields",
+        "module",
+        "guide",
+        "overview",
+        "helper",
+        "helpers",
+        "api",
+        "doc",
+        "docs",
+    }
+)
+
 
 
 class RawRecoveryRequestView(Protocol):
@@ -106,11 +130,14 @@ __all__ = [
     "adaptive_expand",
     "classify_intent",
     "merge_coverage_items",
+    "merge_weak_primary_raw",
     "query_expansion",
     "raw_recovery_candidates",
     "relaxed_recovery_items",
+    "should_augment_raw_phrase_cooccur",
     "step_counts_for_pages",
     "uncovered_latin_terms",
+    "union_passage_hits_by_id",
 ]
 
 
@@ -140,6 +167,140 @@ def step_counts_for_pages(
         for hit in hits:
             counts[hit.page_path] = counts.get(hit.page_path, 0) + len(_STEP_ITEM_RE.findall(hit.text))
     return counts
+
+
+
+def _title_token_overlap_is_strong(ov: set[str], *, body_evidence: bool) -> bool:
+    """Primary title-token / ED-1 bar; relaxed keeps any non-empty overlap.
+
+    Formula (primary only): content = ov - GENERIC_TITLE_TOKENS;
+    strong iff len(content) >= 1 or len(ov) >= 2.
+    """
+
+    if not ov:
+        return False
+    if body_evidence:
+        return True
+    content = ov - GENERIC_TITLE_TOKENS
+    return len(content) >= 1 or len(ov) >= 2
+
+
+
+def fts_ranked_evidence(
+    items: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Primary-strong evidence: stage-one FTS hits only (fts_rank is not None)."""
+    return [item for item in items if item.get("fts_rank") is not None]
+
+
+def primary_fill_is_strong(
+    question: str,
+    items: Sequence[Mapping[str, Any]],
+    *,
+    qualified_fts_hits: int = 0,
+    extra_terms: Sequence[str] = (),
+) -> bool:
+    """True when stage-one primary should block raw_zero.
+
+    Qualified FTS hits count as strong when any primary items remain; otherwise
+    reuse ``relaxed_fill_is_strong`` title/phrase/identifier signals with
+    ``body_evidence=False`` so body-only phrase/id cannot block raw_zero
+    (P2 knife 1 / cluster C). No BM25 cutoff.
+    """
+
+    if not items:
+        return False
+    if qualified_fts_hits > 0:
+        return True
+    return relaxed_fill_is_strong(
+        question, items, extra_terms=extra_terms, body_evidence=False
+    )
+
+
+def relaxed_fill_is_strong(
+    question: str,
+    items: Sequence[Mapping[str, Any]],
+    *,
+    extra_terms: Sequence[str] = (),
+    body_evidence: bool = True,
+) -> bool:
+    """True when a wiki_relaxed fill has identifier/phrase/exact/title evidence.
+
+    Weak fills are pure OR-token / CJK-bigram noise with none of these signals.
+    Used to abstain (clear selection) instead of blocking raw_zero.
+
+    ``extra_terms`` covers agent/corpus expansion aliases (for example ``sl`` →
+    ``suitelet``) matched against title/path (or title tokens) only — never
+    body-only substring. Title evidence also includes edit-distance-1 bridges
+    matching ``query_expansion``.
+
+    ``body_evidence`` (default True) keeps P0 relaxed abstain semantics: phrase
+    and qualified-id aliases may match title/path/body. When False (primary
+    path), phrase and qualified-id match title/path only, and title-token /
+    ED-1 arms use GENERIC_TITLE_TOKENS (len(content)>=1 or len(ov)>=2).
+    """
+
+    if not items:
+        return False
+    q = question.casefold().strip()
+    if not q:
+        return False
+    phrases = [p.casefold() for p in identifier_phrases(question) if p]
+    qualified = extract_qualified_identifiers(question)
+    question_tokens = {tok.casefold() for tok in tokens(question) if tok}
+    expansion_tokens = {str(term).casefold() for term in extra_terms if str(term).strip()}
+    evidence_tokens = question_tokens | expansion_tokens
+    for item in items:
+        hit = item["hit"] if isinstance(item, Mapping) and "hit" in item else item
+        title = str(getattr(hit, "title", "") or "").casefold()
+        page_path = str(getattr(hit, "page_path", "") or "").casefold()
+        body = str(getattr(hit, "text", "") or "").casefold()
+        blob = f"{title}\n{page_path}\n{body}"
+        title_path = f"{title}\n{page_path}"
+        phrase_blob = blob if body_evidence else title_path
+        ident_blob = blob if body_evidence else title_path
+        # exact: question substring equals/contained in title, or title in question
+        if title and (title in q or q in title):
+            return True
+        if len(q) >= 4 and q in {title, page_path}:
+            return True
+        # phrase: multiword English identifier run (body optional via body_evidence)
+        if any(p in phrase_blob for p in phrases):
+            return True
+        # identifier: qualified-id alias (body optional via body_evidence)
+        for ident in qualified:
+            if any(alias.casefold() in ident_blob for alias in ident.aliases):
+                return True
+        # expansion alias: title/path (or title tokens) only — not body substring
+        if any(term and term in title_path for term in expansion_tokens):
+            return True
+        # title token overlap (exact or edit-distance-1, matching query_expansion)
+        # Primary (body_evidence=False): GENERIC denylist bar — content = ov-GENERIC;
+        # strong iff len(content)>=1 or len(ov)>=2. Relaxed: any non-empty ov.
+        title_tokens = {tok.casefold() for tok in tokens(title) if tok}
+        ov = title_tokens & evidence_tokens
+        if _title_token_overlap_is_strong(ov, body_evidence=body_evidence):
+            return True
+        ed_hits: set[str] = set()
+        for title_tok in title_tokens:
+            if len(title_tok) < 4:
+                continue
+            for term in question_tokens:
+                if (
+                    term != title_tok
+                    and len(term) >= 4
+                    and abs(len(term) - len(title_tok)) <= 1
+                    and edit_distance(term, title_tok) <= 1
+                ):
+                    if body_evidence:
+                        return True
+                    ed_hits.add(title_tok)
+        if ed_hits and _title_token_overlap_is_strong(
+            ov | ed_hits, body_evidence=False
+        ):
+            return True
+    return False
+
 
 
 def adaptive_expand(
@@ -239,7 +400,9 @@ def query_expansion(
             close = [
                 word
                 for word in title_words
-                if word != term and len(word) >= 4 and edit_distance(term, word) <= 1
+                # Levenshtein distance is at least the length difference, so
+                # the cheap length check only skips words that cannot match.
+                if word != term and len(word) >= 4 and abs(len(word) - len(term)) <= 1 and edit_distance(term, word) <= 1
             ]
         for alias in (request.agent_terms or {}).get(term, ()):
             if alias != term and alias not in close:
@@ -316,6 +479,32 @@ def _raw_recovery_bonus(hit: PassageHit, question: str, identifier_terms: list[s
     anchor_bonus = 2.0 if any(term in heading_text.casefold() for term in phrase_matches) else 0.0
     exact_phrase_bonus = 1.5 if question.strip().casefold() in body and len(question.strip()) >= 4 else 0.0
     return min(title_overlap, 3) * 4.0 + min(heading_overlap, 3) * 2.0 + phrase_bonus + anchor_bonus + exact_phrase_bonus
+
+
+
+def should_augment_raw_phrase_cooccur(question: str) -> bool:
+    """True when the question has a multi-word Latin entity worth phrase FTS."""
+
+    return len(identifier_phrase_tokens(question)) >= 2
+
+
+def union_passage_hits_by_id(
+    primary: Sequence[PassageHit],
+    secondary: Sequence[PassageHit],
+) -> list[PassageHit]:
+    """Merge FTS hits by passage_id, keeping the higher score (primary on ties)."""
+
+    by_id: dict[str, PassageHit] = {}
+    for hit in primary:
+        by_id[hit.passage_id] = hit
+    for hit in secondary:
+        cur = by_id.get(hit.passage_id)
+        if cur is None or hit.score > cur.score:
+            by_id[hit.passage_id] = hit
+    return sorted(
+        by_id.values(),
+        key=lambda h: (-h.score, h.page_path, h.passage_id),
+    )
 
 
 def raw_recovery_candidates(
@@ -405,13 +594,23 @@ def raw_recovery_candidates(
     if raw_lexical_mode.startswith("error:"):
         return raw_store, [], raw_fts_hits, raw_lexical_mode[6:], "strict"
 
+    if should_augment_raw_phrase_cooccur(request.question):
+        try:
+            phrase_hits = raw_store.search_fts(
+                request.question,
+                limit=candidate_limit,
+                mode="identifier_phrase",
+                term_variants=term_variants or {},
+                **common_kwargs,
+            )
+        except RetrievalIndexError:
+            phrase_hits = []
+        if phrase_hits:
+            raw_hits = union_passage_hits_by_id(raw_hits, phrase_hits)
+
     raw_fts_hits = len(raw_hits)
     raw_items: list[dict[str, Any]] = []
-    query_identifier_phrases = (
-        identifier_phrases(request.question)
-        if raw_lexical_mode == "identifier_phrase"
-        else []
-    )
+    query_identifier_phrases = identifier_phrases(request.question)
     for rank, hit in enumerate(raw_hits, 1):
         if cancellation is not None:
             cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
@@ -431,7 +630,9 @@ def raw_recovery_candidates(
             ):
                 score += IDENTIFIER_PHRASE_BONUS * 0.5
         raw_items.append(candidate_item(hit, score=score, fts_rank=rank))
-    raw_candidate_items = select_best_per_page(raw_items)
+    # Keep multi-ordinal FTS hits so coverage page-union can see sibling passages.
+    # Callers that need one-per-page re-run select_best_per_page.
+    raw_candidate_items = list(raw_items)
     if raw_candidate_items and raw_lexical_mode != "qualified_code":
         step_counts = step_counts_for_pages(
             sorted({item["hit"].page_path for item in raw_candidate_items}),
@@ -477,6 +678,21 @@ def _coverage_terms(item: dict[str, Any], terms: Sequence[str]) -> set[str]:
     return {term for term in terms if term in available}
 
 
+def page_coverage_terms(
+    page_items: Sequence[Mapping[str, Any]],
+    terms: Sequence[str],
+) -> set[str]:
+    """Uncovered-latin hits using the union of all passages on one page."""
+
+    if not page_items or not terms:
+        return set()
+    available: set[str] = set()
+    for item in page_items:
+        hit = item["hit"]
+        available.update(tokens(f"{hit.title} {hit.text}"))
+    return {term for term in terms if term in available}
+
+
 def merge_coverage_items(
     active_items: Sequence[dict[str, Any]],
     raw_items: Sequence[dict[str, Any]],
@@ -485,6 +701,10 @@ def merge_coverage_items(
     rrf_k: int = RRF_K,
 ) -> list[dict[str, Any]]:
     """Fuse active and raw page ranks using normalized, source-local signals."""
+
+    raw_by_page: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in raw_items:
+        raw_by_page[item["hit"].page_path].append(item)
 
     active_pages = select_best_per_page(list(active_items))
     raw_pages = select_best_per_page(list(raw_items))
@@ -498,12 +718,22 @@ def merge_coverage_items(
             source_rank = raw_pages.index(item) + 1
         else:
             source_rank = active_pages.index(item) + 1
-        covered = _coverage_terms(item, uncovered_terms)
+        if is_raw:
+            covered = page_coverage_terms(
+                raw_by_page.get(item["hit"].page_path, [item]),
+                uncovered_terms,
+            )
+        else:
+            covered = _coverage_terms(item, uncovered_terms)
         if is_raw and not covered:
             continue
         coverage_ratio = len(covered) / total_terms
         source_rrf = (rrf_k + 1) / (rrf_k + source_rank)
-        authority = 0.0 if is_raw else min(max(float(item.get("score", 0.0)) / 100.0, 0.0), 0.35)
+        if is_raw:
+            # Offset wiki formal authority so full-coverage raw can surface in top-k.
+            authority = 0.35 * coverage_ratio
+        else:
+            authority = min(max(float(item.get("score", 0.0)) / 100.0, 0.0), 0.35)
         fused_score = round(coverage_ratio + source_rrf + authority, 12)
         ranked.append(
             with_fusion(
@@ -518,4 +748,60 @@ def merge_coverage_items(
             )
         )
     ranked.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
+    return ranked
+
+
+def merge_weak_primary_raw(
+    wiki_items: Sequence[dict[str, Any]],
+    raw_items: Sequence[dict[str, Any]],
+    *,
+    rrf_k: int = RRF_K,
+    raw_cap: int = RAW_FALLBACK_LIMIT,
+) -> list[dict[str, Any]]:
+    """RRF-fuse weak wiki primary with capped raw; keep wiki pages in the pool.
+
+    Unlike ``merge_coverage_items``, this does **not** filter raw by uncovered
+    Latin terms. Used when ``wiki_weak_primary`` probes ``raw_zero`` so a useful
+    weak wiki hit (e.g. gold still on wiki) is not wholesale-replaced by raw.
+    """
+
+    wiki_pages = select_best_per_page(list(wiki_items))
+    raw_pages = select_best_per_page(list(raw_items))
+    raw_pages.sort(
+        key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id)
+    )
+    if raw_cap >= 0:
+        raw_pages = raw_pages[:raw_cap]
+    wiki_pages.sort(
+        key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id)
+    )
+    ranked: list[dict[str, Any]] = []
+    for local_rank, item in enumerate([*wiki_pages, *raw_pages], 1):
+        is_raw = item["hit"].source_kind == "raw"
+        if is_raw:
+            source_rank = raw_pages.index(item) + 1
+        else:
+            source_rank = wiki_pages.index(item) + 1
+        source_rrf = (rrf_k + 1) / (rrf_k + source_rank)
+        authority = (
+            0.0
+            if is_raw
+            else min(max(float(item.get("score", 0.0)) / 100.0, 0.0), 0.35)
+        )
+        fused_score = round(source_rrf + authority, 12)
+        ranked.append(
+            with_fusion(
+                {**item, "score": fused_score},
+                coverage_terms=[],
+                coverage_ratio=0.0,
+                source_local_rank=source_rank,
+                source_local_rrf=source_rrf,
+                fusion_score=fused_score,
+                fusion_source="raw" if is_raw else "active",
+                fusion_local_position=local_rank,
+            )
+        )
+    ranked.sort(
+        key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id)
+    )
     return ranked

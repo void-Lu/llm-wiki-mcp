@@ -21,6 +21,14 @@ from typing import Any, Iterable, Literal
 
 from common.content_redaction import REDACTION_POLICY_VERSION
 from common.privacy_policy import PrivacyPolicy, project_public_value
+from retrieval.graph_edges import (
+    GRAPH_EDGE_KINDS,
+    PageLink,
+    decode_paths,
+    encode_paths,
+    extract_page_links,
+    graph_body,
+)
 from retrieval.lexical_analyzer import (
     expanded_identifier_phrase_fts_query,
     expanded_relaxed_fts_query,
@@ -37,7 +45,7 @@ from retrieval.metadata_filters import normalize_metadata_filters
 from wiki.wiki_io import split_frontmatter
 from wiki.wiki_paths import RETRIEVAL_DB_BY_SCOPE, filesystem_path
 
-RETRIEVAL_SCHEMA_VERSION = 2
+RETRIEVAL_SCHEMA_VERSION = 4
 StoreScope = Literal["active", "archive", "raw"]
 RAW_AUXILIARY_SEGMENTS = frozenset({"manifest", "_deprecated_archive"})
 
@@ -77,6 +85,21 @@ class PassageHit:
     corpus: str
     authority: str
     source_kind: str
+    # Reading-order position of the passage within its page (``-1`` when
+    # unknown, e.g. for synthetic hits).  Context packing uses it to stitch
+    # adjacent chunks without repeating their overlap.
+    ordinal: int = -1
+
+
+def frontmatter_questions_text(frontmatter: dict[str, object]) -> str:
+    """Return the optional ``questions:`` frontmatter as one indexable string.
+
+    Accepts a list of strings or a single string; blank and non-string entries
+    are ignored so a malformed field never breaks indexing.
+    """
+    value = frontmatter.get("questions")
+    items = value if isinstance(value, list) else [value]
+    return " ".join(item.strip() for item in items if isinstance(item, str) and item.strip())
 
 
 class RetrievalIndexStore:
@@ -314,7 +337,7 @@ class RetrievalIndexStore:
         sql = """
             SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
                    passages.text, -bm25(passages_fts, 8.0, 4.0, 3.0, 2.0, 1.0) AS score,
-                   pages.corpus, pages.authority, pages.source_kind
+                   pages.corpus, pages.authority, pages.source_kind, passages.ordinal
             FROM passages_fts JOIN passages ON passages_fts.passage_id = passages.passage_id
             JOIN pages ON pages.path = passages.page_path
             WHERE """ + " AND ".join(clauses) + " ORDER BY score DESC, passages.page_path, passages.ordinal LIMIT ?"
@@ -323,7 +346,7 @@ class RetrievalIndexStore:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise RetrievalIndexError("index_corrupt", "retrieval store could not be searched") from exc
-        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8]) for row in rows]
+        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8], int(row[9])) for row in rows]
 
     def search_qualified_identifier(
         self,
@@ -357,8 +380,44 @@ class RetrievalIndexStore:
             return []
         marks = ",".join("?" for _ in values)
         with self._connection(readonly=True) as connection:
-            rows = connection.execute(f"SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json, passages.text, 0.0, pages.corpus, pages.authority, pages.source_kind FROM passages JOIN pages ON pages.path=passages.page_path WHERE passages.passage_id IN ({marks}) ORDER BY passages.page_path, passages.ordinal", values).fetchall()
-        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8]) for row in rows]
+            rows = connection.execute(f"SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json, passages.text, 0.0, pages.corpus, pages.authority, pages.source_kind, passages.ordinal FROM passages JOIN pages ON pages.path=passages.page_path WHERE passages.passage_id IN ({marks}) ORDER BY passages.page_path, passages.ordinal", values).fetchall()
+        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], float(row[5]), row[6], row[7], row[8], int(row[9])) for row in rows]
+
+    def passages_at_ordinals(self, page_path: str, ordinals: Iterable[int]) -> list[PassageHit]:
+        """Load same-page passages by reading-order ordinals (no schema change).
+
+        Missing ordinals are omitted. Used by Small-to-Big parent expansion so
+        callers can fetch `ordinal ± window` neighbors without a full page scan.
+        """
+        values = sorted({int(item) for item in ordinals if int(item) >= 0})
+        if not page_path or not values or not self.path.exists():
+            return []
+        marks = ",".join("?" for _ in values)
+        sql = (
+            "SELECT passages.passage_id, passages.page_path, pages.title, "
+            "passages.heading_path_json, passages.text, 0.0, pages.corpus, "
+            "pages.authority, pages.source_kind, passages.ordinal "
+            "FROM passages JOIN pages ON pages.path = passages.page_path "
+            f"WHERE passages.page_path = ? AND passages.ordinal IN ({marks}) "
+            "ORDER BY passages.ordinal"
+        )
+        with self._connection(readonly=True) as connection:
+            rows = connection.execute(sql, [page_path, *values]).fetchall()
+        return [
+            PassageHit(
+                row[0],
+                row[1],
+                row[2],
+                tuple(json.loads(row[3])),
+                row[4],
+                float(row[5]),
+                row[6],
+                row[7],
+                row[8],
+                int(row[9]),
+            )
+            for row in rows
+        ]
 
     def passages_for_pages(self, page_paths: Iterable[str], *, limit_per_page: int = 1) -> list[PassageHit]:
         """Return bounded passage projections for already-selected pages.
@@ -371,7 +430,7 @@ class RetrievalIndexStore:
             return []
         marks = ",".join("?" for _ in paths)
         sql = f"""
-            SELECT passage_id, page_path, title, heading_path_json, text, corpus, authority, source_kind
+            SELECT passage_id, page_path, title, heading_path_json, text, corpus, authority, source_kind, ordinal
             FROM (
                 SELECT passages.passage_id, passages.page_path, pages.title, passages.heading_path_json,
                        passages.text, passages.ordinal, pages.corpus, pages.authority, pages.source_kind,
@@ -382,7 +441,7 @@ class RetrievalIndexStore:
         """
         with self._connection(readonly=True) as connection:
             rows = connection.execute(sql, [*paths, limit_per_page]).fetchall()
-        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], 0.0, row[5], row[6], row[7]) for row in rows]
+        return [PassageHit(row[0], row[1], row[2], tuple(json.loads(row[3])), row[4], 0.0, row[5], row[6], row[7], int(row[8])) for row in rows]
 
     def page_candidates(self) -> list[dict[str, object]]:
         """Load query projections from the DB without re-reading source files."""
@@ -407,13 +466,80 @@ class RetrievalIndexStore:
             for row in rows
         ]
 
+    def graph_links(self, kinds: Iterable[str] = GRAPH_EDGE_KINDS) -> dict[str, tuple[str, tuple[PageLink, ...]]]:
+        """Return persisted outgoing edges as ``page -> (source_hash, links)``.
+
+        Every indexed ``wiki/`` page is present, including pages without
+        edges.  ``source_hash`` is the ``redacted_content_hash`` the edges were
+        extracted from, so a caller holding an older snapshot can detect a
+        projection that changed after its capture and fall back to parsing
+        its own snapshot body for that page.
+        """
+        selected = tuple(dict.fromkeys(kinds))
+        if not self.path.exists():
+            return {}
+        marks = ",".join("?" for _ in selected) or "NULL"
+        with self._connection(readonly=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT pages.path, pages.redacted_content_hash, links.source_hash,
+                       links.kind, links.dst, links.dst_paths, links.dst_stem
+                FROM pages LEFT JOIN links ON links.src = pages.path AND links.kind IN ({marks})
+                WHERE pages.path >= 'wiki/' AND pages.path < 'wiki0'
+                ORDER BY pages.path, links.kind, links.ordinal
+                """,
+                selected,
+            ).fetchall()
+        grouped: dict[str, tuple[str, list[PageLink]]] = {}
+        for path, page_hash, source_hash, kind, dst, dst_paths, dst_stem in rows:
+            entry = grouped.setdefault(path, (source_hash or page_hash, []))
+            if kind is not None:
+                entry[1].append(PageLink(kind, dst, decode_paths(dst_paths), dst_stem))
+        return {path: (source_hash, tuple(links)) for path, (source_hash, links) in grouped.items()}
+
+    def link_targets(self) -> list[dict[str, object]]:
+        """Return active Wiki page titles and aliases for write-time hints.
+
+        One read-only pages-only query; ``[]`` when the projection has not
+        been built.  Callers treat a missing projection as "no hints", never
+        as an error, and never build it.
+        """
+        if not self.path.exists():
+            return []
+        with self._connection(readonly=True) as connection:
+            self._ensure_schema(connection)
+            rows = connection.execute(
+                "SELECT path, title, page_type, lifecycle_status, json_type(frontmatter_json, '$.aliases'), json_extract(frontmatter_json, '$.aliases') "
+                "FROM pages WHERE path >= 'wiki/' AND path < 'wiki0' ORDER BY path"
+            ).fetchall()
+        targets: list[dict[str, object]] = []
+        for path, title, page_type, lifecycle, alias_type, alias_value in rows:
+            if alias_type == "array":
+                try:
+                    decoded = json.loads(alias_value)
+                except json.JSONDecodeError:
+                    decoded = []
+            elif alias_type == "text":
+                decoded = [alias_value]
+            else:
+                decoded = []
+            aliases = [str(item) for item in decoded if isinstance(item, str) and item.strip()]
+            targets.append({"path": str(path), "title": str(title or ""), "type": str(page_type or ""), "lifecycle": str(lifecycle or ""), "aliases": aliases})
+        return targets
+
     def vector_records(self) -> list[dict[str, str]]:
         """Return only passage metadata/text required by explicit vector lifecycle."""
         if not self.path.exists():
             return []
         with self._connection(readonly=True) as connection:
-            rows = connection.execute("SELECT passages.passage_id, passages.page_path, passages.content_hash, passages.text, pages.source_kind, pages.corpus FROM passages JOIN pages ON pages.path=passages.page_path ORDER BY passages.page_path, passages.ordinal").fetchall()
-        return [{"passage_id": row[0], "page_path": row[1], "content_hash": row[2], "text": row[3], "source_kind": row[4], "corpus": row[5]} for row in rows]
+            rows = connection.execute("SELECT passages.passage_id, passages.page_path, passages.content_hash, passages.text, pages.source_kind, pages.corpus, pages.title, passages.heading_path_json FROM passages JOIN pages ON pages.path=passages.page_path ORDER BY passages.page_path, passages.ordinal").fetchall()
+        return [
+            {
+                "passage_id": row[0], "page_path": row[1], "content_hash": row[2], "text": row[3], "source_kind": row[4], "corpus": row[5],
+                "title": row[6] or "", "heading_path": [str(item) for item in json.loads(row[7] or "[]")],
+            }
+            for row in rows
+        ]
 
     def list_catalog_items(
         self,
@@ -609,6 +735,8 @@ class RetrievalIndexStore:
             CREATE VIRTUAL TABLE passages_fts USING fts5(passage_id UNINDEXED, title, aliases, keywords, heading, normalized_terms);
             CREATE TABLE vector_dirty(passage_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, reason TEXT NOT NULL);
             CREATE INDEX passages_page_ordinal ON passages(page_path, ordinal);
+            CREATE TABLE links(src TEXT NOT NULL REFERENCES pages(path) ON DELETE CASCADE, kind TEXT NOT NULL, ordinal INTEGER NOT NULL, dst TEXT NOT NULL, dst_paths TEXT NOT NULL, dst_stem TEXT NOT NULL, source_hash TEXT NOT NULL, PRIMARY KEY(src, kind, ordinal));
+            CREATE INDEX links_kind_dst ON links(kind, dst);
         """)
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
@@ -630,15 +758,38 @@ class RetrievalIndexStore:
         aliases = page.frontmatter.get("aliases", [])
         keywords = page.frontmatter.get("tags", [])
         aliases_text = " ".join(map(str, aliases if isinstance(aliases, list) else [aliases]))
+        # Optional ``questions:`` (questions the page answers) are indexed in
+        # the aliases column of the page's first passage only: question-style
+        # queries can match them without a schema change, while the page's
+        # other passages are not inflated.  Pages without the field index
+        # exactly the same text as before.
+        questions_text = frontmatter_questions_text(page.frontmatter)
+        first_aliases_text = f"{aliases_text} {questions_text}".strip() if questions_text else aliases_text
         keywords_text = " ".join(map(str, keywords if isinstance(keywords, list) else [keywords]))
-        for chunk in chunk_markdown(page.path, page.body):
-            self._insert_chunk(connection, chunk, page.title, aliases_text, keywords_text)
+        chunks = chunk_markdown(page.path, page.body)
+        for chunk in chunks:
+            self._insert_chunk(connection, chunk, page.title, first_aliases_text if chunk is chunks[0] else aliases_text, keywords_text)
+        if chunks:
+            # Pages without passages never become query candidates, so they
+            # carry no edges either.  Links are removed with the page row via
+            # the ``ON DELETE CASCADE`` foreign key.
+            self._insert_links(connection, page, extract_page_links(page.path, graph_body(chunk.text for chunk in chunks), page.frontmatter, root=self.root))
 
     @staticmethod
     def _insert_chunk(connection: sqlite3.Connection, chunk: PassageChunk, title: str, aliases: str, keywords: str) -> None:
         connection.execute("INSERT INTO passages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (chunk.passage_id, chunk.page_path, json.dumps(chunk.heading_path, ensure_ascii=False), chunk.heading_anchor, chunk.ordinal, chunk.text, normalize(chunk.text), chunk.token_count, chunk.content_hash, chunk.chunk_schema_version))
         connection.execute("INSERT INTO passages_fts VALUES (?, ?, ?, ?, ?, ?)", (chunk.passage_id, normalize(title), normalize(aliases), normalize(keywords), normalize(" ".join(chunk.heading_path)), normalize(chunk.text)))
         connection.execute("INSERT INTO vector_dirty VALUES (?, ?, ?)", (chunk.passage_id, chunk.content_hash, "page_updated"))
+
+    @staticmethod
+    def _insert_links(connection: sqlite3.Connection, page: IndexedPage, links: list[PageLink]) -> None:
+        ordinals: dict[str, int] = {}
+        rows = []
+        for link in links:
+            ordinal = ordinals.get(link.kind, 0)
+            ordinals[link.kind] = ordinal + 1
+            rows.append((page.path, link.kind, ordinal, link.dst, encode_paths(link.dst_paths), link.dst_stem, page.redacted_content_hash))
+        connection.executemany("INSERT INTO links VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
 
     def _page_stats(self) -> dict[str, tuple[int, int]]:
         with self._connection(readonly=True) as connection:
@@ -699,10 +850,10 @@ def page_from_file(root: Path, path: Path, *, scope: StoreScope) -> IndexedPage 
         frontmatter.setdefault("project", "unknown")
     elif is_raw:
         parts = rel.split("/")
-        # Ingest snapshots use raw/sources/<type>/<project>/<name>/... .
-        # Preserve an explicit frontmatter project, but make that stable path
-        # projection available to FTS filtering when no frontmatter exists.
-        if len(parts) >= 5:
+        # Vendor file trees (raw/sources/file/...) are shared docs — do not
+        # treat the next path segment (e.g. "NetSuite Help Docs") as project.
+        # Ingest snapshots keep raw/sources/<type>/<project>/... inference.
+        if len(parts) >= 5 and parts[2].casefold() != "file":
             frontmatter.setdefault("project", parts[3])
         frontmatter.setdefault("type", "raw")
     elif rel.startswith("wiki/projects/"):

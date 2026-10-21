@@ -22,7 +22,11 @@ from retrieval.vector_provider import VectorProvider, VectorProviderIdentity
 from wiki.wiki_io import read_markdown_page, split_frontmatter
 from wiki.wiki_paths import VECTOR_INDEX_BY_CORPUS
 
-VECTOR_INDEX_SCHEMA_VERSION = 2
+# v3: passages are embedded with their page title and heading path prefixed
+# (see ``embedding_text``); v2 indexes embedded the bare passage text and are
+# reported ``index_incompatible`` so the next explicit build replaces them.
+VECTOR_INDEX_SCHEMA_VERSION = 3
+EMBEDDING_TEXT_VERSION = "title-heading-v1"
 _PAGED_NAVIGATION_PAGE_RE = re.compile(r"^(?:index-\d{2,}|_entries(?:-\d{2,})?)\.md$")
 
 _DOCUMENT_READ_CACHE: dict[str, tuple[tuple[int, int], list[dict[str, object]]]] = {}
@@ -569,20 +573,48 @@ def vector_index_records(vault_root: str | Path, *, include_raw_sources: bool = 
     store = RetrievalIndexStore(root)
     if store.status().get("ok"):
         return [
-            VectorRecord(
-                path=str(record["page_path"]),
-                page_path=str(record["page_path"]),
-                passage_id=str(record["passage_id"]),
-                content_hash=str(record["content_hash"]),
-                text=str(record["text"]),
-                source_kind=str(record["source_kind"]),
-                corpus="active",
-            )
+            _passage_vector_record(record)
             for record in store.vector_records()
             if not str(record["page_path"]).startswith("wiki/sources/")
             and (include_raw_sources or str(record["corpus"]) != "history")
         ]
     return _vector_records(_candidate_pages(root, include_raw_sources=include_raw_sources))
+
+
+def embedding_text(title: str, heading_path: Sequence[str], text: str) -> str:
+    """Return the text a passage is embedded as: title, heading path, body.
+
+    Passages are split below their headings, so the bare text often lacks the
+    subject it talks about ("Retries are capped at three" under "Carrier API >
+    Limits").  Prefixing the page title and the heading path gives the
+    embedding that context.  A leading H1 equal to the title is not repeated.
+    Only the embedded text changes; stored passage text and lexical search do
+    not.
+    """
+
+    clean_title = " ".join(str(title).split())
+    headings = [" ".join(str(item).split()) for item in heading_path]
+    headings = [item for item in headings if item]
+    if headings and clean_title and headings[0].casefold() == clean_title.casefold():
+        headings = headings[1:]
+    lines = [line for line in (clean_title, " > ".join(headings)) if line]
+    return "\n".join([*lines, text]) if lines else text
+
+
+def _passage_vector_record(record: dict[str, Any]) -> VectorRecord:
+    text = embedding_text(str(record.get("title") or ""), [str(item) for item in record.get("heading_path") or ()], str(record["text"]))
+    # The passage hash covers only its body; a retitle or heading rename
+    # changes the embedded text, so the vector hash covers that text too.
+    material = f"{EMBEDDING_TEXT_VERSION}\0{record['content_hash']}\0{text}"
+    return VectorRecord(
+        path=str(record["page_path"]),
+        page_path=str(record["page_path"]),
+        passage_id=str(record["passage_id"]),
+        content_hash=hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        text=text,
+        source_kind=str(record["source_kind"]),
+        corpus="active",
+    )
 
 
 def _vector_records(candidates: list[QueryCandidate]) -> list[VectorRecord]:

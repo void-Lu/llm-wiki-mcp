@@ -1,6 +1,7 @@
 """Bounded graph expansion shared by Query V2 retrieval stages.
 
-The graph operates on already indexed candidate projections.  It does not
+The graph operates on already indexed candidate projections and the link
+edges persisted at index time (see ``retrieval.graph_edges``).  It does not
 read Wiki source files during a query and it never widens the candidate set
 past the caller-provided eligibility boundary.
 """
@@ -8,14 +9,32 @@ past the caller-provided eligibility boundary.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from wiki.wikilinks import wikilink_targets
+from retrieval.graph_edges import WIKILINK, PageLink, extract_page_links, frontmatter_values, resolve_wikilink
 
+# Evidence weights for typed frontmatter relations, alongside the existing
+# direct wikilink (3.0), shared source (4.0 each), common neighbour
+# (1.5 / ln(degree + 1)) and same type (1.0) weights.  ``derived_from`` is an
+# explicit, validated origin declaration and counts like a body wikilink;
+# ``related_objects`` is a looser association.  ``applies_to`` holds
+# applicability labels rather than page targets and is not scored.
+TYPED_RELATION_WEIGHTS = {"derived_from": 3.0, "related_objects": 2.0}
 _GRAPH_SCORE_RATIO_CAP = 0.15
 _PURE_GRAPH_SCORE_CAP = 0.75
+# Raw evidence at which a graph-only page reaches half of the pure-graph cap.
+# One direct wikilink from one seed (weight 3.0) lands at 0.375; stronger or
+# repeated evidence approaches, but never reaches, 0.75.
+_PURE_GRAPH_HALF_SATURATION = 3.0
+# Graph-only pages are capped relative to the strongest seed that reached
+# them: ratio x best seed relevance x E/(E+3).  A graph-only page therefore
+# always stays below the seed that reached it, and neighbours of weak seeds
+# stay low instead of sharing one fixed ceiling with neighbours of strong ones.  Chosen on graph_v1 from the
+# grid {0.3, 0.5, 0.7, 0.9}; ``None`` restores the fixed 0.75 ceiling.
+PURE_GRAPH_SEED_RATIO: float | None = 0.7
 _MAX_GRAPH_EXPANSIONS_PER_SEED = 64
 _SCORE_PRECISION = 12
 
@@ -46,6 +65,8 @@ class QueryCandidate:
     vector_score: float = 0.0
     fusion_score: float = 0.0
     graph_score: float = 0.0
+    graph_evidence: float = 0.0
+    graph_seed_score: float = 0.0
     rank_breakdown: RankBreakdown = field(default_factory=RankBreakdown)
 
     @property
@@ -58,31 +79,64 @@ class Graph:
     neighbors: dict[str, set[str]]
     sources: dict[str, set[str]]
     types: dict[str, str]
+    # Symmetric typed frontmatter relations: page -> related page -> kinds.
+    typed: dict[str, dict[str, set[str]]] = field(default_factory=dict)
+
+    def adjacent(self, rel: str) -> set[str]:
+        """Pages one hop away through a wikilink or a typed relation."""
+
+        related = self.typed.get(rel)
+        if not related:
+            return self.neighbors.get(rel, set())
+        return self.neighbors.get(rel, set()) | set(related)
 
 
-def build_graph(root: Path, candidates: list[QueryCandidate] | None = None) -> Graph:
-    """Build graph relationships from indexed candidate projections."""
+def build_graph(
+    root: Path,
+    candidates: list[QueryCandidate] | None = None,
+    *,
+    edges: Mapping[str, Sequence[PageLink]] | None = None,
+) -> Graph:
+    """Build graph relationships over the caller's candidate boundary.
+
+    ``edges`` are the persisted index-time links keyed by page path.  Pages
+    missing from ``edges`` (or every page, when ``edges`` is omitted) are
+    parsed from their candidate body with the same extractor the index uses.
+    Wikilink targets are resolved against the current candidates only, so a
+    filtered-out page can never become a graph neighbour.
+    """
 
     if candidates is None:
         candidates = []
     wiki_candidates = [candidate for candidate in candidates if candidate.rel.startswith("wiki/")]
-    by_rel = {candidate.rel: candidate.path for candidate in wiki_candidates}
-    by_candidate = {candidate.rel: candidate for candidate in wiki_candidates}
+    by_rel = {candidate.rel: candidate for candidate in wiki_candidates}
     by_stem: dict[str, list[str]] = {}
-    for rel, path in by_rel.items():
-        by_stem.setdefault(path.stem.casefold(), []).append(rel)
+    for rel, candidate in by_rel.items():
+        by_stem.setdefault(candidate.path.stem.casefold(), []).append(rel)
 
     neighbors = {rel: set() for rel in by_rel}
+    typed: dict[str, dict[str, set[str]]] = {}
     sources: dict[str, set[str]] = {}
     types: dict[str, str] = {}
-    for rel, path in by_rel.items():
-        candidate = by_candidate[rel]
-        sources[rel] = {str(item) for item in _as_list(candidate.frontmatter.get("sources"))}
+    for rel, candidate in by_rel.items():
+        # Snapshot metadata freezes YAML lists into tuples; normalise both.
+        sources[rel] = {str(item) for item in frontmatter_values(candidate.frontmatter.get("sources"))}
         types[rel] = str(candidate.frontmatter.get("type") or _path_type(rel))
-        for target in _wikilink_targets(candidate.body, path, root, by_rel, by_stem):
-            neighbors[rel].add(target)
-            neighbors.setdefault(target, set()).add(rel)
-    return Graph(neighbors=neighbors, sources=sources, types=types)
+        page_links = edges.get(rel) if edges is not None else None
+        if page_links is None:
+            page_links = extract_page_links(rel, candidate.body, candidate.frontmatter, root=root)
+        for link in page_links:
+            if link.kind == WIKILINK:
+                target = resolve_wikilink(link, by_rel, by_stem)
+                if target:
+                    neighbors[rel].add(target)
+                    neighbors.setdefault(target, set()).add(rel)
+            elif link.kind in TYPED_RELATION_WEIGHTS:
+                target = resolve_wikilink(link, by_rel, by_stem)
+                if target and target != rel:
+                    typed.setdefault(rel, {}).setdefault(target, set()).add(link.kind)
+                    typed.setdefault(target, {}).setdefault(rel, set()).add(link.kind)
+    return Graph(neighbors=neighbors, sources=sources, types=types, typed=typed)
 
 
 def apply_graph_expansion(
@@ -92,8 +146,14 @@ def apply_graph_expansion(
     max_graph_hops: int,
     *,
     collect_reasons: bool,
+    pure_seed_ratio: float | None = PURE_GRAPH_SEED_RATIO,
 ) -> None:
-    """Add bounded graph evidence without bypassing public query filters."""
+    """Add bounded graph evidence without bypassing public query filters.
+
+    Graph-only pages score ``pure_seed_ratio`` x the best contributing seed's
+    relevance x E/(E+3); ``pure_seed_ratio=None`` keeps the fixed 0.75 ceiling.
+    Pages with their own lexical/vector signal keep the 15% boost cap.
+    """
 
     candidates_by_rel = {candidate.rel: candidate for candidate in all_candidates}
     seeds = sorted(rel for rel, candidate in scored.items() if candidate.source_kind == "wiki")
@@ -104,7 +164,7 @@ def apply_graph_expansion(
         for hop in range(1, max_graph_hops + 1):
             next_frontier: dict[str, str] = {}
             for via in sorted(frontier):
-                for rel in sorted(graph.neighbors.get(via, set()) - visited):
+                for rel in sorted(graph.adjacent(via) - visited):
                     # ``all_candidates`` is already scoped by project/type/tag
                     # filters.  Do not permit an excluded graph page to bridge
                     # to a result that would otherwise be unreachable.
@@ -124,7 +184,22 @@ def apply_graph_expansion(
                 relationship_score = evidence.score
                 raw_contribution = relationship_score * decay
                 graph_cap = _graph_score_cap(candidate)
-                applied = max(0.0, min(raw_contribution, graph_cap - candidate.graph_score))
+                if _has_relevance_signal(candidate):
+                    applied = max(0.0, min(raw_contribution, graph_cap - candidate.graph_score))
+                else:
+                    # Graph-only pages accumulate uncapped evidence and map it
+                    # monotonically into [0, cap), so stronger evidence keeps
+                    # ranking above weaker evidence instead of every page
+                    # saturating at the cap and falling back to path order.
+                    candidate.graph_evidence += raw_contribution
+                    if raw_contribution > 0:
+                        candidate.graph_seed_score = max(candidate.graph_seed_score, _relevance_base(scored[seed]))
+                    if pure_seed_ratio is None:
+                        target_score = _pure_graph_score(candidate.graph_evidence)
+                    else:
+                        graph_cap = _stable_score(pure_seed_ratio * candidate.graph_seed_score)
+                        target_score = _relative_graph_score(candidate.graph_evidence, graph_cap)
+                    applied = max(0.0, target_score - candidate.graph_score)
                 if collect_reasons:
                     if not relationship_reasons:
                         relationship_reasons = [{"kind": "graph_path", "source": seed, "target": rel, "score": 0.0}]
@@ -158,6 +233,8 @@ def relationship_evidence_for(left: str, right: str, graph: Graph) -> Relationsh
     reasons: list[dict[str, Any]] = []
     if right in graph.neighbors.get(left, set()):
         reasons.append({"kind": "direct_wikilink", "source": left, "target": right, "score": 3.0})
+    for kind in sorted(graph.typed.get(left, {}).get(right, set())):
+        reasons.append({"kind": "typed_relation", "source": left, "target": right, "value": kind, "score": TYPED_RELATION_WEIGHTS[kind]})
     shared_sources = sorted(graph.sources.get(left, set()) & graph.sources.get(right, set()))
     for source in shared_sources:
         reasons.append({"kind": "shared_source", "source": left, "target": right, "value": source, "score": 4.0})
@@ -183,6 +260,26 @@ def relationship_score_for(left: str, right: str, graph: Graph) -> float:
     return relationship_evidence_for(left, right, graph).score
 
 
+def _has_relevance_signal(candidate: QueryCandidate) -> bool:
+    return max(candidate.fusion_score, candidate.keyword_score, candidate.vector_score) > 0
+
+
+def _relevance_base(candidate: QueryCandidate) -> float:
+    return max(candidate.fusion_score, candidate.keyword_score, candidate.vector_score)
+
+
+def _relative_graph_score(evidence: float, cap: float) -> float:
+    if evidence <= 0 or cap <= 0:
+        return 0.0
+    return _stable_score(cap * evidence / (evidence + _PURE_GRAPH_HALF_SATURATION))
+
+
+def _pure_graph_score(evidence: float) -> float:
+    if evidence <= 0:
+        return 0.0
+    return _stable_score(_PURE_GRAPH_SCORE_CAP * evidence / (evidence + _PURE_GRAPH_HALF_SATURATION))
+
+
 def _graph_score_cap(candidate: QueryCandidate) -> float:
     # Use the strongest relevance signal as the graph cap base. In lexical
     # mode fusion_score equals keyword_score; in hybrid mode fusion_score
@@ -193,40 +290,6 @@ def _graph_score_cap(candidate: QueryCandidate) -> float:
     if base > 0:
         return _stable_score(base * _GRAPH_SCORE_RATIO_CAP)
     return _PURE_GRAPH_SCORE_CAP
-
-
-def _wikilink_targets(body: str, path: Path, root: Path, by_rel: dict[str, Path], by_stem: dict[str, list[str]]) -> list[str]:
-    targets = []
-    for target in wikilink_targets(body):
-        target_path = Path(target)
-        candidates: list[Path] = []
-        if target_path.suffix != ".md":
-            target_path = target_path.with_suffix(".md")
-        candidates.extend([(path.parent / target_path).resolve(), (root / "wiki" / target_path).resolve(), (root / target_path).resolve()])
-        matched = ""
-        for candidate in candidates:
-            try:
-                rel = candidate.relative_to(root).as_posix()
-            except ValueError:
-                continue
-            if rel in by_rel:
-                matched = rel
-                break
-        if not matched:
-            stem_matches = by_stem.get(Path(target).stem.casefold(), [])
-            if len(stem_matches) == 1:
-                matched = stem_matches[0]
-        if matched:
-            targets.append(matched)
-    return targets
-
-
-def _as_list(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    if value in (None, ""):
-        return []
-    return [value]
 
 
 def _path_type(rel: str) -> str:

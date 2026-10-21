@@ -60,6 +60,7 @@ def test_query_execution_context_runs_parameterized_raw_branches(tmp_path: Path)
             wiki_relaxed_answered=False,
             raw_available="unknown",
             relaxed_available=False,
+            wiki_strong_answered=False,
         )
     )
     assert coverage_plan is not None and coverage_plan.branch == "coverage"
@@ -92,6 +93,7 @@ def test_query_execution_context_runs_parameterized_raw_branches(tmp_path: Path)
             wiki_relaxed_answered=True,
             raw_available="unknown",
             relaxed_available=True,
+            wiki_strong_answered=True,
         )
     )
     assert all_coverage_plan is not None and all_coverage_plan.branch == "all_coverage"
@@ -127,6 +129,7 @@ def test_query_execution_context_runs_parameterized_raw_branches(tmp_path: Path)
             wiki_relaxed_answered=False,
             raw_available="unknown",
             relaxed_available=False,
+            wiki_strong_answered=False,
         )
     )
     assert raw_zero_plan is not None and raw_zero_plan.branch == "raw_zero"

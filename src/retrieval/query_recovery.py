@@ -18,6 +18,9 @@ from retrieval.body_budget import (
 )
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
+from runtime.runtime_config import RrfWeights
+
+DEFAULT_RRF_WEIGHTS = RrfWeights()
 
 
 FRESHNESS_BONUS_MAX = 12.0
@@ -53,6 +56,7 @@ class FallbackState:
     wiki_relaxed_answered: bool
     raw_available: Literal["unknown", "yes", "no"]
     relaxed_available: bool
+    wiki_strong_answered: bool
 
 
 @dataclass(frozen=True)
@@ -110,16 +114,19 @@ def plan_fallback(state: FallbackState) -> FallbackPlan | None:
     ):
         return FallbackPlan("wiki_relaxed", RecoveryCondition(), "relaxed", "wiki_relaxed")
     if (
-        not state.has_primary_recall
-        and not state.wiki_relaxed_answered
+        not state.wiki_strong_answered
         and state.effective_scope in {"knowledge", "all"}
         and state.raw_available in {"unknown", "yes"}
     ):
+        reason = "wiki_weak_primary" if state.has_primary_recall else "wiki_zero_results"
+        kind: CandidatesKind = (
+            "combined_active_raw" if state.has_primary_recall else "raw_only"
+        )
         return FallbackPlan(
             "raw_zero",
-            RecoveryCondition("raw", ("wiki_zero_results",), "item"),
+            RecoveryCondition("raw", (reason,), "item"),
             "raw",
-            "raw_only",
+            kind,
         )
     return None
 
@@ -343,13 +350,18 @@ def fusion_score(
     item: Mapping[str, Any],
     *,
     effective_rrf_k: int,
+    rrf_weights: RrfWeights = DEFAULT_RRF_WEIGHTS,
 ) -> dict[str, Any]:
-    """Compose the primary RRF, exact-match, and total fusion signals."""
+    """Compose the primary RRF, exact-match, and total fusion signals.
+
+    ``rrf_weights`` multiply the FTS, title and vector terms; the default
+    weights of ``1.0`` leave every score bit-for-bit unchanged.
+    """
 
     rrf = (
-        (1 / (effective_rrf_k + item["fts_rank"]) if item["fts_rank"] else 0.0)
-        + (1 / (effective_rrf_k + item["title_rank"]) if item["title_rank"] else 0.0)
-        + (1 / (effective_rrf_k + item["vector_rank"]) if item["vector_rank"] else 0.0)
+        (rrf_weights.fts / (effective_rrf_k + item["fts_rank"]) if item["fts_rank"] else 0.0)
+        + (rrf_weights.title / (effective_rrf_k + item["title_rank"]) if item["title_rank"] else 0.0)
+        + (rrf_weights.vector / (effective_rrf_k + item["vector_rank"]) if item["vector_rank"] else 0.0)
     )
     exact = int(question.casefold() in {hit.title.casefold(), hit.page_path.casefold()})
     total = compose_score(
@@ -385,6 +397,71 @@ class RecoveryAssembly:
     pool_by_page: dict[str, list[dict[str, Any]]]
     context_items: list[dict[str, Any]]
     fallback: dict[str, Any]
+
+
+def _hit_window(
+    page_hits: Sequence[PassageHit],
+    pool: Sequence[Mapping[str, Any]],
+    seen_ids: set[str],
+    costs: dict[str, int],
+) -> Sequence[PassageHit]:
+    """Return the passages a strong page fills, in reading order.
+
+    A page whose unseen passages fit ``PAGE_TOKEN_BUDGET`` is filled from its
+    start exactly as before.  A longer page spends the budget on the passages
+    around its matched passages instead of on its opening: starting from each
+    matched passage (best first) the window grows to the following and then
+    the preceding neighbour until the budget is used.  ``costs`` caches
+    the token estimates computed here for the caller's fill loop.
+    """
+
+    def cost(hit: PassageHit) -> int:
+        if hit.passage_id in seen_ids:
+            return 0
+        value = costs.get(hit.passage_id)
+        if value is None:
+            value = costs[hit.passage_id] = estimate_response_tokens(hit.text)
+        return value
+
+    total = 0
+    for hit in page_hits:
+        total += cost(hit)
+        if total > PAGE_TOKEN_BUDGET:
+            break
+    else:
+        return page_hits
+    position = {hit.passage_id: index for index, hit in enumerate(page_hits)}
+    anchors = [position[item["hit"].passage_id] for item in select_best_per_page(pool)[:1] if item["hit"].passage_id in position]
+    anchors += [position[item["hit"].passage_id] for item in pool if item["hit"].passage_id in position]
+    if not anchors:
+        return page_hits
+    chosen: set[int] = set()
+    budget = PAGE_TOKEN_BUDGET
+    # The opening passage orients the reader (page summary/definition), so it
+    # is kept whenever it fits alongside the matched passage.
+    opening_cost = cost(page_hits[0])
+    if opening_cost <= budget // 4:
+        chosen.add(0)
+        budget -= opening_cost
+    for anchor in dict.fromkeys(anchors):
+        low = high = anchor
+        chosen.add(anchor)
+        forward = True
+        open_sides = {True, False}
+        while open_sides:
+            if forward not in open_sides:
+                forward = not forward
+            index = high + 1 if forward else low - 1
+            if not 0 <= index < len(page_hits) or index in chosen or cost(page_hits[index]) > budget:
+                open_sides.discard(forward)
+            else:
+                budget -= cost(page_hits[index])
+                chosen.add(index)
+                low, high = min(low, index), max(high, index)
+            forward = not forward
+        if budget <= 0:
+            break
+    return [page_hits[index] for index in sorted(chosen)]
 
 
 def _build_page_ordered_context(
@@ -435,12 +512,16 @@ def _build_page_ordered_context(
         page_store = raw_store if raw_store is not None and page_path.startswith("raw/") else store
         cancellation.checkpoint("context")
         page_hits = page_store.passages_for_pages([page_path], limit_per_page=PAGE_FILL_LIMIT)
+        costs: dict[str, int] = {}
+        page_hits = _hit_window(page_hits, page_candidates.get(page_path, ()), seen_ids, costs)
         page_tokens = 0
         for hit_index, page_hit in enumerate(page_hits):
             cancellation.checkpoint_batch(hit_index, every=16, stage="context")
             if page_hit.passage_id in seen_ids:
                 continue
-            item_tokens = estimate_response_tokens(page_hit.text)
+            item_tokens = costs.get(page_hit.passage_id)
+            if item_tokens is None:
+                item_tokens = estimate_response_tokens(page_hit.text)
             if page_tokens + item_tokens > PAGE_TOKEN_BUDGET:
                 break
             page_tokens += item_tokens

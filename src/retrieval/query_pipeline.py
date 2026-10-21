@@ -6,16 +6,20 @@ import re
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Callable, Literal, cast
 
 from retrieval.body_budget import result_floor_budget
 from retrieval.candidate_items import candidate_item
 from retrieval.context_packer import ContextPassage, pack_context
+from retrieval.parent_expansion import expand_hit_texts
+from retrieval.citation_trace import build_citation_trace, write_citation_trace_dump
+from retrieval.graph_edges import PAGE_TARGET_RELATION_KINDS, WIKILINK
 from retrieval.graph_retrieval import QueryCandidate, apply_graph_expansion, build_graph
 from retrieval.lexical_analyzer import has_qualified_identifier
 from retrieval.query_cancellation import QueryCancellationContext
 from retrieval.query_recovery import (
     DEFAULT_RECOVERY_CONDITION,
+    DEFAULT_RRF_WEIGHTS,
     LadderStep,
     assemble_recovery,
     fallback_envelope,
@@ -33,7 +37,7 @@ from retrieval.query_shared import (
 )
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
 from retrieval.query_quality_calibration import load_calibration_artifact_once
-from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, TelemetrySettings
+from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, RrfWeights, TelemetrySettings
 from retrieval.query_quality_policy import (
     GATE_FAIL_OPEN_ERROR,
     GATE_WOULD_SUPPRESS_ALL,
@@ -400,35 +404,41 @@ def _graph_expand(
     debug: bool,
     snapshot: QueryCorpusSnapshot | None = None,
     cancellation: QueryCancellationContext | None = None,
+    graph_cache: dict[str, Any] | None = None,
 ) -> tuple[dict[str, QueryCandidate], list[PassageHit]]:
     """Reuse the legacy bounded expander over DB projections, never files.
 
     The expander owns the existing two-hop, fan-out and score-cap behaviour;
     this adapter only supplies its already-filtered candidate boundary.
+    ``graph_cache`` lets later stages of the same request (relaxed recovery)
+    reuse the eligible candidate boundary and graph built for the seed stage;
+    candidate objects are recreated per call because expansion mutates them.
     """
     if scope in {"archive", "raw"} or not seed_scores:
         return {}, []
-    candidates: list[QueryCandidate] = []
-    pages = snapshot.pages if snapshot is not None else store.page_candidates()
-    for index, page in enumerate(pages):
-        if cancellation is not None:
-            cancellation.checkpoint_batch(index, every=16, stage="graph")
-        path = str(page["path"])
-        frontmatter = metadata.get(path, {})
-        if (
-            not path.startswith("wiki/")
-            or not snapshot_page_eligible(page, metadata, scope=scope, project=project, filters=filters)
-        ):
-            continue
-        candidates.append(
-            QueryCandidate(
-                path=root / path,
-                rel=path,
-                title=str(page["title"]),
-                body=str(page["body"]),
-                frontmatter=dict(frontmatter),
-            )
-        )
+    cache = graph_cache if graph_cache is not None else {}
+    if "templates" not in cache:
+        templates: list[tuple[str, str, str, dict[str, Any]]] = []
+        candidate_hashes: dict[str, str] = {}
+        pages = snapshot.pages if snapshot is not None else store.page_candidates()
+        for index, page in enumerate(pages):
+            if cancellation is not None:
+                cancellation.checkpoint_batch(index, every=16, stage="graph")
+            path = str(page["path"])
+            frontmatter = metadata.get(path, {})
+            if (
+                not path.startswith("wiki/")
+                or not snapshot_page_eligible(page, metadata, scope=scope, project=project, filters=filters)
+            ):
+                continue
+            candidate_hashes[path] = str(page.get("content_hash") or "")
+            templates.append((path, str(page["title"]), str(page["body"]), dict(frontmatter)))
+        cache["templates"] = templates
+        cache["hashes"] = candidate_hashes
+    candidates = [
+        QueryCandidate(path=root / path, rel=path, title=title, body=body, frontmatter=frontmatter)
+        for path, title, body, frontmatter in cache["templates"]
+    ]
     by_path = {candidate.rel: candidate for candidate in candidates}
     scored = {path: by_path[path] for path in seed_scores if path in by_path}
     for path, candidate in scored.items():
@@ -436,9 +446,49 @@ def _graph_expand(
         candidate.fusion_score = seed_scores[path]
     if not scored:
         return {}, []
-    apply_graph_expansion(scored, candidates, build_graph(root, candidates), max_graph_hops=2, collect_reasons=debug)
+    if "graph" not in cache:
+        candidate_hashes = cache["hashes"]
+        stored = snapshot.graph_links(store) if snapshot is not None else store.graph_links((WIKILINK, *PAGE_TARGET_RELATION_KINDS))
+        # Only trust persisted edges extracted from the exact projection this
+        # query sees; anything else is parsed from the snapshot body instead.
+        edges = {
+            path: links
+            for path, (source_hash, links) in stored.items()
+            if path in candidate_hashes and source_hash == candidate_hashes[path]
+        }
+        cache["graph"] = build_graph(root, candidates, edges=edges)
+    apply_graph_expansion(scored, candidates, cache["graph"], max_graph_hops=2, collect_reasons=debug)
     added = [path for path in scored if path not in seed_scores]
     return scored, store.passages_for_pages(added, limit_per_page=1)
+
+
+def _merge_graph_expansion(
+    scored: list[dict[str, Any]],
+    graph_candidates: dict[str, QueryCandidate],
+    graph_passages: list[PassageHit],
+    cancellation: QueryCancellationContext,
+) -> None:
+    existing_by_path = {item["hit"].page_path: item for item in scored}
+    for index, (path, candidate) in enumerate(graph_candidates.items()):
+        cancellation.checkpoint_batch(index, every=16, stage="graph")
+        if path in existing_by_path:
+            existing_by_path[path]["graph_score"] = candidate.graph_score
+            existing_by_path[path]["graph_reasons"] = list(candidate.rank_breakdown.graph_reasons)
+            existing_by_path[path]["score"] = round(existing_by_path[path]["score"] + candidate.graph_score, 12)
+    for index, hit in enumerate(graph_passages):
+        cancellation.checkpoint_batch(index, every=16, stage="graph")
+        candidate = graph_candidates[hit.page_path]
+        scored.append(
+            candidate_item(
+                hit,
+                score=candidate.total_score,
+                graph_score=candidate.graph_score,
+                graph_reasons=list(candidate.rank_breakdown.graph_reasons),
+            )
+        )
+
+
+_QUALIFIED_STAGE_ONE_SCOPES = frozenset({"raw", "auto", "knowledge", "all"})
 
 
 def _stage_one_fts_hits(
@@ -457,7 +507,10 @@ def _stage_one_fts_hits(
         "tags": list(filters.tags),
     }
     steps: list[LadderStep] = [LadderStep("strict", "strict", question, common_kwargs)]
-    if effective_scope == "raw" and has_qualified_identifier(question):
+    if (
+        has_qualified_identifier(question)
+        and effective_scope in _QUALIFIED_STAGE_ONE_SCOPES
+    ):
         steps.append(LadderStep("qualified_code", "qualified_code", question, common_kwargs))
     counts: dict[str, int] = {}
     hits, mode = search_ladder(
@@ -490,6 +543,8 @@ def assemble_public_projection(
     provenance: Mapping[str, Mapping[str, str]],
     seed_stats: QuerySeedStats,
     quality_gate_evaluation: _QualityGateEvaluation | None,
+    load_passages_at_ordinals: Callable[[str, Sequence[int]], Sequence[PassageHit]] | None = None,
+    vault_root: Path | None = None,
 ) -> PublicQueryProjection:
     """Assemble the public envelope from the still-open execution view.
 
@@ -529,23 +584,51 @@ def assemble_public_projection(
         for item in view.context_items
         if item["hit"].page_path in public_paths
     ]
-    passages = [
-        ContextPassage(
-            item["hit"].passage_id,
-            item["hit"].page_path,
-            heading(item["hit"]),
-            item["hit"].text,
-            item["score"],
-            (
-                "raw_evidence"
-                if item["hit"].source_kind == "raw"
-                else "history_evidence"
-                if item["hit"].corpus == "history"
-                else "formal_knowledge"
-            ),
+    expanded_by_id: dict[str, Any] = {}
+    if (
+        request_view.include_context_pack
+        and request_view.expand_parents
+        and load_passages_at_ordinals is not None
+        and public_context_items
+    ):
+        expanded_by_id = {
+            item.passage_id: item
+            for item in expand_hit_texts(
+                [entry["hit"] for entry in public_context_items],
+                load_passages=load_passages_at_ordinals,
+                window=request_view.parent_window,
+                same_heading_only=request_view.same_heading_only,
+            )
+        }
+    passages = []
+    for item in public_context_items:
+        hit = item["hit"]
+        expanded = expanded_by_id.get(hit.passage_id)
+        content = expanded.text if expanded is not None else hit.text
+        passages.append(
+            ContextPassage(
+                hit.passage_id,
+                hit.page_path,
+                heading(hit),
+                content,
+                item["score"],
+                (
+                    "raw_evidence"
+                    if hit.source_kind == "raw"
+                    else "history_evidence"
+                    if hit.corpus == "history"
+                    else "formal_knowledge"
+                ),
+                ordinal=hit.ordinal,
+                expanded=bool(expanded.expanded) if expanded is not None else False,
+                neighbor_ordinals=(
+                    expanded.neighbor_ordinals if expanded is not None else ()
+                ),
+                expansion_chars=(
+                    int(expanded.expansion_chars) if expanded is not None else 0
+                ),
+            )
         )
-        for item in public_context_items
-    ]
     k_budget = result_floor_budget(request_view.top_k, request_view.hard_budget_tokens)
     packed: dict[str, Any] = (
         pack_context(
@@ -583,6 +666,15 @@ def assemble_public_projection(
 
     metadata = request_view.metadata
 
+    expansion_meta: dict[str, dict[str, Any]] = {
+        passage_id: {
+            "expanded": bool(expanded.expanded),
+            "neighbor_ordinals": tuple(expanded.neighbor_ordinals),
+            "expansion_chars": int(expanded.expansion_chars),
+        }
+        for passage_id, expanded in expanded_by_id.items()
+    }
+
     def result_item(
         item: Mapping[str, Any], *, citation: str, include_content: bool
     ) -> dict[str, Any]:
@@ -599,8 +691,10 @@ def assemble_public_projection(
         citation_metadata = _citation_metadata(hit, provenance)
         if citation_metadata:
             result_metadata["provenance"] = citation_metadata
+        expansion = expansion_meta.get(hit.passage_id)
         result: dict[str, Any] = {
             "citation": citation,
+            "passage_id": hit.passage_id,
             "path": hit.page_path,
             "heading": heading(hit),
             "score": item["score"],
@@ -612,6 +706,9 @@ def assemble_public_projection(
             },
             "source_kind": hit.source_kind,
             "metadata": result_metadata,
+            "expanded": bool(expansion["expanded"]) if expansion else False,
+            "neighbor_ordinals": list(expansion["neighbor_ordinals"]) if expansion else [],
+            "expansion_chars": int(expansion["expansion_chars"]) if expansion else 0,
         }
         if include_content:
             context = next(
@@ -734,6 +831,17 @@ def assemble_public_projection(
             for item in baseline_selected
         ]
 
+    citation_trace = build_citation_trace(
+        question=request_view.question,
+        public_scope=request_view.public_scope,
+        intent=request_view.intent,
+        retrieval_mode=request_view.retrieval_mode,
+        lexical_mode=view.lexical_mode,
+        public_selected=public_selected,
+        expansion_by_passage_id=expansion_meta,
+        heading_of=heading,
+    )
+
     response: dict[str, Any] = {
         "ok": True,
         "question": request_view.question,
@@ -744,7 +852,13 @@ def assemble_public_projection(
         "expansion_suggestions": list(view.expansion_suggestions),
         "budget": packed["budget"],
         "pipeline": pipeline,
+        "citation_trace": citation_trace,
     }
+    if request_view.dump_citation_trace:
+        dump_root = vault_root
+        if dump_root is None:
+            raise ValueError("vault_root is required when dump_citation_trace is enabled")
+        response["citation_trace_path"] = write_citation_trace_dump(dump_root, citation_trace)
     if not results:
         has_discovery_entities = bool(discovery_entities) or bool(
             discovery.get("candidate_entities")
@@ -789,18 +903,28 @@ def run_query_v2(
     quality_gate: QualityGateSettings | None = None,
     debug: bool = False,
     include_context_pack: bool = True,
+    expand_parents: bool = True,
+    parent_window: int = 1,
+    same_heading_only: bool = False,
+    dump_citation_trace: bool = False,
     lexical_enabled: bool = True,
     retrieval_mode: Literal["lexical", "vector", "hybrid"] = "hybrid",
     expansion_terms: dict[str, list[str]] | None = None,
     confirmation_token: str | None = None,
     cancellation: QueryCancellationContext | None = None,
     telemetry_stats: MutableMapping[str, object] | None = None,
+    graph_expansion: bool = True,
+    rrf_weights: RrfWeights | None = None,
 ) -> dict[str, Any]:
     """Read existing projections and return one canonical result payload.
 
     The internal packer still assembles page-ordered evidence, but its body is
     emitted once on each public ``results`` item; the old ``context_pack`` and
     legacy adapter are intentionally not part of the response contract.
+
+    ``graph_expansion`` is an engine-internal switch for offline evaluation
+    ablations (graph on vs off); the MCP ``wiki_query`` boundary never exposes
+    it and always keeps the default bounded graph expansion.
     """
     cancellation = cancellation or QueryCancellationContext.unbounded()
     cancellation.checkpoint("status")
@@ -923,38 +1047,32 @@ def run_query_v2(
                     metadata,
                     item,
                     effective_rrf_k=effective_rrf_k,
+                    rrf_weights=rrf_weights or DEFAULT_RRF_WEIGHTS,
                 ),
                 "graph_score": 0.0,
                 "graph_reasons": [],
             }
         )
-    cancellation.checkpoint("graph")
-    graph_candidates, graph_passages = (
-        _graph_expand(
+    graph_cache: dict[str, Any] = {}
+
+    def expand_graph(items: list[dict[str, Any]]) -> None:
+        """Add bounded graph evidence to one scored candidate list in place.
+
+        The strict seed stage and the relaxed Wiki recovery stage share this
+        closure so both use the same snapshot, filters and caps.
+        """
+
+        cancellation.checkpoint("graph")
+        if effective_scope == "raw" or not graph_expansion:
+            return
+        graph_candidates, graph_passages = _graph_expand(
             root, store, metadata, scope=effective_scope, project=project, filters=filters,
-            seed_scores={item["hit"].page_path: item["score"] for item in scored}, debug=debug, snapshot=snapshot, cancellation=cancellation,
+            seed_scores={item["hit"].page_path: item["score"] for item in items}, debug=debug, snapshot=snapshot, cancellation=cancellation,
+            graph_cache=graph_cache,
         )
-        if effective_scope != "raw"
-        else ({}, [])
-    )
-    existing_by_path = {item["hit"].page_path: item for item in scored}
-    for index, (path, candidate) in enumerate(graph_candidates.items()):
-        cancellation.checkpoint_batch(index, every=16, stage="graph")
-        if path in existing_by_path:
-            existing_by_path[path]["graph_score"] = candidate.graph_score
-            existing_by_path[path]["graph_reasons"] = list(candidate.rank_breakdown.graph_reasons)
-            existing_by_path[path]["score"] = round(existing_by_path[path]["score"] + candidate.graph_score, 12)
-    for index, hit in enumerate(graph_passages):
-        cancellation.checkpoint_batch(index, every=16, stage="graph")
-        candidate = graph_candidates[hit.page_path]
-        scored.append(
-            candidate_item(
-                hit,
-                score=candidate.total_score,
-                graph_score=candidate.graph_score,
-                graph_reasons=list(candidate.rank_breakdown.graph_reasons),
-            )
-        )
+        _merge_graph_expansion(items, graph_candidates, graph_passages, cancellation)
+
+    expand_graph(scored)
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     # Retrieval is page-first: the public result list keeps one best passage
     # per page, while the internal pack is assembled page-by-page in reading
@@ -988,6 +1106,10 @@ def run_query_v2(
         lexical_enabled=lexical_enabled,
         include_context_pack=include_context_pack,
         debug=debug,
+        expand_parents=expand_parents,
+        parent_window=parent_window,
+        same_heading_only=same_heading_only,
+        dump_citation_trace=dump_citation_trace,
     )
     execution = QueryExecutionContext(
         root=root,
@@ -1000,6 +1122,8 @@ def run_query_v2(
         snapshot=snapshot,
         seed_lexical_mode=stage_lexical_mode,
         seed_has_primary_recall=has_primary_recall,
+        seed_qualified_fts_hits=qualified_fts_hits,
+        graph_expander=expand_graph,
     )
     execution_view = execution.execute(request_view)
     quality_gate_evaluation = _quality_gate_evaluation(
@@ -1023,6 +1147,8 @@ def run_query_v2(
             scope_rules=tuple(scope_rules),
         ),
         quality_gate_evaluation=quality_gate_evaluation,
+        load_passages_at_ordinals=store.passages_at_ordinals,
+        vault_root=root,
     )
     execution.outcome()
     if telemetry_stats is not None:

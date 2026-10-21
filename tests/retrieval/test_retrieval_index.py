@@ -170,6 +170,66 @@ def test_reconcile_detects_content_changes_with_unchanged_file_stats(tmp_path: P
     assert before["content_hash"] != after["content_hash"]
 
 
+def test_raw_file_tree_does_not_infer_project_from_path_segment(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(
+        root,
+        "raw/sources/file/NetSuite Help Docs/01_SuiteCloud/NuiserverWidget Module.md",
+        "# N/ui/serverWidget\n\nForm Field API",
+    )
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    page = next(p for p in store.page_candidates() if "NuiserverWidget" in p["path"])
+    assert page["project"] == ""
+
+
+def test_raw_projects_snapshot_still_infers_project(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(root, "raw/sources/projects/demo/notes/a.md", "# Demo\n\nbody")
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    assert store.page_candidates()[0]["project"] == "demo"
+
+
+def test_raw_file_frontmatter_project_is_respected(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(
+        root,
+        "raw/sources/file/NetSuite Help Docs/x.md",
+        "---\nproject: codingwork\n---\n\n# X\n\nbody",
+    )
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    assert store.page_candidates()[0]["project"] == "codingwork"
+
+
+def test_raw_file_empty_project_passes_project_filter(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(
+        root,
+        "raw/sources/file/NetSuite Help Docs/01_SuiteCloud/NuiserverWidget Module.md",
+        "# N/ui/serverWidget\n\nunique help docs needle for codingwork filter",
+    )
+    _write(
+        root,
+        "raw/sources/projects/other/notes/a.md",
+        "# Other\n\nunique help docs needle for codingwork filter",
+    )
+    store = RetrievalIndexStore(root, scope="raw")
+    store.build(store.iter_vault_pages())
+    hits = store.search_fts(
+        "unique help docs needle for codingwork filter",
+        project="codingwork",
+        limit=10,
+    )
+    paths = [hit.page_path for hit in hits]
+    assert (
+        "raw/sources/file/NetSuite Help Docs/01_SuiteCloud/NuiserverWidget Module.md"
+        in paths
+    )
+    assert "raw/sources/projects/other/notes/a.md" not in paths
+
+
 def test_chat_projection_uses_a_full_session_locator_and_never_uses_year_as_project(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     _write(root, "raw/sources/chat/2026/07/31/session/a.md", "# Review\n\nprovisional approval")
@@ -306,3 +366,56 @@ def test_catalog_path_prefix_matches_exact_identity_and_excludes_siblings(tmp_pa
     directory_items = directory["items"]
     assert isinstance(directory_items, list)
     assert [item["path"] for item in directory_items] == ["raw/sources/file/demo/child.md"]
+
+
+def test_frontmatter_questions_are_indexed_with_page_aliases(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(
+        root,
+        "wiki/concepts/rotation.md",
+        "---\ntitle: Credential Rotation\naliases: [key rollover]\nquestions:\n  - How often do we rotate the payment gateway secret?\n  - 支付网关密钥多久轮换一次\n---\n\n# Credential Rotation\n\nQuarterly schedule for service credentials.",
+    )
+    _write(root, "wiki/concepts/other.md", "---\ntitle: Other\n---\n\n# Other\n\nQuarterly schedule for reports.")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+
+    assert [hit.page_path for hit in store.search_fts("payment gateway secret")] == ["wiki/concepts/rotation.md"]
+    assert [hit.page_path for hit in store.search_fts("支付网关密钥")] == ["wiki/concepts/rotation.md"]
+    # Aliases still match, and question text never leaks into passage text.
+    assert store.search_fts("key rollover")[0].page_path == "wiki/concepts/rotation.md"
+    assert all("gateway" not in hit.text for hit in store.search_fts("quarterly schedule"))
+
+
+def test_frontmatter_questions_ignore_malformed_values_and_leave_other_pages_unchanged(tmp_path: Path) -> None:
+    import sqlite3
+
+    from retrieval.retrieval_index import frontmatter_questions_text
+
+    assert frontmatter_questions_text({}) == ""
+    assert frontmatter_questions_text({"questions": None}) == ""
+    assert frontmatter_questions_text({"questions": "  Why? "}) == "Why?"
+    assert frontmatter_questions_text({"questions": ["A?", 3, " ", {"x": 1}, "B?"]}) == "A? B?"
+
+    root = tmp_path / "vault"
+    _write(root, "wiki/concepts/plain.md", "---\ntitle: Plain\naliases: [plain alias]\nquestions: 42\n---\n\n# Plain\n\nbody text")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+    with sqlite3.connect(store.path) as connection:
+        aliases = connection.execute("SELECT aliases FROM passages_fts").fetchall()
+    assert aliases == [("plain alias",)]
+
+
+def test_frontmatter_questions_attach_to_the_first_passage_only(tmp_path: Path) -> None:
+    import sqlite3
+
+    root = tmp_path / "vault"
+    body = "\n\n".join(f"## Part {index}\n\n" + " ".join(f"word{index}x{n}" for n in range(500)) for index in range(3))
+    _write(root, "wiki/concepts/long.md", f"---\ntitle: Long\naliases: [lengthy]\nquestions:\n  - Where is the tariff archive?\n---\n\n# Long\n\n{body}")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+    with sqlite3.connect(store.path) as connection:
+        rows = connection.execute("SELECT passages.ordinal, passages_fts.aliases FROM passages_fts JOIN passages USING(passage_id) ORDER BY passages.ordinal").fetchall()
+    assert len(rows) > 1
+    assert "tariff" in rows[0][1] and "lengthy" in rows[0][1]
+    assert all(aliases == "lengthy" for _ordinal, aliases in rows[1:])
+    assert [hit.ordinal for hit in store.search_fts("tariff archive")] == [rows[0][0]]

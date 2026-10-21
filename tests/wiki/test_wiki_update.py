@@ -336,3 +336,115 @@ def test_preview_and_apply_with_custom_heading(tmp_path) -> None:
     )
     assert result["ok"] is True
     assert "## 相关深度文档" in page.read_text(encoding="utf-8")
+
+
+def test_schema_text_describes_the_locked_fields_and_replace_semantics_the_code_uses() -> None:
+    from wiki.wiki_paths import DEFAULT_SCHEMA_TEXT
+    from wiki.wiki_update import LOCKED_FIELDS
+
+    rule = next(line for line in DEFAULT_SCHEMA_TEXT.splitlines() if line.startswith("3. 受控更新"))
+    locked_part = rule.split("锁定字段不可改值：", 1)[1].split("（", 1)[0]
+    assert {item.strip("`") for item in locked_part.split("、")} == LOCKED_FIELDS
+    assert "title" not in LOCKED_FIELDS
+    assert "整体替换原值" in rule and "去重合并" not in rule
+
+
+def test_incoming_title_changes_and_arrays_replace_instead_of_merging(tmp_path) -> None:
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\ntitle: A\naliases:\n- Old One\n- Old Two\n---\n\n# A\n\nold\n", encoding="utf-8")
+    incoming = {"title": "Renamed", "aliases": ["Old Two"]}
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "new", incoming)
+    applied = apply_update(tmp_path, "wiki/concepts/general/a.md", "new", incoming_frontmatter=incoming, plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
+
+    assert applied["ok"] is True
+    frontmatter = yaml.safe_load(page.read_text(encoding="utf-8").split("---\n")[1])
+    assert frontmatter["title"] == "Renamed"
+    assert frontmatter["aliases"] == ["Old Two"]
+    assert "\n# Renamed\n" in page.read_text(encoding="utf-8")
+
+
+def _heading_page(tmp_path):
+    page = tmp_path / "wiki/concepts/general/a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\ntitle: Rate Engine\n---\n\n# Rate Engine\n\nold\n", encoding="utf-8")
+    return page
+
+
+def test_differing_body_heading_is_dropped_with_a_warning_in_preview_and_apply(tmp_path) -> None:
+    page = _heading_page(tmp_path)
+    body = "\n# Pricing Service\n\nnew\n"
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", body)
+    applied = apply_update(tmp_path, "wiki/concepts/general/a.md", body, expected_hash=preview["current_hash"])
+
+    expected = [
+        "title_heading_ignored: body heading '# Pricing Service' is not the page title 'Rate Engine'; "
+        "the heading is rendered from frontmatter, set incoming_frontmatter.title to rename the page"
+    ]
+    assert preview["warnings"] == expected
+    assert applied["ok"] is True and applied["warnings"] == expected
+    text = page.read_text(encoding="utf-8")
+    assert "title: Rate Engine" in text and "# Rate Engine" in text and "Pricing Service" not in text
+
+
+@pytest.mark.parametrize(
+    ("body", "incoming"),
+    [
+        ("# Rate Engine\n\nnew\n", None),
+        ("new\n\n# Later Heading\n", None),
+        ("## Section\n\nnew\n", None),
+        ("# Pricing Service\n\nnew\n", {"title": "Pricing Service"}),
+    ],
+)
+def test_no_heading_warning_when_the_heading_matches_or_is_not_leading(tmp_path, body, incoming) -> None:
+    _heading_page(tmp_path)
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", body, incoming)
+    applied = apply_update(tmp_path, "wiki/concepts/general/a.md", body, incoming_frontmatter=incoming, plan_id=preview["plan_id"], expected_hash=preview["current_hash"])
+
+    assert applied["ok"] is True
+    assert "warnings" not in preview and "warnings" not in applied
+
+
+def test_heading_warning_uses_redacted_text(tmp_path) -> None:
+    _heading_page(tmp_path)
+    preview = preview_update(tmp_path, "wiki/concepts/general/a.md", "# Owner bob@example.com\n\nnew\n")
+    assert "bob@example.com" not in preview["warnings"][0]
+    assert "[REDACTED_EMAIL]" in preview["warnings"][0]
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "---\ntype: concept\n---\n\n# Legacy Heading Title\n\nold\n",
+        "# Legacy Heading Title\n\nold\n",
+    ],
+)
+def test_body_only_update_keeps_the_h1_title_of_a_page_without_frontmatter_title(tmp_path, original: str) -> None:
+    page = tmp_path / "wiki/concepts/general/legacy.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(original, encoding="utf-8")
+
+    preview = preview_update(tmp_path, "wiki/concepts/general/legacy.md", "new body\n")
+    applied = apply_update(tmp_path, "wiki/concepts/general/legacy.md", "new body\n", expected_hash=preview["current_hash"])
+
+    assert applied["ok"] is True
+    text = page.read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(text.split("---\n")[1])
+    assert frontmatter["title"] == "Legacy Heading Title"
+    assert "\n# Legacy Heading Title\n\nnew body\n" in text
+    assert "# legacy" not in text
+    assert "warnings" not in preview and "warnings" not in applied
+
+
+def test_page_without_title_or_heading_still_falls_back_to_the_stem(tmp_path) -> None:
+    page = tmp_path / "wiki/concepts/general/bare.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\n---\n\nold\n", encoding="utf-8")
+
+    applied = apply_update(tmp_path, "wiki/concepts/general/bare.md", "new\n", expected_hash=sha256(page.read_bytes()).hexdigest())
+
+    assert applied["ok"] is True
+    assert "\n# bare\n" in page.read_text(encoding="utf-8")

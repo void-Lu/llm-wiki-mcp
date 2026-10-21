@@ -368,3 +368,75 @@ def test_report_owner_drops_case_query_and_paths_at_persistence_boundary(tmp_pat
     assert "C:/secret" not in text
     assert "secret query" not in text
     assert '"query"' not in text
+
+
+def test_report_owner_gate_rejects_graph_ablation_against_graph_on_baseline() -> None:
+    metadata = {
+        "dataset_id": "fixture",
+        "dataset_revision": "rev-1",
+        "vault_fingerprint": {"value": "digest"},
+        "ranking": {"version": "ranking-v1"},
+        "parameters": {"retrieval_mode": "lexical", "vector_enabled": False},
+    }
+    baseline = {
+        "metadata": metadata,
+        "metrics": {
+            "recall_at_k_macro": 1.0,
+            "ndcg_at_k_macro": 1.0,
+            "filter_correctness": 1.0,
+            "no_answer_false_positive_rate": 0.0,
+            "p95_latency_ms": 1.0,
+        },
+    }
+    candidate = {
+        **baseline,
+        "metadata": {**metadata, "parameters": {**metadata["parameters"], "graph_expansion": False}},
+    }
+
+    gate = evaluate_retrieval_gate(candidate, baseline)
+    legacy = evaluate_retrieval_gate(baseline, baseline)
+
+    assert gate["passed"] is False
+    assert gate["checks"]["graph_expansion_matches"] == {
+        "passed": False,
+        "actual": False,
+        "expected": True,
+        "reason": "graph_expansion_mismatch",
+    }
+    # 旧报告缺少该参数时按默认开启处理，不破坏既有 baseline 比较。
+    assert legacy["checks"]["graph_expansion_matches"]["passed"] is True
+
+
+def test_report_owner_markdown_lists_ranking_by_k_and_graph_mode(tmp_path: Path) -> None:
+    report = {
+        "metadata": {
+            "dataset_id": "fixture",
+            "dataset_revision": "rev-1",
+            "parameters": {"top_k": 10, "graph_expansion": False},
+            "vault_fingerprint": {"value": "digest", "file_count": 1},
+            "runtime_provenance": {"package_version": "test", "revision": "rev"},
+            "query_v2": {},
+        },
+        "metrics": {
+            "recall_at_k_macro": 0.5,
+            "precision_at_k_macro": 0.1,
+            "mrr_at_k_macro": 0.25,
+            "ndcg_at_k_macro": 0.3,
+            "ranking_by_k": {
+                "10": {"recall": 0.5, "precision": 0.1, "mrr": 0.25, "ndcg": 0.3},
+                "1": {"recall": 0.0, "precision": 0.0, "mrr": 0.0, "ndcg": 0.0},
+            },
+            "no_answer_false_positive_rate": 0.0,
+            "context_budget": {"within_budget": True},
+            "filter_correctness": 1.0,
+            "p95_latency_ms": 1.0,
+        },
+        "cases": [],
+    }
+
+    output = write_retrieval_eval_report(report, tmp_path / "reports")
+    markdown = Path(output["markdown"]).read_text(encoding="utf-8")
+
+    assert "- 图扩展：关闭（离线消融）" in markdown
+    assert "| k | Recall | Precision | MRR | nDCG |" in markdown
+    assert markdown.index("| 1 | 0.0000") < markdown.index("| 10 | 0.5000 | 0.1000 | 0.2500 | 0.3000 |")

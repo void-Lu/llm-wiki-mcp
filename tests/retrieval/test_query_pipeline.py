@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from retrieval.query_pipeline import run_query_v2
@@ -639,7 +640,8 @@ def test_v2_wiki_result_does_not_mix_raw_list_record_evidence(tmp_path: Path) ->
 
     assert result["results"][0]["path"] == note
     assert all(not item["path"].startswith("raw/") for item in result["results"])
-    assert result["pipeline"]["lexical"]["mode"] == "relaxed"
+    # List/Record is a qualified identifier; stage-one uses qualified_code on active.
+    assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
     assert result["pipeline"]["fallback"]["level"] == "none"
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 0
 
@@ -772,11 +774,11 @@ def test_v2_freshness_ranks_newer_fix_note_above_older_one(tmp_path: Path) -> No
         "重新安装 resolver 并重建索引。\n"
     )
     older.write_text(
-        f"---\ntitle: \"旧补丁\"\nupdated_at: \"2026-06-01\"\n---\n\n{body}",
+        f"---\ntitle: \"CodeGraph 旧补丁：SuiteScript 解析\"\nupdated_at: \"2026-06-01\"\n---\n\n{body}",
         encoding="utf-8",
     )
     newer.write_text(
-        f"---\ntitle: \"新补丁\"\nupdated_at: \"2026-07-22\"\n---\n\n{body}",
+        f"---\ntitle: \"CodeGraph 新补丁：SuiteScript 解析\"\nupdated_at: \"2026-07-22\"\n---\n\n{body}",
         encoding="utf-8",
     )
     refresh_indexes(root)
@@ -801,7 +803,7 @@ def test_v2_two_phase_pack_keeps_every_selected_page_represented(tmp_path: Path)
     _write(
         root,
         long_page,
-        "Long guide",
+        "CodeGraph Long guide：SuiteScript 解析",
         (
             "## 背景\n\n"
             + "这是很长的背景段落，包含大量填充词。" * 80
@@ -814,7 +816,7 @@ def test_v2_two_phase_pack_keeps_every_selected_page_represented(tmp_path: Path)
     _write(
         root,
         second,
-        "Second note",
+        "CodeGraph Second note：SuiteScript 验证",
         "codegraph 重建索引后，需要验证 SuiteScript 函数关系恢复。",
         type="troubleshooting",
     )
@@ -1358,6 +1360,39 @@ def test_v2_raw_scope_uses_qualified_aliases_on_the_primary_path(tmp_path: Path)
         assert result["pipeline"]["lexical"]["mode"] == "qualified_code"
 
 
+
+def test_v2_active_scope_uses_qualified_code_for_chinese_module_question(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    _write(
+        root,
+        "wiki/concepts/netsuite-ss-modules/n-record.md",
+        "N/record",
+        "N/record module methods: create load submitFields.",
+        type="concept",
+    )
+    _write(
+        root,
+        "wiki/concepts/noise-methods.md",
+        "方法列表",
+        "各种方法 模块 有哪些 列表 noise only chinese bigrams.",
+        type="concept",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root,
+        "n/record模块有哪些方法",
+        scope="knowledge",  # also parametrize auto if cheap
+        retrieval_mode="lexical",
+    )
+    paths = [item["path"] for item in result["results"]]
+    assert "wiki/concepts/netsuite-ss-modules/n-record.md" in paths
+    assert result["pipeline"]["counters"]["qualified_fts_hits"] > 0
+    # Prefer module page near top (strict CJK AND alone often misses)
+    assert paths[0] == "wiki/concepts/netsuite-ss-modules/n-record.md"
+
+
 def test_v2_namespace_wildcard_discovers_raw_catalog_before_entity_batch(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     create_wiki_root(root)
@@ -1756,3 +1791,26 @@ def test_v2_path_prefix_filter_restricts_results(tmp_path: Path) -> None:
     )
     paths = {item["path"] for item in result["results"]}
     assert paths == {"wiki/concepts/domain-a/page.md"}
+
+
+def test_v2_passes_rrf_weights_to_primary_fusion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import retrieval.query_pipeline as query_pipeline
+    from runtime.runtime_config import RrfWeights
+
+    root = tmp_path / "vault"
+    page = root / "wiki/concepts/invoice.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntitle: Invoice Approval\n---\n\n# Invoice Approval\n\ninvoice approval workflow", encoding="utf-8")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+    seen: list[object] = []
+    original = query_pipeline.fusion_score
+
+    def spy(*args: object, **kwargs: object) -> dict[str, object]:
+        seen.append(kwargs.get("rrf_weights"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(query_pipeline, "fusion_score", spy)
+    run_query_v2(root, "invoice approval workflow", retrieval_mode="lexical")
+    run_query_v2(root, "invoice approval workflow", retrieval_mode="lexical", rrf_weights=RrfWeights(fts=2.0))
+    assert seen and set(seen) == {RrfWeights(), RrfWeights(fts=2.0)}

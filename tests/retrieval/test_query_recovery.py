@@ -69,6 +69,7 @@ def _state(
     wiki_relaxed_answered: bool,
     raw_available: Literal["unknown", "yes", "no"],
     relaxed_available: bool,
+    wiki_strong_answered: bool = False,
 ) -> FallbackState:
     return FallbackState(
         has_primary_recall=has_primary_recall,
@@ -77,10 +78,11 @@ def _state(
         wiki_relaxed_answered=wiki_relaxed_answered,
         raw_available=raw_available,
         relaxed_available=relaxed_available,
+        wiki_strong_answered=wiki_strong_answered,
     )
 
 
-def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
+def test_fallback_state_is_frozen_and_has_seven_evidence_fields() -> None:
     state = _state(
         has_primary_recall=False,
         effective_scope="all",
@@ -88,6 +90,7 @@ def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
         wiki_relaxed_answered=True,
         raw_available="unknown",
         relaxed_available=True,
+        wiki_strong_answered=True,
     )
 
     assert state == FallbackState(
@@ -97,6 +100,7 @@ def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
         True,
         "unknown",
         True,
+        True,
     )
     assert state.__dataclass_fields__.keys() == {
         "has_primary_recall",
@@ -105,6 +109,7 @@ def test_fallback_state_is_frozen_and_has_six_evidence_fields() -> None:
         "wiki_relaxed_answered",
         "raw_available",
         "relaxed_available",
+        "wiki_strong_answered",
     }
     with pytest.raises(FrozenInstanceError):
         state.raw_available = "yes"  # type: ignore[misc]
@@ -170,8 +175,78 @@ def test_plan_fallback_covers_each_branch_and_none_path() -> None:
             wiki_relaxed_answered=False,
             raw_available="no",
             relaxed_available=False,
+            wiki_strong_answered=False,
         )
     ) is None
+
+
+def test_plan_fallback_weak_primary_schedules_raw_zero() -> None:
+    plan = plan_fallback(
+        _state(
+            has_primary_recall=True,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            wiki_strong_answered=False,
+            raw_available="yes",
+            relaxed_available=False,
+        )
+    )
+    assert plan is not None and plan.branch == "raw_zero"
+    assert plan.candidates_kind == "combined_active_raw"
+    assert "wiki_weak_primary" in plan.condition.reasons
+
+
+def test_plan_fallback_strong_wiki_blocks_raw_zero() -> None:
+    for overrides in (
+        dict(has_primary_recall=True, wiki_strong_answered=True),
+        dict(has_primary_recall=False, wiki_relaxed_answered=True, wiki_strong_answered=True),
+    ):
+        args = dict(
+            has_primary_recall=False,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            raw_available="yes",
+            relaxed_available=False,
+            wiki_strong_answered=False,
+        )
+        args.update(overrides)
+        plan = plan_fallback(_state(**args))
+        assert plan is None or plan.branch != "raw_zero"
+
+
+def test_plan_fallback_coverage_not_blocked_by_wiki_strong_flag() -> None:
+    """Coverage is planned from primary+uncovered; strong flag must not steal the branch."""
+    plan = plan_fallback(
+        _state(
+            has_primary_recall=True,
+            effective_scope="knowledge",
+            uncovered_latin_terms=("unauthenticated",),
+            wiki_relaxed_answered=False,
+            wiki_strong_answered=True,  # as if primary were strong
+            raw_available="yes",
+            relaxed_available=False,
+        )
+    )
+    assert plan is not None
+    assert plan.branch == "coverage"
+
+
+def test_plan_fallback_zero_results_still_uses_wiki_zero_results() -> None:
+    plan = plan_fallback(
+        _state(
+            has_primary_recall=False,
+            effective_scope="knowledge",
+            uncovered_latin_terms=(),
+            wiki_relaxed_answered=False,
+            wiki_strong_answered=False,
+            raw_available="yes",
+            relaxed_available=False,
+        )
+    )
+    assert plan is not None and plan.branch == "raw_zero"
+    assert "wiki_zero_results" in plan.condition.reasons
 
 
 def test_plan_fallback_exhausts_the_decision_matrix() -> None:
@@ -184,6 +259,7 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
             (False, True),
             ("unknown", "yes", "no"),
             (False, True),
+            (False, True),
         )
     )
     cases.extend(
@@ -194,9 +270,10 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
             (False, True),
             ("yes", "no"),
             (False,),
+            (False, True),
         )
     )
-    assert len(cases) == 320
+    assert len(cases) == 640
 
     for (
         has_primary_recall,
@@ -205,6 +282,7 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
         wiki_relaxed_answered,
         raw_available,
         relaxed_available,
+        wiki_strong_answered,
     ) in cases:
         state = _state(
             has_primary_recall=has_primary_recall,
@@ -213,6 +291,7 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
             wiki_relaxed_answered=wiki_relaxed_answered,
             raw_available=raw_available,
             relaxed_available=relaxed_available,
+            wiki_strong_answered=wiki_strong_answered,
         )
         plan = plan_fallback(state)
         raw_ready = raw_available in {"unknown", "yes"}
@@ -222,7 +301,7 @@ def test_plan_fallback_exhausts_the_decision_matrix() -> None:
             assert plan is not None and plan.branch == "all_coverage"
         elif not has_primary_recall and effective_scope in {"knowledge", "all"} and relaxed_available:
             assert plan is not None and plan.branch == "wiki_relaxed"
-        elif not has_primary_recall and not wiki_relaxed_answered and effective_scope in {"knowledge", "all"} and raw_ready:
+        elif not wiki_strong_answered and effective_scope in {"knowledge", "all"} and raw_ready:
             assert plan is not None and plan.branch == "raw_zero"
         else:
             assert plan is None
@@ -609,3 +688,50 @@ def test_assembler_rejects_retired_explicit_maps_path() -> None:
             cancellation=QueryCancellationContext.unbounded(),
             hit_stats={},  # type: ignore[call-arg]
         )
+
+
+def _window_hits(sizes: list[int]) -> list:
+    from retrieval.retrieval_index import PassageHit
+
+    return [
+        PassageHit(f"p{index}", "wiki/concepts/long.md", "Long", ("Long",), " ".join(f"w{index}n{n}" for n in range(size)), 0.0, "wiki", "wiki", "wiki", index)
+        for index, size in enumerate(sizes)
+    ]
+
+
+def test_hit_window_keeps_reading_order_fill_when_the_page_fits_the_budget() -> None:
+    from retrieval.query_recovery import _hit_window
+
+    hits = _window_hits([100, 100, 100])
+    assert _hit_window(hits, [{"hit": hits[2], "score": 1.0}], set(), {}) is hits
+
+
+def test_hit_window_centres_a_long_page_on_its_matched_passage_and_keeps_the_opening() -> None:
+    from retrieval.context_packer import estimate_response_tokens
+    from retrieval.body_budget import PAGE_TOKEN_BUDGET
+    from retrieval.query_recovery import _hit_window
+
+    hits = _window_hits([60] + [400] * 20)
+    matched = hits[12]
+    window = _hit_window(hits, [{"hit": matched, "score": 1.0}], {matched.passage_id}, {})
+    ordinals = [hit.ordinal for hit in window]
+
+    assert ordinals == sorted(ordinals)
+    assert ordinals[0] == 0 and 12 in ordinals and 13 in ordinals and 11 in ordinals
+    assert 1 not in ordinals and 20 not in ordinals
+    assert sum(estimate_response_tokens(hit.text) for hit in window if hit is not matched) <= PAGE_TOKEN_BUDGET
+    # The following neighbour is preferred when the budget is odd.
+    assert max(ordinals) - 12 >= 12 - min(o for o in ordinals if o)
+
+
+def test_fusion_score_default_weights_are_exact_and_weights_scale_each_source() -> None:
+    from runtime.runtime_config import RrfWeights
+
+    hit = PassageHit("p-1", "wiki/concepts/target.md", "Target", (), "", 0.0, "active", "high", "wiki")
+    item = {"fts_rank": 3, "title_rank": 2, "vector_rank": 7}
+    unweighted = fusion_score(hit, "different", "concept", "knowledge", {}, item, effective_rrf_k=60)
+    assert unweighted["rrf"] == 1 / 63 + 1 / 62 + 1 / 67
+    assert fusion_score(hit, "different", "concept", "knowledge", {}, item, effective_rrf_k=60, rrf_weights=RrfWeights()) == unweighted
+
+    weighted = fusion_score(hit, "different", "concept", "knowledge", {}, item, effective_rrf_k=60, rrf_weights=RrfWeights(fts=2.0, title=0.0, vector=0.5))
+    assert weighted["rrf"] == 2.0 / 63 + 0.5 / 67

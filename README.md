@@ -179,16 +179,26 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 | `wiki_sync_specs`       | 预览/应用/舍弃调用方指定规范目录（`source_root`，不限于 `.trellis/spec`）到 `wiki/projects/<project>/specs/` 的精确镜像计划，包含删除过期页面。 |
 | `wiki_manage_shared_spec` | 预览/应用/舍弃 `wiki/entities/shared-specs/` 单页公共规范的新建、更新或删除计划。                             |
 
+`wiki_write_note` 可选参数 `aliases`（字符串列表）为新页面写入 frontmatter `aliases`（紧跟 `title`）：逐项去首尾空白、去掉空串，数量 ≤ 20、每项 ≤ 120 字符，按 frontmatter 同一脱敏规则处理，大小写不敏感去重并去掉与标题相同的项；非字符串或超限返回 `invalid_aliases` 且不写入，chat 类型不接受。结果为空或不传时不写 `aliases` 键，页面与不传该参数时逐字节相同。别名进入检索投影（FTS `aliases` 列、`link_suggestions` 目标）并参与新建时的 `duplicate_warnings` 检查。
+
+`wiki_write_note` 可选参数 `questions`（字符串列表）写入 frontmatter `questions`（紧跟 `aliases`，没有别名时紧跟 `title`），列出本页能回答的问题：规则与 `aliases` 相同——逐项去首尾空白、去掉空串，数量 ≤ 20、每项 ≤ 300 字符，按 frontmatter 同一脱敏规则处理，大小写不敏感去重（不与标题比较）；非字符串或超限返回 `invalid_questions` 且不写入，chat 类型不接受。结果为空或不传时不写 `questions` 键，页面与不传该参数时逐字节相同。问题按下文 `questions` 字段的检索规则进入索引。
+
 `wiki_write_note` 成功写入后返回 `state`、`operation_id`、`page_hash`；若页面已提交但派生投影待修复，响应会额外给出 `repair_action` 与 `failed_stage`，调用方应执行指定 repair，而不是重复创建整页。
+
+写入提示（只读、可选字段，不改写页面）：`wiki_write_note` 与 `wiki_update(action="apply")` 保存成功后（`wiki_update(action="preview")` 也会按 apply 将写入的渲染结果预先计算同一提示），若正文提到了其他 Wiki 页面的标题、别名或多词文件名（如 `retry-budget` → “retry budget”）但没有链接，响应附带 `link_suggestions`，每个目标页只报告第一次出现：`{"target": "wiki/entities/rate-engine.md", "title": "Rate Engine", "mention": "rate engine", "line": 3, "link": "[[rate-engine|rate engine]]"}`。跳过代码块/行内代码、已有 wikilink 与 Markdown 链接、页面自身、正文已链接的目标、短于 4 个拉丁字符或 2 个汉字的词、指向多个页面的词；拉丁词要求词边界，单个拉丁单词须大小写一致，中文按子串匹配且长词优先。标题/别名来自已构建的检索投影；投影缺失时不返回该字段。没有提示时不出现该字段。
+
+页面 frontmatter 可选字段 `questions`（字符串列表，或单个字符串）列出本页能回答的问题：检索投影把这些问题并入该页第一个 passage 的 FTS `aliases` 列，使问句式查询能命中；非字符串/空项被忽略，问题文本不进入正文、snippet 或向量嵌入。没有该字段的页面索引内容不变；已有页面新增或修改 `questions` 后由增量检索更新（按页面内容 hash）生效，可用 `wiki_update` 的 `incoming_frontmatter` 设置。
+
+`wiki_write_note` 新建页面后还会检查标题是否与已有页面重复或近似，若有则附带 `duplicate_warnings`（最多 5 条，页面照常创建）：`{"path": "wiki/concepts/general/限流器.md", "title": "限流器", "reason": "title_contains", "score": 0.6, "matched": "限流器组件"}`。`reason` 为 `same_title_or_alias`（经 `ConceptRegistry.resolve` 的别名归一化后与已有标题/别名相同）、`similar_title`（归一化后字符 bigram Jaccard ≥ 0.6，比较对象含已有标题、别名和文件名短语）或 `title_contains`（一方包含另一方、较短一方至少 3 个字符且占较长一方至少一半）。每条警告带 `confidence`：`high` 表示标题/别名相同或只是拼写变体（复数、连字符、单字母拼写错误）；`related` 表示一方只是另一方加了整词或字（`title_contains`，或 `similar_title` 但词集合互为真子集，如 “Rate Limiting Policy” 与 “Rate Limiting”），通常是更窄/更宽的页面，适合互相链接而非合并；新页面位于 `wiki/projects/` 下、候选为 concept/knowledge 页时，除标题/别名相同外也降为 `related`。`high` 排在 `related` 前面。同样只读已构建的检索投影，无警告时不出现该字段。`wiki_update` 的 preview 与 apply 在 `incoming_frontmatter` 设置 `title` 或 `aliases`、且页面因此获得新的标题/别名时（保留旧标题作别名、仅重排别名不算），也对这些新增项返回同样格式的 `duplicate_warnings`；`wiki_manage_shared_spec(action="preview", operation="upsert")` 在新建或改名时同样返回。页面自身从不计入；纯正文更新不返回该字段。
 
 不再注册 `wiki_generation` worker 工具。init/config、vector build/rebuild、retrieval evaluation、archive admin 和 migration 只保留在 CLI/admin 边界。
 
 旧版 CodeGraph 摄入留下的内容已由用户在真实 vault 中完成迁移；退役清理命令已删除，
 无需再次运行存量清理。
 
-`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测检索契约，输出 JSON 与 Markdown 报告。当前查询契约是 V2，`--query-version` 仅接受 `v2`；默认 `--entrypoint engine --retrieval-mode lexical`，不创建、不更新也不调用 vector/Embedding。需要验证 MCP 公共边界时使用 `--entrypoint mcp`，该入口会拒绝非词法配置，并覆盖 `project`、`type`、`tags`、`path_prefix`、空结果和错误契约。`--scope` 控制 V2 corpus。报告包含 Recall、Precision、MRR、nDCG（@1/@3/@5/@10）、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。传入 `--baseline-report <retrieval-eval.json>` 可执行冻结基线 gate：Recall/nDCG 回退不超过 0.02、过滤器 100%、无答案误命中率不超过 0.05、P95 增长不超过 10%，且词法-only 与 context budget 检查通过。若评测样本带有质量门禁观测，报告还会输出 false suppression、no-answer `would_accept`、rank churn 和 reason/score-family 分桶；identity 或最小样本不满足时状态保持 `unproven`。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。
+`retrieval-eval` 使用版本化 JSONL 查询集和 manifest 只读评测检索契约，输出 JSON 与 Markdown 报告。当前查询契约是 V2，`--query-version` 仅接受 `v2`；默认 `--entrypoint engine --retrieval-mode lexical`，不创建、不更新也不调用 vector/Embedding。需要验证 MCP 公共边界时使用 `--entrypoint mcp`，该入口会拒绝非词法配置，并覆盖 `project`、`type`、`tags`、`path_prefix`、空结果和错误契约。`--scope` 控制 V2 corpus。报告包含 Recall、Precision、MRR、nDCG（@1/@3/@5/@10）、无答案误命中率、过滤器正确性、P95 延迟、context budget、语料指纹和运行 provenance；不会构建索引或写入 vault。传入 `--baseline-report <retrieval-eval.json>` 可执行冻结基线 gate：Recall/nDCG 回退不超过 0.02、过滤器 100%、无答案误命中率不超过 0.05、P95 增长不超过 10%，且词法-only 与 context budget 检查通过。若评测样本带有质量门禁观测，报告还会输出 false suppression、no-answer `would_accept`、rank churn 和 reason/score-family 分桶；identity 或最小样本不满足时状态保持 `unproven`。CLI 默认对首个 case 单独测量 context budget；可用 `--context-budget-case-limit` 扩大样本，或以 `--no-context-budget` 显式跳过。报告的 Markdown 同时列出 Recall/Precision/MRR/nDCG 的 @1/@3/@5/@10 表。`--no-graph-expansion` 仅在 engine 入口关闭 Query V2 图扩展，用于 graph on/off 离线消融；它不改变 MCP `wiki_query` 接口，`--entrypoint mcp` 会拒绝该开关，gate 也会拒绝图扩展设置不一致的 baseline。
 
-仓库内 `tests/fixtures/retrieval/` 只用于 CI 的确定性框架验证，报告不能当作生产 vault 基线。真实 vault 评测只需提供 vault 根目录、版本化 JSONL/manifest 和相对路径标注；不要提交正文、绝对路径或敏感日志。没有冻结真实数据集时，baseline gate 应标记为 `unproven`，而不是虚构生产结论。
+仓库内 `tests/fixtures/retrieval/` 只用于 CI 的确定性框架验证，报告不能当作生产 vault 基线。其中 `fixture.jsonl` + `vault/` 是 6 条 active 冒烟集，`v2_40/` 是 archive scope 历史回归，`graph_v1/` 是合成的互链 active vault（52 条，含关系/直查/无答案分组），用于 graph on/off 对比；三者的开/关对比记录在 `tests/fixtures/retrieval/graph-eval-baseline.md`。真实 vault 评测只需提供 vault 根目录、版本化 JSONL/manifest 和相对路径标注；不要提交正文、绝对路径或敏感日志。没有冻结真实数据集时，baseline gate 应标记为 `unproven`，而不是虚构生产结论。
 
 ### 整改后的架构边界
 
@@ -203,7 +213,7 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 
 向量检索默认关闭。唯一支持的 provider 是本地 `local_bge_m3`；模型目录在 `config set-retrieval` 写入用户级配置，加载时启用离线模式和 `local_files_only`，缺模型或未安装 `vector` extra 时只会结构化降级到关键词/图结果。为使 BGE-M3 的 CPU 全量建库可控，文档 embedding 默认上限为 256 tokens；该值是索引身份的一部分，改变后必须执行 full build。
 
-先通过 `vector build` 显式构建索引；`wiki_query` 从不构建、更新索引或下载模型。索引保存于 vault 的 `.llm-wiki/vector-index/`，仅含相对路径、内容哈希、元数据和归一化向量，不保存正文。默认 `include_raw_sources=false`，这会同时约束建库、更新和查询。
+先通过 `vector build` 显式构建索引；`wiki_query` 从不构建、更新索引或下载模型。索引保存于 vault 的 `.llm-wiki/vector-index/`，仅含相对路径、内容哈希、元数据和归一化向量，不保存正文。默认 `include_raw_sources=false`，这会同时约束建库、更新和查询。每个 passage 按“页面标题、标题路径（`A > B`）、正文”三行拼接后嵌入，使切在小节下的 passage 仍带有主题上下文；向量索引 schema 为 3，旧版（v2，只嵌入正文）索引会被报告为 `index_incompatible`，需重新 `vector build`。
 
 配置本地模型后，普通查询不再传模型或索引参数：
 
@@ -215,7 +225,9 @@ wiki_query(
 )
 ```
 
-Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，在每个物理 store 上先捕获一次不可变 `QueryCorpusSnapshot`，再做 passage FTS/vector 召回、RRF 融合和有界强-seed graph 扩展排序；退役的 `wiki/sources`、superseded 与 deprecated 页面不会进入 active 正文。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
+Query V2 默认返回 compact response：`results` 只含 path、heading、snippet 和 scores，正文只存在于一次性的 `context_pack.passages`。它按 scope 打开 active/history 或独立 archive store，在每个物理 store 上先捕获一次不可变 `QueryCorpusSnapshot`，再做 passage FTS/vector 召回、RRF 融合和有界强-seed graph 扩展排序；退役的 `wiki/sources`、superseded 与 deprecated 页面不会进入 active 正文。每个结果页的正文（`results[].content`）按阅读顺序拼接所选 passage：相邻 chunk 共享的重叠部分（切块时重复的最多 64 个单位）只保留一次；同一次响应中已在前面出现过的长段落（约 8 个英文词或 24 个汉字以上，如模板化样板段落）在后续页面中省略，但每个结果页至少保留其第一段 passage 正文。强相关页面（最高分 ≥ 首页 0.6 倍）的正文在每页约 2400 token 的预算内补全：页面放得下时从页首按阅读顺序补全（与以前相同）；更长的页面先保留页首 passage（不超过预算的 1/4 时），再以命中 passage 为中心交替向后、向前扩展相邻 passage 直到预算用完。排序不受影响。非 chat raw source 会在维护/摄入阶段投影到独立的 `.llm-wiki/raw-retrieval.sqlite3` FTS：查询始终优先 Wiki，且仅在 Wiki 零结果时才回退该 raw FTS。回退只读取已建索引，不扫描 raw 文件、不会为 raw 召回加载模型，并在 `pipeline.fallback` 中标明 `wiki_zero_results`。
+
+主融合的 RRF 各路权重可在全局配置 `vaults.<name>.retrieval.ranking.rrf_weights`（`fts`、`title`、`vector`，0–10 的数，默认均为 `1.0`）或环境变量 `LLM_WIKI_RRF_WEIGHTS`（如 `fts=1,vector=0.8`，只覆盖列出的项，优先于配置文件）中设置；默认值与不设时的排序逐位相同。非法值使 `wiki_query` 返回 `invalid_config`。权重只乘在主 RRF 的 FTS/标题/向量三项上；graph 扩展基于融合后的分数，因此间接受影响；覆盖合并（`merge_coverage_items`）使用的来源 RRF 不受影响。生效权重及每项来源显示在 `wiki_status` 的 `config.retrieval.ranking` 与 CLI `status` / `config show` 的 `retrieval.ranking` 中：`{"rrf_weights": {"fts": 1.0, "title": 1.0, "vector": 0.8}, "rrf_weight_sources": {"fts": "default", "title": "default", "vector": "env"}}`（来源为 `default`/`config`/`env`）；环境变量非法时额外给出 `"env_error": "invalid_config"`，权重显示配置文件的值（此时查询会返回 `invalid_config`）。
 
 ### Query V2 质量门禁
 
@@ -277,7 +289,7 @@ vault_root/
 推荐循环：
 
 1. 用 CLI 注册 vault：`llm-wiki-mcp init --vault <name> --root <path> --default`。首次写入时 `create_wiki_root` 会自动补齐 `purpose.md`、`schema.md`、`raw/sources/`、`wiki/` 与归档目录。
-2. 摄入明确文件：`wiki_ingest(source_path=..., source_name=..., project=..., source_type="file")`。文件按字节复制到 `raw/sources/<type>/<project>/<source_name>/`，同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
+2. 摄入明确文件：项目证据用 `wiki_ingest(source_path=..., source_name=..., project=..., source_type="projects")`，落到 `raw/sources/projects/<project>/<source_name>/`。`source_type="file"` 只用于非项目文件语料（例如导入的帮助文档），落到 `raw/sources/file/<corpus>/...`。已登记的项目若仍传入 `file`，会被改写到 `projects`。同时同步 raw/检索索引；正式 Wiki 页面由后续显式笔记或更新操作维护。
 3. 用 `wiki_query` 查询已积累的知识，回答时引用 numbered context pack。
 4. 通过 `wiki_write_note`，把人工整理的 spec、plan、troubleshooting、researches 或 knowledge note 写回 `wiki/projects/<project>/specs/`、`wiki/projects/<project>/plans/`、`wiki/projects/<project>/troubleshooting/`、`wiki/projects/<project>/researches/` 或 `wiki/concepts/`。
 5. 用 `wiki_update(action="preview"|"apply")` 对既有页面做受控编辑。
@@ -330,6 +342,8 @@ wiki_archive(apply)  → 写入 archives/bundles + archive index
 wiki_restore(plan)   → 从 bundle 生成恢复计划
 wiki_restore(apply)  → 恢复页面 + 更新 active/archive index
 ```
+
+页面的 `# 标题` 行总是由 frontmatter `title` 渲染：`incoming_body` 开头的 H1 若与将保留的标题不同会被丢弃，preview 与 apply 都在 `warnings` 中返回 `title_heading_ignored: ...`（页面照常写入）；改名请用 `incoming_frontmatter={"title": ...}`。
 
 普通页面提交不调用全量 `refresh_indexes`。缺失、不兼容或损坏的检索库必须通过 `index build|update` 或 admin repair 显式恢复；页面事实与派生索引的状态以 operation result 中的 `state`、`failed_stage`、`repair_action` 为准。
 

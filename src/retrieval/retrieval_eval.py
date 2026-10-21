@@ -201,6 +201,7 @@ class EvaluationQueryRequest:
     vector_config: Mapping[str, Any] | None
     query_version: str
     scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"]
+    graph_expansion: bool = True
 
 
 class EvaluationQueryAdapter(Protocol):
@@ -235,6 +236,8 @@ class McpQueryAdapter:
             raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
         if request.retrieval_mode != "lexical":
             raise RetrievalEvalError("mcp_requires_lexical", "the MCP evaluation entrypoint is lexical-only")
+        if not request.graph_expansion:
+            raise RetrievalEvalError("mcp_graph_toggle_unsupported", "the MCP evaluation entrypoint always uses graph expansion")
         adapter = self.runtime.adapter
         if adapter is None or adapter.query is None:
             raise RetrievalEvalError("mcp_adapter_missing", "MCP evaluation requires an injected adapter")
@@ -351,8 +354,13 @@ def run_retrieval_evaluation(
     scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"] | None = None,
     entrypoint: Literal["engine", "mcp"] = "engine",
     quality_gate: QualityGateSettings | None = None,
+    graph_expansion: bool = True,
 ) -> dict[str, Any]:
-    """通过统一 query service 运行只读评测，保留既有报告形状。"""
+    """通过统一 query service 运行只读评测，保留既有报告形状。
+
+    ``graph_expansion=False`` 只用于 engine 入口的离线消融（graph on/off 对比）；
+    MCP 公共边界不暴露该开关，因此 ``entrypoint="mcp"`` 时必须保持默认值。
+    """
 
     if top_k <= 0:
         raise RetrievalEvalError("invalid_top_k", "top_k must be greater than zero")
@@ -370,6 +378,8 @@ def run_retrieval_evaluation(
         raise RetrievalEvalError("invalid_query_version", "retrieval evaluation only supports query_version v2")
     if scope is not None and scope not in {"auto", "knowledge", "history", "all", "archive", "raw"}:
         raise RetrievalEvalError("invalid_scope", "scope must be auto, knowledge, history, all, or archive")
+    if not graph_expansion and entrypoint != "engine":
+        raise RetrievalEvalError("mcp_graph_toggle_unsupported", "graph expansion can only be disabled for the engine entrypoint")
 
     root = filesystem_path(vault_root)
     validate_dataset_paths(dataset, root)
@@ -390,6 +400,7 @@ def run_retrieval_evaluation(
         scope=_case_scope(first, scope),
         entrypoint=entrypoint,
         quality_gate=quality_gate,
+        graph_expansion=graph_expansion,
     )
 
     cases: list[dict[str, Any]] = []
@@ -428,6 +439,7 @@ def run_retrieval_evaluation(
                 scope=case_scope,
                 entrypoint=entrypoint,
                 quality_gate=quality_gate,
+                graph_expansion=graph_expansion,
             )
             elapsed_ms = (time.perf_counter() - started) * 1_000
             latency_samples.append(elapsed_ms)
@@ -480,6 +492,7 @@ def run_retrieval_evaluation(
                 scope=case_scope,
                 entrypoint=entrypoint,
                 quality_gate=quality_gate,
+                graph_expansion=graph_expansion,
             )
             raw_budget = context_result.get("budget") or context_result.get("context_pack", {}).get("budget", {})
             budget = dict(raw_budget)
@@ -515,6 +528,7 @@ def run_retrieval_evaluation(
             query_version=query_version,
             entrypoint=entrypoint,
             quality_gate=quality_gate,
+            graph_expansion=graph_expansion,
         )
         for item in diagnosis:
             category = str(item.get("category", "unknown"))
@@ -604,6 +618,7 @@ def run_retrieval_evaluation(
                 "query_version": query_version,
                 "scope": scope or "per_case",
                 "entrypoint": entrypoint,
+                "graph_expansion": graph_expansion,
                 "telemetry_enabled": False,
                 "context_budget_mode": "engine_context_pack" if entrypoint == "engine" else "mcp_public_budget_not_exposed",
             },
@@ -731,6 +746,7 @@ def _diagnose_case(
     query_version: str,
     entrypoint: Literal["engine", "mcp"],
     quality_gate: QualityGateSettings | None,
+    graph_expansion: bool = True,
 ) -> list[dict[str, Any]]:
     """使用有界 top-40 只读 query 解释遗漏，不改变主评测指标。"""
 
@@ -749,6 +765,7 @@ def _diagnose_case(
             scope=scope,
             entrypoint=entrypoint,
             quality_gate=quality_gate,
+            graph_expansion=graph_expansion,
         )
         diagnostic_paths = [str(item["path"]) for item in diagnostic_result.get("results", [])]
     except RetrievalEvalError as exc:
@@ -804,6 +821,7 @@ def _run_case(
     scope: Literal["auto", "knowledge", "history", "all", "archive", "raw"],
     entrypoint: Literal["engine", "mcp"],
     quality_gate: QualityGateSettings | None = None,
+    graph_expansion: bool = True,
 ) -> dict[str, Any]:
     runtime = (
         EvaluationRuntimeSnapshot.from_mcp_vault(root, quality_gate=quality_gate)
@@ -818,6 +836,7 @@ def _run_case(
         vector_config=vector_config,
         query_version=query_version,
         scope=scope,
+        graph_expansion=graph_expansion,
     )
     return EvaluationQueryService(runtime).run(request)
 
@@ -872,6 +891,7 @@ def _execute_engine_query(
         quality_gate=quality_gate,
         include_context_pack=request.include_context_pack,
         retrieval_mode=request.retrieval_mode,
+        graph_expansion=request.graph_expansion,
     )
 
 

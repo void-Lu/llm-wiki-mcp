@@ -26,3 +26,17 @@ def test_fts_and_wikilink_candidates_create_review_evidence(tmp_path) -> None:
     resolved = registry.resolve("approval")
     assert "wiki/concepts/finance/invoice.md" in resolved["evidence"]["fts"]
     assert registry._wikilink_candidates("Invoice Approval") == ["wiki/concepts/finance/invoice.md"]
+
+
+def test_registry_accepts_preloaded_records_and_can_skip_evidence_scans(tmp_path, monkeypatch) -> None:
+    from wiki.concept_registry import ConceptRecord
+
+    record = ConceptRecord("concept_x", "wiki/entities/rate-engine.md", "Rate Engine", ("Pricing Engine",), "", (), "active")
+    registry = ConceptRegistry(tmp_path, records=[record])
+    monkeypatch.setattr(registry, "_fts_candidates", lambda candidate: (_ for _ in ()).throw(AssertionError("fts")))
+    monkeypatch.setattr(registry, "_wikilink_candidates", lambda candidate: (_ for _ in ()).throw(AssertionError("links")))
+
+    assert registry.resolve("pricing-engine", collect_evidence=False)["action"] == "existing"
+    candidate = registry.resolve("rate", collect_evidence=False)
+    assert candidate["action"] == "candidate"
+    assert [match.path for match in candidate["matches"]] == ["wiki/entities/rate-engine.md"]

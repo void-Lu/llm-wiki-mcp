@@ -334,6 +334,35 @@ def test_retrieval_eval_writes_json_and_markdown_reports(tmp_path: Path, capsys:
     assert Path(output["reports"]["markdown"]).is_file()
 
 
+def test_retrieval_eval_no_graph_expansion_flag_records_engine_ablation(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    fixture_root = Path(__file__).parents[1] / "fixtures" / "retrieval" / "graph_v1"
+    vault = tmp_path / "vault"
+    shutil.copytree(fixture_root / "vault", vault)
+    store = RetrievalIndexStore(vault)
+    store.build(store.iter_vault_pages())
+    output_dir = tmp_path / "reports"
+
+    exit_code = main(
+        [
+            "retrieval-eval",
+            "--vault",
+            str(vault),
+            "--dataset",
+            str(fixture_root / "cases.jsonl"),
+            "--output-dir",
+            str(output_dir),
+            "--no-context-budget",
+            "--no-graph-expansion",
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(output["reports"]["json"]).read_text(encoding="utf-8"))
+    assert report["metadata"]["parameters"]["graph_expansion"] is False
+    assert "图扩展：关闭" in Path(output["reports"]["markdown"]).read_text(encoding="utf-8")
+
+
 def test_retrieval_gold_sample_cli_writes_redacted_template(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     vault = _make_vault(tmp_path / "vault")
     telemetry = QueryTelemetry(vault)

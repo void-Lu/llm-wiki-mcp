@@ -1,3 +1,4 @@
+import re
 from typing import cast
 
 from retrieval.context_packer import ContextPassage, pack_context
@@ -80,3 +81,64 @@ def test_context_pack_omitted_uses_original_candidates_minus_retained_items() ->
     budget = cast(dict[str, int], packed["budget"])
     assert budget["used"] == 3
     assert budget["omitted"] == 1
+
+
+def _chunks(text: str, *, max_tokens: int = 60, overlap: int = 16):
+    from retrieval.passage_chunker import chunk_markdown
+
+    return chunk_markdown("wiki/a.md", text, target_tokens=max_tokens - 10, max_tokens=max_tokens, overlap_tokens=overlap)
+
+
+def _long_section() -> str:
+    paragraphs = [" ".join(f"p{index}w{word}, value." for word in range(12)) for index in range(8)]
+    return "# A\n\n## Setup\n\n" + "\n\n".join(paragraphs)
+
+
+def test_adjacent_chunks_are_stitched_in_reading_order_without_their_overlap() -> None:
+    from retrieval.context_packer import ContextPassage, pack_context
+
+    chunks = _chunks(_long_section())
+    assert len(chunks) >= 3
+    # The best passage (ordinal 1) is packed first, then the page from the top.
+    order = [chunks[1], chunks[0], *chunks[2:]]
+    passages = [ContextPassage(c.passage_id, c.page_path, "Setup", c.text, 1.0, "formal_knowledge", ordinal=c.ordinal) for c in order]
+
+    packed = pack_context(passages, hard_limit=10_000, intent="lookup")
+
+    content = packed["passages"][0]["content"]
+    for index in range(8):
+        for word in range(12):
+            # The chunker may re-tokenize an overlap ("p0w8 ,"), so count words.
+            assert len(re.findall(rf"\bp{index}w{word}\b", content)) == 1, (index, word)
+    assert content.index("p0w0") < content.index("p7w11")
+
+
+def test_strip_chunk_overlap_ignores_short_coincidental_matches() -> None:
+    from retrieval.context_packer import strip_chunk_overlap
+
+    assert strip_chunk_overlap("the next step starts here", previous="ends with the", following=None) == "the next step starts here"
+    tail = "alpha beta gamma delta epsilon zeta eta theta"
+    assert strip_chunk_overlap(f"{tail} iota kappa", previous=f"start {tail}", following=None) == "iota kappa"
+    assert strip_chunk_overlap(f"lead {tail}", previous=None, following=f"{tail} after") == "lead"
+
+
+def test_paragraphs_repeated_across_pages_are_packed_once() -> None:
+    from retrieval.context_packer import ContextPassage, pack_context
+
+    boiler = "需要实施细节时，应回到锁定的 raw 原文核对；本页不合并任何其他文档。"
+    passages = [
+        ContextPassage(f"p{index}", f"wiki/{index}.md", "H", f"Topic {index} specific text.\n\n{boiler}", 1.0, "formal_knowledge", ordinal=0)
+        for index in range(3)
+    ]
+
+    packed = pack_context(passages, hard_limit=10_000, intent="lookup")
+
+    contents = [item["content"] for item in packed["passages"]]
+    assert [boiler in content for content in contents] == [True, False, False]
+    assert all(f"Topic {index} specific text." in contents[index] for index in range(3))
+    # A page whose whole first passage repeats an earlier page keeps its body.
+    same = [ContextPassage(f"d{i}", f"wiki/d{i}.md", "H", boiler, 1.0, "formal_knowledge", ordinal=0) for i in range(2)]
+    assert [item["content"] for item in pack_context(same, hard_limit=10_000, intent="lookup")["passages"]] == [boiler, boiler]
+    # Short paragraphs ("Yes.") are never treated as repeats.
+    short = [ContextPassage(f"s{i}", f"wiki/s{i}.md", "H", "Yes.", 1.0, "formal_knowledge", ordinal=0) for i in range(2)]
+    assert [item["content"] for item in pack_context(short, hard_limit=100, intent="lookup")["passages"]] == ["Yes.", "Yes."]

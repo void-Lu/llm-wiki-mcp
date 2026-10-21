@@ -150,6 +150,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluation_parser.add_argument("--entrypoint", choices=("engine", "mcp"), default="engine", help="Evaluation boundary (default: engine; mcp is lexical-only).")
     evaluation_parser.add_argument("--query-version", choices=("v2",), default="v2", help="Query contract to evaluate (only v2 is supported).")
     evaluation_parser.add_argument("--scope", choices=("auto", "knowledge", "history", "all", "archive", "raw"), default=None, help="Optional fixed Query V2 corpus scope; omitted uses each case scope.")
+    evaluation_parser.add_argument("--no-graph-expansion", action="store_true", help="Disable Query V2 graph expansion for an offline ablation (engine entrypoint only).")
     evaluation_parser.add_argument("--baseline-report", help="Optional frozen retrieval-eval.json used for the regression gate.")
     evaluation_parser.add_argument("--vector-model-path", help="Required local BGE-M3 directory for vector or hybrid evaluation.")
     evaluation_parser.add_argument("--vector-index-path", help="Optional vault-relative vector index directory for vector or hybrid evaluation.")
@@ -337,6 +338,7 @@ def _run_retrieval_eval(args: argparse.Namespace) -> int:
         entrypoint=args.entrypoint,
         query_version=args.query_version,
         scope=args.scope,
+        graph_expansion=not args.no_graph_expansion,
         vector_config=(
             {
                 "provider": "local_bge_m3",

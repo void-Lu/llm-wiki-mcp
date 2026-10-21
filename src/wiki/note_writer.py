@@ -10,6 +10,8 @@ from wiki.page_policy import provenance_status, stamp_page_policy
 from wiki.wiki_io import WikiWriteError, prepare_wiki_page, split_frontmatter
 from wiki.wiki_models import WikiPage
 from wiki.wiki_paths import WikiPathError, create_wiki_root, resolve_within_root, safe_segment, slug, translate_path_error
+from wiki.duplicate_titles import duplicate_title_warnings
+from wiki.link_suggestions import load_target_rows, unlinked_mention_suggestions
 from wiki.wikilink_validator import auto_normalize_wikilinks, validate_wikilinks
 from wiki.reference_section import build_reference_section, skipped_warnings
 from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, SourceProvenanceResolver, source_hash_map
@@ -17,6 +19,10 @@ from wiki.source_provenance import ResolvedRawSource, SourceProvenanceError, Sou
 NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches", "knowledge", "entity", "chat"}
 PROJECT_NOTE_TYPES = {"spec", "plan", "troubleshooting", "researches"}
 DOMAINS = {"common-errors", "integration-patterns"}
+MAX_ALIASES = 20
+MAX_ALIAS_CHARS = 120
+MAX_QUESTIONS = 20
+MAX_QUESTION_CHARS = 300
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "code": code, "error": message}
 
@@ -64,6 +70,86 @@ def _known_or_existing(value: str, known_values: set[str], directory: Path) -> d
         if value in existing:
             return None
     return _error("unknown_subdir", f"unknown subdir: {value}")
+
+
+def _aliases(value: object, title: str, policy: PrivacyPolicy) -> tuple[list[str], dict[str, Any] | None]:
+    """Validate optional aliases: strings only, trimmed, redacted, deduplicated.
+
+    Case-insensitive duplicates and aliases equal to the title are dropped;
+    an empty result means no ``aliases`` key is written at all.
+    """
+
+    if value is None:
+        return [], None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return [], _error("invalid_aliases", "aliases must be a list of strings")
+    cleaned = [item.strip() for item in value if item.strip()]
+    if len(cleaned) > MAX_ALIASES:
+        return [], _error("invalid_aliases", f"at most {MAX_ALIASES} aliases are allowed")
+    if any(len(item) > MAX_ALIAS_CHARS for item in cleaned):
+        return [], _error("invalid_aliases", f"each alias must be at most {MAX_ALIAS_CHARS} characters")
+    redacted = policy.redact_metadata(cleaned, field="aliases")
+    items = [str(item) for item in redacted] if isinstance(redacted, list) else cleaned
+    seen = {title.strip().casefold(), policy.redact_display_text(title).strip().casefold()}
+    result: list[str] = []
+    for item in items:
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result, None
+
+
+def _questions(value: object, policy: PrivacyPolicy) -> tuple[list[str], dict[str, Any] | None]:
+    """Validate optional questions the page answers.
+
+    Mirrors ``_aliases``: strings only, trimmed, empty entries dropped,
+    redacted and de-duplicated case-insensitively; an empty result means no
+    ``questions`` key is written at all.
+    """
+
+    if value is None:
+        return [], None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return [], _error("invalid_questions", "questions must be a list of strings")
+    cleaned = [item.strip() for item in value if item.strip()]
+    if len(cleaned) > MAX_QUESTIONS:
+        return [], _error("invalid_questions", f"at most {MAX_QUESTIONS} questions are allowed")
+    if any(len(item) > MAX_QUESTION_CHARS for item in cleaned):
+        return [], _error("invalid_questions", f"each question must be at most {MAX_QUESTION_CHARS} characters")
+    redacted = policy.redact_metadata(cleaned, field="questions")
+    items = [str(item) for item in redacted] if isinstance(redacted, list) else cleaned
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result, None
+
+
+def _with_questions(frontmatter: dict[str, Any], questions: list[str]) -> dict[str, Any]:
+    """Insert ``questions`` after ``aliases`` (or ``title``) for readability."""
+
+    anchor = "aliases" if "aliases" in frontmatter else "title"
+    ordered: dict[str, Any] = {}
+    for key, item in frontmatter.items():
+        ordered[key] = item
+        if key == anchor:
+            ordered["questions"] = questions
+    return ordered
+
+
+def _with_aliases(frontmatter: dict[str, Any], aliases: list[str]) -> dict[str, Any]:
+    """Insert ``aliases`` right after ``title`` so the key order stays readable."""
+
+    ordered: dict[str, Any] = {}
+    for key, item in frontmatter.items():
+        ordered[key] = item
+        if key == "title":
+            ordered["aliases"] = aliases
+    return ordered
 
 
 def _frontmatter(
@@ -122,15 +208,27 @@ def save_obsidian_note(
     related_pages: list[dict[str, Any]] | None = None,
     related_pages_heading: str | None = None,
     sources: list[str] | None = None,
+    aliases: list[str] | None = None,
+    questions: list[str] | None = None,
 ) -> dict[str, Any]:
     if vault_root is None or not str(vault_root).strip():
         return _error("missing_vault_root", "vault_root is required")
     root = Path(vault_root).expanduser().resolve()
     policy = PrivacyPolicy()
+    alias_values, alias_error = _aliases(aliases, title, policy)
+    if alias_error is not None:
+        return alias_error
+    question_values, question_error = _questions(questions, policy)
+    if question_error is not None:
+        return question_error
 
     if note_type not in NOTE_TYPES:
         return _error("invalid_note_type", f"invalid note_type: {note_type}")
     if note_type == "chat":
+        if alias_values:
+            return _error("invalid_aliases", "chat sources do not accept aliases")
+        if question_values:
+            return _error("invalid_questions", "chat sources do not accept questions")
         if chat_derived:
             return _error("invalid_chat_derived", "chat sources cannot be chat-derived pages")
         create_wiki_root(root)
@@ -243,6 +341,10 @@ def save_obsidian_note(
         zentao_urls or [],
         status,
     )
+    if alias_values:
+        frontmatter = _with_aliases(frontmatter, alias_values)
+    if question_values:
+        frontmatter = _with_questions(frontmatter, question_values)
     if chat_derived:
         frontmatter["chat_derived"] = True
         frontmatter["chat_sources"] = [
@@ -319,6 +421,20 @@ def save_obsidian_note(
     if sources is not None and not chat_derived:
         result["sources_skipped"] = sources_skipped
     skipped = [*related_pages_skipped, *sources_skipped]
+    hint_rows = load_target_rows(root)
+    link_suggestions = unlinked_mention_suggestions(root, relative_path.as_posix(), prepared_body, rows=hint_rows)
+    if link_suggestions:
+        result["link_suggestions"] = link_suggestions
+    stored_aliases = prepared.frontmatter.get("aliases") if alias_values else None
+    duplicate_warnings = duplicate_title_warnings(
+        root,
+        relative_path.as_posix(),
+        title,
+        rows=hint_rows,
+        aliases=[str(item) for item in stored_aliases] if isinstance(stored_aliases, list) else (),
+    )
+    if duplicate_warnings:
+        result["duplicate_warnings"] = duplicate_warnings
     if skipped:
         result["warnings"] = [
             *skipped_warnings("related_pages", related_pages_skipped),

@@ -13,7 +13,8 @@ from uuid import uuid4
 from wiki.atomic_file import AtomicFileError, atomic_write_text, sha256_file
 from wiki.page_mutation import DELETED_PAGE_HASH, PageMutationCoordinator
 from wiki.page_policy import stamp_page_policy
-from wiki.wiki_io import render_page, strip_leading_h1
+from wiki.duplicate_titles import new_title_surfaces, surface_duplicate_warnings
+from wiki.wiki_io import render_page, split_frontmatter, strip_leading_h1
 from wiki.wiki_paths import (
     ADMIN_PLANS_DIR,
     WikiPathError,
@@ -503,7 +504,18 @@ class SharedSpecService:
                 "entries": [entry],
             }
         )
-        return _plan_response(self.store, plan, summary, [entry])
+        response = _plan_response(self.store, plan, summary, [entry])
+        if operation == "upsert":
+            # Advisory: a new shared spec, or a retitled one, whose title
+            # matches or nearly matches another page's title/aliases.
+            current_frontmatter, _ = split_frontmatter(current_text) if current_text else ({}, "")
+            old_title = str(current_frontmatter.get("title") or "") if current_hash is not None else ""
+            old_aliases = [str(item) for item in current_frontmatter.get("aliases") or [] if isinstance(item, str)] if isinstance(current_frontmatter.get("aliases"), list) else []
+            gained = new_title_surfaces(old_title, old_aliases, title.strip(), [])
+            duplicate_warnings = surface_duplicate_warnings(self.root, relative, gained)
+            if duplicate_warnings:
+                response["duplicate_warnings"] = duplicate_warnings
+        return response
 
     def apply(self, plan_id: str) -> dict[str, object]:
         try:

@@ -34,6 +34,12 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     configuration. Text sources are copied to ``raw/sources`` and projected to
     raw FTS; every other file is copied byte-for-byte to ``raw/assets`` without
     semantic indexing.
+
+    Project-owned text belongs under ``raw/sources/projects/<project>/``.
+    ``source_type="file"`` is for non-project file corpora. When ``file`` is
+    requested for a project that already exists at ``wiki/projects/<project>``
+    or ``raw/sources/projects/<project>``, the snapshot is stored as
+    ``projects`` instead.
     """
 
     root = Path(vault_root).expanduser().resolve()
@@ -59,6 +65,13 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
     except IngestSnapshotError as exc:
         return {"ok": False, "code": exc.code, "error": "source snapshot could not be completed"}
     is_text_source = snapshot.is_text
+    routed_from = None
+    if is_text_source and type_value == "file":
+        canonical_project = _canonical_project_name(root, project_value)
+        if canonical_project is not None:
+            routed_from = "file"
+            type_value = "projects"
+            project_value = canonical_project
     target = (
         root / "raw" / "sources" / type_value / project_value / name_value / target_name
         if is_text_source
@@ -80,7 +93,7 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
         return {"ok": False, "code": "source_write_failed", "error": "source snapshot could not be committed"}
     operation = "new" if previous_hash is None else "unchanged" if previous_hash == incoming_hash else "modified"
     if not is_text_source:
-        return {
+        response = {
             "ok": True,
             "operation": operation,
             "source": target.relative_to(root).as_posix(),
@@ -90,6 +103,7 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
             "index_scope": None,
             "index": {"ok": True, "state": "not_indexed", "code": "asset_not_indexed"},
         }
+        return response
     # Raw snapshots are the source of truth.  The profile only supplies the
     # ordered inline stages; ingest still owns these direct calls and does not
     # create a page-operation journal.
@@ -118,6 +132,9 @@ def ingest_file(*, vault_root: str | Path, source_path: str | Path, source_name:
         elif stage == "retrieval":
             index = result
     response = {"ok": bool(index.get("ok")), "operation": operation, "source": target.relative_to(root).as_posix(), "content_hash": incoming_hash, "storage_kind": "text_source", "semantic_indexed": bool(index.get("ok")), "index_scope": index_scope, "index": index}
+    if routed_from is not None:
+        response["source_type"] = type_value
+        response["source_type_routed_from"] = routed_from
     if provenance_result is not None:
         response["generation"] = provenance_result["generation"]
         response["stale_pages"] = provenance_result["stale"]
@@ -133,6 +150,21 @@ def _invalidate_raw_provenance(root: Path, relative_path: Path, source_hash: str
         "stale": stale,
         "generation": {"enabled": False, "reason": "raw_only"},
     }
+
+
+def _canonical_project_name(root: Path, project: str) -> str | None:
+    """Return the on-disk project directory name when ``project`` is registered."""
+
+    if not project or project.casefold() == "default":
+        return None
+    folded = project.casefold()
+    for parent in (root / "wiki" / "projects", root / "raw" / "sources" / "projects"):
+        if not parent.is_dir():
+            continue
+        for child in parent.iterdir():
+            if child.is_dir() and child.name.casefold() == folded:
+                return child.name
+    return None
 
 
 def _hash_file(path: Path) -> str:
