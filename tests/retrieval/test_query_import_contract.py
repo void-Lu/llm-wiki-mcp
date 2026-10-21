@@ -20,11 +20,14 @@ MIGRATED_RECALL_NAMES = frozenset(
         "adaptive_expand",
         "classify_intent",
         "merge_coverage_items",
+        "merge_weak_primary_raw",
         "query_expansion",
+        "should_augment_raw_phrase_cooccur",
         "raw_recovery_candidates",
         "relaxed_recovery_items",
         "step_counts_for_pages",
         "uncovered_latin_terms",
+        "union_passage_hits_by_id",
     }
 )
 
