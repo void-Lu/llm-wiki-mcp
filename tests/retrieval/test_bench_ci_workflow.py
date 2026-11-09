@@ -18,3 +18,10 @@ def test_readme_documents_bench_suite() -> None:
     assert "bench --profile" in readme
     assert "HeuristicEvidenceJudge" in readme or "弱标签" in readme
     assert "R@10" in readme or "0.75" in readme
+
+
+def test_bench_ci_workflow_runs_cli_bench_tests() -> None:
+    path = REPO / ".github" / "workflows" / "bench-ci.yml"
+    text = path.read_text(encoding="utf-8")
+    assert "tests/app/test_cli.py" in text
+    assert "-k bench" in text

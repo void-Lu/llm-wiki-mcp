@@ -59,14 +59,18 @@ def score_topk_evidence(
     }
 
 
+def _normalize_page_path(path: str) -> str:
+    return str(path).replace("\\", "/").lstrip("/")
+
+
 def gold_page_in_topk(
     hit_paths: Sequence[str],
     relevant_paths: Sequence[str],
     *,
     top_k: int = 10,
 ) -> bool:
-    top = {str(p) for p in list(hit_paths)[:top_k]}
-    return any(str(path) in top for path in relevant_paths)
+    top = {_normalize_page_path(p) for p in list(hit_paths)[:top_k]}
+    return any(_normalize_page_path(path) in top for path in relevant_paths)
 
 
 def citation_coverage(result: Mapping[str, Any]) -> float | None:

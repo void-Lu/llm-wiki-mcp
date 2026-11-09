@@ -14,6 +14,8 @@ jobs:
           enable-cache: true
       - name: Sync dev deps
         run: uv sync --extra dev
+      - name: CLI bench smoke
+        run: uv run pytest tests/app/test_cli.py -k bench -q
       - name: Fixed bench suite (ci profile)
         run: |
           mkdir -p reports/bench/ci

@@ -166,3 +166,92 @@ def test_local_accuracy_gate_fail_loud(
     )
     assert exit_code == 2
     assert summary["tracks"]["accuracy"]["status"] == "fail"
+
+
+def test_summary_reports_are_relative_under_output_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import retrieval.bench_runner as runner
+
+    out = tmp_path / "out"
+    work = tmp_path / "work-vault"
+    work.mkdir()
+    dataset = tmp_path / "cases.jsonl"
+    dataset.write_text("{}\n", encoding="utf-8")
+    manifest = tmp_path / "cases.manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    abs_report = (out / "regression" / "retrieval-eval.json").resolve()
+
+    monkeypatch.setattr(
+        runner,
+        "run_regression_track",
+        lambda output_dir, **kwargs: {
+            "status": "pass",
+            "pytest_exit_code": 0,
+            "work_vault": work,
+            "dataset": dataset,
+            "manifest": manifest,
+            "reports": {"json": str(abs_report)},
+        },
+    )
+
+    def fake_weak(**kwargs):  # noqa: ANN001
+        wl_dir = Path(kwargs["output_dir"])
+        wl_dir.mkdir(parents=True, exist_ok=True)
+        path = (wl_dir / "weak-label.json").resolve()
+        path.write_text("{}\n", encoding="utf-8")
+        return {
+            "mean_top1_evidence": 0.1,
+            "mean_topk_evidence": 0.1,
+            "gold_in_topk_rate": 0.0,
+            "citation_coverage_mean": "unavailable",
+            "reports": {"json": str(path)},
+        }
+
+    monkeypatch.setattr(runner, "run_weak_label_track", fake_weak)
+
+    exit_code, summary = run_bench(profile="ci", output_dir=out)
+    assert exit_code == 0
+    regress_reports = summary["tracks"]["regression"]["reports"]
+    weak_reports = summary["tracks"]["weak_label"]["reports"]
+    for reports in (regress_reports, weak_reports):
+        for value in reports.values():
+            assert isinstance(value, str)
+            assert not Path(value).is_absolute(), value
+            assert ".." not in Path(value).parts
+    assert regress_reports["json"] == "regression/retrieval-eval.json"
+    assert weak_reports["json"] == "weak_label/weak-label.json"
+    written = out / "bench-summary.json"
+    assert written.is_file()
+    import json
+
+    disk = json.loads(written.read_text(encoding="utf-8"))
+    assert disk["tracks"]["regression"]["reports"]["json"] == "regression/retrieval-eval.json"
+
+
+def test_track_exception_still_writes_summary_and_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import retrieval.bench_runner as runner
+
+    monkeypatch.setattr(
+        runner,
+        "run_regression_track",
+        lambda output_dir, **kwargs: (_ for _ in ()).throw(RuntimeError("boom-regression")),
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_weak_label_track",
+        lambda **kwargs: {
+            "mean_top1_evidence": 0.0,
+            "reports": {"json": str(tmp_path / "w.json")},
+        },
+    )
+    out = tmp_path / "out-exc"
+    exit_code, summary = run_bench(profile="ci", output_dir=out)
+    assert exit_code != 0
+    assert summary["tracks"]["regression"]["status"] == "fail"
+    reason = str(summary["tracks"]["regression"].get("reason") or "")
+    assert "RuntimeError" in reason or "boom-regression" in reason
+    assert (out / "bench-summary.json").is_file()

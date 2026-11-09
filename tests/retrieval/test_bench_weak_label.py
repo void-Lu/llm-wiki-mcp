@@ -56,3 +56,16 @@ def test_gold_page_in_topk_and_citation_coverage() -> None:
     )
     assert covered == 1.0
     assert citation_coverage({"results": [{"path": "wiki/a.md"}]}) is None
+
+
+def test_gold_page_in_topk_normalizes_slashes_and_leading_slash() -> None:
+    # Match retrieval_eval path normalization: backslash + leading slash variants.
+    assert gold_page_in_topk(
+        ["wiki\\concepts\\invoice.md"], ["/wiki/concepts/invoice.md"], top_k=1
+    )
+    assert gold_page_in_topk(
+        ["/wiki/concepts/invoice.md"], ["wiki\\concepts\\invoice.md"], top_k=1
+    )
+    assert gold_page_in_topk(
+        ["\\wiki\\a.md", "other.md"], ["wiki/a.md"], top_k=2
+    )

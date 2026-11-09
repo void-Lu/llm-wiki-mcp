@@ -68,6 +68,40 @@ def extract_recall_at_10(report: Mapping[str, Any]) -> float | None:
     return None
 
 
+
+
+def _relativize_reports(
+    reports: Mapping[str, Any] | None,
+    output_dir: Path,
+) -> dict[str, str]:
+    """Store report paths relative to --output-dir for bench-summary."""
+    if not reports:
+        return {}
+    root = Path(output_dir).resolve()
+    out: dict[str, str] = {}
+    for key, value in reports.items():
+        if value is None:
+            continue
+        p = Path(str(value))
+        try:
+            rel = p.resolve().relative_to(root)
+        except ValueError:
+            # Outside output dir: keep as POSIX-ish relative-looking string if possible
+            rel = Path(str(value).replace("\\", "/"))
+            if rel.is_absolute():
+                # Fall back to name under a stable key rather than leaking abs path
+                rel = Path(p.name)
+        out[str(key)] = rel.as_posix()
+    return out
+
+
+def _track_failure(exc: BaseException) -> dict[str, Any]:
+    msg = f"{type(exc).__name__}: {exc}"
+    if len(msg) > 240:
+        msg = msg[:237] + "..."
+    return {"status": "fail", "reason": msg}
+
+
 def _default_run_pytest(args: Sequence[str]) -> int:
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", *args],
@@ -181,6 +215,7 @@ def run_bench(
     out.mkdir(parents=True, exist_ok=True)
     tracks: dict[str, dict[str, Any]] = {}
 
+    regress: dict[str, Any]
     if skip_regression:
         tracks["regression"] = {"status": "skipped", "reason": "skip_regression"}
         regress = {
@@ -190,13 +225,22 @@ def run_bench(
             "manifest": graph_v1_paths()["manifest"],
         }
     else:
-        regress = run_regression_track(out, run_pytest=run_pytest)
-        reports = regress.get("reports") or {}
-        tracks["regression"] = {
-            "status": regress["status"],
-            "pytest_exit_code": regress.get("pytest_exit_code"),
-            "reports": {key: str(value) for key, value in reports.items()},
-        }
+        try:
+            regress = run_regression_track(out, run_pytest=run_pytest)
+            reports = regress.get("reports") or {}
+            tracks["regression"] = {
+                "status": regress["status"],
+                "pytest_exit_code": regress.get("pytest_exit_code"),
+                "reports": _relativize_reports(reports, out),
+            }
+        except Exception as exc:  # noqa: BLE001 — keep summary writable
+            tracks["regression"] = _track_failure(exc)
+            regress = {
+                "status": "fail",
+                "work_vault": None,
+                "dataset": graph_v1_paths()["dataset"],
+                "manifest": graph_v1_paths()["manifest"],
+            }
 
     accuracy_vault = Path(vault) if vault else DEFAULT_ACCURACY_VAULT
     accuracy_dataset = Path(dataset) if dataset else DEFAULT_ACCURACY_DATASET
@@ -208,13 +252,20 @@ def run_bench(
             "reason": "ci_profile" if profile == "ci" else "skip_accuracy",
         }
     else:
-        tracks["accuracy"] = run_accuracy_track(
-            vault=accuracy_vault,
-            dataset=accuracy_dataset,
-            manifest=accuracy_manifest if accuracy_manifest.is_file() else None,
-            output_dir=out,
-            r10_min=accuracy_r10_min,
-        )
+        try:
+            accuracy = run_accuracy_track(
+                vault=accuracy_vault,
+                dataset=accuracy_dataset,
+                manifest=accuracy_manifest if accuracy_manifest.is_file() else None,
+                output_dir=out,
+                r10_min=accuracy_r10_min,
+            )
+            if isinstance(accuracy.get("reports"), Mapping):
+                accuracy = dict(accuracy)
+                accuracy["reports"] = _relativize_reports(accuracy.get("reports"), out)
+            tracks["accuracy"] = accuracy
+        except Exception as exc:  # noqa: BLE001
+            tracks["accuracy"] = _track_failure(exc)
 
     timing_path = Path(timing_queries) if timing_queries else default_timing_queries_path()
     if profile == "ci" or skip_latency:
@@ -227,71 +278,77 @@ def run_bench(
     elif not accuracy_vault.is_dir():
         tracks["latency"] = {"status": "skipped", "reason": "vault_missing"}
     else:
-        latency_report = run_latency_track(
-            vault=accuracy_vault,
-            queries_path=timing_path,
-            output_dir=out / "latency",
-            baseline_report=latency_baseline_report,
-        )
-        tracks["latency"] = {
-            "status": "report_only",
-            "mean_ms": latency_report["mean_ms"],
-            "p50_ms": latency_report["p50_ms"],
-            "p95_ms": latency_report["p95_ms"],
-            "query_count": latency_report["query_count"],
-            "reports": latency_report.get("reports"),
-        }
+        try:
+            latency_report = run_latency_track(
+                vault=accuracy_vault,
+                queries_path=timing_path,
+                output_dir=out / "latency",
+                baseline_report=latency_baseline_report,
+            )
+            tracks["latency"] = {
+                "status": "report_only",
+                "mean_ms": latency_report["mean_ms"],
+                "p50_ms": latency_report["p50_ms"],
+                "p95_ms": latency_report["p95_ms"],
+                "query_count": latency_report["query_count"],
+                "reports": _relativize_reports(latency_report.get("reports"), out),
+            }
+        except Exception as exc:  # noqa: BLE001
+            tracks["latency"] = _track_failure(exc)
 
     if skip_weak_label:
         tracks["weak_label"] = {"status": "skipped", "reason": "skip_weak_label"}
     else:
-        if profile == "ci":
-            wl_vault = (
-                Path(regress["work_vault"])
-                if regress.get("work_vault")
-                else graph_v1_paths()["vault"]
-            )
-            wl_dataset = Path(regress["dataset"])
-            wl_manifest = Path(regress["manifest"])
-        else:
-            wl_vault = (
-                Path(weak_label_vault)
-                if weak_label_vault
-                else (
-                    accuracy_vault
-                    if accuracy_vault.is_dir()
-                    else Path(regress.get("work_vault") or graph_v1_paths()["vault"])
+        try:
+            if profile == "ci":
+                wl_vault = (
+                    Path(regress["work_vault"])
+                    if regress.get("work_vault")
+                    else graph_v1_paths()["vault"]
                 )
-            )
-            wl_dataset = (
-                Path(weak_label_dataset)
-                if weak_label_dataset
-                else (
-                    accuracy_dataset
-                    if accuracy_dataset.is_file()
-                    else graph_v1_paths()["dataset"]
+                wl_dataset = Path(regress["dataset"])
+                wl_manifest = Path(regress["manifest"])
+            else:
+                wl_vault = (
+                    Path(weak_label_vault)
+                    if weak_label_vault
+                    else (
+                        accuracy_vault
+                        if accuracy_vault.is_dir()
+                        else Path(regress.get("work_vault") or graph_v1_paths()["vault"])
+                    )
                 )
+                wl_dataset = (
+                    Path(weak_label_dataset)
+                    if weak_label_dataset
+                    else (
+                        accuracy_dataset
+                        if accuracy_dataset.is_file()
+                        else graph_v1_paths()["dataset"]
+                    )
+                )
+                wl_manifest = (
+                    accuracy_manifest
+                    if accuracy_manifest.is_file() and wl_dataset == accuracy_dataset
+                    else graph_v1_paths()["manifest"]
+                )
+            # Keyword-only so monkeypatched fakes that accept **kwargs still work.
+            weak = run_weak_label_track(
+                vault=wl_vault,
+                dataset_path=wl_dataset,
+                output_dir=out / "weak_label",
+                manifest_path=wl_manifest,
             )
-            wl_manifest = (
-                accuracy_manifest
-                if accuracy_manifest.is_file() and wl_dataset == accuracy_dataset
-                else graph_v1_paths()["manifest"]
-            )
-        # Keyword-only so monkeypatched fakes that accept **kwargs still work.
-        weak = run_weak_label_track(
-            vault=wl_vault,
-            dataset_path=wl_dataset,
-            output_dir=out / "weak_label",
-            manifest_path=wl_manifest,
-        )
-        tracks["weak_label"] = {
-            "status": "report_only",
-            "mean_top1_evidence": weak.get("mean_top1_evidence"),
-            "mean_topk_evidence": weak.get("mean_topk_evidence"),
-            "gold_in_topk_rate": weak.get("gold_in_topk_rate"),
-            "citation_coverage_mean": weak.get("citation_coverage_mean"),
-            "reports": weak.get("reports"),
-        }
+            tracks["weak_label"] = {
+                "status": "report_only",
+                "mean_top1_evidence": weak.get("mean_top1_evidence"),
+                "mean_topk_evidence": weak.get("mean_topk_evidence"),
+                "gold_in_topk_rate": weak.get("gold_in_topk_rate"),
+                "citation_coverage_mean": weak.get("citation_coverage_mean"),
+                "reports": _relativize_reports(weak.get("reports"), out),
+            }
+        except Exception as exc:  # noqa: BLE001
+            tracks["weak_label"] = _track_failure(exc)
 
     finished = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     summary = build_bench_summary(
@@ -308,5 +365,7 @@ def run_bench(
     if tracks["latency"]["status"] == "fail":
         exit_code = 2
     if profile == "local" and tracks["accuracy"]["status"] == "fail":
+        exit_code = 2
+    if tracks["weak_label"]["status"] == "fail":
         exit_code = 2
     return exit_code, summary
