@@ -23,6 +23,7 @@ from retrieval.query_recovery import (
     plan_coverage_raw_merge,
     plan_fallback,
     plan_raw_single_shot,
+    plan_wiki_relaxed_single_shot,
     resolve_fallback_lexical_mode,
     select_best_per_page,
     step_bonus,
@@ -493,7 +494,7 @@ class QueryExecutionContext:
 
 
     def _run_sag2_default_recovery(self, request_view: QueryRequestView) -> None:
-        """Default-path recovery: coverage raw merge, then empty/weak raw once."""
+        """Default-path recovery: coverage, wiki_relaxed single-shot, then raw once."""
 
         self.sag2_recovery_reasons = []
         self.uncovered_latin_terms = recall_policy.uncovered_latin_terms(
@@ -505,10 +506,93 @@ class QueryExecutionContext:
             effective_scope=request_view.effective_scope,
         ):
             self._run_coverage_raw_merge(request_view)
-        # Knife 2 (wiki_relaxed) lands in Task 3; Task 2 keeps empty/weak raw
-        # but skips a second FTS when coverage already spent the single shot.
+
+        evidence_scores = {
+            item["hit"].passage_id: float(item.get("evidence_score", 0.0))
+            for item in self.selected
+        }
+        pool_kind = wiki_hop_pool_kind(self.selected, evidence_scores)
+        relaxed_reason = plan_wiki_relaxed_single_shot(
+            pool_kind=pool_kind,
+            question=request_view.question,
+            effective_scope=request_view.effective_scope,
+        )
+        if relaxed_reason is not None:
+            self._run_wiki_relaxed_single_shot(request_view, relaxed_reason)
+
+        # Empty/weak raw once; skip if coverage already spent the single shot.
         if not self.sag2_raw_single_shot:
             self._run_raw_single_shot(request_view)
+
+    def _run_wiki_relaxed_single_shot(
+        self,
+        request_view: QueryRequestView,
+        reason: Literal["wiki_relaxed_empty", "wiki_relaxed_cjk"],
+    ) -> None:
+        """One bounded wiki_relaxed fill for empty/CJK weak pools (no P2 ladder)."""
+
+        self.sag2_recovery_reasons.append(reason)
+        self.cancellation.checkpoint("fallback")
+        items, self.relaxed_fts_hits, relaxed_warning = recall_policy.relaxed_recovery_items(
+            self.store,
+            recall_policy.RelaxedRecoveryRequestView(
+                metadata=request_view.metadata,
+                question=request_view.question,
+                scope=request_view.effective_scope,
+                project=request_view.project,
+                filters=request_view.filters,
+                extra_terms=(),
+                cancellation=self.cancellation,
+                limit=recall_policy.WIKI_RELAXED_SINGLE_SHOT_LIMIT,
+            ),
+        )
+        if relaxed_warning:
+            self.status = {**self.status, "code": relaxed_warning}
+        if not items:
+            return
+        step_counts = recall_policy.step_counts_for_pages(
+            sorted({item["hit"].page_path for item in items}),
+            self.store,
+            None,
+        )
+        for item in items:
+            count = step_counts.get(item["hit"].page_path, 0)
+            item["score"] = compose_score(
+                item["hit"],
+                request_view.question,
+                request_view.intent,
+                request_view.effective_scope,
+                request_view.metadata,
+                base=item["hit"].score,
+                freshness=True,
+                step_bonus=step_bonus(count),
+            )
+        items.sort(
+            key=lambda item: (
+                -item["score"],
+                item["hit"].page_path,
+                item["hit"].passage_id,
+            )
+        )
+        selected = recall_policy.adaptive_expand(
+            select_best_per_page(items), request_view.top_k
+        )[: request_view.top_k]
+        # Hard bound top-N even if adaptive_expand grows.
+        selected = selected[: recall_policy.WIKI_RELAXED_SINGLE_SHOT_LIMIT]
+        if not recall_policy.relaxed_fill_is_strong(
+            request_view.question, selected, extra_terms=[]
+        ):
+            return  # abstain; leave prior selected (possibly empty)
+        self.selected = selected
+        self.recovery = assemble_recovery(
+            selected,
+            condition=RecoveryCondition(),
+            candidates=items,
+            store=self.store,
+            cancellation=self.cancellation,
+        )
+        self.context_items = self.recovery.context_items
+        self.lexical_mode = "relaxed"
 
     def _run_coverage_raw_merge(self, request_view: QueryRequestView) -> None:
         """One strict raw FTS merged into a nonempty wiki pool for uncovered Latin."""

@@ -488,3 +488,85 @@ def test_coverage_and_weak_share_one_raw_shot(
     )
     assert result is not None, f"pipeline crashed before assertions: {err!r}"
     assert "coverage_raw_merge" in result["pipeline"]["sag2_hop"]["recovery_reasons"]
+
+
+def test_cjk_empty_pool_fires_one_wiki_relaxed(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # Strict AND may miss; relaxed OR / CJK bigrams should hit.
+    write_test_page(
+        root,
+        "wiki/concepts/timebill.md",
+        {"title": "工时填写", "type": "concept"},
+        "本文说明如何配置工时填写流程与保存步骤。",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root, "如何配置工时填写", retrieval_mode="lexical", top_k=5
+    )
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert "wiki_relaxed_empty" in sag2["recovery_reasons"] or (
+        "wiki_relaxed_cjk" in sag2["recovery_reasons"]
+    )
+    # Single-shot: must not also look like raw_zero / coverage ladder chain.
+    assert result["pipeline"]["lexical"]["mode"] not in {"raw_zero", "coverage"}
+    assert result["pipeline"]["counters"]["relaxed_fts_hits"] >= 0
+    # If relaxed answered, results should be wiki paths.
+    if result["results"]:
+        assert result["results"][0]["path"].startswith("wiki/")
+
+
+def test_cjk_relaxed_still_empty_falls_back_to_raw_replace(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # No wiki pages that can answer; raw holds the CJK-adjacent Latin help text.
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: 工时帮助\n---\n\n如何配置工时填写：打开菜单后保存。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root, "如何配置工时填写", retrieval_mode="lexical", top_k=5
+    )
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert "wiki_relaxed_empty" in sag2["recovery_reasons"]
+    # After failed/empty relaxed, empty→raw replace.
+    assert sag2["raw_fallback_mode"] == "raw_replace"
+    assert sag2["raw_single_shot"] is True
+    assert result["results"]
+    assert str(result["results"][0]["path"]).startswith("raw/")
+
+
+def test_default_path_never_runs_full_p2_ladder_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even when coverage + CJK empty signals exist, do not call plan_fallback chain."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_test_page(
+        root,
+        "wiki/concepts/invoice.md",
+        {"title": "Invoice", "type": "concept"},
+        "invoice approval",
+    )
+    refresh_indexes(root)
+
+    import retrieval.query_execution_context as qec
+    import retrieval.query_recovery as recovery
+
+    calls = {"plan_fallback": 0}
+    real_plan = recovery.plan_fallback
+
+    def counted(state):  # noqa: ANN001
+        calls["plan_fallback"] += 1
+        return real_plan(state)
+
+    monkeypatch.setattr(qec, "plan_fallback", counted)
+    monkeypatch.setattr(recovery, "plan_fallback", counted)
+
+    run_query_v2(root, "invoice RAG 如何配置", retrieval_mode="lexical", top_k=5)
+    assert calls["plan_fallback"] == 0
