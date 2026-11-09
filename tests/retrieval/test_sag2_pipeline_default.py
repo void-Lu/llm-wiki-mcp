@@ -464,7 +464,27 @@ def test_coverage_and_weak_share_one_raw_shot(
         return store
 
     monkeypatch.setattr(qec.QueryExecutionContext, "get_raw_store", wrapped)
+    # Force eager weak/empty so a missing orchestrator guard
+    # (`if not self.sag2_raw_single_shot`) would admit a second raw FTS.
+    # Without this, a strong-ish post-coverage pool can make plan_raw_single_shot
+    # stay false and the call-count assert would pass vacuously.
+    monkeypatch.setattr(qec, "wiki_hop_is_weak", lambda selected, evidence: True)
+    monkeypatch.setattr(
+        qec,
+        "wiki_hop_pool_kind",
+        lambda selected, evidence: "weak" if selected else "empty",
+    )
+    monkeypatch.setattr(qec, "plan_raw_single_shot", lambda **kwargs: True)
 
-    result = run_query_v2(root, "invoice RAG", retrieval_mode="lexical", top_k=5)
+    result = None
+    err: BaseException | None = None
+    try:
+        result = run_query_v2(root, "invoice RAG", retrieval_mode="lexical", top_k=5)
+    except BaseException as exc:  # noqa: BLE001 — assert call count even if merge crashes
+        err = exc
+    assert calls["n"] <= 1, (
+        f"expected at most one raw FTS after coverage; got {calls['n']}"
+        + (f" (pipeline error: {err!r})" if err is not None else "")
+    )
+    assert result is not None, f"pipeline crashed before assertions: {err!r}"
     assert "coverage_raw_merge" in result["pipeline"]["sag2_hop"]["recovery_reasons"]
-    assert calls["n"] <= 1

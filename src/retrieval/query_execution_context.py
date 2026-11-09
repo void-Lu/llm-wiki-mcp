@@ -514,9 +514,9 @@ class QueryExecutionContext:
         """One strict raw FTS merged into a nonempty wiki pool for uncovered Latin."""
 
         self._ensure_open()
-        # Consume the single raw shot even if merge later admits nothing.
+        # Consume the single raw shot even if merge later admits nothing (dedupe).
+        # Mode is set only when raw is actually admitted into selection.
         self.sag2_raw_single_shot = True
-        self.sag2_raw_fallback_mode = "raw_merge"
         self.cancellation.checkpoint("fallback")
 
         availability = self.raw_availability()
@@ -624,6 +624,7 @@ class QueryExecutionContext:
         )
         if self.coverage_fallback:
             self.sag2_recovery_reasons.append("coverage_raw_merge")
+            self.sag2_raw_fallback_mode = "raw_merge"
 
     def _run_raw_single_shot(self, request_view: QueryRequestView) -> None:
         """One strict raw FTS when wiki+hop is empty/very weak (no P2 ladder)."""
