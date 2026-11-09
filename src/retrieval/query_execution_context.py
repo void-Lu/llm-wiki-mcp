@@ -34,6 +34,7 @@ from retrieval.query_shared import QueryFilters, eligible
 from retrieval.query_snapshot import QueryCorpusSnapshot
 from retrieval.retrieval_index import RetrievalIndexError, RetrievalIndexStore
 from retrieval import query_recall_policy as recall_policy
+from retrieval.sag2_evidence import HeuristicEvidenceJudge
 from retrieval import discovery as discovery_owner
 from retrieval import entity_batch as entity_batch_owner
 
@@ -583,6 +584,22 @@ class QueryExecutionContext:
             request_view.question, selected, extra_terms=[]
         ):
             return  # abstain; leave prior selected (possibly empty)
+        # Stamp hop/judge evidence so strong relaxed fill is not mistaken for a
+        # weak pool by _run_raw_single_shot (missing evidence_score → 0.0).
+        # Floor at the wiki_hop strong threshold (0.15): relaxed_fill_is_strong
+        # already admitted these rows.
+        judge = HeuristicEvidenceJudge()
+        for item in selected:
+            hit = item["hit"]
+            judged = float(
+                judge.score(
+                    request_view.question,
+                    str(getattr(hit, "text", "") or ""),
+                    title=str(getattr(hit, "title", "") or ""),
+                    page_path=str(getattr(hit, "page_path", "") or ""),
+                )
+            )
+            item["evidence_score"] = max(judged, 0.15)
         self.selected = selected
         self.recovery = assemble_recovery(
             selected,

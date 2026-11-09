@@ -509,12 +509,13 @@ def test_cjk_empty_pool_fires_one_wiki_relaxed(tmp_path: Path) -> None:
     assert "wiki_relaxed_empty" in sag2["recovery_reasons"] or (
         "wiki_relaxed_cjk" in sag2["recovery_reasons"]
     )
-    # Single-shot: must not also look like raw_zero / coverage ladder chain.
-    assert result["pipeline"]["lexical"]["mode"] not in {"raw_zero", "coverage"}
-    assert result["pipeline"]["counters"]["relaxed_fts_hits"] >= 0
-    # If relaxed answered, results should be wiki paths.
-    if result["results"]:
-        assert result["results"][0]["path"].startswith("wiki/")
+    # Strong relaxed fill must skip raw and keep relaxed lexical mode.
+    assert sag2["raw_fallback_mode"] == "none"
+    assert sag2["raw_single_shot"] is False
+    assert result["pipeline"]["lexical"]["mode"] in {"relaxed", "wiki_relaxed"}
+    assert result["pipeline"]["counters"]["relaxed_fts_hits"] >= 1
+    assert result["results"]
+    assert result["results"][0]["path"].startswith("wiki/")
 
 
 def test_cjk_relaxed_still_empty_falls_back_to_raw_replace(tmp_path: Path) -> None:
@@ -570,3 +571,109 @@ def test_default_path_never_runs_full_p2_ladder_chain(
 
     run_query_v2(root, "invoice RAG 如何配置", retrieval_mode="lexical", top_k=5)
     assert calls["plan_fallback"] == 0
+
+
+def test_cjk_empty_pool_strong_relaxed_skips_raw(tmp_path: Path) -> None:
+    """Strong wiki_relaxed fill must look strong to raw (evidence stamped)."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_test_page(
+        root,
+        "wiki/concepts/timebill.md",
+        {"title": "工时填写", "type": "concept"},
+        "本文说明如何配置工时填写流程与保存步骤。",
+    )
+    # Raw competitor that would win/merge if knife-2 strength were invisible.
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: 工时帮助\n---\n\n如何配置工时填写：打开菜单后保存。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root, "如何配置工时填写", retrieval_mode="lexical", top_k=5
+    )
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert "wiki_relaxed_empty" in sag2["recovery_reasons"] or (
+        "wiki_relaxed_cjk" in sag2["recovery_reasons"]
+    )
+    assert sag2["raw_fallback_mode"] == "none"
+    assert sag2["raw_single_shot"] is False
+    assert result["pipeline"]["lexical"]["mode"] in {"relaxed", "wiki_relaxed"}
+    assert result["results"]
+    assert str(result["results"][0]["path"]).startswith("wiki/")
+    assert result["pipeline"]["counters"]["relaxed_fts_hits"] >= 1
+
+
+def test_wiki_relaxed_cjk_weak_pool_skips_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Weak+CJK reason telemetry; strong relaxed fill must skip raw."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # Pre-existing weak wiki row so pool_kind is weak (not empty).
+    write_test_page(
+        root,
+        "wiki/concepts/stub.md",
+        {"title": "笔记", "type": "concept"},
+        "配置说明",
+    )
+    write_test_page(
+        root,
+        "wiki/concepts/timebill.md",
+        {"title": "工时填写", "type": "concept"},
+        "本文说明如何配置工时填写流程与保存步骤。",
+    )
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: 工时帮助\n---\n\n如何配置工时填写：打开菜单后保存。",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    import retrieval.query_execution_context as qec
+    from retrieval.sag2_evidence import HeuristicEvidenceJudge
+
+    # Force pre-relaxed pool to look weak so knife-2 plans wiki_relaxed_cjk.
+    # After strong fill, real wiki_hop_* must see stamped evidence (≥0.15).
+    real_kind = qec.wiki_hop_pool_kind
+    real_weak = qec.wiki_hop_is_weak
+    state = {"relaxed_done": False}
+
+    def kind_after(selected, evidence):  # noqa: ANN001
+        if not state["relaxed_done"]:
+            return "weak" if selected else "empty"
+        return real_kind(selected, evidence)
+
+    def weak_after(selected, evidence):  # noqa: ANN001
+        if not state["relaxed_done"]:
+            return True
+        return real_weak(selected, evidence)
+
+    real_relaxed = qec.QueryExecutionContext._run_wiki_relaxed_single_shot
+
+    def wrapped_relaxed(self, request_view, reason):  # noqa: ANN001
+        real_relaxed(self, request_view, reason)
+        state["relaxed_done"] = True
+
+    monkeypatch.setattr(qec, "wiki_hop_pool_kind", kind_after)
+    monkeypatch.setattr(qec, "wiki_hop_is_weak", weak_after)
+    monkeypatch.setattr(
+        qec.QueryExecutionContext, "_run_wiki_relaxed_single_shot", wrapped_relaxed
+    )
+    # Keep judge real so stamping uses hop/judge scores.
+    assert HeuristicEvidenceJudge is not None
+
+    result = run_query_v2(
+        root, "如何配置工时填写", retrieval_mode="lexical", top_k=5
+    )
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert "wiki_relaxed_cjk" in sag2["recovery_reasons"]
+    assert sag2["raw_fallback_mode"] == "none"
+    assert sag2["raw_single_shot"] is False
+    assert result["pipeline"]["lexical"]["mode"] in {"relaxed", "wiki_relaxed"}
+    assert result["results"]
+    assert str(result["results"][0]["path"]).startswith("wiki/")
