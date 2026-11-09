@@ -11,6 +11,14 @@
 - **废弃（仍可读、默认惰性）**：`pipeline.coverage`（默认 `triggered: false`）、`counters.relaxed_fts_hits`（默认 0）及 ladder 相关 lexical mode 名；文档层标 deprecated，默认路径不应再触发。
 - 向量检索仍为既有 opt-in / hybrid；查询时生效，**无需**为 hop 重建索引。详设见 `docs/specs/2026-11-09-sag2-hop-default-design.md`，实现计划 `docs/plans/2026-11-09-sag2-hop-default.md`。
 
+## 2026-11-09 — v1.0.0：SAG2 召回回升（弱池 raw merge + Judge 加权）
+
+- **弱池 raw：** wiki+hop 候选非空但 top 证据分 `< 0.15` 时，单次 raw FTS **merge** 并入（复用 `merge_weak_primary_raw`），**不再**整池 replace；**空池**仍 replace。
+- **Judge 加权：** `HeuristicEvidenceJudge` 对标题/路径 token、CJK 连续片段、标识符式 token 增加有界 bonus，分数仍 clamp 到 `[0,1]`；hop 调用传入 `PassageHit.title` / `page_path`。
+- **Telemetry：** `pipeline.sag2_hop.raw_fallback_mode` = `none` | `raw_merge` | `raw_replace`；`raw_single_shot` 在 merge/replace 时仍为 `true`。
+- **不做：** 不恢复默认 P2 ladder；本轮不含 TermSelector 问句稀有专名保留（Approach C）。
+- **验收：** codingwork gold 同口径 **R@10 ≥ 0.80**；未达标须显式记录，不得静默宣称成功。详设 `docs/specs/2026-11-09-sag2-recall-lift-merge-judge-design.md`。
+
 ## 2026-10-20 — 检索 P2：raw 池多词实体共现 / 短语召回（0008）
 
 - 
