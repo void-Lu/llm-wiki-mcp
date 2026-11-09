@@ -269,3 +269,27 @@ def test_no_ladder_branch_when_raw_single_shot(tmp_path: Path) -> None:
         "raw_prefix",  # single-shot uses strict once; prefix ladder must stay off
     }
     assert pipeline["counters"]["relaxed_fts_hits"] == 0
+
+
+def test_pipeline_includes_sag2_hop_telemetry(tmp_path: Path) -> None:
+    root = _seed_vault(tmp_path)
+    result = run_query_v2(root, "email capture", top_k=3)
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert set(sag2) >= {
+        "hops_run",
+        "judge_calls",
+        "expansion_term_count",
+        "stop_reason",
+        "truncated",
+        "raw_single_shot",
+    }
+    assert isinstance(sag2["hops_run"], int)
+    assert isinstance(sag2["judge_calls"], int)
+    assert isinstance(sag2["expansion_term_count"], int)
+    assert isinstance(sag2["stop_reason"], str)
+    assert isinstance(sag2["truncated"], bool)
+    assert isinstance(sag2["raw_single_shot"], bool)
+    assert "results" in result and "budget" in result
+    # Deprecated ladder keys remain readable but inert on default path.
+    assert result["pipeline"]["coverage"]["triggered"] is False
+    assert result["pipeline"]["counters"]["relaxed_fts_hits"] == 0

@@ -148,6 +148,7 @@ class QueryExecutionView:
     sag2_judge_calls: int = 0
     sag2_expansion_terms: tuple[str, ...] = ()
     sag2_stop_reason: str = ""
+    sag2_truncated: bool = False
     sag2_raw_single_shot: bool = False
 
 
@@ -186,6 +187,7 @@ class QueryExecutionContext:
     sag2_judge_calls: int = 0
     sag2_expansion_terms: tuple[str, ...] = ()
     sag2_stop_reason: str = ""
+    sag2_truncated: bool = False
     sag2_raw_single_shot: bool = False
     raw_store: RetrievalIndexStore | None = field(default=None, init=False)
     raw_snapshot: QueryCorpusSnapshot | None = field(default=None, init=False)
@@ -420,6 +422,7 @@ class QueryExecutionContext:
             sag2_judge_calls=self.sag2_judge_calls,
             sag2_expansion_terms=tuple(self.sag2_expansion_terms),
             sag2_stop_reason=self.sag2_stop_reason,
+            sag2_truncated=self.sag2_truncated,
             sag2_raw_single_shot=self.sag2_raw_single_shot,
         )
 

@@ -1,9 +1,15 @@
 # 变更记录
 
-## 2026-11-09 — v1.0.0：SAG2 hop 默认主路径（计划中）
+## 2026-11-09 — v1.0.0：SAG2 hop 默认主路径
 
-- 版本号升至 **1.0.0**；检索默认主路径将改为 BM25 → 本地 EvidenceJudge → 抽词扩检（`H≤2`），去掉默认 P2 ladder（coverage / wiki_relaxed / all_coverage / raw_zero 及 0008/0015/0018 补丁）。
-- 本条目为版本与实现计划占位；行为变更随 `docs/plans/2026-11-09-sag2-hop-default.md` 任务落地后补充。
+- 版本号升至 **1.0.0**。`wiki_query` / Query V2 **默认**主路径改为：BM25/FTS5 初召 → 本地 `EvidenceJudge` → `TermSelector` 抽词扩检 → `Sag2HopController`（`H≤2`，对齐 SAG2 Algorithm 1）；**不再**默认走 P2 ladder（coverage → wiki_relaxed → all_coverage → raw_zero）及 0008/0015/0018 补丁。
+- **本地判证 only**：默认 `HeuristicEvidenceJudge`；禁止托管 JEV / 为判证外传 vault。本地 LLM 钩子预留，不可用时回退规则。
+- **wikilink 图扩展**：仅在 hop（及证据分 soft-blend）**之后**对 top 证据跑一次；邻居不参与扩词。实现仍传 `max_graph_hops=2`（与既有 `apply_graph_expansion` 参数一致）；设计「一度」语义以种子出发的有界扩展为准，未另收紧为硬编码 1。
+- **raw 兜底**：仅当 wiki+hop 为空或证据极弱（top 证据分 `< 0.15`）时 **单次** raw FTS（`strict`）；失败返回空结果 + `wiki_hop_empty` / `wiki_hop_weak`（可带 `raw_single_shot_empty`）。不重入旧 ladder。
+- **兼容开关**：`enable_legacy_p2_ladder=True` 可显式打开旧 ladder 对照；默认 `False`。
+- **MCP 稳定**：不改名 `results` / `additional_results` / `budget` / 顶层 ok 信封。新增 `pipeline.sag2_hop`：`hops_run`、`judge_calls`、`expansion_term_count`、`stop_reason`、`truncated`、`raw_single_shot`。
+- **废弃（仍可读、默认惰性）**：`pipeline.coverage`（默认 `triggered: false`）、`counters.relaxed_fts_hits`（默认 0）及 ladder 相关 lexical mode 名；文档层标 deprecated，默认路径不应再触发。
+- 向量检索仍为既有 opt-in / hybrid；查询时生效，**无需**为 hop 重建索引。详设见 `docs/specs/2026-11-09-sag2-hop-default-design.md`，实现计划 `docs/plans/2026-11-09-sag2-hop-default.md`。
 
 ## 2026-10-20 — 检索 P2：raw 池多词实体共现 / 短语召回（0008）
 

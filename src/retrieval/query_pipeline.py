@@ -809,8 +809,9 @@ def assemble_public_projection(
         "sag2_hop": {
             "hops_run": view.sag2_hops_run,
             "judge_calls": view.sag2_judge_calls,
-            "expansion_terms": list(view.sag2_expansion_terms),
+            "expansion_term_count": len(view.sag2_expansion_terms),
             "stop_reason": view.sag2_stop_reason,
+            "truncated": view.sag2_truncated,
             "raw_single_shot": view.sag2_raw_single_shot,
         },
         "counters": {
@@ -1030,6 +1031,7 @@ def run_query_v2(
     sag2_judge_calls = 0
     sag2_expansion_terms: tuple[str, ...] = ()
     sag2_stop_reason = "skipped"
+    sag2_truncated = False
     if retrieval_mode != "vector":
         cancellation.checkpoint("sag2_hop")
         stage_one_hits = list(fts)
@@ -1068,6 +1070,7 @@ def run_query_v2(
         sag2_judge_calls = hop.judge_calls
         sag2_expansion_terms = hop.expansion_terms
         sag2_stop_reason = hop.stop_reason
+        sag2_truncated = hop.truncated
     allowed_vector_paths: set[str] = set()
     for index, item in enumerate(snapshot.pages):
         cancellation.checkpoint_batch(index, every=16, stage="snapshot")
@@ -1249,6 +1252,7 @@ def run_query_v2(
         sag2_judge_calls=sag2_judge_calls,
         sag2_expansion_terms=sag2_expansion_terms,
         sag2_stop_reason=sag2_stop_reason,
+        sag2_truncated=sag2_truncated,
     )
     execution_view = execution.execute(request_view)
     quality_gate_evaluation = _quality_gate_evaluation(
