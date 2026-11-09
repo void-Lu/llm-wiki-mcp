@@ -304,7 +304,13 @@ def test_v2_coverage_does_not_open_raw_store_when_primary_covers_terms(
     }
 
 
-def test_v2_cjk_only_query_does_not_open_raw_store(tmp_path: Path, monkeypatch) -> None:
+def test_v2_cjk_only_query_does_not_trigger_coverage(tmp_path: Path) -> None:
+    """CJK queries must not enter the deprecated coverage ladder.
+
+    Default sag2_hop may attempt raw_single_shot when the heuristic judge
+    scores CJK evidence weakly; that is not a coverage/P2 ladder open.
+    """
+
     root = tmp_path / "vault"
     create_wiki_root(root)
     _write(
@@ -316,19 +322,18 @@ def test_v2_cjk_only_query_does_not_open_raw_store(tmp_path: Path, monkeypatch) 
     )
     refresh_indexes(root)
 
-    original_status = RetrievalIndexStore.status
-
-    def reject_raw_status(self: RetrievalIndexStore) -> dict[str, object]:
-        if self.scope == "raw":
-            raise AssertionError("CJK-only queries must not open the raw store")
-        return original_status(self)
-
-    monkeypatch.setattr(RetrievalIndexStore, "status", reject_raw_status)
     result = run_query_v2(root, "知识检索", retrieval_mode="lexical")
 
+    assert result["results"], "wiki hit should still surface"
+    assert result["results"][0]["path"] == "wiki/concepts/knowledge.md"
     assert result["pipeline"]["coverage"] == {
         "uncovered_latin_terms": [],
         "triggered": False,
+    }
+    assert result["pipeline"]["lexical"]["mode"] not in {
+        "wiki_relaxed",
+        "coverage",
+        "raw_zero",
     }
 
 
@@ -1322,6 +1327,7 @@ def test_v2_strong_primary_still_blocks_raw_zero(tmp_path: Path) -> None:
         "MCP Standard Tools 安装清单 Server SuiteScript",
         scope="knowledge",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
     paths = [item["path"] for item in result["results"]]
     assert paths, "expected results"

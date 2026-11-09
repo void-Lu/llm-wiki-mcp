@@ -811,6 +811,7 @@ def assemble_public_projection(
             "judge_calls": view.sag2_judge_calls,
             "expansion_terms": list(view.sag2_expansion_terms),
             "stop_reason": view.sag2_stop_reason,
+            "raw_single_shot": view.sag2_raw_single_shot,
         },
         "counters": {
             "fts_hits": seed_stats.fts_hits,

@@ -222,3 +222,50 @@ def test_graph_ablation_zeroes_graph_score(tmp_path: Path) -> None:
     assert disabled["ok"] is True
     assert disabled["pipeline"]["counters"]["graph_hits"] == 0
     assert all(item["scores"]["graph"] == 0 for item in disabled["results"])
+
+
+def test_raw_single_shot_when_wiki_hop_empty(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: Reports Help\n---\n\nAccess reports from the Reports menu.",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "access reports", retrieval_mode="lexical")
+
+    assert result["results"]
+    assert result["results"][0]["path"] == "raw/sources/file/default/help.md"
+    assert result["results"][0]["source_kind"] == "raw"
+    assert result["pipeline"]["fallback"]["level"] == "raw"
+    assert "wiki_hop_empty" in result["pipeline"]["fallback"]["reasons"] or (
+        "wiki_hop_weak" in result["pipeline"]["fallback"]["reasons"]
+    )
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert sag2["raw_single_shot"] is True
+
+
+def test_no_ladder_branch_when_raw_single_shot(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: Reports Help\n---\n\nAccess reports from the Reports menu.",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "access reports", retrieval_mode="lexical")
+    pipeline = result["pipeline"]
+    assert pipeline["coverage"]["triggered"] is False
+    assert pipeline["lexical"]["mode"] not in {
+        "wiki_relaxed",
+        "coverage",
+        "raw_zero",
+        "raw_prefix",  # single-shot uses strict once; prefix ladder must stay off
+    }
+    assert pipeline["counters"]["relaxed_fts_hits"] == 0

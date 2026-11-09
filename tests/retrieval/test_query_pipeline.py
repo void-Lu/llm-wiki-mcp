@@ -462,7 +462,10 @@ def test_v2_wiki_relaxed_recall_does_not_open_raw_store(tmp_path: Path, monkeypa
         return original_status(self)
 
     monkeypatch.setattr(RetrievalIndexStore, "status", reject_raw_status)
-    result = run_query_v2(root, "alpha missing", retrieval_mode="lexical")
+    # Ladder contract: wiki_relaxed may answer without opening raw.
+    result = run_query_v2(
+        root, "alpha missing", retrieval_mode="lexical", enable_legacy_p2_ladder=True
+    )
 
     assert [item["path"] for item in result["results"]] == ["wiki/concepts/curated.md"]
     assert result["pipeline"]["counters"]["raw_fts_hits"] == 0

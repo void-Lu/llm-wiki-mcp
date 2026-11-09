@@ -135,6 +135,34 @@ def plan_fallback(state: FallbackState) -> FallbackPlan | None:
     return None
 
 
+def plan_raw_single_shot(*, wiki_empty_or_weak: bool, effective_scope: str) -> bool:
+    """Whether the default sag2 path should fire one strict raw FTS.
+
+    Never schedules coverage / wiki_relaxed / all_coverage / raw_zero.
+    Scope gate mirrors legacy raw_zero: knowledge/all only.
+    """
+
+    return bool(wiki_empty_or_weak) and effective_scope in {"knowledge", "all"}
+
+
+def wiki_hop_is_weak(
+    selected: Sequence[Mapping[str, Any]],
+    evidence_scores: Mapping[str, float],
+) -> bool:
+    """True when wiki+hop selected is empty or top evidence is below 0.15."""
+
+    if not selected:
+        return True
+    top = max(
+        (
+            float(evidence_scores.get(item["hit"].passage_id, 0.0))
+            for item in selected
+        ),
+        default=0.0,
+    )
+    return top < 0.15
+
+
 def resolve_fallback_lexical_mode(
     plan: FallbackPlan | None,
     raw_lexical_mode: str | None = None,

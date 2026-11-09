@@ -10,20 +10,26 @@ from typing import Any, Literal
 
 from retrieval.lexical_analyzer import has_qualified_identifier
 from retrieval.query_cancellation import QueryCancellationContext
-from retrieval.query_shared import QueryFilters
+from retrieval.candidate_items import candidate_item
 from retrieval.query_recovery import (
     FallbackPlan,
     FallbackState,
+    DEFAULT_RECOVERY_CONDITION,
     RecoveryAssembly,
+    RecoveryCondition,
     assemble_recovery,
     compose_score,
+    fallback_envelope,
     plan_fallback,
+    plan_raw_single_shot,
     resolve_fallback_lexical_mode,
     select_best_per_page,
     step_bonus,
+    wiki_hop_is_weak,
 )
+from retrieval.query_shared import QueryFilters, eligible
 from retrieval.query_snapshot import QueryCorpusSnapshot
-from retrieval.retrieval_index import RetrievalIndexStore
+from retrieval.retrieval_index import RetrievalIndexError, RetrievalIndexStore
 from retrieval import query_recall_policy as recall_policy
 from retrieval import discovery as discovery_owner
 from retrieval import entity_batch as entity_batch_owner
@@ -142,6 +148,7 @@ class QueryExecutionView:
     sag2_judge_calls: int = 0
     sag2_expansion_terms: tuple[str, ...] = ()
     sag2_stop_reason: str = ""
+    sag2_raw_single_shot: bool = False
 
 
 @dataclass
@@ -179,6 +186,7 @@ class QueryExecutionContext:
     sag2_judge_calls: int = 0
     sag2_expansion_terms: tuple[str, ...] = ()
     sag2_stop_reason: str = ""
+    sag2_raw_single_shot: bool = False
     raw_store: RetrievalIndexStore | None = field(default=None, init=False)
     raw_snapshot: QueryCorpusSnapshot | None = field(default=None, init=False)
     selected: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -412,6 +420,7 @@ class QueryExecutionContext:
             sag2_judge_calls=self.sag2_judge_calls,
             sag2_expansion_terms=tuple(self.sag2_expansion_terms),
             sag2_stop_reason=self.sag2_stop_reason,
+            sag2_raw_single_shot=self.sag2_raw_single_shot,
         )
 
     def execute(self, request_view: QueryRequestView) -> QueryExecutionView:
@@ -470,13 +479,161 @@ class QueryExecutionContext:
         object.__setattr__(self, "_sealed", True)
         return frozen_view
 
+
+    def _run_raw_single_shot(self, request_view: QueryRequestView) -> None:
+        """One strict raw FTS when wiki+hop is empty/very weak (no P2 ladder)."""
+
+        self._ensure_open()
+        self.sag2_raw_single_shot = False
+        evidence_scores = {
+            item["hit"].passage_id: float(item.get("evidence_score", 0.0))
+            for item in self.selected
+        }
+        empty_or_weak = wiki_hop_is_weak(self.selected, evidence_scores)
+        if not plan_raw_single_shot(
+            wiki_empty_or_weak=empty_or_weak,
+            effective_scope=request_view.effective_scope,
+        ):
+            return
+
+        reason = "wiki_hop_empty" if not self.selected else "wiki_hop_weak"
+        self.sag2_raw_single_shot = True
+        self.cancellation.checkpoint("fallback")
+
+        availability = self.raw_availability()
+        warning = self._raw_warning()
+        if availability != "fresh":
+            self.raw_fts_hits = 0
+            self.raw_index_warning = warning
+            if not self.selected:
+                self.recovery = assemble_recovery(
+                    [],
+                    condition=DEFAULT_RECOVERY_CONDITION,
+                    candidates=[],
+                    store=self.store,
+                    cancellation=self.cancellation,
+                )
+                self.recovery = replace(
+                    self.recovery,
+                    fallback=fallback_envelope(
+                        "none", (reason, "raw_single_shot_empty"), ()
+                    ),
+                )
+                self.context_items = []
+            return
+
+        raw_store = self.get_raw_store()
+        raw_snapshot = self.capture_raw_snapshot()
+        candidate_limit = min(
+            max(request_view.top_k * 8, recall_policy.RAW_FALLBACK_LIMIT),
+            recall_policy.RAW_FALLBACK_CANDIDATE_LIMIT,
+        )
+        try:
+            raw_hits = raw_store.search_fts(
+                request_view.question,
+                limit=candidate_limit,
+                mode="strict",
+                project=request_view.project,
+                page_type=request_view.filters.type,
+                tags=list(request_view.filters.tags),
+            )
+        except RetrievalIndexError as exc:
+            self.raw_fts_hits = 0
+            self.raw_index_warning = _raw_index_warning({"code": exc.code})
+            if not self.selected:
+                self.recovery = assemble_recovery(
+                    [],
+                    condition=DEFAULT_RECOVERY_CONDITION,
+                    candidates=[],
+                    store=self.store,
+                    cancellation=self.cancellation,
+                )
+                self.recovery = replace(
+                    self.recovery,
+                    fallback=fallback_envelope(
+                        "none", (reason, "raw_single_shot_empty"), ()
+                    ),
+                )
+                self.context_items = []
+            return
+
+        raw_metadata: dict[str, dict[str, Any]] = {}
+        for index, page in enumerate(raw_snapshot.pages):
+            self.cancellation.checkpoint_batch(index, every=16, stage="snapshot")
+            frontmatter = page.get("frontmatter")
+            raw_metadata[str(page["path"])] = (
+                dict(frontmatter) if isinstance(frontmatter, Mapping) else {}
+            )
+
+        raw_items: list[dict[str, Any]] = []
+        for rank, hit in enumerate(raw_hits, 1):
+            self.cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
+            if not eligible(hit, raw_metadata, scope="raw"):
+                continue
+            raw_items.append(candidate_item(hit, score=float(hit.score), fts_rank=rank))
+
+        self.raw_fts_hits = len(raw_hits)
+        self.raw_index_warning = ""
+        if not raw_items:
+            if not self.selected:
+                self.recovery = assemble_recovery(
+                    [],
+                    condition=DEFAULT_RECOVERY_CONDITION,
+                    candidates=[],
+                    store=self.store,
+                    cancellation=self.cancellation,
+                )
+                self.recovery = replace(
+                    self.recovery,
+                    fallback=fallback_envelope(
+                        "none", (reason, "raw_single_shot_empty"), ()
+                    ),
+                )
+                self.context_items = []
+            return
+
+        step_counts = recall_policy.step_counts_for_pages(
+            sorted({item["hit"].page_path for item in raw_items}),
+            raw_store,
+            raw_store,
+        )
+        for item in raw_items:
+            count = step_counts.get(item["hit"].page_path, 0)
+            item["score"] = round(item["score"] + step_bonus(count), 12)
+        raw_items.sort(
+            key=lambda item: (
+                -item["score"],
+                item["hit"].page_path,
+                item["hit"].passage_id,
+            )
+        )
+
+        # Empty/weak wiki: raw_only replace (no weak-primary merge ladder).
+        selected = select_best_per_page(raw_items)
+        selected = recall_policy.adaptive_expand(selected, request_view.top_k)[
+            : request_view.top_k
+        ]
+        recovery = assemble_recovery(
+            selected,
+            condition=RecoveryCondition("raw", (reason,), "item"),
+            candidates=raw_items,
+            store=self.store,
+            raw_store=raw_store,
+            cancellation=self.cancellation,
+        )
+        self.selected = selected
+        self.context_items = recovery.context_items
+        self.recovery = recovery
+        self.lexical_mode = "strict"
+        self.coverage_fallback = False
+
     def _run_fallback_recovery(self, request_view: QueryRequestView) -> None:
         """Run fallback branches and retain their state on this context.
 
-        When ``enable_legacy_p2_ladder`` is False (default), this is a no-op:
-        sag2_hop owns recall expansion; selected/scored stay as the pipeline
-        provided. Legacy coverage / wiki_relaxed / all_coverage / raw_zero
-        remain available only behind the explicit opt-in flag.
+        When ``enable_legacy_p2_ladder`` is False (default), skip the P2 ladder
+        and optionally fire one strict raw FTS when wiki+hop is empty/very weak.
+        Legacy coverage / wiki_relaxed / all_coverage / raw_zero remain available
+        only behind the explicit opt-in flag.
         """
 
         self._ensure_open()
@@ -492,6 +649,7 @@ class QueryExecutionContext:
             else []
         )
         if not self.enable_legacy_p2_ladder:
+            self._run_raw_single_shot(request_view)
             return
         query_extra_terms: list[str] = []
         query_term_variants: dict[str, list[str]] = {}
