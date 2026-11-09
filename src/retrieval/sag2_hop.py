@@ -73,7 +73,15 @@ class Sag2HopController:
                 evidence[hit.passage_id] = 0.0
                 return 0.0
             try:
-                score = float(self._judge.score(question, hit.text, context=context))
+                score = float(
+                    self._judge.score(
+                        question,
+                        hit.text,
+                        context=context,
+                        title=hit.title,
+                        page_path=hit.page_path,
+                    )
+                )
             except Exception:
                 score = 0.0
             judge_calls += 1
