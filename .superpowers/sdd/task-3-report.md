@@ -52,7 +52,7 @@ None blocking. `_run_raw_single_shot` still resets flags on entry — safe only 
 ## Review fix (evidence_score stamp)
 
 **Status:** FIXED  
-**Fix commit:** `a5d0c95b1697597e0430dbfca6336826ebfa1fdf`  
+**Fix commit:** `5239d901ca253b74f8bc0ad4e1f1f5b6b767e33f`  
 **Base:** `5f7f579`
 
 ### Critical
