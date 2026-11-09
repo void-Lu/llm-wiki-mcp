@@ -81,7 +81,11 @@ class LadderStep:
 
 
 def plan_fallback(state: FallbackState) -> FallbackPlan | None:
-    """Return the pure fallback branch selected by current evidence."""
+    """Return the pure fallback branch selected by current evidence.
+
+    Deprecated as the default Query V2 path: ``sag2_hop`` owns expansion.
+    Kept for ``enable_legacy_p2_ladder=True`` contrast tests and callers.
+    """
 
     if (
         state.has_primary_recall
@@ -129,6 +133,91 @@ def plan_fallback(state: FallbackState) -> FallbackPlan | None:
             kind,
         )
     return None
+
+
+def plan_raw_single_shot(*, wiki_empty_or_weak: bool, effective_scope: str) -> bool:
+    """Whether the default sag2 path should fire one strict raw FTS.
+
+    Never schedules coverage / wiki_relaxed / all_coverage / raw_zero.
+    Scope gate mirrors legacy raw_zero: knowledge/all only.
+    """
+
+    return bool(wiki_empty_or_weak) and effective_scope in {"knowledge", "all"}
+
+
+WikiHopPoolKind = Literal["empty", "weak", "strong"]
+
+
+def wiki_hop_pool_kind(
+    selected: Sequence[Mapping[str, Any]],
+    evidence_scores: Mapping[str, float],
+) -> WikiHopPoolKind:
+    """Classify wiki+hop pool for raw single-shot branching."""
+
+    if not selected:
+        return "empty"
+    top = max(
+        (
+            float(evidence_scores.get(item["hit"].passage_id, 0.0))
+            for item in selected
+        ),
+        default=0.0,
+    )
+    if top < 0.15:
+        return "weak"
+    return "strong"
+
+
+def wiki_hop_is_weak(
+    selected: Sequence[Mapping[str, Any]],
+    evidence_scores: Mapping[str, float],
+) -> bool:
+    """True when wiki+hop selected is empty or top evidence is below 0.15."""
+
+    return wiki_hop_pool_kind(selected, evidence_scores) != "strong"
+
+
+_CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uff00-\uffef]")
+
+
+def query_has_cjk(question: str) -> bool:
+    """True when the question contains CJK / kana / fullwidth characters."""
+
+    return bool(_CJK_RE.search(question or ""))
+
+
+def plan_coverage_raw_merge(
+    *,
+    uncovered_latin_terms: Sequence[str],
+    selected_nonempty: bool,
+    effective_scope: str,
+) -> bool:
+    """Whether sag2 default path should fire one coverage raw → merge."""
+
+    return (
+        bool(selected_nonempty)
+        and bool(uncovered_latin_terms)
+        and effective_scope in {"knowledge", "all"}
+    )
+
+
+def plan_wiki_relaxed_single_shot(
+    *,
+    pool_kind: WikiHopPoolKind,
+    question: str,
+    effective_scope: str,
+) -> Literal["wiki_relaxed_empty", "wiki_relaxed_cjk"] | None:
+    """Return knife-2 reason when empty/weak pool + CJK should try wiki_relaxed."""
+
+    if effective_scope not in {"knowledge", "all"}:
+        return None
+    if pool_kind == "strong":
+        return None
+    if not query_has_cjk(question):
+        return None
+    if pool_kind == "empty":
+        return "wiki_relaxed_empty"
+    return "wiki_relaxed_cjk"
 
 
 def resolve_fallback_lexical_mode(

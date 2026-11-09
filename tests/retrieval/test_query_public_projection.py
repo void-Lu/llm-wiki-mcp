@@ -116,3 +116,18 @@ def test_assemble_public_projection_projects_seed_gate_discovery_and_context() -
     ]
     assert projection.response["pipeline"]["quality_gate"] == gate_summary
     assert projection.response["pipeline"]["discovery"] == view.discovery
+    sag2 = projection.response["pipeline"]["sag2_hop"]
+    assert set(sag2) >= {
+        "hops_run",
+        "judge_calls",
+        "expansion_term_count",
+        "stop_reason",
+        "truncated",
+        "raw_single_shot",
+        "raw_fallback_mode",
+    }
+    assert sag2["expansion_term_count"] == 0
+    assert sag2["truncated"] is False
+    assert sag2["raw_single_shot"] is False
+    assert sag2["raw_fallback_mode"] == "none"
+    assert "results" in projection.response and "budget" in projection.response

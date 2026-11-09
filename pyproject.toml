@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "llm-wiki-mcp"
-version = "0.9.0"
+version = "1.0.0"
 description = "Local MCP server for Obsidian LLM Wiki maintenance"
 readme = "README.md"
 requires-python = ">=3.11"

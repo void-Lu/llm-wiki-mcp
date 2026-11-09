@@ -36,6 +36,9 @@ from retrieval.query_shared import (
     snapshot_page_eligible,
 )
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
+from retrieval.sag2_evidence import HeuristicEvidenceJudge
+from retrieval.sag2_hop import Sag2HopController
+from retrieval.sag2_terms import TermSelector
 from retrieval.query_quality_calibration import load_calibration_artifact_once
 from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, RrfWeights, TelemetrySettings
 from retrieval.query_quality_policy import (
@@ -86,6 +89,33 @@ class QuerySeedStats:
     vector_warnings: tuple[str, ...]
     index_warnings: tuple[str, ...]
     scope_rules: tuple[str, ...]
+
+
+SAG2_EVIDENCE_BLEND_WEIGHT = 1.0
+"""Soft-blend factor: evidence_score in [0,1] added onto fusion score."""
+
+
+@dataclass(frozen=True)
+class IndexStoreSearcher:
+    """LexicalSearcher adapter over ``RetrievalIndexStore.search_fts``."""
+
+    store: RetrievalIndexStore
+    project: str | None = None
+    page_type: str | None = None
+    tags: tuple[str, ...] = ()
+
+    def search(self, query: str, *, limit: int = 20) -> list[PassageHit]:
+        try:
+            return self.store.search_fts(
+                query,
+                limit=limit,
+                project=self.project,
+                page_type=self.page_type,
+                tags=list(self.tags) or None,
+                mode="strict",
+            )
+        except RetrievalIndexError:
+            return []
 
 
 @dataclass(frozen=True)
@@ -776,6 +806,16 @@ def assemble_public_projection(
             "uncovered_latin_terms": list(view.uncovered_latin_terms),
             "triggered": view.coverage_fallback,
         },
+        "sag2_hop": {
+            "hops_run": view.sag2_hops_run,
+            "judge_calls": view.sag2_judge_calls,
+            "expansion_term_count": len(view.sag2_expansion_terms),
+            "stop_reason": view.sag2_stop_reason,
+            "truncated": view.sag2_truncated,
+            "raw_single_shot": view.sag2_raw_single_shot,
+            "raw_fallback_mode": view.sag2_raw_fallback_mode,
+            "recovery_reasons": list(view.sag2_recovery_reasons),
+        },
         "counters": {
             "fts_hits": seed_stats.fts_hits,
             "qualified_fts_hits": seed_stats.qualified_fts_hits,
@@ -915,6 +955,7 @@ def run_query_v2(
     telemetry_stats: MutableMapping[str, object] | None = None,
     graph_expansion: bool = True,
     rrf_weights: RrfWeights | None = None,
+    enable_legacy_p2_ladder: bool = False,
 ) -> dict[str, Any]:
     """Read existing projections and return one canonical result payload.
 
@@ -986,6 +1027,52 @@ def run_query_v2(
     except RetrievalIndexError as exc:
         fts = []
         status = {**status, "code": exc.code}
+    stage_one_fts_count = len(fts)
+    evidence_by_id: dict[str, float] = {}
+    sag2_hops_run = 0
+    sag2_judge_calls = 0
+    sag2_expansion_terms: tuple[str, ...] = ()
+    sag2_stop_reason = "skipped"
+    sag2_truncated = False
+    if retrieval_mode != "vector":
+        cancellation.checkpoint("sag2_hop")
+        stage_one_hits = list(fts)
+        hop = Sag2HopController(
+            HeuristicEvidenceJudge(),
+            TermSelector(),
+            IndexStoreSearcher(
+                store,
+                project=project,
+                page_type=filters.type,
+                tags=tuple(filters.tags),
+            ),
+        ).run(question, stage_one_hits[:100])
+        evidence_by_id = dict(hop.evidence_scores)
+        # Prefer hop-judged evidence order for fts_rank → RRF, but break equal
+        # evidence by page_path (not passage_id hash) so path ties stay stable.
+        judged = sorted(
+            hop.candidates,
+            key=lambda hit: (
+                -evidence_by_id.get(hit.passage_id, 0.0),
+                hit.page_path,
+                hit.passage_id,
+            ),
+        )
+        merged: list[PassageHit] = []
+        seen_ids: set[str] = set()
+        for hit in judged:
+            merged.append(hit)
+            seen_ids.add(hit.passage_id)
+        for hit in stage_one_hits:
+            if hit.passage_id not in seen_ids:
+                merged.append(hit)
+                seen_ids.add(hit.passage_id)
+        fts = merged
+        sag2_hops_run = hop.hops_run
+        sag2_judge_calls = hop.judge_calls
+        sag2_expansion_terms = hop.expansion_terms
+        sag2_stop_reason = hop.stop_reason
+        sag2_truncated = hop.truncated
     allowed_vector_paths: set[str] = set()
     for index, item in enumerate(snapshot.pages):
         cancellation.checkpoint_batch(index, every=16, stage="snapshot")
@@ -1011,6 +1098,7 @@ def run_query_v2(
             continue
         item = ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0, fts_rank=rank))
         item["fts_rank"] = rank
+        item["evidence_score"] = float(evidence_by_id.get(hit.passage_id, 0.0))
     # A vector hit is identified by passage ID.  Load its existing retrieval
     # projection rather than scanning Markdown, so vector-only recall remains
     # available without adding query-time corpus reads.
@@ -1056,23 +1144,60 @@ def run_query_v2(
     graph_cache: dict[str, Any] = {}
 
     def expand_graph(items: list[dict[str, Any]]) -> None:
-        """Add bounded graph evidence to one scored candidate list in place.
+        """Wikilink expand once on post-hop top evidence (not term expansion).
 
-        The strict seed stage and the relaxed Wiki recovery stage share this
-        closure so both use the same snapshot, filters and caps.
+        Default path: called after sag2_hop + evidence blend. Graph neighbors
+        are score boosts / added passages only — never expansion terms.
+        Legacy wiki_relaxed may reuse this closure when the P2 ladder is
+        explicitly opted in; the default ladder is off so that path is inert.
         """
 
         cancellation.checkpoint("graph")
         if effective_scope == "raw" or not graph_expansion:
             return
+        # Seed from top evidence pages only (one best passage per page).
+        by_page: dict[str, dict[str, Any]] = {}
+        for item in items:
+            path = item["hit"].page_path
+            prev = by_page.get(path)
+            if prev is None or (
+                float(item.get("evidence_score", 0.0)),
+                float(item["score"]),
+            ) > (
+                float(prev.get("evidence_score", 0.0)),
+                float(prev["score"]),
+            ):
+                by_page[path] = item
+        ranked_pages = sorted(
+            by_page.values(),
+            key=lambda item: (
+                -float(item.get("evidence_score", 0.0)),
+                -float(item["score"]),
+                item["hit"].page_path,
+            ),
+        )
+        seed_cap = max(int(top_k), 10)
+        seed_scores = {
+            item["hit"].page_path: float(item["score"])
+            for item in ranked_pages[:seed_cap]
+        }
         graph_candidates, graph_passages = _graph_expand(
             root, store, metadata, scope=effective_scope, project=project, filters=filters,
-            seed_scores={item["hit"].page_path: item["score"] for item in items}, debug=debug, snapshot=snapshot, cancellation=cancellation,
+            seed_scores=seed_scores, debug=debug, snapshot=snapshot, cancellation=cancellation,
             graph_cache=graph_cache,
         )
         _merge_graph_expansion(items, graph_candidates, graph_passages, cancellation)
 
+    # Soft-blend EvidenceJudge into fusion score *before* graph so wikilink
+    # expansion seeds the hop-ranked top evidence (path/title ties remain the
+    # final stable keys when blended scores match).
+    for item in scored:
+        evidence = float(item.get("evidence_score", 0.0))
+        item["evidence_score"] = evidence
+        item["score"] = round(item["score"] + SAG2_EVIDENCE_BLEND_WEIGHT * evidence, 12)
+    scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     expand_graph(scored)
+    # Graph merges add graph_score into item["score"]; re-sort before pack.
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     # Retrieval is page-first: the public result list keeps one best passage
     # per page, while the internal pack is assembled page-by-page in reading
@@ -1124,6 +1249,12 @@ def run_query_v2(
         seed_has_primary_recall=has_primary_recall,
         seed_qualified_fts_hits=qualified_fts_hits,
         graph_expander=expand_graph,
+        enable_legacy_p2_ladder=enable_legacy_p2_ladder,
+        sag2_hops_run=sag2_hops_run,
+        sag2_judge_calls=sag2_judge_calls,
+        sag2_expansion_terms=sag2_expansion_terms,
+        sag2_stop_reason=sag2_stop_reason,
+        sag2_truncated=sag2_truncated,
     )
     execution_view = execution.execute(request_view)
     quality_gate_evaluation = _quality_gate_evaluation(
@@ -1139,7 +1270,7 @@ def run_query_v2(
         request_view=request_view,
         provenance=provenance,
         seed_stats=QuerySeedStats(
-            fts_hits=len(fts),
+            fts_hits=stage_one_fts_count,
             qualified_fts_hits=qualified_fts_hits,
             vector_hits=len(vector),
             vector_warnings=tuple(vector_warnings),

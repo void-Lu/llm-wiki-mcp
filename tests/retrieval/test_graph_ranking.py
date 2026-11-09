@@ -28,8 +28,8 @@ def _graph_scores(payload: dict) -> dict[str, float]:
 
 def test_relaxed_recovery_receives_graph_evidence(vault: Path) -> None:
     question = "which team is on call for the accounting journal exporter"
-    on = run_query_v2(vault, question, retrieval_mode="lexical", debug=True)
-    off = run_query_v2(vault, question, retrieval_mode="lexical", debug=True, graph_expansion=False)
+    on = run_query_v2(vault, question, retrieval_mode="lexical", debug=True, enable_legacy_p2_ladder=True)
+    off = run_query_v2(vault, question, retrieval_mode="lexical", debug=True, graph_expansion=False, enable_legacy_p2_ladder=True)
 
     assert on["pipeline"]["lexical"]["mode"] == "relaxed"
     assert on["pipeline"]["counters"]["fts_hits"] == 0
@@ -39,8 +39,8 @@ def test_relaxed_recovery_receives_graph_evidence(vault: Path) -> None:
 
 def test_relaxed_graph_expansion_respects_request_filters(vault: Path) -> None:
     question = "which team is on call for the accounting journal exporter"
-    unfiltered = run_query_v2(vault, question, retrieval_mode="lexical", debug=True)
-    payload = run_query_v2(vault, question, retrieval_mode="lexical", project="ledger", debug=True)
+    unfiltered = run_query_v2(vault, question, retrieval_mode="lexical", debug=True, enable_legacy_p2_ladder=True)
+    payload = run_query_v2(vault, question, retrieval_mode="lexical", project="ledger", debug=True, enable_legacy_p2_ladder=True)
 
     # Without a filter the graph reaches other projects' pages ...
     assert any(path.startswith("wiki/projects/harbor/") and score > 0 for path, score in _graph_scores(unfiltered).items())

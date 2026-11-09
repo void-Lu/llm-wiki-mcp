@@ -1,60 +1,53 @@
 ---
 name: shared-spec-vault
-description: 将项目规范目录与 Wiki vault 镜像，或在公共规范与项目规范之间执行逐项审核的提取、导入。来源目录由本 skill 声明，不假设固定名称。
+description: 镜像项目规范到 Wiki vault，逐项审核公共规范的提取、维护与回写，并处理项目适配及规范文档合并迁移。
 ---
 
 # Shared Spec Vault
 
-这是一个用户显式触发的 skill。每次只执行一个模式：`sync`、`extract` 或 `import`。不创建 Trellis task，不安装自身，也不保存审核状态或旧正文。
+这是一个用户显式触发的 skill。按阶段选择 `extract`（提取或维护公共正文）、`import`（原文导入或项目适配）、`sync`（项目镜像）。用户已授权连续工作时，可以串联这些阶段；每阶段明确读写方向。公共正文调整本身不授权回写项目，回写项目本身也不授权同步知识库。
 
-## 项目规范来源
+## 项目与工具入口
 
-工具只接受调用方传入的 `source_root`，脚本内不假设任何目录名；具体来源写在本 skill 里，安装后按项目增改：
+- 每个项目使用一个真实的规范来源目录。解析顺序：用户本次明确指定的路径、项目 `AGENTS.md` / `CLAUDE.md` 声明、已有项目配置、探测 `.trellis/spec/`。确认绝对路径位于对应项目内；确实无法确定时才询问。
+- 优先使用 `wiki_sync_specs`、`wiki_manage_shared_spec` 及 `wiki_list` / `wiki_get`。写操作的 preview 显式绑定 `project`、适用的 `source_root` 或公共页路径；apply 使用该计划的 `plan_id`。
+- 工具未暴露或需要备用入口时，读取[同步与工具契约](references/sync-contract.md#工具入口与失败恢复)。
 
-| project | source_root |
-| --- | --- |
-| <project> | <项目规范目录的绝对路径> |
+## 共同约束与授权
 
-解析顺序：上表命中 > 用户本次指定的路径 > 项目 agent 配置（`AGENTS.md`/`CLAUDE.md`）声明的规范目录 > 探测 `.trellis/spec/`。都无法确定时先问用户，不要猜。
+- 公共规范固定为扁平路径 `wiki/entities/shared-specs/<file>.md`，用 `applies_to.languages`、`applies_to.platforms`、`applies_to.frameworks` 和 `conditions` 表达适用范围。
+- 初次提取可追溯到项目规则。已确认的公共正文可独立修订、去重、拆分或合并；区分来源原文、平台契约、工程原则及公司或项目策略，编辑后的正文标明其性质。
+- 按 Vault schema 记录真实 raw 来源与内容哈希，分别标明镜像、用户确认、官方依据的证据性质。文档核对不等于账号实测。
+- 写入前准备完整 diff、目标、适用条件、来源及删除或引用影响。按用户要求的审核粒度执行：只要求分析或逐项确认时先呈现候选；已明确要求检查修订、合并或同步时，该范围内的可逆文档变更可在预览核对后落实，包括必要的新文件、索引、引用迁移及被替代旧页清理，无需为这些步骤重复确认。
+- 新任务重新审核适用性与差异，不沿用旧选择作为新授权。授权按任务目标、项目、规则语义及影响判断；超出范围、未决的规则取舍或影响扩大时，展示具体变化并确认。遇到 `source_changed` / `target_changed` 保留现场、重新预览；结果仍在既有授权内时可继续，等结果修复和重试同理。
+- 审核选择只用于当前任务，不创建 Trellis task，也不将选择、旧正文或审核状态写成项目或知识库历史。失败恢复所需的工具计划按其生命周期处理。
 
-路径必须是绝对路径且落在当前项目内；一个项目只声明一个规范目录，避免同一批规则出现两个镜像。
+## `extract`：提取和维护公共规范
 
-## 共同约束
-
-- 每次调用工具时都显式传入「项目规范来源」解析出的绝对路径和明确的 `project` 名称。
-- 公共规范固定为 `wiki/entities/shared-specs/<file>.md`。目录扁平，项目和技术栈通过 frontmatter 的 `applies_to.languages`、`applies_to.platforms`、`applies_to.frameworks` 隔离；`conditions` 保存不能结构化的适用条件。
-- 规则正文保留原文，只添加或维护公共页的 frontmatter 和必要的标题封装；不要总结、改写或合并正文。
-- 所有会写入 vault 的操作先 preview，再把完整差异和影响告诉用户，得到确认后才 apply。每次导入都重新审核，不复用上次选择。
-- 预览后遇到 `source_changed` 或 `target_changed`，停止 apply，重新 preview；不强行覆盖。
-
-## `sync`：项目镜像
-
-1. 调用 `wiki_sync_specs(source_root=<项目规范来源的绝对路径>, project=<project>, action="preview")`。
-2. 展示 create、update、delete、unchanged 和每个页面路径；确认后用同一 `plan_id` 调用 `action="apply"`。
-3. 这是当前目录的完全镜像：源目录已删除的规则会删除 `wiki/projects/<project>/specs/` 中对应页面，不保留旧经验或历史副本。
-4. 项目镜像删除不会删除 `wiki/entities/shared-specs/`。若公共页的 `derived_from` 指向被删除的项目规则，逐页提示用户复核：保留时用 `upsert` 保留正文并移除失效来源，更新时重新提取候选，删除时用 `delete`；每个选择都先 preview 再 apply。
-
-## `extract`：提取公共规范
-
-1. 读取 `<项目规范来源>/**/*.md`，按 heading 或明确规则边界拆成单条候选，逐条判断它是否能跨项目复用；不要因为文件名或目录名自动推广。
-2. 为每个候选选择扁平目标 `wiki/entities/shared-specs/<safe-name>.md`，填写 `applies_to`、`conditions`，并把每个来源记录为 `{project, path, rule}`。同一公共页可有多个来源项目，追加来源而不是覆盖来源集合。
-3. 先用 `wiki_list` 枚举已有公共页，按稳定路径、`derived_from`、标题和正文分别匹配；不要把不同页面仅凭相似标题合并。对命中的公共页保留已有来源并追加当前来源。
-4. 对每个候选分别调用 `wiki_manage_shared_spec(operation="upsert", action="preview", ...)`，展示正文差异、适用范围和来源差异；让用户逐项选择“新建、更新、舍弃”。
-5. 只对选择新建或更新的候选用返回的 `plan_id` apply；选择舍弃的候选用同一工具的 `action="discard"` 删除临时计划，不写入 vault，也不留下审核记录。apply 前重新读取候选正文和来源页，若内容变化就重新 preview。
+1. 按 heading 或规则边界读取项目规范并拆分候选，判断跨项目复用价值；维护现有公共正文时读取其完整内容、范围和来源。
+2. 用 `wiki_list` 完整枚举公共页，结合稳定路径、`derived_from`、标题及正文判断对应关系。相似标题不足以合并；已有独立正文先比较语义，保留有效来源集合。
+3. 每个候选指定扁平路径、适用范围、`conditions` 和 `derived_from: {project, path, rule}`。新增真实来源追加到集合；失效或已迁移的来源按当前证据处理。
+4. 逐项调用 `wiki_manage_shared_spec(operation="upsert" 或 "delete", action="preview", ...)`，展示正文、范围及来源差异，按用户指定的审核粒度决定新建、更新、删除或舍弃；已有授权按共同规则落实。
+5. apply 前核对候选和来源版本。只 apply 获授权的计划；舍弃用同工具 `action="discard"`。拆分、合并或移动时同时读取[文档迁移](references/document-migration.md)。
 
 ## `import`：公共规范回写项目
 
-1. 先确认当前项目的语言、平台、框架、版本和架构前提，以及要组合的规范组；只推荐所有非空 `applies_to` 标签都匹配的公共页，`conditions` 由 skill 在审核时解释并展示依据。
-2. 用 `wiki_list` 找到 `wiki/entities/shared-specs/` 下的公共页，再用每项的 `content_ref` 调 `wiki_get(include_body=true)` 读取正文和 frontmatter；不要用模糊检索代替完整枚举。
-3. 默认从 `derived_from` 的项目路径推导 `<项目规范来源>/<relative>`；没有唯一来源时先要求用户指定目标路径。
-4. 将公共页正文与本地目标逐项比较：缺失是“新建”，内容相同是“重复/unchanged”，不同且规则互斥是“冲突”，不同但可并存是“相关”；每项展示统一 diff、分类理由和目标路径，逐项询问“新建、更新、舍弃”。
-5. 用户确认后重新读取公共页和本地目标，若任一版本改变就重新分类和 preview；仅将仍获选择的项写入本地项目规范目录，使用临时文件替换保证单文件原子写入。正文保持公共页原文，不改写其他本地规则，也不把审核结果写入 vault 或项目历史。
-6. 完成后重新读取已写入文件核对内容；若项目有本地 spec index，再按项目现有约定更新它。导入不会反向删除公共页。
+执行前读取[项目采用与适配](references/project-adoption.md)。
 
-## 工具边界
+1. 确定项目环境和采用策略，完整枚举并读取公共页，逐条审核适用性。
+2. 按请求选择原文导入或项目适配，结合现有目录、索引和规则语义提出目标位置及完整差异。
+3. 落实获授权的结果，回读核对规则语义及项目索引。涉及多页整合、移动或删除时读取[文档迁移](references/document-migration.md)。
+4. 用户要求同步时，再进入 `sync`。项目回写不会反向删除公共页。
 
-- `wiki_sync_specs` 只负责项目树的 preview/apply 镜像。
-- `wiki_manage_shared_spec` 只负责一个公共页的 upsert/delete preview/apply，以及路径、适用范围、来源和 CAS 校验。
-- skill 负责读取本地文件、提取候选、枚举公共页、逐项询问和回写项目规范目录；不要把批量审核状态塞进 MCP 计划。
+## `sync`：项目镜像
 
-完成标准：用户确认的每个页面都已写入，未确认的页面没有副作用；任一漂移或投影失败都返回明确错误并停在可重试状态。
+执行前读取[同步与工具契约](references/sync-contract.md)；涉及源页删除、移动、拆分或合并时同时读取[文档迁移](references/document-migration.md)。
+
+1. 对真实 `source_root` 调 `wiki_sync_specs(project=..., source_root=..., action="preview")`。
+2. 展示工具返回的 create、update、delete、unchanged 计数及变更路径，并补足正文和元数据差异；区分本次编辑、既有未同步差异与知识库独有内容。确认全部实际影响处于授权范围。
+3. 元数据归属或其他阻碍已解决后，用同一 `plan_id` apply。源目录删除会删除对应镜像页；公共实体独立维护，其引用按迁移流程复核。
+4. 按同步契约验收文件、引用和投影状态；失败报告已完成部分与恢复入口。
+
+## 完成标准
+
+所有获授权的变更均已落地，其他页面保持不动；回读结果与审核内容相符，手工索引和活动引用有效。同步后源与镜像符合明确的内容及元数据契约，相关导航与检索投影成功；未完成的投影、来源迁移或同步分别明确报告，不能仅凭文件已写入宣称完成。

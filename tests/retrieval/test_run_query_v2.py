@@ -205,6 +205,7 @@ def test_quality_gate_artifact_enforce_rejects_and_resolves_relative_and_absolut
         retrieval_mode="lexical",
         telemetry=telemetry,
         quality_gate=QualityGateSettings(mode="enforce", artifact_path="reports/calibration.json"),
+        enable_legacy_p2_ladder=True,
     )
     absolute = run_query_v2(
         root,
@@ -213,6 +214,7 @@ def test_quality_gate_artifact_enforce_rejects_and_resolves_relative_and_absolut
         retrieval_mode="lexical",
         telemetry=telemetry,
         quality_gate=QualityGateSettings(mode="enforce", artifact_path=str(artifact_path)),
+        enable_legacy_p2_ladder=True,
     )
 
     for result in (relative, absolute):
@@ -415,6 +417,7 @@ def test_quality_gate_enforce_restricts_raw_allowed_source_paths(tmp_path: Path,
         top_k=2,
         retrieval_mode="lexical",
         telemetry=telemetry,
+        enable_legacy_p2_ladder=True,
     )
     assert baseline["pipeline"]["fallback"]["level"] == "raw"
     allowed_before = baseline["pipeline"]["fallback"]["allowed_source_paths"]
@@ -432,6 +435,7 @@ def test_quality_gate_enforce_restricts_raw_allowed_source_paths(tmp_path: Path,
         retrieval_mode="lexical",
         telemetry=telemetry,
         quality_gate=QualityGateSettings(mode="enforce"),
+        enable_legacy_p2_ladder=True,
     )
 
     accepted_path = enforced["results"][0]["path"]
@@ -588,8 +592,8 @@ def test_wiki_query_reads_raw_projection_only_for_explicit_raw_scope(tmp_path: P
     raw.write_text("raw projection sentinel", encoding="utf-8")
     refresh_indexes(root)
 
-    default_result = run_query_v2(root, "raw projection sentinel", retrieval_mode="lexical")
-    raw_result = run_query_v2(root, "raw projection sentinel", scope="raw", top_k=5, retrieval_mode="lexical")
+    default_result = run_query_v2(root, "raw projection sentinel", retrieval_mode="lexical", enable_legacy_p2_ladder=True)
+    raw_result = run_query_v2(root, "raw projection sentinel", scope="raw", top_k=5, retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
     assert [item["path"] for item in default_result["results"]] == [
         "raw/sources/file/default/projection.txt"
@@ -634,7 +638,8 @@ def test_engine_graph_expansion_switch_is_an_offline_ablation(tmp_path: Path):
     disabled = run_query_v2(root, "needle", top_k=3, retrieval_mode="lexical", graph_expansion=False)
 
     assert "wiki/concepts/neighbor.md" in [item["path"] for item in enabled["results"]]
-    assert [item["path"] for item in disabled["results"]] == ["wiki/concepts/seed.md"]
+    # sag2_hop may still lexical-expand to neighbor; the ablation only turns
+    # off wikilink graph scoring, not hop term expansion.
     assert disabled["pipeline"]["counters"]["graph_hits"] == 0
     assert all(item["scores"]["graph"] == 0 for item in disabled["results"])
 
@@ -674,8 +679,14 @@ def test_wiki_query_graph_uses_markdown_code_context_semantics(tmp_path: Path):
 
     paths = [item["path"] for item in result["results"]]
     assert "wiki/concepts/neighbor.md" in paths
-    assert "wiki/concepts/inline-example.md" not in paths
-    assert "wiki/concepts/fenced-example.md" not in paths
+    neighbor = result["results"][paths.index("wiki/concepts/neighbor.md")]
+    assert neighbor["scores"]["graph"] > 0
+    # Code-context wikilinks must not receive graph credit. Hop may still
+    # lexical-hit those pages via term expand; graph score stays zero.
+    for code_path in ("wiki/concepts/inline-example.md", "wiki/concepts/fenced-example.md"):
+        if code_path in paths:
+            item = result["results"][paths.index(code_path)]
+            assert item["scores"]["graph"] == 0
 
 
 def test_wiki_query_archived_page_is_not_a_graph_bridge(tmp_path: Path):
