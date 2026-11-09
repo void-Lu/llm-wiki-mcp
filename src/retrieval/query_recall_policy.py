@@ -45,6 +45,7 @@ RAW_FALLBACK_LIMIT = 20
 RAW_FALLBACK_CANDIDATE_LIMIT = 160
 IDENTIFIER_PHRASE_BONUS = 20.0
 IDENTIFIER_PHRASE_CANDIDATES = 200
+WIKI_RELAXED_SINGLE_SHOT_LIMIT = 40
 ADAPTIVE_EXPAND_MAX = 40
 ADAPTIVE_SCORE_RATIO = 0.9
 MAX_ADAPTIVE_SCORE_RATIO = 0.7
@@ -103,6 +104,7 @@ class RelaxedRecoveryRequestView:
     filters: QueryFilters
     extra_terms: Sequence[str]
     cancellation: QueryCancellationContext | None = None
+    limit: int | None = None
 
 _STEP_ITEM_RE = re.compile(r"(?:^\s*\d{1,3}\s*[\.\)、]|^\s*第[一二三四五六七八九十百\d]+步)", re.M)
 _COMPARE_RE = re.compile(r"(?:比较|区别|差异|对比|compare|versus|vs\.?|difference)", re.I)
@@ -120,6 +122,7 @@ __all__ = [
     "DEFAULT_TOP_K",
     "IDENTIFIER_PHRASE_BONUS",
     "IDENTIFIER_PHRASE_CANDIDATES",
+    "WIKI_RELAXED_SINGLE_SHOT_LIMIT",
     "MAX_ADAPTIVE_SCORE_RATIO",
     "PASSAGE_PROBE_LIMIT",
     "PASSAGE_SCAN_LIMIT",
@@ -436,10 +439,15 @@ def relaxed_recovery_items(
 ) -> tuple[list[dict[str, Any]], int, str]:
     """Read a bounded relaxed candidate set from one existing projection."""
 
+    fts_limit = (
+        int(request.limit)
+        if request.limit is not None
+        else IDENTIFIER_PHRASE_CANDIDATES
+    )
     try:
         hits = store.search_fts(
             request.question,
-            limit=IDENTIFIER_PHRASE_CANDIDATES,
+            limit=fts_limit,
             project=request.project,
             page_type=request.filters.type,
             tags=list(request.filters.tags),

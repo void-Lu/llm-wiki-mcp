@@ -19,7 +19,10 @@ from retrieval.query_recovery import (
     compose_score,
     fallback_envelope,
     fusion_score,
+    plan_coverage_raw_merge,
     plan_fallback,
+    plan_wiki_relaxed_single_shot,
+    query_has_cjk,
     search_ladder,
     select_best_per_page,
     step_bonus,
@@ -751,3 +754,88 @@ def test_wiki_hop_pool_kind_empty_weak_strong() -> None:
     assert wiki_hop_pool_kind([strong_item], {"p2": 0.40}) == "strong"
     # Boundary: exactly 0.15 is strong (weak is strictly < 0.15).
     assert wiki_hop_pool_kind([{"hit": Hit("p3")}], {"p3": 0.15}) == "strong"
+
+
+def test_query_has_cjk_detects_han_and_rejects_latin_only() -> None:
+    assert query_has_cjk("如何配置工时填写") is True
+    assert query_has_cjk("suiteql 工时") is True
+    assert query_has_cjk("access reports") is False
+    assert query_has_cjk("saveTimeBill run_query_v2") is False
+
+
+def test_plan_coverage_raw_merge_requires_primary_uncovered_and_scope() -> None:
+    assert (
+        plan_coverage_raw_merge(
+            uncovered_latin_terms=("rag",),
+            selected_nonempty=True,
+            effective_scope="knowledge",
+        )
+        is True
+    )
+    assert (
+        plan_coverage_raw_merge(
+            uncovered_latin_terms=("rag",),
+            selected_nonempty=False,
+            effective_scope="knowledge",
+        )
+        is False
+    )
+    assert (
+        plan_coverage_raw_merge(
+            uncovered_latin_terms=(),
+            selected_nonempty=True,
+            effective_scope="knowledge",
+        )
+        is False
+    )
+    assert (
+        plan_coverage_raw_merge(
+            uncovered_latin_terms=("rag",),
+            selected_nonempty=True,
+            effective_scope="raw",
+        )
+        is False
+    )
+
+
+def test_plan_wiki_relaxed_single_shot_empty_or_weak_with_cjk_only() -> None:
+    assert (
+        plan_wiki_relaxed_single_shot(
+            pool_kind="empty",
+            question="如何配置工时填写",
+            effective_scope="all",
+        )
+        == "wiki_relaxed_empty"
+    )
+    assert (
+        plan_wiki_relaxed_single_shot(
+            pool_kind="weak",
+            question="suiteql 工时",
+            effective_scope="knowledge",
+        )
+        == "wiki_relaxed_cjk"
+    )
+    assert (
+        plan_wiki_relaxed_single_shot(
+            pool_kind="strong",
+            question="如何配置工时填写",
+            effective_scope="knowledge",
+        )
+        is None
+    )
+    assert (
+        plan_wiki_relaxed_single_shot(
+            pool_kind="empty",
+            question="access reports",
+            effective_scope="knowledge",
+        )
+        is None
+    )
+    assert (
+        plan_wiki_relaxed_single_shot(
+            pool_kind="empty",
+            question="如何配置",
+            effective_scope="archive",
+        )
+        is None
+    )

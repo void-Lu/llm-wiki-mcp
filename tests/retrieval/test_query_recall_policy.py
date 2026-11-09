@@ -1845,3 +1845,24 @@ def test_raw_recovery_phrase_cooccur_fail_open_when_phrase_empty(
     )
     assert mode == "qualified_code"
     assert [item["hit"].passage_id for item in items] == [noise_hit.passage_id]
+
+
+def test_wiki_relaxed_single_shot_limit_constant_and_view_default() -> None:
+    from retrieval.query_recall_policy import (
+        IDENTIFIER_PHRASE_CANDIDATES,
+        WIKI_RELAXED_SINGLE_SHOT_LIMIT,
+        RelaxedRecoveryRequestView,
+    )
+
+    assert WIKI_RELAXED_SINGLE_SHOT_LIMIT == 40
+    assert WIKI_RELAXED_SINGLE_SHOT_LIMIT < IDENTIFIER_PHRASE_CANDIDATES
+    view = RelaxedRecoveryRequestView(
+        metadata={},
+        question="如何配置",
+        scope="knowledge",
+        project=None,
+        filters=QueryFilters(),
+        extra_terms=(),
+        limit=WIKI_RELAXED_SINGLE_SHOT_LIMIT,
+    )
+    assert view.limit == 40

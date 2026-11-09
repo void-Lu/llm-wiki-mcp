@@ -177,6 +177,49 @@ def wiki_hop_is_weak(
     return wiki_hop_pool_kind(selected, evidence_scores) != "strong"
 
 
+_CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uff00-\uffef]")
+
+
+def query_has_cjk(question: str) -> bool:
+    """True when the question contains CJK / kana / fullwidth characters."""
+
+    return bool(_CJK_RE.search(question or ""))
+
+
+def plan_coverage_raw_merge(
+    *,
+    uncovered_latin_terms: Sequence[str],
+    selected_nonempty: bool,
+    effective_scope: str,
+) -> bool:
+    """Whether sag2 default path should fire one coverage raw → merge."""
+
+    return (
+        bool(selected_nonempty)
+        and bool(uncovered_latin_terms)
+        and effective_scope in {"knowledge", "all"}
+    )
+
+
+def plan_wiki_relaxed_single_shot(
+    *,
+    pool_kind: WikiHopPoolKind,
+    question: str,
+    effective_scope: str,
+) -> Literal["wiki_relaxed_empty", "wiki_relaxed_cjk"] | None:
+    """Return knife-2 reason when empty/weak pool + CJK should try wiki_relaxed."""
+
+    if effective_scope not in {"knowledge", "all"}:
+        return None
+    if pool_kind == "strong":
+        return None
+    if not query_has_cjk(question):
+        return None
+    if pool_kind == "empty":
+        return "wiki_relaxed_empty"
+    return "wiki_relaxed_cjk"
+
+
 def resolve_fallback_lexical_mode(
     plan: FallbackPlan | None,
     raw_lexical_mode: str | None = None,
