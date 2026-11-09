@@ -138,6 +138,10 @@ class QueryExecutionView:
     discovery_source_items: Sequence[Mapping[str, Any]]
     batch_payload: Mapping[str, Any]
     discovery_requested: bool
+    sag2_hops_run: int = 0
+    sag2_judge_calls: int = 0
+    sag2_expansion_terms: tuple[str, ...] = ()
+    sag2_stop_reason: str = ""
 
 
 @dataclass
@@ -168,6 +172,13 @@ class QueryExecutionContext:
     # engine supplies it so relaxed Wiki recovery reuses the seed stage's
     # snapshot, filters and caps; ``None`` keeps recovery lexical-only.
     graph_expander: Callable[[list[dict[str, Any]]], None] | None = field(default=None, repr=False)
+    # Legacy P2 ladder (coverage → wiki_relaxed → all_coverage → raw_zero).
+    # Default False: sag2_hop is the main path (see SAG2 hop-default plan).
+    enable_legacy_p2_ladder: bool = False
+    sag2_hops_run: int = 0
+    sag2_judge_calls: int = 0
+    sag2_expansion_terms: tuple[str, ...] = ()
+    sag2_stop_reason: str = ""
     raw_store: RetrievalIndexStore | None = field(default=None, init=False)
     raw_snapshot: QueryCorpusSnapshot | None = field(default=None, init=False)
     selected: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -397,6 +408,10 @@ class QueryExecutionContext:
             discovery_source_items=self.discovery_source_items,
             batch_payload=self.batch_payload,
             discovery_requested=self.discovery_requested,
+            sag2_hops_run=self.sag2_hops_run,
+            sag2_judge_calls=self.sag2_judge_calls,
+            sag2_expansion_terms=tuple(self.sag2_expansion_terms),
+            sag2_stop_reason=self.sag2_stop_reason,
         )
 
     def execute(self, request_view: QueryRequestView) -> QueryExecutionView:
@@ -456,7 +471,13 @@ class QueryExecutionContext:
         return frozen_view
 
     def _run_fallback_recovery(self, request_view: QueryRequestView) -> None:
-        """Run fallback branches and retain their state on this context."""
+        """Run fallback branches and retain their state on this context.
+
+        When ``enable_legacy_p2_ladder`` is False (default), this is a no-op:
+        sag2_hop owns recall expansion; selected/scored stay as the pipeline
+        provided. Legacy coverage / wiki_relaxed / all_coverage / raw_zero
+        remain available only behind the explicit opt-in flag.
+        """
 
         self._ensure_open()
         self.raw_fts_hits = 0
@@ -470,6 +491,8 @@ class QueryExecutionContext:
             and request_view.effective_scope in {"knowledge", "all"}
             else []
         )
+        if not self.enable_legacy_p2_ladder:
+            return
         query_extra_terms: list[str] = []
         query_term_variants: dict[str, list[str]] = {}
         wiki_relaxed_answered = False

@@ -81,7 +81,11 @@ class LadderStep:
 
 
 def plan_fallback(state: FallbackState) -> FallbackPlan | None:
-    """Return the pure fallback branch selected by current evidence."""
+    """Return the pure fallback branch selected by current evidence.
+
+    Deprecated as the default Query V2 path: ``sag2_hop`` owns expansion.
+    Kept for ``enable_legacy_p2_ladder=True`` contrast tests and callers.
+    """
 
     if (
         state.has_primary_recall

@@ -72,7 +72,7 @@ def test_v2_reports_unresolved_fuzzy_terms_when_primary_recall_is_empty(
     )
     refresh_indexes(root)
 
-    result = run_query_v2(root, "我想写一个llm chatbox的sl页面脚本", top_k=5)
+    result = run_query_v2(root, "我想写一个llm chatbox的sl页面脚本", top_k=5, enable_legacy_p2_ladder=True)
 
     assert result["ok"] is True
     # chatbox is bridged by edit distance to the title word ChatBot, so it is
@@ -96,14 +96,15 @@ def test_v2_agent_supplied_expansion_terms_reach_documents_with_abbreviated_quer
     )
     refresh_indexes(root)
 
-    first = run_query_v2(root, "sl 页面脚本", top_k=5)
+    first = run_query_v2(root, "sl 页面脚本", top_k=5, enable_legacy_p2_ladder=True)
     assert first["ok"] is True
     assert first["results"] == []
     assert first["expansion_suggestions"] == ["sl"]
 
     # The agent resolves sl -> suitelet with its own model and retries.
     retried = run_query_v2(
-        root, "sl 页面脚本", top_k=5, expansion_terms={"sl": ["suitelet"]}
+        root, "sl 页面脚本", top_k=5, expansion_terms={"sl": ["suitelet"]},
+        enable_legacy_p2_ladder=True,
     )
     assert retried["results"][0]["path"] == "wiki/concepts/suitelet-guide.md"
     assert retried["expansion_suggestions"] == []
@@ -182,6 +183,7 @@ def test_v2_coverage_recovery_merges_raw_evidence_when_primary_misses_latin_term
         top_k=2,
         embedding=EmbeddingSettings(enabled=True),
         retrieval_mode="hybrid",
+        enable_legacy_p2_ladder=True,
     )
 
     assert {item["path"] for item in result["results"]} == {
@@ -251,7 +253,8 @@ def test_v2_all_scope_coverage_extends_wiki_relaxed_results(tmp_path: Path) -> N
     refresh_indexes(root)
 
     result = run_query_v2(
-        root, "RAG LLM", scope="all", retrieval_mode="lexical", top_k=2
+        root, "RAG LLM", scope="all", retrieval_mode="lexical", top_k=2,
+        enable_legacy_p2_ladder=True,
     )
 
     assert {item["path"] for item in result["results"]} == {
@@ -613,6 +616,7 @@ def test_v2_coverage_merge_surfaces_raw_help_doc(tmp_path: Path) -> None:
         scope="knowledge",
         retrieval_mode="lexical",
         top_k=10,
+        enable_legacy_p2_ladder=True,
     )
     paths = [item["path"] for item in result["results"]]
     assert any(path.startswith("raw/") for path in paths), paths
@@ -630,7 +634,7 @@ def test_v2_raw_fallback_uses_raw_documents_after_formal_miss(tmp_path: Path) ->
     )
     refresh_indexes(root)
 
-    result = run_query_v2(root, "access reports", retrieval_mode="lexical")
+    result = run_query_v2(root, "access reports", retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
     assert result["results"]
     assert result["results"][0]["path"] == "raw/sources/file/default/help.md"
@@ -647,7 +651,7 @@ def test_v2_raw_fallback_uses_bounded_prefix_recovery(tmp_path: Path) -> None:
     )
     refresh_indexes(root)
 
-    result = run_query_v2(root, "ingest", retrieval_mode="lexical")
+    result = run_query_v2(root, "ingest", retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
     assert [item["path"] for item in result["results"]] == [
         "raw/sources/file/default/ingestion.md"
@@ -676,7 +680,7 @@ def test_v2_raw_fallback_uses_the_dedicated_fts_store_without_scanning_sources(
             AssertionError("raw source scan")
         ),
     )
-    result = run_query_v2(root, "custbody_approval_state", retrieval_mode="lexical")
+    result = run_query_v2(root, "custbody_approval_state", retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
     raw_passages = [item for item in result["results"] if item["source_kind"] == "raw"]
     assert raw_passages and "custbody_approval_state" in raw_passages[0]["content"]
@@ -704,7 +708,7 @@ def test_v2_raw_fallback_reports_missing_corrupt_and_stale_raw_indexes(
         else:
             raw_store.mark_stale()
 
-        result = run_query_v2(root, "raw lifecycle marker", retrieval_mode="lexical")
+        result = run_query_v2(root, "raw lifecycle marker", retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
         assert result["ok"] is True
         assert result["results"] == []
@@ -727,7 +731,7 @@ def test_v2_raw_fallback_reranks_page_titles_and_deduplicates_pages(
     )
     refresh_indexes(root)
 
-    result = run_query_v2(root, "target", retrieval_mode="lexical", top_k=2)
+    result = run_query_v2(root, "target", retrieval_mode="lexical", top_k=2, enable_legacy_p2_ladder=True)
 
     assert [item["path"] for item in result["results"]] == [
         "raw/sources/file/default/target.md",
@@ -759,7 +763,7 @@ def test_v2_raw_fallback_recovers_qualified_module_names_from_chinese_questions(
         ("N/record module methods", "raw/sources/references/n-record.md"),
         ("N/search module methods", "raw/sources/references/n-search.md"),
     ):
-        result = run_query_v2(root, question, retrieval_mode="lexical")
+        result = run_query_v2(root, question, retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
         assert [item["path"] for item in result["results"]] == [expected_path]
         assert result["pipeline"]["fallback"]["level"] == "raw"
@@ -788,6 +792,7 @@ def test_v2_wiki_relaxed_answer_blocks_raw_fallback(tmp_path: Path) -> None:
         root,
         "NetSuite 的 Location 字段 selectrecordtype 数字 ID 是多少？",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     paths = [item["path"] for item in result["results"]]
@@ -941,6 +946,7 @@ def test_v2_weak_wiki_relaxed_abstains_and_allows_raw_zero(tmp_path: Path) -> No
         "架构深化 技术债 剩余摩擦 owner 模块",
         scope="knowledge",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
     # After weak abstain, either empty (if raw unavailable in fixture path)
     # or raw_zero filled — never the noise-only wiki pages as a fake answer.
@@ -1174,6 +1180,7 @@ def test_v2_body_only_primary_phrase_allows_raw_zero(tmp_path: Path) -> None:
         '"Custom Record Type Object Custom Fields"',
         scope="knowledge",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
     paths = [item["path"] for item in result["results"]]
     assert any(path.startswith("raw/") for path in paths), paths
@@ -1208,6 +1215,7 @@ def test_v2_weak_primary_allows_capped_raw_zero(tmp_path: Path) -> None:
         "MCP Standard Tools 安装清单 Server SuiteScript",
         scope="knowledge",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
     paths = [item["path"] for item in result["results"]]
     assert paths, "expected results"
@@ -1246,6 +1254,7 @@ def test_v2_weak_primary_raw_merge_keeps_wiki(tmp_path: Path) -> None:
         scope="knowledge",
         retrieval_mode="lexical",
         top_k=10,
+        enable_legacy_p2_ladder=True,
     )
     paths = [item["path"] for item in result["results"]]
     assert paths, "expected results"
@@ -1367,6 +1376,7 @@ def test_v2_raw_fallback_combines_identifier_phrase_docs_above_bigram_noise(
         root,
         "配置netsuite系统内ai connector的mcp工具的完整步骤是什么，需要详细介绍需要安装和勾选的配置内容",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     paths = [item["path"] for item in result["results"]]
@@ -1404,7 +1414,8 @@ def test_v2_raw_fallback_returns_only_the_best_matching_passage_per_source_file(
     refresh_indexes(root)
 
     result = run_query_v2(
-        root, "unique raw de-duplication sentinel", retrieval_mode="lexical"
+        root, "unique raw de-duplication sentinel", retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     assert [item["path"] for item in result["results"]] == ["raw/sources/manual.md"]
@@ -1436,6 +1447,7 @@ def test_v2_identifier_phrase_fills_procedural_sections_of_selected_guide_pages(
         root,
         "配置netsuite系统内ai connector的mcp工具的完整步骤是什么，需要详细介绍需要安装和勾选的配置内容",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     assert result["pipeline"]["lexical"]["mode"] == "identifier_phrase"
@@ -1485,6 +1497,7 @@ def test_v2_step_guide_bonus_prefers_numbered_procedural_page(tmp_path: Path) ->
         root,
         "如何修复 codegraph 解析失败，具体步骤是什么",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     assert result["results"][0]["path"] == steps
@@ -1532,6 +1545,7 @@ def test_v2_adaptive_expand_keeps_close_scoring_pages_above_boundary(
         "如何修复 codegraph 解析失败，具体步骤是什么",
         retrieval_mode="lexical",
         top_k=10,
+        enable_legacy_p2_ladder=True,
     )
 
     returned = [item["path"] for item in result["results"]]
@@ -1607,7 +1621,7 @@ def test_v2_relaxes_multilingual_questions_after_strict_fts_returns_no_results(
     refresh_indexes(root)
 
     for question in ("mr脚本执行各阶段限制。", "map reduce script phases limits"):
-        result = run_query_v2(root, question, retrieval_mode="lexical")
+        result = run_query_v2(root, question, retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
         assert result["results"][0]["path"] == "wiki/concepts/map-reduce-limits.md"
         assert result["pipeline"]["fallback"]["level"] == "none"
@@ -1647,19 +1661,22 @@ def test_v2_raw_fallback_respects_project_and_type_filters(tmp_path: Path) -> No
     refresh_indexes(root)
 
     scoped = run_query_v2(
-        root, "unique raw retrieval needle", project="alpha", retrieval_mode="lexical"
+        root, "unique raw retrieval needle", project="alpha", retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
     raw_type = run_query_v2(
         root,
         "unique raw retrieval needle",
         filters=QueryFilters(type="raw"),
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
     other_type = run_query_v2(
         root,
         "unique raw retrieval needle",
         filters=QueryFilters(type="concept"),
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     assert [item["path"] for item in scoped["results"]] == [

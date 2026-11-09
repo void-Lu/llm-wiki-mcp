@@ -36,6 +36,9 @@ from retrieval.query_shared import (
     snapshot_page_eligible,
 )
 from retrieval.retrieval_index import PassageHit, RetrievalIndexError, RetrievalIndexStore
+from retrieval.sag2_evidence import HeuristicEvidenceJudge
+from retrieval.sag2_hop import Sag2HopController
+from retrieval.sag2_terms import TermSelector
 from retrieval.query_quality_calibration import load_calibration_artifact_once
 from runtime.runtime_config import EmbeddingSettings, QualityGateSettings, RrfWeights, TelemetrySettings
 from retrieval.query_quality_policy import (
@@ -86,6 +89,29 @@ class QuerySeedStats:
     vector_warnings: tuple[str, ...]
     index_warnings: tuple[str, ...]
     scope_rules: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class IndexStoreSearcher:
+    """LexicalSearcher adapter over ``RetrievalIndexStore.search_fts``."""
+
+    store: RetrievalIndexStore
+    project: str | None = None
+    page_type: str | None = None
+    tags: tuple[str, ...] = ()
+
+    def search(self, query: str, *, limit: int = 20) -> list[PassageHit]:
+        try:
+            return self.store.search_fts(
+                query,
+                limit=limit,
+                project=self.project,
+                page_type=self.page_type,
+                tags=list(self.tags) or None,
+                mode="strict",
+            )
+        except RetrievalIndexError:
+            return []
 
 
 @dataclass(frozen=True)
@@ -776,6 +802,12 @@ def assemble_public_projection(
             "uncovered_latin_terms": list(view.uncovered_latin_terms),
             "triggered": view.coverage_fallback,
         },
+        "sag2_hop": {
+            "hops_run": view.sag2_hops_run,
+            "judge_calls": view.sag2_judge_calls,
+            "expansion_terms": list(view.sag2_expansion_terms),
+            "stop_reason": view.sag2_stop_reason,
+        },
         "counters": {
             "fts_hits": seed_stats.fts_hits,
             "qualified_fts_hits": seed_stats.qualified_fts_hits,
@@ -915,6 +947,7 @@ def run_query_v2(
     telemetry_stats: MutableMapping[str, object] | None = None,
     graph_expansion: bool = True,
     rrf_weights: RrfWeights | None = None,
+    enable_legacy_p2_ladder: bool = False,
 ) -> dict[str, Any]:
     """Read existing projections and return one canonical result payload.
 
@@ -986,6 +1019,42 @@ def run_query_v2(
     except RetrievalIndexError as exc:
         fts = []
         status = {**status, "code": exc.code}
+    stage_one_fts_count = len(fts)
+    evidence_by_id: dict[str, float] = {}
+    sag2_hops_run = 0
+    sag2_judge_calls = 0
+    sag2_expansion_terms: tuple[str, ...] = ()
+    sag2_stop_reason = "skipped"
+    if retrieval_mode != "vector":
+        cancellation.checkpoint("sag2_hop")
+        stage_one_hits = list(fts)
+        hop = Sag2HopController(
+            HeuristicEvidenceJudge(),
+            TermSelector(),
+            IndexStoreSearcher(
+                store,
+                project=project,
+                page_type=filters.type,
+                tags=tuple(filters.tags),
+            ),
+        ).run(question, stage_one_hits[:100])
+        # Preserve stage-one BM25 order (path/RRF tie-breaks). Append only
+        # hop-discovered passages so evidence reordering cannot invert equals.
+        merged: list[PassageHit] = []
+        seen_ids: set[str] = set()
+        for hit in stage_one_hits:
+            merged.append(hit)
+            seen_ids.add(hit.passage_id)
+        for hit in hop.candidates:
+            if hit.passage_id not in seen_ids:
+                merged.append(hit)
+                seen_ids.add(hit.passage_id)
+        fts = merged
+        evidence_by_id = dict(hop.evidence_scores)
+        sag2_hops_run = hop.hops_run
+        sag2_judge_calls = hop.judge_calls
+        sag2_expansion_terms = hop.expansion_terms
+        sag2_stop_reason = hop.stop_reason
     allowed_vector_paths: set[str] = set()
     for index, item in enumerate(snapshot.pages):
         cancellation.checkpoint_batch(index, every=16, stage="snapshot")
@@ -1011,6 +1080,7 @@ def run_query_v2(
             continue
         item = ranked.setdefault(hit.passage_id, candidate_item(hit, score=0.0, fts_rank=rank))
         item["fts_rank"] = rank
+        item["evidence_score"] = float(evidence_by_id.get(hit.passage_id, 0.0))
     # A vector hit is identified by passage ID.  Load its existing retrieval
     # projection rather than scanning Markdown, so vector-only recall remains
     # available without adding query-time corpus reads.
@@ -1073,6 +1143,11 @@ def run_query_v2(
         _merge_graph_expansion(items, graph_candidates, graph_passages, cancellation)
 
     expand_graph(scored)
+    # Keep fusion/path tie-break semantics. Hop already ordered candidates by
+    # evidence and that order is mirrored in fts_rank → RRF; stash evidence for
+    # telemetry/debug without overriding score sort.
+    for item in scored:
+        item["evidence_score"] = float(item.get("evidence_score", 0.0))
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     # Retrieval is page-first: the public result list keeps one best passage
     # per page, while the internal pack is assembled page-by-page in reading
@@ -1124,6 +1199,11 @@ def run_query_v2(
         seed_has_primary_recall=has_primary_recall,
         seed_qualified_fts_hits=qualified_fts_hits,
         graph_expander=expand_graph,
+        enable_legacy_p2_ladder=enable_legacy_p2_ladder,
+        sag2_hops_run=sag2_hops_run,
+        sag2_judge_calls=sag2_judge_calls,
+        sag2_expansion_terms=sag2_expansion_terms,
+        sag2_stop_reason=sag2_stop_reason,
     )
     execution_view = execution.execute(request_view)
     quality_gate_evaluation = _quality_gate_evaluation(
@@ -1139,7 +1219,7 @@ def run_query_v2(
         request_view=request_view,
         provenance=provenance,
         seed_stats=QuerySeedStats(
-            fts_hits=len(fts),
+            fts_hits=stage_one_fts_count,
             qualified_fts_hits=qualified_fts_hits,
             vector_hits=len(vector),
             vector_warnings=tuple(vector_warnings),

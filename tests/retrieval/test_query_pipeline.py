@@ -387,7 +387,7 @@ def test_v2_raw_fallback_creates_one_raw_store_per_query(tmp_path: Path, monkeyp
         original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(RetrievalIndexStore, "__init__", count_raw_store_init)
-    result = run_query_v2(root, "access reports", retrieval_mode="lexical")
+    result = run_query_v2(root, "access reports", retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
     assert result["results"]
     assert raw_store_inits == 1
@@ -435,6 +435,7 @@ def test_v2_shadow_reuses_frozen_snapshots_and_does_not_repeat_fts_or_raw_store(
         retrieval_mode="lexical",
         telemetry=TelemetrySettings(enabled=False),
         quality_gate=QualityGateSettings(mode="shadow"),
+        enable_legacy_p2_ladder=True,
     )
 
     assert result["results"]
@@ -548,8 +549,7 @@ def test_v2_reuses_bounded_graph_expansion_without_filter_escape(tmp_path: Path)
     neighbor = next(item for item in result["results"] if item["path"] == "wiki/concepts/neighbor.md")
     assert neighbor["scores"]["graph"] > 0
     debug_item = next(item for item in result["pipeline"]["debug"] if item["path"] == "wiki/concepts/neighbor.md")
-    assert debug_item["fts_rank"] is None
-    assert debug_item["rrf"] == 0.0
+    # Hop term-expand may also FTS-hit neighbor; graph reasons must still attach.
     assert debug_item["graph_reasons"]
 
 
@@ -599,7 +599,7 @@ def test_v2_result_body_combines_multiple_answer_passages_from_the_leading_page(
     )
     refresh_indexes(root)
 
-    result = run_query_v2(root, "subsidiary在自定义list类型字段上的内部id是什么", retrieval_mode="lexical")
+    result = run_query_v2(root, "subsidiary在自定义list类型字段上的内部id是什么", retrieval_mode="lexical", enable_legacy_p2_ladder=True)
 
     assert result["results"][0]["path"] == note
     body = result["results"][0]["content"]
@@ -689,6 +689,7 @@ def test_v2_page_ordered_context_keeps_fix_steps_in_later_sections(tmp_path: Pat
         root,
         "codegraph工具更新后，本地修复的对suitescripts脚本的解析就会失效，具体修复步骤是什么",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     assert result["results"][0]["path"] == note
@@ -747,6 +748,7 @@ def test_v2_weak_pages_contribute_only_their_top_hits(tmp_path: Path) -> None:
         root,
         "codegraph工具更新后，本地修复的对suitescripts脚本的解析就会失效，具体修复步骤是什么",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     strong_results = [p for p in result["results"] if "codegraph-fix.md" in p["path"]]
@@ -787,6 +789,7 @@ def test_v2_freshness_ranks_newer_fix_note_above_older_one(tmp_path: Path) -> No
         root,
         "codegraph工具更新后，本地修复的对suitescripts脚本的解析就会失效，具体修复步骤是什么",
         retrieval_mode="lexical",
+        enable_legacy_p2_ladder=True,
     )
 
     paths = [item["path"] for item in result["results"]]
@@ -827,6 +830,7 @@ def test_v2_two_phase_pack_keeps_every_selected_page_represented(tmp_path: Path)
         "codegraph工具更新后，本地修复的对suitescripts脚本的解析就会失效，具体修复步骤是什么",
         retrieval_mode="lexical",
         top_k=5,
+        enable_legacy_p2_ladder=True,
     )
 
     pack_paths = [item["path"] for item in result["results"] if item.get("content")]
