@@ -1,0 +1,26 @@
+name: bench-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - name: Sync dev deps
+        run: uv sync --extra dev
+      - name: Fixed bench suite (ci profile)
+        run: |
+          mkdir -p reports/bench/ci
+          uv run llm-wiki-mcp bench --profile ci --output-dir reports/bench/ci
+      - name: Upload bench summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-summary-ci
+          path: reports/bench/ci

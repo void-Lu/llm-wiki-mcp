@@ -45,6 +45,7 @@ uv run llm-wiki-mcp index build --vault <path> [--scope active|raw|archive]
 uv run llm-wiki-mcp index update --vault <path> [--scope active|raw|archive]
 uv run llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir>
 uv run llm-wiki-mcp retrieval-eval --vault <path> --dataset <cases.jsonl> --output-dir <reports-dir> --retrieval-mode hybrid --vector-model-path <local-bge-m3-path>
+uv run llm-wiki-mcp bench --profile local|ci --output-dir <reports-dir>
 uv run llm-wiki-mcp vector status --vault <path>
 uv run llm-wiki-mcp vector build --vault <path> --model-path <local-bge-m3-path>
 uv run llm-wiki-mcp vector update --vault <path> --model-path <local-bge-m3-path>
@@ -376,6 +377,23 @@ uv run ruff check src/
 # 文档与公共 MCP 说明回归
 uv run pytest tests/test_readme_global_mcp_docs.py -q
 ```
+
+### Bench 套件
+
+同一入口覆盖回归 / 准 / 快 / 弱标签（弱标签仅 `HeuristicEvidenceJudge`，无外呼）：
+
+```bash
+# 本地四轨（codingwork vault/dataset 缺省路径不存在时准轨 skipped，不假装达标）
+uv run llm-wiki-mcp bench --profile local --output-dir reports/bench/local
+
+# CI 两轨：pytest tests/retrieval + graph_v1 retrieval-eval + fixture 弱标签
+uv run llm-wiki-mcp bench --profile ci --output-dir reports/bench/ci
+```
+
+- 准轨默认门禁 **R@10 ≥ 0.75**（`--accuracy-r10-min` 可改）；仅 local 未达标时非零退出。
+- 快轨读取 `tests/fixtures/bench/timing_queries.json`（5 题），无硬门禁。
+- 弱标签只出报告（`report_only`），不因伪分异红。
+- 报告目录建议 `reports/bench/<run>/`（已 gitignore）；不要提交真实 vault 正文。
 
 ### 约定
 

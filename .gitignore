@@ -31,3 +31,5 @@ docs/*
 /.vscode/mcp.json
 /.mcp.json
 .eval
+
+reports/bench/
