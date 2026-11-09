@@ -81,13 +81,15 @@ def test_pack_path_prefers_evidence_score_over_stage_one_bm25_order(
 
     real_score = HeuristicEvidenceJudge.score
 
-    def forced_score(self, question, passage_text, *, context=()):
+    def forced_score(self, question, passage_text, *, context=(), title="", page_path=""):
         lowered = passage_text.casefold()
         if "calibration procedure" in lowered:
             return 0.95
         if lowered.count("needle") >= 3:
             return 0.05
-        return real_score(self, question, passage_text, context=context)
+        return real_score(
+            self, question, passage_text, context=context, title=title, page_path=page_path
+        )
 
     monkeypatch.setattr(HeuristicEvidenceJudge, "score", forced_score)
 
@@ -160,13 +162,15 @@ def test_graph_seeds_reflect_evidence_before_expand(
 
     real_score = HeuristicEvidenceJudge.score
 
-    def forced_score(self, question, passage_text, *, context=()):
+    def forced_score(self, question, passage_text, *, context=(), title="", page_path=""):
         lowered = passage_text.casefold()
         if "calibration procedure" in lowered:
             return 0.95
         if lowered.count("needle") >= 3:
             return 0.05
-        return real_score(self, question, passage_text, context=context)
+        return real_score(
+            self, question, passage_text, context=context, title=title, page_path=page_path
+        )
 
     monkeypatch.setattr(HeuristicEvidenceJudge, "score", forced_score)
     # Huge blend weight: if expand runs before blend, seed scores ignore it.
@@ -282,6 +286,7 @@ def test_pipeline_includes_sag2_hop_telemetry(tmp_path: Path) -> None:
         "stop_reason",
         "truncated",
         "raw_single_shot",
+        "raw_fallback_mode",
     }
     assert isinstance(sag2["hops_run"], int)
     assert isinstance(sag2["judge_calls"], int)
@@ -293,3 +298,84 @@ def test_pipeline_includes_sag2_hop_telemetry(tmp_path: Path) -> None:
     # Deprecated ladder keys remain readable but inert on default path.
     assert result["pipeline"]["coverage"]["triggered"] is False
     assert result["pipeline"]["counters"]["relaxed_fts_hits"] == 0
+
+
+def test_raw_empty_pool_still_replace(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: Reports Help\n---\n\nAccess reports from the Reports menu.",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(root, "access reports", retrieval_mode="lexical")
+    assert result["results"]
+    assert result["results"][0]["path"] == "raw/sources/file/default/help.md"
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert sag2["raw_single_shot"] is True
+    assert sag2["raw_fallback_mode"] == "raw_replace"
+
+
+def test_raw_weak_pool_merges_and_keeps_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Weak wiki evidence must survive raw single-shot (merge, not replace)."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # Wiki page: only weak overlap with the question (one shared token).
+    write_test_page(
+        root,
+        "wiki/concepts/report-stub.md",
+        {"title": "Stub Notes", "type": "concept"},
+        "reports overview without the access verb.",
+    )
+    raw = root / "raw/sources/file/default/help.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: Reports Help\n---\n\nAccess reports from the Reports menu.",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    # Task 1 title/CJK bonuses can push natural overlap ≥0.15; force weak pool.
+    # Patch the names bound in query_execution_context (direct imports).
+    import retrieval.query_execution_context as qec
+
+    monkeypatch.setattr(qec, "wiki_hop_is_weak", lambda selected, evidence: bool(selected))
+    monkeypatch.setattr(
+        qec,
+        "wiki_hop_pool_kind",
+        lambda selected, evidence: "weak" if selected else "empty",
+    )
+
+    result = run_query_v2(root, "access reports", retrieval_mode="lexical", top_k=5)
+    assert result["ok"] is True
+    paths = [item["path"] for item in result["results"]]
+    kinds = [item.get("source_kind") for item in result["results"]]
+    # Wiki stub must remain somewhere in the returned / additional pool or results.
+    all_paths = paths + [item["path"] for item in result.get("additional_results", [])]
+    assert "wiki/concepts/report-stub.md" in all_paths
+    assert any(k == "raw" or str(p).startswith("raw/") for p, k in zip(paths, kinds)) or any(
+        str(p).startswith("raw/") for p in all_paths
+    )
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert sag2["raw_single_shot"] is True
+    assert sag2["raw_fallback_mode"] == "raw_merge"
+    # Must not look like a ladder branch.
+    assert result["pipeline"]["coverage"]["triggered"] is False
+
+
+def test_pipeline_sag2_telemetry_includes_raw_fallback_mode(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_test_page(
+        root,
+        "wiki/concepts/email-capture.md",
+        {"title": "Email Capture", "type": "concept"},
+        "Email capture plug-in implementation uses the Email Capture Plug-in interface.",
+    )
+    refresh_indexes(root)
+    result = run_query_v2(root, "email capture", top_k=3)
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert sag2["raw_fallback_mode"] in {"none", "raw_merge", "raw_replace"}

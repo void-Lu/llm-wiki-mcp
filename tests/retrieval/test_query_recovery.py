@@ -735,3 +735,19 @@ def test_fusion_score_default_weights_are_exact_and_weights_scale_each_source() 
 
     weighted = fusion_score(hit, "different", "concept", "knowledge", {}, item, effective_rrf_k=60, rrf_weights=RrfWeights(fts=2.0, title=0.0, vector=0.5))
     assert weighted["rrf"] == 2.0 / 63 + 0.5 / 67
+
+
+def test_wiki_hop_pool_kind_empty_weak_strong() -> None:
+    from retrieval.query_recovery import wiki_hop_pool_kind
+
+    class Hit:
+        def __init__(self, passage_id: str) -> None:
+            self.passage_id = passage_id
+
+    weak_item = {"hit": Hit("p1"), "evidence_score": 0.05}
+    strong_item = {"hit": Hit("p2"), "evidence_score": 0.40}
+    assert wiki_hop_pool_kind([], {}) == "empty"
+    assert wiki_hop_pool_kind([weak_item], {"p1": 0.05}) == "weak"
+    assert wiki_hop_pool_kind([strong_item], {"p2": 0.40}) == "strong"
+    # Boundary: exactly 0.15 is strong (weak is strictly < 0.15).
+    assert wiki_hop_pool_kind([{"hit": Hit("p3")}], {"p3": 0.15}) == "strong"

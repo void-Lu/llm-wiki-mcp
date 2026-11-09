@@ -145,14 +145,17 @@ def plan_raw_single_shot(*, wiki_empty_or_weak: bool, effective_scope: str) -> b
     return bool(wiki_empty_or_weak) and effective_scope in {"knowledge", "all"}
 
 
-def wiki_hop_is_weak(
+WikiHopPoolKind = Literal["empty", "weak", "strong"]
+
+
+def wiki_hop_pool_kind(
     selected: Sequence[Mapping[str, Any]],
     evidence_scores: Mapping[str, float],
-) -> bool:
-    """True when wiki+hop selected is empty or top evidence is below 0.15."""
+) -> WikiHopPoolKind:
+    """Classify wiki+hop pool for raw single-shot branching."""
 
     if not selected:
-        return True
+        return "empty"
     top = max(
         (
             float(evidence_scores.get(item["hit"].passage_id, 0.0))
@@ -160,7 +163,18 @@ def wiki_hop_is_weak(
         ),
         default=0.0,
     )
-    return top < 0.15
+    if top < 0.15:
+        return "weak"
+    return "strong"
+
+
+def wiki_hop_is_weak(
+    selected: Sequence[Mapping[str, Any]],
+    evidence_scores: Mapping[str, float],
+) -> bool:
+    """True when wiki+hop selected is empty or top evidence is below 0.15."""
+
+    return wiki_hop_pool_kind(selected, evidence_scores) != "strong"
 
 
 def resolve_fallback_lexical_mode(

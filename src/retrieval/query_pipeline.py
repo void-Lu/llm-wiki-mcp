@@ -813,6 +813,7 @@ def assemble_public_projection(
             "stop_reason": view.sag2_stop_reason,
             "truncated": view.sag2_truncated,
             "raw_single_shot": view.sag2_raw_single_shot,
+            "raw_fallback_mode": view.sag2_raw_fallback_mode,
         },
         "counters": {
             "fts_hits": seed_stats.fts_hits,

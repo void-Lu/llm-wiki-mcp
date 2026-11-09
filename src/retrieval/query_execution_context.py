@@ -26,6 +26,7 @@ from retrieval.query_recovery import (
     select_best_per_page,
     step_bonus,
     wiki_hop_is_weak,
+    wiki_hop_pool_kind,
 )
 from retrieval.query_shared import QueryFilters, eligible
 from retrieval.query_snapshot import QueryCorpusSnapshot
@@ -150,6 +151,7 @@ class QueryExecutionView:
     sag2_stop_reason: str = ""
     sag2_truncated: bool = False
     sag2_raw_single_shot: bool = False
+    sag2_raw_fallback_mode: str = "none"
 
 
 @dataclass
@@ -189,6 +191,7 @@ class QueryExecutionContext:
     sag2_stop_reason: str = ""
     sag2_truncated: bool = False
     sag2_raw_single_shot: bool = False
+    sag2_raw_fallback_mode: str = "none"
     raw_store: RetrievalIndexStore | None = field(default=None, init=False)
     raw_snapshot: QueryCorpusSnapshot | None = field(default=None, init=False)
     selected: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -424,6 +427,7 @@ class QueryExecutionContext:
             sag2_stop_reason=self.sag2_stop_reason,
             sag2_truncated=self.sag2_truncated,
             sag2_raw_single_shot=self.sag2_raw_single_shot,
+            sag2_raw_fallback_mode=self.sag2_raw_fallback_mode,
         )
 
     def execute(self, request_view: QueryRequestView) -> QueryExecutionView:
@@ -488,6 +492,7 @@ class QueryExecutionContext:
 
         self._ensure_open()
         self.sag2_raw_single_shot = False
+        self.sag2_raw_fallback_mode = "none"
         evidence_scores = {
             item["hit"].passage_id: float(item.get("evidence_score", 0.0))
             for item in self.selected
@@ -499,8 +504,12 @@ class QueryExecutionContext:
         ):
             return
 
-        reason = "wiki_hop_empty" if not self.selected else "wiki_hop_weak"
+        kind = wiki_hop_pool_kind(self.selected, evidence_scores)
+        reason = "wiki_hop_empty" if kind == "empty" else "wiki_hop_weak"
         self.sag2_raw_single_shot = True
+        self.sag2_raw_fallback_mode = (
+            "raw_replace" if kind == "empty" else "raw_merge"
+        )
         self.cancellation.checkpoint("fallback")
 
         availability = self.raw_availability()
@@ -611,19 +620,35 @@ class QueryExecutionContext:
             )
         )
 
-        # Empty/weak wiki: raw_only replace (no weak-primary merge ladder).
-        selected = select_best_per_page(raw_items)
-        selected = recall_policy.adaptive_expand(selected, request_view.top_k)[
-            : request_view.top_k
-        ]
-        recovery = assemble_recovery(
-            selected,
-            condition=RecoveryCondition("raw", (reason,), "item"),
-            candidates=raw_items,
-            store=self.store,
-            raw_store=raw_store,
-            cancellation=self.cancellation,
-        )
+        if kind == "empty":
+            selected = select_best_per_page(raw_items)
+            selected = recall_policy.adaptive_expand(selected, request_view.top_k)[
+                : request_view.top_k
+            ]
+            recovery = assemble_recovery(
+                selected,
+                condition=RecoveryCondition("raw", (reason,), "item"),
+                candidates=raw_items,
+                store=self.store,
+                raw_store=raw_store,
+                cancellation=self.cancellation,
+            )
+        else:
+            # weak: merge, preserve wiki rows
+            merged = recall_policy.merge_weak_primary_raw(self.selected, raw_items)
+            selected = select_best_per_page(merged)
+            selected = recall_policy.adaptive_expand(selected, request_view.top_k)[
+                : request_view.top_k
+            ]
+            recovery = assemble_recovery(
+                selected,
+                condition=RecoveryCondition("raw", (reason,), "item"),
+                candidates=merged,
+                store=self.store,
+                raw_store=raw_store,
+                cancellation=self.cancellation,
+            )
+
         self.selected = selected
         self.context_items = recovery.context_items
         self.recovery = recovery

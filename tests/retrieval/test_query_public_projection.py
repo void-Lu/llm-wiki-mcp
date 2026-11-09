@@ -124,8 +124,10 @@ def test_assemble_public_projection_projects_seed_gate_discovery_and_context() -
         "stop_reason",
         "truncated",
         "raw_single_shot",
+        "raw_fallback_mode",
     }
     assert sag2["expansion_term_count"] == 0
     assert sag2["truncated"] is False
     assert sag2["raw_single_shot"] is False
+    assert sag2["raw_fallback_mode"] == "none"
     assert "results" in projection.response and "budget" in projection.response
