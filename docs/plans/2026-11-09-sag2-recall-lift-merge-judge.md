@@ -773,7 +773,7 @@ EOF
 
 **Baseline to beat:** LU-C / box note on `v1.0.0` hop-default: codingwork gold **R@10 ≈ 0.6655** (29 cases). **Gate: R@10 ≥ 0.80**.
 
-- [ ] **Step 1: Unit smoke (always on box)**
+- [x] **Step 1: Unit smoke (always on box)**
 
 ```bash
 uv run pytest \
@@ -786,7 +786,7 @@ uv run pytest \
 
 Expected: all PASS.
 
-- [ ] **Step 2: Broader retrieval regression (informational)**
+- [x] **Step 2: Broader retrieval regression (informational)**
 
 ```bash
 uv run pytest tests/retrieval -q --tb=line
@@ -794,7 +794,7 @@ uv run pytest tests/retrieval -q --tb=line
 
 Expected: no new failures vs pre-task HEAD.
 
-- [ ] **Step 3: Codingwork gold eval (gate)**
+- [x] **Step 3: Codingwork gold eval (gate)**
 
 On this box the prior hop-default run left artifacts at `/tmp/sag2-eval/`:
 
@@ -852,7 +852,7 @@ PY
 
 **Same-protocol note:** Drop `codingwork-0029` only if those two gold raw paths are still missing (same as hop-default run). Prefer running the full JSONL and letting the eval harness report missing paths; document case count actually scored.
 
-- [ ] **Step 4: Append results note to this plan + commit if docs changed**
+- [x] **Step 4: Append results note to this plan + commit if docs changed**
 
 ```markdown
 #### Task 4 results note (YYYY-MM-DD UTC+8)
@@ -872,6 +872,17 @@ docs: record sag2 recall-lift eval smoke results
 EOF
 )" || true
 ```
+
+
+#### Task 4 results note (2026-11-09 UTC+8)
+
+| Run | Cases | R@10 macro | Notes |
+| --- | --- | --- | --- |
+| Unit smoke (Task 1–2 tests) | 26 | — | PASS (`test_sag2_evidence` / `hop` / `pipeline_default` / `wiki_hop_pool_kind`) |
+| `tests/retrieval` | 456 passed, 1 skipped | — | informational; no new failures |
+| codingwork-wiki-query-gold | **29** (dropped `codingwork-0029`; same protocol as hop-default) | **0.6428** | **FAIL_LOUD** — gate ≥0.80 unmet; baseline hop-default **0.6655**; delta **−0.0227**; MRR 0.5491; nDCG 0.5466; P95 ~29.3s; commit under test `493ba9e`; LU-C vault `C:\Users\26327\Documents\Obsidian Vault\codingwork`; report `.eval/gold-sample-2026-10-19/reports-v1.0.0-recall-lift/` |
+
+**Gate verdict:** **FAIL_LOUD**. Approach A (weak raw merge + Judge title/CJK/identifier bonuses) did **not** lift codingwork gold R@10 to ≥0.80; measured **below** hop-default baseline. Application code left as-is for follow-up (Approach C / threshold / merge ranking). **Do not** silently re-enable P2 ladder. Do **not** claim recall-lift success.
 
 ---
 

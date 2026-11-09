@@ -17,7 +17,7 @@
 - **Judge 加权：** `HeuristicEvidenceJudge` 对标题/路径 token、CJK 连续片段、标识符式 token 增加有界 bonus，分数仍 clamp 到 `[0,1]`；hop 调用传入 `PassageHit.title` / `page_path`。
 - **Telemetry：** `pipeline.sag2_hop.raw_fallback_mode` = `none` | `raw_merge` | `raw_replace`；`raw_single_shot` 在 merge/replace 时仍为 `true`。
 - **不做：** 不恢复默认 P2 ladder；本轮不含 TermSelector 问句稀有专名保留（Approach C）。
-- **验收：** codingwork gold 同口径 **R@10 ≥ 0.80**；未达标须显式记录，不得静默宣称成功。详设 `docs/specs/2026-11-09-sag2-recall-lift-merge-judge-design.md`。
+- **验收（已跑，门禁未过）：** codingwork gold 同口径目标 **R@10 ≥ 0.80**。LU-C 实测（commit `493ba9e`，29 cases，丢 `codingwork-0029`）：**R@10 = 0.6428**（基线 hop-default 0.6655，Δ −0.0227）→ **FAIL_LOUD**；不得宣称召回回升成功。应用代码保持 Approach A 现状，后续可跟 Approach C / 阈值 / merge 排序；**不**静默恢复 P2 ladder。详设 `docs/specs/2026-11-09-sag2-recall-lift-merge-judge-design.md`；评测笔记见 plan Task 4 results。
 
 ## 2026-10-20 — 检索 P2：raw 池多词实体共现 / 短语召回（0008）
 
