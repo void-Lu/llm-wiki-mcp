@@ -412,3 +412,56 @@ def test_pyproject_exposes_cli_without_preload_script():
     assert 'llm-wiki-mcp = "app.cli:main"' in text
     assert 'llm-wiki-mcp-server = "app.server:main"' in text
     assert "llm-wiki-mcp-preload-model" not in text
+
+
+def test_bench_cli_profile_ci_invokes_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import app.cli as cli_mod
+
+    calls: dict[str, object] = {}
+
+    def fake_run_bench(**kwargs):  # noqa: ANN001
+        calls.update(kwargs)
+        summary = {
+            "schema_version": 1,
+            "profile": kwargs["profile"],
+            "started_at": "t0",
+            "finished_at": "t1",
+            "tracks": {
+                "regression": {"status": "pass", "pytest_exit_code": 0},
+                "accuracy": {"status": "skipped", "reason": "ci_profile"},
+                "latency": {"status": "skipped", "reason": "ci_profile"},
+                "weak_label": {"status": "report_only", "mean_top1_evidence": 0.1},
+            },
+        }
+        out = Path(kwargs["output_dir"])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "bench-summary.json").write_text("{}\n", encoding="utf-8")
+        return 0, summary
+
+    monkeypatch.setattr(cli_mod, "run_bench", fake_run_bench)
+    exit_code = main(
+        [
+            "bench",
+            "--profile",
+            "ci",
+            "--output-dir",
+            str(tmp_path / "bench-out"),
+        ]
+    )
+    assert exit_code == 0
+    assert calls["profile"] == "ci"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["profile"] == "ci"
+
+
+def test_bench_parser_requires_profile_and_output_dir() -> None:
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["bench"])
+    args = parser.parse_args(["bench", "--profile", "local", "--output-dir", "/tmp/x"])
+    assert args.command == "bench"
+    assert args.profile == "local"
+    assert args.accuracy_r10_min == 0.75
