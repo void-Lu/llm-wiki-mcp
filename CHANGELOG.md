@@ -1,5 +1,10 @@
 # 变更记录
 
+## 2026-11-09 — v1.0.0：SAG2 hop 默认主路径（计划中）
+
+- 版本号升至 **1.0.0**；检索默认主路径将改为 BM25 → 本地 EvidenceJudge → 抽词扩检（`H≤2`），去掉默认 P2 ladder（coverage / wiki_relaxed / all_coverage / raw_zero 及 0008/0015/0018 补丁）。
+- 本条目为版本与实现计划占位；行为变更随 `docs/plans/2026-11-09-sag2-hop-default.md` 任务落地后补充。
+
 ## 2026-10-20 — 检索 P2：raw 池多词实体共现 / 短语召回（0008）
 
 - 
