@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import pytest
 
 from retrieval.query_pipeline import run_query_v2
 from tests.helpers import write_test_page
@@ -104,3 +105,120 @@ def test_pack_path_prefers_evidence_score_over_stage_one_bm25_order(
         "wiki/concepts/zzz-weak.md",
     ]
 
+
+
+def test_graph_expansion_happens_after_hop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _seed_vault(tmp_path)
+    order: list[str] = []
+
+    import retrieval.sag2_hop as sag2_hop_module
+    import retrieval.query_pipeline as qp
+
+    original_run = sag2_hop_module.Sag2HopController.run
+
+    def wrapped(self, question, initial_hits):  # noqa: ANN001
+        order.append("hop")
+        return original_run(self, question, initial_hits)
+
+    monkeypatch.setattr(sag2_hop_module.Sag2HopController, "run", wrapped)
+
+    original_expand = qp.apply_graph_expansion
+
+    def expand_probe(*args, **kwargs):  # noqa: ANN001
+        order.append("graph")
+        return original_expand(*args, **kwargs)
+
+    monkeypatch.setattr(qp, "apply_graph_expansion", expand_probe)
+    run_query_v2(root, "email capture plug-in", top_k=5, graph_expansion=True)
+    assert "hop" in order and "graph" in order
+    assert order.index("hop") < order.index("graph")
+    assert order.count("graph") == 1
+
+
+def test_graph_seeds_reflect_evidence_before_expand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post-hop graph must seed from evidence-blended scores, not raw fusion."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_test_page(
+        root,
+        "wiki/concepts/zzz-weak.md",
+        {"title": "Weak Evidence", "type": "concept"},
+        "needle needle needle needle needle links to [[aaa-strong]].",
+    )
+    write_test_page(
+        root,
+        "wiki/concepts/aaa-strong.md",
+        {"title": "Preferred Evidence", "type": "concept"},
+        "needle calibration procedure for sensor array",
+    )
+    refresh_indexes(root)
+
+    from retrieval.sag2_evidence import HeuristicEvidenceJudge
+    import retrieval.query_pipeline as qp
+
+    real_score = HeuristicEvidenceJudge.score
+
+    def forced_score(self, question, passage_text, *, context=()):
+        lowered = passage_text.casefold()
+        if "calibration procedure" in lowered:
+            return 0.95
+        if lowered.count("needle") >= 3:
+            return 0.05
+        return real_score(self, question, passage_text, context=context)
+
+    monkeypatch.setattr(HeuristicEvidenceJudge, "score", forced_score)
+    # Huge blend weight: if expand runs before blend, seed scores ignore it.
+    monkeypatch.setattr(qp, "SAG2_EVIDENCE_BLEND_WEIGHT", 100.0)
+
+    seed_fusion: dict[str, float] = {}
+    original_expand = qp.apply_graph_expansion
+
+    def expand_probe(scored, candidates, graph, max_graph_hops=2, collect_reasons=False):  # noqa: ANN001
+        for path, candidate in scored.items():
+            seed_fusion[path] = float(candidate.fusion_score)
+        return original_expand(
+            scored, candidates, graph, max_graph_hops=max_graph_hops, collect_reasons=collect_reasons
+        )
+
+    monkeypatch.setattr(qp, "apply_graph_expansion", expand_probe)
+
+    result = run_query_v2(
+        root,
+        "needle",
+        top_k=2,
+        retrieval_mode="lexical",
+        graph_expansion=True,
+        include_context_pack=False,
+    )
+    assert result["ok"] is True
+    assert "wiki/concepts/aaa-strong.md" in seed_fusion
+    assert "wiki/concepts/zzz-weak.md" in seed_fusion
+    # Blend must already be applied to graph seeds (0.95*100 vs 0.05*100).
+    assert seed_fusion["wiki/concepts/aaa-strong.md"] - seed_fusion["wiki/concepts/zzz-weak.md"] > 50.0
+
+
+def test_graph_ablation_zeroes_graph_score(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_test_page(
+        root,
+        "wiki/concepts/seed.md",
+        {"title": "Seed Page", "type": "concept"},
+        "unique needle links to [[neighbor.md]].",
+    )
+    write_test_page(
+        root,
+        "wiki/concepts/neighbor.md",
+        {"title": "Neighbor Page", "type": "concept"},
+        "related content without the unique token.",
+    )
+    refresh_indexes(root)
+
+    disabled = run_query_v2(
+        root, "needle", top_k=5, retrieval_mode="lexical", graph_expansion=False
+    )
+    assert disabled["ok"] is True
+    assert disabled["pipeline"]["counters"]["graph_hits"] == 0
+    assert all(item["scores"]["graph"] == 0 for item in disabled["results"])

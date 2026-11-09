@@ -1138,30 +1138,60 @@ def run_query_v2(
     graph_cache: dict[str, Any] = {}
 
     def expand_graph(items: list[dict[str, Any]]) -> None:
-        """Add bounded graph evidence to one scored candidate list in place.
+        """Wikilink expand once on post-hop top evidence (not term expansion).
 
-        The strict seed stage and the relaxed Wiki recovery stage share this
-        closure so both use the same snapshot, filters and caps.
+        Default path: called after sag2_hop + evidence blend. Graph neighbors
+        are score boosts / added passages only — never expansion terms.
+        Legacy wiki_relaxed may reuse this closure when the P2 ladder is
+        explicitly opted in; the default ladder is off so that path is inert.
         """
 
         cancellation.checkpoint("graph")
         if effective_scope == "raw" or not graph_expansion:
             return
+        # Seed from top evidence pages only (one best passage per page).
+        by_page: dict[str, dict[str, Any]] = {}
+        for item in items:
+            path = item["hit"].page_path
+            prev = by_page.get(path)
+            if prev is None or (
+                float(item.get("evidence_score", 0.0)),
+                float(item["score"]),
+            ) > (
+                float(prev.get("evidence_score", 0.0)),
+                float(prev["score"]),
+            ):
+                by_page[path] = item
+        ranked_pages = sorted(
+            by_page.values(),
+            key=lambda item: (
+                -float(item.get("evidence_score", 0.0)),
+                -float(item["score"]),
+                item["hit"].page_path,
+            ),
+        )
+        seed_cap = max(int(top_k), 10)
+        seed_scores = {
+            item["hit"].page_path: float(item["score"])
+            for item in ranked_pages[:seed_cap]
+        }
         graph_candidates, graph_passages = _graph_expand(
             root, store, metadata, scope=effective_scope, project=project, filters=filters,
-            seed_scores={item["hit"].page_path: item["score"] for item in items}, debug=debug, snapshot=snapshot, cancellation=cancellation,
+            seed_scores=seed_scores, debug=debug, snapshot=snapshot, cancellation=cancellation,
             graph_cache=graph_cache,
         )
         _merge_graph_expansion(items, graph_candidates, graph_passages, cancellation)
 
-    expand_graph(scored)
-    # Soft-blend EvidenceJudge into fusion score so hop quality can reorder
-    # BM25-close hits without swamping title/exact/authority (path/title ties
-    # remain the final stable keys when blended scores match).
+    # Soft-blend EvidenceJudge into fusion score *before* graph so wikilink
+    # expansion seeds the hop-ranked top evidence (path/title ties remain the
+    # final stable keys when blended scores match).
     for item in scored:
         evidence = float(item.get("evidence_score", 0.0))
         item["evidence_score"] = evidence
         item["score"] = round(item["score"] + SAG2_EVIDENCE_BLEND_WEIGHT * evidence, 12)
+    scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
+    expand_graph(scored)
+    # Graph merges add graph_score into item["score"]; re-sort before pack.
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     # Retrieval is page-first: the public result list keeps one best passage
     # per page, while the internal pack is assembled page-by-page in reading
