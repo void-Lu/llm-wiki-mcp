@@ -9,6 +9,7 @@ from typing import Any, Sequence
 from runtime.platform_paths import global_config_path
 from wiki.ingest_service import sync_retrieval_index
 from retrieval.retrieval_index import RetrievalIndexStore
+from retrieval.bench_runner import run_bench
 from retrieval.retrieval_eval import (
     RetrievalEvalError,
     evaluate_retrieval_gate,
@@ -154,6 +155,36 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluation_parser.add_argument("--baseline-report", help="Optional frozen retrieval-eval.json used for the regression gate.")
     evaluation_parser.add_argument("--vector-model-path", help="Required local BGE-M3 directory for vector or hybrid evaluation.")
     evaluation_parser.add_argument("--vector-index-path", help="Optional vault-relative vector index directory for vector or hybrid evaluation.")
+
+
+    bench_parser = subparsers.add_parser(
+        "bench",
+        help="Run the fixed local/CI retrieval bench suite (regression, accuracy, latency, weak-label).",
+    )
+    bench_parser.add_argument("--profile", required=True, choices=("local", "ci"))
+    bench_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory for bench-summary and per-track reports.",
+    )
+    bench_parser.add_argument("--vault", help="Local accuracy/latency vault root override.")
+    bench_parser.add_argument("--dataset", help="Local accuracy JSONL dataset override.")
+    bench_parser.add_argument("--manifest", help="Local accuracy manifest override.")
+    bench_parser.add_argument("--accuracy-r10-min", type=float, default=0.75)
+    bench_parser.add_argument(
+        "--timing-queries",
+        help="Latency queries JSON (default: tests/fixtures/bench/timing_queries.json).",
+    )
+    bench_parser.add_argument(
+        "--latency-baseline-report",
+        help="Optional prior latency JSON for delta reporting.",
+    )
+    bench_parser.add_argument("--weak-label-vault", help="Weak-label vault override.")
+    bench_parser.add_argument("--weak-label-dataset", help="Weak-label dataset override.")
+    bench_parser.add_argument("--skip-accuracy", action="store_true")
+    bench_parser.add_argument("--skip-latency", action="store_true")
+    bench_parser.add_argument("--skip-regression", action="store_true")
+    bench_parser.add_argument("--skip-weak-label", action="store_true")
 
     quality_gate_parser = subparsers.add_parser("quality-gate", help="Offline quality-gate calibration administration.")
     quality_gate_actions = quality_gate_parser.add_subparsers(dest="quality_gate_action", required=True)
@@ -564,6 +595,35 @@ def _run_repair(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 2
 
 
+
+def _run_bench(args: argparse.Namespace) -> int:
+    exit_code, summary = run_bench(
+        profile=args.profile,
+        output_dir=args.output_dir,
+        vault=args.vault,
+        dataset=args.dataset,
+        manifest=args.manifest,
+        accuracy_r10_min=args.accuracy_r10_min,
+        timing_queries=args.timing_queries,
+        latency_baseline_report=args.latency_baseline_report,
+        weak_label_vault=args.weak_label_vault,
+        weak_label_dataset=args.weak_label_dataset,
+        skip_accuracy=args.skip_accuracy,
+        skip_latency=args.skip_latency,
+        skip_regression=args.skip_regression,
+        skip_weak_label=args.skip_weak_label,
+    )
+    _print_json(
+        {
+            "ok": exit_code == 0,
+            "profile": args.profile,
+            "summary": summary,
+            "output_dir": str(Path(args.output_dir)),
+        }
+    )
+    return exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -583,6 +643,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_config(args)
         if args.command == "retrieval-eval":
             return _run_retrieval_eval(args)
+        if args.command == "bench":
+            return _run_bench(args)
         if args.command == "quality-gate" and args.quality_gate_action == "calibrate":
             return _run_quality_gate_calibrate(args)
         if args.command == "retrieval-gold-sample":

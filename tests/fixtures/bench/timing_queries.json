@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "dataset_id": "bench-timing-v1",
+  "revision": "2026-11-09.1",
+  "notes": "Frozen wall-clock set matching 2026-11-09 v0.9.36 vs v1.0.0 A/B (seed 20261109). Queries only — no vault bodies.",
+  "queries": [
+    {
+      "id": "codingwork-0015",
+      "query": "unauthenticated client-side contexts N/search module",
+      "scope": "auto",
+      "language": "en",
+      "answerable": true,
+      "tags": ["latin", "identifier", "slow-hop"]
+    },
+    {
+      "id": "codingwork-0001",
+      "query": "Suitelet N/llm ChatBot Tooling 代码示例",
+      "scope": "knowledge",
+      "language": "mixed",
+      "answerable": true,
+      "tags": ["cjk-mixed", "identifier"]
+    },
+    {
+      "id": "codingwork-0004",
+      "query": "N/workflow 模块 方法 列表",
+      "scope": "auto",
+      "language": "mixed",
+      "answerable": true,
+      "tags": ["cjk-mixed", "identifier", "slow-hop"]
+    },
+    {
+      "id": "codingwork-0027",
+      "query": "serverWidget createForm addField Suitelet",
+      "scope": "all",
+      "language": "en",
+      "answerable": true,
+      "tags": ["latin", "identifier", "camelcase"]
+    },
+    {
+      "id": "codingwork-0020",
+      "query": "MapReduce 脚本各阶段执行限制 getInputData map reduce summarize 治理单位 限制",
+      "scope": "auto",
+      "language": "mixed",
+      "answerable": true,
+      "tags": ["cjk-mixed", "short-cache-or-fast"]
+    }
+  ]
+}
