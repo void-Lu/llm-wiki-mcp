@@ -58,7 +58,7 @@ def default_timing_queries_path() -> Path:
 
 def extract_recall_at_10(report: Mapping[str, Any]) -> float | None:
     metrics = report.get("metrics") if isinstance(report.get("metrics"), Mapping) else {}
-    for key in ("recall_at_10", "macro_recall_at_10", "recall_at_k_macro", "R@10"):
+    for key in ("recall_at_k_macro", "macro_recall_at_10", "recall_at_10", "R@10"):
         if key in metrics and metrics[key] is not None:
             return float(metrics[key])
     ranking = metrics.get("ranking") if isinstance(metrics.get("ranking"), Mapping) else {}

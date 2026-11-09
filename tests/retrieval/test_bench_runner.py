@@ -1,7 +1,6 @@
 # tests/retrieval/test_bench_runner.py
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +10,10 @@ from retrieval.bench_runner import extract_recall_at_10, run_bench
 
 def test_extract_recall_at_10_prefers_macro_at_k() -> None:
     assert extract_recall_at_10({"metrics": {"recall_at_k_macro": 0.84}}) == pytest.approx(0.84)
+    # both-keys: macro must win over flat recall_at_10 (accuracy lock)
+    assert extract_recall_at_10(
+        {"metrics": {"recall_at_k_macro": 0.84, "recall_at_10": 0.1}}
+    ) == pytest.approx(0.84)
     assert extract_recall_at_10({"metrics": {"ranking": {"recall_at_10": 0.5}}}) == pytest.approx(0.5)
     assert extract_recall_at_10({"metrics": {}}) is None
 
