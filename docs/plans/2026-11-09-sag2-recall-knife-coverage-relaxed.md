@@ -908,7 +908,7 @@ EOF
 
 **Baseline to beat:** first-knife FAIL_LOUD **R@10 ≈ 0.6428** (29 cases). Hop-default ≈ **0.6655**. **Gate: R@10 ≥ 0.75**.
 
-- [ ] **Step 1: Unit smoke (always on box)**
+- [x] **Step 1: Unit smoke (always on box)**
 
 ```bash
 uv run pytest \
@@ -921,7 +921,7 @@ uv run pytest \
 
 Expected: all PASS.
 
-- [ ] **Step 2: Broader retrieval regression (informational)**
+- [x] **Step 2: Broader retrieval regression (informational)**
 
 ```bash
 uv run pytest tests/retrieval -q --tb=line
@@ -929,7 +929,7 @@ uv run pytest tests/retrieval -q --tb=line
 
 Expected: no new failures vs pre-task HEAD (legacy ladder tests remain opt-in).
 
-- [ ] **Step 3: Codingwork gold eval (gate)**
+- [x] **Step 3: Codingwork gold eval (gate)**
 
 Artifacts from prior runs on this box:
 
@@ -985,26 +985,17 @@ PY
 
 Same-protocol note: drop `codingwork-0029` only if those two gold raw paths are still missing (same as prior runs). Document case count actually scored.
 
-- [ ] **Step 4: Append results note to this plan + commit if docs changed**
+- [x] **Step 4: Append results note to this plan + commit if docs changed**
 
-```markdown
-#### Task 5 results note (YYYY-MM-DD UTC+8)
+#### Task 5 results note (2026-11-09 UTC+8)
 
 | Run | Cases | R@10 macro | Notes |
 | --- | --- | --- | --- |
-| Unit smoke (Tasks 1–3 tests) | … | — | … |
-| `tests/retrieval` | … | — | … |
-| codingwork-wiki-query-gold | … | … | PASS ≥0.75 / FAIL_LOUD / SKIPPED_NO_VAULT |
-```
+| Unit smoke (Tasks 1–3 tests) | 22 | — | PASS (`query_recovery` CJK/coverage/relaxed planners + `test_sag2_pipeline_default`) |
+| `tests/retrieval` | 467 passed / 1 skipped | — | No new failures; legacy ladder tests remain opt-in |
+| codingwork-wiki-query-gold | **29** (dropped `codingwork-0029`; same protocol — 2 gold raw paths still missing under `07_SS2CSC`) | **0.8351** | **PASS** ≥0.75; first-knife baseline **0.6428** (Δ **+0.1923**); hop-default **0.6655** (Δ **+0.1696**); MRR 0.7500; nDCG 0.7434; P95 ~14.1s; under-test commit `21da8d5`; vault `/tmp/sag2-eval/codingwork-vault` (re-extracted UTF-8 from `codingwork-eval-bundle.zip`; FTS `index build` active+raw); report `/tmp/sag2-eval/reports-recall-knife/`; fallback reasons: `coverage_raw_merge`×2, `wiki_hop_empty`×1, `raw_single_shot_empty`×1; **P2 ladder not re-enabled** |
 
-```bash
-git add -f docs/plans/2026-11-09-sag2-recall-knife-coverage-relaxed.md
-git commit -m "$(cat <<'EOF'
-docs: record sag2 recall knife eval smoke results
-
-EOF
-)" || true
-```
+Gate outcome: **PASS** (measured R@10 = `0.835081585081585` ≥ 0.75). Application code left unchanged in Task 5.
 
 ---
 
