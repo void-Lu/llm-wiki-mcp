@@ -1123,19 +1123,21 @@ git commit -m "docs+feat(retrieval): sag2_hop telemetry and v1.0.0 changelog"
 
 **Interfaces:** none new.
 
-- [ ] **Step 1: Run unit smoke**
+- [x] **Step 1: Run unit smoke**
 
 ```bash
 uv run pytest tests/retrieval/test_sag2_evidence.py tests/retrieval/test_sag2_terms.py tests/retrieval/test_sag2_hop.py tests/retrieval/test_sag2_pipeline_default.py -q
+# 20 passed in 0.36s (2026-11-09, box, HEAD 1265ec3)
 ```
 
-- [ ] **Step 2: Run broader retrieval regression (informational)**
+- [x] **Step 2: Run broader retrieval regression (informational)**
 
 ```bash
 uv run pytest tests/retrieval -q --tb=line
+# 447 passed, 1 skipped in 30.35s (informational; not a merge gate)
 ```
 
-- [ ] **Step 3: Optional gold eval (not a gate)**
+- [x] **Step 3: Optional gold eval (not a gate)**
 
 ```bash
 uv run llm-wiki-mcp retrieval-eval --help
@@ -1144,7 +1146,21 @@ uv run llm-wiki-mcp retrieval-eval --help
 
 Architecture alignment remains the acceptance criterion; attach numbers as commentary only.
 
-- [ ] **Step 4: Commit only if docs/notes changed**
+#### Task 8 results note (2026-11-09 UTC+8, non-blocking)
+
+| Run | Cases | R@10 macro | MRR@10 | nDCG@10 | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Unit smoke (sag2_*) | 20 tests | — | — | — | all green |
+| `tests/retrieval` | 447 pass / 1 skip | — | — | — | informational |
+| CI fixture `graph_v1` (box, lexical, graph on) | 52 | **0.8125** | 0.5115 | 0.5746 | vs published baseline R@10 0.740 / MRR 0.489 / nDCG 0.548 on older ranking; **not** a production gate |
+| LU-C `codingwork-wiki-query-gold` on **v1.0.0** `1265ec3` | 29 (dropped `codingwork-0029`: 2 gold raw paths missing from vault) | **0.6655** | 0.5482 | 0.5574 | P95 ~23.8s (hop cost); commentary only |
+| Prior P2 cooccur report on same gold (v0.9.x `8fdfce5`, 30 cases) | 30 | **0.8333** | 0.7316 | 0.7293 | ladder-era reference; vault fingerprint then 227 files / now 230 |
+
+**Acceptance:** architecture alignment with paper §3 / Algorithm 1 (Tasks 1–7) — **met**. Gold Recall drop vs P2 ladder is expected after retiring coverage/relaxed/raw_zero defaults; do **not** fail the branch on this alone.
+
+Report artifacts (LU-C, not committed): `.eval/gold-sample-2026-10-19/reports-v1.0.0-sag2/`; box graph_v1: `/tmp/sag2-eval/reports-on/`.
+
+- [x] **Step 4: Commit only if docs/notes changed**
 
 ```bash
 git add -f docs/plans/2026-11-09-sag2-hop-default.md
