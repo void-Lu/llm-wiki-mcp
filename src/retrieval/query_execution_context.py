@@ -20,6 +20,7 @@ from retrieval.query_recovery import (
     assemble_recovery,
     compose_score,
     fallback_envelope,
+    plan_coverage_raw_merge,
     plan_fallback,
     plan_raw_single_shot,
     resolve_fallback_lexical_mode,
@@ -152,6 +153,7 @@ class QueryExecutionView:
     sag2_truncated: bool = False
     sag2_raw_single_shot: bool = False
     sag2_raw_fallback_mode: str = "none"
+    sag2_recovery_reasons: Sequence[str] = ()
 
 
 @dataclass
@@ -192,6 +194,7 @@ class QueryExecutionContext:
     sag2_truncated: bool = False
     sag2_raw_single_shot: bool = False
     sag2_raw_fallback_mode: str = "none"
+    sag2_recovery_reasons: list[str] = field(default_factory=list, init=False)
     raw_store: RetrievalIndexStore | None = field(default=None, init=False)
     raw_snapshot: QueryCorpusSnapshot | None = field(default=None, init=False)
     selected: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -428,6 +431,7 @@ class QueryExecutionContext:
             sag2_truncated=self.sag2_truncated,
             sag2_raw_single_shot=self.sag2_raw_single_shot,
             sag2_raw_fallback_mode=self.sag2_raw_fallback_mode,
+            sag2_recovery_reasons=tuple(self.sag2_recovery_reasons),
         )
 
     def execute(self, request_view: QueryRequestView) -> QueryExecutionView:
@@ -477,6 +481,7 @@ class QueryExecutionContext:
             status=_freeze_value(view.status),
             expansion_suggestions=_freeze_value(view.expansion_suggestions),
             uncovered_latin_terms=_freeze_value(view.uncovered_latin_terms),
+            sag2_recovery_reasons=_freeze_value(view.sag2_recovery_reasons),
             discovery=_freeze_value(view.discovery),
             discovery_entities=_freeze_value(view.discovery_entities),
             discovery_source_items=_freeze_value(view.discovery_source_items),
@@ -486,6 +491,139 @@ class QueryExecutionContext:
         object.__setattr__(self, "_sealed", True)
         return frozen_view
 
+
+    def _run_sag2_default_recovery(self, request_view: QueryRequestView) -> None:
+        """Default-path recovery: coverage raw merge, then empty/weak raw once."""
+
+        self.sag2_recovery_reasons = []
+        self.uncovered_latin_terms = recall_policy.uncovered_latin_terms(
+            request_view.question, self.selected
+        )
+        if plan_coverage_raw_merge(
+            uncovered_latin_terms=self.uncovered_latin_terms,
+            selected_nonempty=bool(self.selected),
+            effective_scope=request_view.effective_scope,
+        ):
+            self._run_coverage_raw_merge(request_view)
+        # Knife 2 (wiki_relaxed) lands in Task 3; Task 2 keeps empty/weak raw
+        # but skips a second FTS when coverage already spent the single shot.
+        if not self.sag2_raw_single_shot:
+            self._run_raw_single_shot(request_view)
+
+    def _run_coverage_raw_merge(self, request_view: QueryRequestView) -> None:
+        """One strict raw FTS merged into a nonempty wiki pool for uncovered Latin."""
+
+        self._ensure_open()
+        # Consume the single raw shot even if merge later admits nothing.
+        self.sag2_raw_single_shot = True
+        self.sag2_raw_fallback_mode = "raw_merge"
+        self.cancellation.checkpoint("fallback")
+
+        availability = self.raw_availability()
+        warning = self._raw_warning()
+        if availability != "fresh":
+            self.raw_fts_hits = 0
+            self.raw_index_warning = warning
+            return
+
+        raw_store = self.get_raw_store()
+        raw_snapshot = self.capture_raw_snapshot()
+        candidate_limit = min(
+            max(request_view.top_k * 8, recall_policy.RAW_FALLBACK_LIMIT),
+            recall_policy.RAW_FALLBACK_CANDIDATE_LIMIT,
+        )
+        try:
+            raw_hits = raw_store.search_fts(
+                request_view.question,
+                limit=candidate_limit,
+                mode="strict",
+                project=request_view.project,
+                page_type=request_view.filters.type,
+                tags=list(request_view.filters.tags),
+            )
+        except RetrievalIndexError as exc:
+            self.raw_fts_hits = 0
+            self.raw_index_warning = _raw_index_warning({"code": exc.code})
+            return
+
+        raw_metadata: dict[str, dict[str, Any]] = {}
+        for index, page in enumerate(raw_snapshot.pages):
+            self.cancellation.checkpoint_batch(index, every=16, stage="snapshot")
+            frontmatter = page.get("frontmatter")
+            raw_metadata[str(page["path"])] = (
+                dict(frontmatter) if isinstance(frontmatter, Mapping) else {}
+            )
+
+        raw_items: list[dict[str, Any]] = []
+        for rank, hit in enumerate(raw_hits, 1):
+            self.cancellation.checkpoint_batch(rank - 1, every=16, stage="fallback")
+            if not eligible(hit, raw_metadata, scope="raw"):
+                continue
+            raw_items.append(candidate_item(hit, score=float(hit.score), fts_rank=rank))
+
+        self.raw_fts_hits = len(raw_hits)
+        self.raw_index_warning = ""
+        if not raw_items:
+            return
+
+        step_counts = recall_policy.step_counts_for_pages(
+            sorted({item["hit"].page_path for item in raw_items}),
+            raw_store,
+            raw_store,
+        )
+        for item in raw_items:
+            count = step_counts.get(item["hit"].page_path, 0)
+            item["score"] = round(item["score"] + step_bonus(count), 12)
+        raw_items.sort(
+            key=lambda item: (
+                -item["score"],
+                item["hit"].page_path,
+                item["hit"].passage_id,
+            )
+        )
+
+        # Prefer coverage merge (not weak merge) so uncovered Latin gates raw.
+        covered_raw_items = recall_policy.merge_coverage_items(
+            [],
+            raw_items,
+            self.uncovered_latin_terms,
+            rrf_k=request_view.effective_rrf_k,
+        )
+        covered_paths = {item["hit"].page_path for item in covered_raw_items}
+        raw_items = [
+            item for item in raw_items if item["hit"].page_path in covered_paths
+        ]
+        if not raw_items:
+            return
+
+        merged = recall_policy.merge_coverage_items(
+            self.selected,
+            raw_items,
+            self.uncovered_latin_terms,
+            rrf_k=request_view.effective_rrf_k,
+        )
+        selected = recall_policy.adaptive_expand(
+            select_best_per_page(merged), request_view.top_k
+        )[: request_view.top_k]
+        recovery = assemble_recovery(
+            selected,
+            condition=RecoveryCondition(
+                "raw", ("coverage_raw_merge",), "item"
+            ),
+            candidates=[*self.selected, *raw_items],
+            store=self.store,
+            raw_store=raw_store,
+            cancellation=self.cancellation,
+        )
+        self.selected = selected
+        self.context_items = recovery.context_items
+        self.recovery = recovery
+        self.lexical_mode = "strict"
+        self.coverage_fallback = any(
+            item["hit"].source_kind == "raw" for item in selected
+        )
+        if self.coverage_fallback:
+            self.sag2_recovery_reasons.append("coverage_raw_merge")
 
     def _run_raw_single_shot(self, request_view: QueryRequestView) -> None:
         """One strict raw FTS when wiki+hop is empty/very weak (no P2 ladder)."""
@@ -677,7 +815,7 @@ class QueryExecutionContext:
             else []
         )
         if not self.enable_legacy_p2_ladder:
-            self._run_raw_single_shot(request_view)
+            self._run_sag2_default_recovery(request_view)
             return
         query_extra_terms: list[str] = []
         query_term_variants: dict[str, list[str]] = {}

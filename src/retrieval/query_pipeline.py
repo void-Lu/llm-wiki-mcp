@@ -814,6 +814,7 @@ def assemble_public_projection(
             "truncated": view.sag2_truncated,
             "raw_single_shot": view.sag2_raw_single_shot,
             "raw_fallback_mode": view.sag2_raw_fallback_mode,
+            "recovery_reasons": list(view.sag2_recovery_reasons),
         },
         "counters": {
             "fts_hits": seed_stats.fts_hits,

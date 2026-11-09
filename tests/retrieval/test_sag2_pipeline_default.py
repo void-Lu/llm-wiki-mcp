@@ -287,6 +287,7 @@ def test_pipeline_includes_sag2_hop_telemetry(tmp_path: Path) -> None:
         "truncated",
         "raw_single_shot",
         "raw_fallback_mode",
+        "recovery_reasons",
     }
     assert isinstance(sag2["hops_run"], int)
     assert isinstance(sag2["judge_calls"], int)
@@ -328,7 +329,7 @@ def test_raw_weak_pool_merges_and_keeps_wiki(tmp_path: Path, monkeypatch: pytest
         root,
         "wiki/concepts/report-stub.md",
         {"title": "Stub Notes", "type": "concept"},
-        "reports overview without the access verb.",
+        "access reports overview without depth.",
     )
     raw = root / "raw/sources/file/default/help.md"
     raw.parent.mkdir(parents=True, exist_ok=True)
@@ -379,3 +380,91 @@ def test_pipeline_sag2_telemetry_includes_raw_fallback_mode(tmp_path: Path) -> N
     result = run_query_v2(root, "email capture", top_k=3)
     sag2 = result["pipeline"]["sag2_hop"]
     assert sag2["raw_fallback_mode"] in {"none", "raw_merge", "raw_replace"}
+
+
+def test_coverage_raw_merge_keeps_wiki_and_adds_raw(tmp_path: Path) -> None:
+    """Uncovered Latin on a strong-ish wiki pool must merge raw, not replace."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_test_page(
+        root,
+        "wiki/concepts/invoice.md",
+        {"title": "Invoice", "type": "concept"},
+        "invoice approval is documented here",
+    )
+    raw = root / "raw/sources/references/rag.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: RAG Reference\n---\n\nRAG evidence complements invoice retrieval.",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    result = run_query_v2(
+        root, "invoice RAG", retrieval_mode="lexical", top_k=5
+    )
+    assert result["ok"] is True
+    all_paths = [item["path"] for item in result["results"]] + [
+        item["path"] for item in result.get("additional_results", [])
+    ]
+    assert "wiki/concepts/invoice.md" in all_paths
+    assert any("rag" in str(p).casefold() or str(p).startswith("raw/") for p in all_paths)
+    sag2 = result["pipeline"]["sag2_hop"]
+    assert "coverage_raw_merge" in sag2["recovery_reasons"]
+    assert sag2["raw_single_shot"] is True
+    assert sag2["raw_fallback_mode"] == "raw_merge"
+    assert result["pipeline"]["coverage"]["triggered"] is True
+    assert "rag" in [
+        t.casefold() for t in result["pipeline"]["coverage"]["uncovered_latin_terms"]
+    ] or result["pipeline"]["coverage"]["triggered"] is True
+    # Must not look like full P2 ladder (no wiki_relaxed / raw_zero lexical mode).
+    assert result["pipeline"]["lexical"]["mode"] not in {
+        "wiki_relaxed",
+        "raw_zero",
+        "coverage",
+    }
+
+
+def test_coverage_and_weak_share_one_raw_shot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Coverage raw must not be followed by a second weak raw FTS."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    write_test_page(
+        root,
+        "wiki/concepts/invoice.md",
+        {"title": "Invoice", "type": "concept"},
+        "invoice approval is documented here",
+    )
+    raw = root / "raw/sources/references/rag.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(
+        "---\ntitle: RAG Reference\n---\n\nRAG evidence complements invoice retrieval.",
+        encoding="utf-8",
+    )
+    refresh_indexes(root)
+
+    import retrieval.query_execution_context as qec
+
+    calls = {"n": 0}
+    real_get = qec.QueryExecutionContext.get_raw_store
+
+    def wrapped(self):  # noqa: ANN001
+        store = real_get(self)
+        if not getattr(store, "_knife_counted", False):
+            orig = store.search_fts
+
+            def counted(query, **kwargs):  # noqa: ANN001
+                calls["n"] += 1
+                return orig(query, **kwargs)
+
+            store.search_fts = counted  # type: ignore[method-assign]
+            store._knife_counted = True  # type: ignore[attr-defined]
+        return store
+
+    monkeypatch.setattr(qec.QueryExecutionContext, "get_raw_store", wrapped)
+
+    result = run_query_v2(root, "invoice RAG", retrieval_mode="lexical", top_k=5)
+    assert "coverage_raw_merge" in result["pipeline"]["sag2_hop"]["recovery_reasons"]
+    assert calls["n"] <= 1
