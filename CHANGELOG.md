@@ -19,6 +19,14 @@
 - **不做：** 不恢复默认 P2 ladder；本轮不含 TermSelector 问句稀有专名保留（Approach C）。
 - **验收（已跑，门禁未过）：** codingwork gold 同口径目标 **R@10 ≥ 0.80**。LU-C 实测（commit `493ba9e`，29 cases，丢 `codingwork-0029`）：**R@10 = 0.6428**（基线 hop-default 0.6655，Δ −0.0227）→ **FAIL_LOUD**；不得宣称召回回升成功。应用代码保持 Approach A 现状，后续可跟 Approach C / 阈值 / merge 排序；**不**静默恢复 P2 ladder。详设 `docs/specs/2026-11-09-sag2-recall-lift-merge-judge-design.md`；评测笔记见 plan Task 4 results。
 
+## 2026-11-09 — v1.0.0：SAG2 召回第二刀（coverage raw merge + CJK wiki_relaxed）
+
+- **刀 1 — 空洞 raw merge：** hop+图扩展后，若问句仍有未覆盖 Latin/标识符 token（复用 `uncovered_latin_terms`）且池非空，则 **一次** raw FTS，经 `merge_coverage_items` **merge** 进 wiki+hop（非整池 replace）；与第一刀弱池 merge **共用至多一次** raw。
+- **刀 2 — 空池/CJK wiki_relaxed：** 池为空或弱（top 证据 `< 0.15`）**且**问句含 CJK 时，发 **单次** 有界 `wiki_relaxed`（`WIKI_RELAXED_SINGLE_SHOT_LIMIT=40`）；弱噪声弃权；仍空则走既有 empty→raw **replace**。
+- **Telemetry：** `pipeline.sag2_hop.recovery_reasons` 可含 `coverage_raw_merge` / `wiki_relaxed_cjk` / `wiki_relaxed_empty`；`raw_fallback_mode` 仍为 `none` | `raw_merge` | `raw_replace`；`pipeline.coverage.triggered` 在刀 1 采纳 raw 时可为 `true`。
+- **不做：** 不恢复默认 P2 ladder；本轮不含刀 3（图扩展/bonus 抖动）。
+- **验收：** codingwork gold 同口径 **R@10 ≥ 0.75**；未达标须 FAIL_LOUD。详设 `docs/specs/2026-11-09-sag2-recall-knife-coverage-relaxed-design.md`。
+
 ## 2026-10-20 — 检索 P2：raw 池多词实体共现 / 短语召回（0008）
 
 - 
