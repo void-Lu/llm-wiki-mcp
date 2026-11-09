@@ -91,6 +91,10 @@ class QuerySeedStats:
     scope_rules: tuple[str, ...]
 
 
+SAG2_EVIDENCE_BLEND_WEIGHT = 1.0
+"""Soft-blend factor: evidence_score in [0,1] added onto fusion score."""
+
+
 @dataclass(frozen=True)
 class IndexStoreSearcher:
     """LexicalSearcher adapter over ``RetrievalIndexStore.search_fts``."""
@@ -1038,19 +1042,27 @@ def run_query_v2(
                 tags=tuple(filters.tags),
             ),
         ).run(question, stage_one_hits[:100])
-        # Preserve stage-one BM25 order (path/RRF tie-breaks). Append only
-        # hop-discovered passages so evidence reordering cannot invert equals.
+        evidence_by_id = dict(hop.evidence_scores)
+        # Prefer hop-judged evidence order for fts_rank → RRF, but break equal
+        # evidence by page_path (not passage_id hash) so path ties stay stable.
+        judged = sorted(
+            hop.candidates,
+            key=lambda hit: (
+                -evidence_by_id.get(hit.passage_id, 0.0),
+                hit.page_path,
+                hit.passage_id,
+            ),
+        )
         merged: list[PassageHit] = []
         seen_ids: set[str] = set()
-        for hit in stage_one_hits:
+        for hit in judged:
             merged.append(hit)
             seen_ids.add(hit.passage_id)
-        for hit in hop.candidates:
+        for hit in stage_one_hits:
             if hit.passage_id not in seen_ids:
                 merged.append(hit)
                 seen_ids.add(hit.passage_id)
         fts = merged
-        evidence_by_id = dict(hop.evidence_scores)
         sag2_hops_run = hop.hops_run
         sag2_judge_calls = hop.judge_calls
         sag2_expansion_terms = hop.expansion_terms
@@ -1143,11 +1155,13 @@ def run_query_v2(
         _merge_graph_expansion(items, graph_candidates, graph_passages, cancellation)
 
     expand_graph(scored)
-    # Keep fusion/path tie-break semantics. Hop already ordered candidates by
-    # evidence and that order is mirrored in fts_rank → RRF; stash evidence for
-    # telemetry/debug without overriding score sort.
+    # Soft-blend EvidenceJudge into fusion score so hop quality can reorder
+    # BM25-close hits without swamping title/exact/authority (path/title ties
+    # remain the final stable keys when blended scores match).
     for item in scored:
-        item["evidence_score"] = float(item.get("evidence_score", 0.0))
+        evidence = float(item.get("evidence_score", 0.0))
+        item["evidence_score"] = evidence
+        item["score"] = round(item["score"] + SAG2_EVIDENCE_BLEND_WEIGHT * evidence, 12)
     scored.sort(key=lambda item: (-item["score"], item["hit"].page_path, item["hit"].passage_id))
     # Retrieval is page-first: the public result list keeps one best passage
     # per page, while the internal pack is assembled page-by-page in reading

@@ -53,3 +53,54 @@ def test_legacy_p2_ladder_opt_in_still_reachable(tmp_path: Path) -> None:
     assert result["ok"] is True
     # Opt-in must still expose sag2_hop telemetry (hop remains default main path).
     assert isinstance(result["pipeline"].get("sag2_hop"), dict)
+
+def test_pack_path_prefers_evidence_score_over_stage_one_bm25_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Hop evidence must outrank stage-one BM25 / path order on the pack path."""
+    root = tmp_path / "vault"
+    create_wiki_root(root)
+    # Both pages match query "needle". Path/BM25 would favor zzz (higher TF /
+    # later path must not win once evidence prefers aaa).
+    write_test_page(
+        root,
+        "wiki/concepts/zzz-weak.md",
+        {"title": "Weak Evidence", "type": "concept"},
+        "needle needle needle needle needle",
+    )
+    write_test_page(
+        root,
+        "wiki/concepts/aaa-strong.md",
+        {"title": "Preferred Evidence", "type": "concept"},
+        "needle calibration procedure for sensor array",
+    )
+    refresh_indexes(root)
+
+    from retrieval.sag2_evidence import HeuristicEvidenceJudge
+
+    real_score = HeuristicEvidenceJudge.score
+
+    def forced_score(self, question, passage_text, *, context=()):
+        lowered = passage_text.casefold()
+        if "calibration procedure" in lowered:
+            return 0.95
+        if lowered.count("needle") >= 3:
+            return 0.05
+        return real_score(self, question, passage_text, context=context)
+
+    monkeypatch.setattr(HeuristicEvidenceJudge, "score", forced_score)
+
+    result = run_query_v2(
+        root,
+        "needle",
+        top_k=2,
+        retrieval_mode="lexical",
+        include_context_pack=False,
+    )
+    assert result["ok"] is True
+    paths = [item["path"] for item in result["results"]]
+    assert paths[:2] == [
+        "wiki/concepts/aaa-strong.md",
+        "wiki/concepts/zzz-weak.md",
+    ]
+
