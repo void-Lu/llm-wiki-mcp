@@ -489,13 +489,39 @@ def test_builder_removes_only_its_staging_tree_after_failure(
     assert list(tmp_path.glob(".failed-bundle.stage-*")) == []
 
 
-def test_cli_accepts_output_dir_and_allow_dirty_only() -> None:
+def test_builder_force_replaces_existing_directory_atomically_and_preserves_on_failure(
+    fixture_repo: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "fixed-bundle"
+    output.mkdir()
+    (output / "stale.txt").write_text("old", encoding="utf-8")
+
+    # --force replaces existing directory cleanly
+    rebuilt = _build(fixture_repo, output, force=True)
+    assert rebuilt == output
+    assert not (output / "stale.txt").exists()
+    assert (output / "codex" / "plugin.json").is_file()
+    assert list(tmp_path.glob(".fixed-bundle.old-*")) == []
+
+    # Failed build with --force leaves previous output intact
+    (fixture_repo / "plugins" / "hosts" / "dsh" / MCP_FILENAMES["dsh"]).write_text(
+        "not json", encoding="utf-8"
+    )
+    with pytest.raises(BUILDER.BuildError, match="invalid MCP config"):
+        _build(fixture_repo, output, force=True)
+    assert (output / "codex" / "plugin.json").is_file()
+    assert list(tmp_path.glob(".fixed-bundle.stage-*")) == []
+
+
+def test_cli_accepts_output_dir_allow_dirty_and_force_only() -> None:
     default = BUILDER.parse_args(["--output-dir", "out"])
     assert default.output_dir == Path("out")
     assert default.allow_dirty is False
+    assert default.force is False
 
-    allowed = BUILDER.parse_args(["--output-dir", "out", "--allow-dirty"])
+    allowed = BUILDER.parse_args(["--output-dir", "out", "--allow-dirty", "--force"])
     assert allowed.allow_dirty is True
+    assert allowed.force is True
 
     with pytest.raises(SystemExit):
         BUILDER.parse_args(["--output-dir", "out", "--server-command", "custom-server"])

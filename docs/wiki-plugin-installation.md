@@ -17,9 +17,9 @@ uv run python scripts/build_wiki_plugins.py --output-dir dist/wiki-plugins
 $wikiPluginBundle = (Resolve-Path dist/wiki-plugins).Path
 ```
 
-如需在未提交改动时做本地开发构建，可显式传入 `--allow-dirty`。
+如需在未提交改动时做本地开发构建，可显式传入 `--allow-dirty`；如需原地原子覆盖已有输出目录（推荐固定使用 `dist/wiki-plugins` 以便各宿主复用同一本地路径），可传入 `--force`。
 
-输出包含 `codex`、`claude`、`copilot`、`antigravity`、`dsh` 五个自包含安装目录以及本地市场清单。每个宿主目录自带 `server/llm_wiki_mcp-<version>-py3-none-any.whl`、`server/constraints.txt` 与简短的 `README.md`，MCP 配置均通过 `uvx` 与宿主插件目录变量启动，不含本机绝对路径。构建新版本时请使用新的输出目录，升级后重开宿主会话。建议在宿主中只保留一个 `llm-wiki` MCP 注册，避免插件与原手工配置同时暴露同一套工具。
+输出包含 `codex`、`claude`、`copilot`、`antigravity`、`dsh` 五个自包含安装目录以及本地市场清单。每个宿主目录自带 `server/llm_wiki_mcp-<version>-py3-none-any.whl`、`server/constraints.txt` 与简短的 `README.md`，MCP 配置均通过 `uvx` 与宿主插件目录变量启动，不含本机绝对路径。升级新版本时可用 `--force` 覆盖同一输出目录，完成后重开宿主会话。建议在宿主中只保留一个 `llm-wiki` MCP 注册，避免插件与原手工配置同时暴露同一套工具。
 
 ## 零配置 Vault、自定义初始化与重命名
 

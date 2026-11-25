@@ -410,13 +410,21 @@ def build_plugins(
     output_dir: str | Path,
     *,
     allow_dirty: bool = False,
+    force: bool = False,
 ) -> Path:
-    """Build self-contained host plugin bundles into a new output directory atomically."""
+    """Build self-contained host plugin bundles into an output directory atomically."""
 
     root = Path(repo_root).expanduser().resolve()
     output = Path(output_dir).expanduser().resolve()
+    if output.parent == output or output == root or _is_within(root, output):
+        raise BuildError(f"refusing to write to unsafe output directory: {output}")
     if output.exists():
-        raise BuildError(f"output directory already exists; choose a new path: {output}")
+        if not force:
+            raise BuildError(
+                f"output directory already exists; choose a new path or pass --force: {output}"
+            )
+        if not output.is_dir():
+            raise BuildError(f"output path exists and is not a directory: {output}")
 
     templates_root = (root / "plugins" / "hosts").resolve()
     reserved_roots = ((root / "plugins").resolve(), (root / "skills").resolve())
@@ -534,7 +542,18 @@ def build_plugins(
             _stamp_manifest_version(host_output, host, version)
 
         _write_marketplaces(staged_root, version=version)
-        staged_root.rename(output)
+        if output.exists():
+            backup_root = output.parent / f".{output.name}.old-{uuid.uuid4().hex}"
+            output.rename(backup_root)
+            try:
+                staged_root.rename(output)
+            except BaseException:
+                if not output.exists() and backup_root.exists():
+                    backup_root.rename(output)
+                raise
+            shutil.rmtree(backup_root, ignore_errors=True)
+        else:
+            staged_root.rename(output)
     except BaseException:
         if staged_root.exists():
             shutil.rmtree(staged_root, ignore_errors=True)
@@ -548,13 +567,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--output-dir",
         required=True,
         type=Path,
-        help="new output root; must not already exist",
+        help="output root directory; must not already exist unless --force is passed",
     )
     parser.add_argument(
         "--allow-dirty",
         action="store_true",
         default=False,
         help="allow building when the Git working tree has uncommitted changes",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="atomically replace an existing output directory after staging succeeds",
     )
     return parser.parse_args(argv)
 
@@ -567,6 +592,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repo_root,
             options.output_dir,
             allow_dirty=options.allow_dirty,
+            force=options.force,
         )
     except (BuildError, OSError) as exc:
         print(f"build failed: {exc}", file=sys.stderr)

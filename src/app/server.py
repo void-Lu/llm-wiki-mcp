@@ -15,7 +15,14 @@ from typing import Any, Literal
 from mcp.server import MCPServer
 from mcp.types import CallToolResult, InputRequiredResult, TextContent, ToolAnnotations
 
-from app.public_contracts import PublicError, PublicResult, public_error, public_error_from_exception, project_public_result
+from app.public_contracts import (
+    PublicError,
+    PublicResult,
+    project_public_result,
+    public_error,
+    public_error_from_exception,
+    unknown_arguments_error,
+)
 from archive.archive_status_reader import ArchiveStatusReader
 from wiki.note_writer import save_obsidian_note as run_write_note
 from wiki.wiki_update import apply_update as run_apply_update
@@ -152,7 +159,7 @@ class StrictMCPServer(MCPServer):
             )
             unknown = set(arguments) - allowed
             if unknown:
-                payload = public_error("validation_error")
+                payload = project_public_result(unknown_arguments_error(unknown))
                 return CallToolResult(
                     content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
                     structured_content=payload,
@@ -542,7 +549,14 @@ def wiki_list(
     storeScope: Literal["active", "raw", "archive"] | None = None,
     pageSize: int | None = None,
 ) -> dict[str, Any]:
-    """List metadata from one physical scope; filters may target a file or directory prefix."""
+    """List metadata from one physical scope (``store_scope``: ``active``, ``raw``, or ``archive``).
+
+    Use ``filters.path_prefix`` (or ``filters.pathPrefix``), e.g.
+    ``{"path_prefix": "wiki/projects/"}``, to restrict results to a file or
+    directory prefix; do not pass ``path_prefix`` as a top-level argument.
+    ``filters`` also accepts ``type``, ``tags``, ``project``, ``freshness``,
+    ``lifecycle``, and ``corpus``.
+    """
 
     resolution = _registered_resolution()
     return ContentCatalogService(resolution.root, logical_vault=resolution.logical_name).list_items(
