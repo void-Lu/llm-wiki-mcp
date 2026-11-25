@@ -85,3 +85,15 @@ def test_installation_docs_prefer_uv_commands():
     assert "uv sync --extra dev" in claude
     assert "命令为 `uv run pytest tests/<package>/test_<module>.py`" in claude
     assert "python -m pip install -e" not in combined
+
+
+def test_readme_cc_switch_config_uses_cross_client_powershell_without_cmd_quoting():
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert '"command": "powershell.exe"' in readme
+    assert "GetEnvironmentVariable($k,'User')" in readme
+    assert "GetEnvironmentVariable($k,'Machine')" in readme
+    assert "SetEnvironmentVariable($k,$v)" in readme
+    assert "cmd /c" not in readme
+    assert '"command": "cmd"' not in readme
+    assert "%LLM_WIKI_MCP_DIR%" not in readme

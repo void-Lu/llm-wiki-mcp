@@ -39,9 +39,10 @@ def test_historical_page_envelopes_remain_byte_compatible(tmp_path: Path) -> Non
     )
     rendered = render_page({"type": "concept", "generated": True}, "\n正文\n")
 
-    assert prepared.text.encode("utf-8") == (fixture_root / "prepare.md").read_bytes()
-    assert chat.encode("utf-8") == (fixture_root / "chat.md").read_bytes()
-    assert rendered.encode("utf-8") == (fixture_root / "render.md").read_bytes()
+    for filename, text in (("prepare.md", prepared.text), ("chat.md", chat), ("render.md", rendered)):
+        # Existing Windows checkouts can retain CRLF in these snapshots.
+        expected = (fixture_root / filename).read_bytes().replace(b"\r\n", b"\n")
+        assert text.encode("utf-8") == expected, filename
     assert prepared.text_hash == sha256(prepared.text.encode("utf-8")).hexdigest()
 
 

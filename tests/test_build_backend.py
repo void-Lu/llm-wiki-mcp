@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -124,7 +125,10 @@ def test_wheel_embeds_revision_and_imports_without_git_metadata(
     )
     assert isolated.returncode == 0, isolated.stderr
     runtime = json.loads(isolated.stdout)
-    assert runtime["package_version"] == "0.9.0"
+    project_metadata = tomllib.loads(
+        (project / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert runtime["package_version"] == project_metadata["project"]["version"]
     assert runtime["revision"] == FULL_REVISION
     assert runtime["dirty"] is False
     assert runtime["revision_source"] == "build"

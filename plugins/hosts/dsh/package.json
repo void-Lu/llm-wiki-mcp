@@ -1,0 +1,40 @@
+{
+  "name": "dsh-llm-wiki",
+  "version": "1.1.0",
+  "private": false,
+  "type": "module",
+  "main": "index.mjs",
+  "files": [
+    "README.md",
+    "adapter.mjs",
+    "cordis.patch.yml",
+    "index.mjs",
+    "mcp.json",
+    "server/**",
+    "session-guidance.md",
+    "skills/shared-spec-vault/**"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": "0.2.2-rc.5 || 0.2.3-alpha.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.5 || 0.2.3-alpha.2",
+    "@deepseek-ai/dsh-mcp-manager": "0.2.2-rc.5 || 0.2.3-alpha.2",
+    "@deepseek-ai/dsh-skill": "0.2.2-rc.5 || 0.2.3-alpha.2",
+    "@deepseek-ai/dsh-skill-filesystem": "0.2.2-rc.5 || 0.2.3-alpha.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.5 || 0.2.3-alpha.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-agent": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-mcp-manager": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-skill": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-skill-filesystem": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.3-alpha.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

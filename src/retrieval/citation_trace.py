@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from retrieval.query_telemetry import redact_query
+from wiki.wiki_paths import CITATION_TRACE_DIR
 
 BODY_KEYS = frozenset({"content", "text", "body", "passage_text", "raw_text"})
-CITATION_TRACE_DIR = Path(".llm-wiki") / "citation-traces"
 
 
 def _score_family(item: Mapping[str, Any]) -> str:
@@ -92,7 +92,7 @@ def citation_trace_query_hash(query_redacted: str) -> str:
 
 
 def write_citation_trace_dump(vault_root: str | Path, trace: Mapping[str, Any]) -> str:
-    """Write *trace* under ``.llm-wiki/citation-traces/``; return vault-relative path."""
+    """Write a citation trace dump and return its vault-relative path."""
 
     root = Path(vault_root).expanduser().resolve()
     query_redacted = str(trace.get("query_redacted") or "")

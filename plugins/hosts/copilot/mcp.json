@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "llm-wiki": {
+      "type": "stdio",
+      "command": "llm-wiki-mcp-server",
+      "args": []
+    }
+  }
+}

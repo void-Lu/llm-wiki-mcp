@@ -1,0 +1,5 @@
+- op: add
+  path: /-
+  value:
+    id: llm-wiki
+    name: dsh-llm-wiki

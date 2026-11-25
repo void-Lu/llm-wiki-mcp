@@ -11,6 +11,8 @@ from runtime.runtime_config import (
     QualityGateSettings,
     RuntimeConfigError,
     _normalize_storage_hash_path,
+    ensure_default_vault,
+    rename_global_config_vault,
     resolve_runtime_config,
     vault_storage_id,
     write_global_config,
@@ -493,3 +495,80 @@ def test_public_status_reports_effective_rrf_weights_and_their_sources(tmp_path:
         "rrf_weight_sources": {"fts": "config", "title": "config", "vector": "default"},
         "env_error": "invalid_config",
     }
+
+
+def test_ensure_default_vault_auto_creates_only_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    default_root = tmp_path / "Documents" / "llm-wiki-vault"
+    monkeypatch.setenv("LLM_WIKI_DEFAULT_VAULT_ROOT", str(default_root))
+    persisted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "runtime.runtime_config.persist_user_env_var",
+        lambda name, value: persisted.append((name, value)) or True,
+    )
+
+    # 1. Existing LLM_WIKI_VAULT_ROOT is preserved without creating default dir
+    user_vault = tmp_path / "user-vault"
+    user_vault.mkdir()
+    monkeypatch.setenv("LLM_WIKI_VAULT_ROOT", str(user_vault))
+    cfg_env = tmp_path / "cfg-env" / "config.yaml"
+    reg_env, created_env = ensure_default_vault(cfg_env)
+    assert created_env is False
+    assert not default_root.exists()
+    assert not cfg_env.exists()
+    assert reg_env.resolve_vault().root == user_vault.resolve()
+
+    # 2. Existing config.yaml default_vault is preserved untouched
+    monkeypatch.delenv("LLM_WIKI_VAULT_ROOT", raising=False)
+    cfg_existing = tmp_path / "cfg-existing" / "config.yaml"
+    write_global_config(cfg_existing, vault_name="custom", vault_root=user_vault, make_default=True)
+    reg_existing, created_existing = ensure_default_vault(cfg_existing)
+    assert created_existing is False
+    assert not default_root.exists()
+    assert reg_existing.resolve_vault().name == "custom"
+
+    # 3. Fresh machine auto-creates default dir, writes config.yaml, and persists env
+    cfg_fresh = tmp_path / "cfg-fresh" / "config.yaml"
+    reg_fresh, created_fresh = ensure_default_vault(cfg_fresh)
+    assert created_fresh is True
+    assert default_root.is_dir()
+    assert cfg_fresh.is_file()
+    assert reg_fresh.resolve_vault().name == "llm-wiki-vault"
+    assert reg_fresh.resolve_vault().root == default_root.resolve()
+    assert persisted == [("LLM_WIKI_VAULT_ROOT", str(default_root.resolve()))]
+
+
+def test_rename_global_config_vault_preserves_settings_and_validates_conflicts(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vaults" / "llm-wiki-vault"
+    vault.mkdir(parents=True)
+    cfg = tmp_path / "config.yaml"
+    write_global_config(
+        cfg,
+        vault_name="llm-wiki-vault",
+        vault_root=vault,
+        make_default=True,
+        telemetry={"retention_days": 45},
+    )
+
+    _, old_name, old_root, new_root, renamed = rename_global_config_vault(
+        cfg, old_name=None, new_name="codingwork", rename_directory=True
+    )
+    assert old_name == "llm-wiki-vault"
+    assert old_root == vault.resolve()
+    assert new_root == (tmp_path / "vaults" / "codingwork").resolve()
+    assert renamed is True
+    assert not vault.exists()
+    assert new_root.is_dir()
+
+    reg = ConfigRegistry.from_file(cfg)
+    resolved = reg.resolve_vault()
+    assert resolved.name == "codingwork"
+    assert resolved.root == new_root
+    assert resolved.settings.telemetry.retention_days == 45
+
+    with pytest.raises(RuntimeConfigError) as bad:
+        rename_global_config_vault(cfg, old_name="codingwork", new_name="../escape")
+    assert bad.value.code == "invalid_config"

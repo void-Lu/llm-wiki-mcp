@@ -24,6 +24,7 @@ from runtime.runtime_config import (
     ConfigRegistry,
     ResolvedVault,
     RuntimeConfigError,
+    ensure_default_vault,
     rrf_weights_with_env,
     VaultSettings,
 )
@@ -995,6 +996,8 @@ def wiki_manage_shared_spec(operation: str, page_path: str, action: str = "previ
 
 
 def main() -> None:
+    global CONFIG_REGISTRY
+    CONFIG_REGISTRY, _ = ensure_default_vault()
     mcp.run()
 
 

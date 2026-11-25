@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-project --no-python-downloads python \"$PLUGIN_ROOT/session_hook.py\" codex",
+            "commandWindows": "uv run --no-project --no-python-downloads python \"$env:PLUGIN_ROOT/session_hook.py\" codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

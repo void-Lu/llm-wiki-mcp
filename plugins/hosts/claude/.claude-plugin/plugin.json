@@ -1,0 +1,9 @@
+{
+  "name": "llm-wiki",
+  "version": "1.1.0",
+  "description": "Use the LLM Wiki knowledge vault through MCP.",
+  "license": "MIT",
+  "author": {
+    "name": "LLM Wiki MCP Contributors"
+  }
+}
