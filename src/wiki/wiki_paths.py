@@ -49,6 +49,7 @@ RETRIEVAL_DB_BY_SCOPE = {
     "archive": Path(".llm-wiki/archive-index.sqlite3"),
     "raw": Path(".llm-wiki/raw-retrieval.sqlite3"),
 }
+CITATION_TRACE_DIR = Path(".llm-wiki/citation-traces")
 VECTOR_INDEX = Path(".llm-wiki/vector-index")
 VECTOR_INDEX_BY_CORPUS = {
     "active": VECTOR_INDEX,

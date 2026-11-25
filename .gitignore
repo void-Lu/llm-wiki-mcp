@@ -16,7 +16,8 @@ rag/
 .venv
 .vscode
 dist
-scripts
+scripts/*
+!scripts/build_wiki_plugins.py
 src/__pycache__
 src/llm_wiki_mcp.egg-info
 tests/__pycache__
@@ -27,6 +28,7 @@ docs/plan/
 docs/superpowers/
 docs/*
 !docs/adr/
+!docs/wiki-plugin-installation.md
 /.netsuite-mcp/logs/
 /.vscode/mcp.json
 /.mcp.json

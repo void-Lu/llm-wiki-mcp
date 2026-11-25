@@ -18,6 +18,11 @@ uv sync --extra dev --extra vector
 `NETSUITE_LLM_WIKI_*` 环境变量；当前入口和配置变量以本文档中的 `llm-wiki-mcp-*`
 与 `LLM_WIKI_*` 为准。
 
+### 宿主插件
+
+可将内置 MCP 服务端 wheel、完整的 `shared-spec-vault` 与会话 hooks 装配成自包含的本地插件，覆盖 Codex、Claude Code、GitHub Copilot、Google Antigravity CLI 和 DeepSeek Harness（无需克隆仓库或手工 `uv sync`）。
+安装入口、首次预热、验证步骤与暂缓项见[宿主插件安装](docs/wiki-plugin-installation.md)。
+
 ### MCP SDK 2.x
 
 运行依赖固定在 `mcp>=2,<3`。stdio 启动方式和现有 MCP 客户端配置保持不变；服务器握手版本由运行时 provenance 通过 `MCPServer(..., version=...)` 公开上报。
@@ -87,12 +92,12 @@ server 按以下顺序解析 wiki 根目录（vault）：
 
 设好后再按各客户端方式引用变量：
 
-| 客户端                   | 配置文件                                                    | 变量引用方式                               |
-| ------------------------ | ----------------------------------------------------------- | ------------------------------------------ |
-| VS Code / GitHub Copilot | 项目根 `.vscode/mcp.json`                                   | `${env:VAR}`                               |
-| Claude Code              | 项目根 `.mcp.json` 或 `~/.claude.json` 的 `mcpServers`     | `${VAR}`（或下方 `cc-switch` 通用配置）     |
-| Codex                    | `~/.codex/config.toml`                                      | `powershell.exe` + `$env:VAR` + `env_vars`（或下方 `cc-switch` 通用配置） |
-| Antigravity / cc-switch  | `~/.gemini/config/mcp_config.json` 或 `cc-switch`           | `powershell.exe` + 进程/User/Machine 环境变量回退 |
+| 客户端                   | 配置文件                                                     | 变量引用方式                                                                      |
+| ------------------------ | ------------------------------------------------------------ | --------------------------------------------------------------------------------- |
+| VS Code / GitHub Copilot | 项目根 `.vscode/mcp.json`                                  | `${env:VAR}`                                                                    |
+| Claude Code              | 项目根 `.mcp.json` 或 `~/.claude.json` 的 `mcpServers` | `${VAR}`（或下方 `cc-switch` 通用配置）                                       |
+| Codex                    | `~/.codex/config.toml`                                     | `powershell.exe` + `$env:VAR` + `env_vars`（或下方 `cc-switch` 通用配置） |
+| Antigravity / cc-switch  | `~/.gemini/config/mcp_config.json` 或 `cc-switch`        | `powershell.exe` + 进程/User/Machine 环境变量回退                               |
 
 #### VS Code / GitHub Copilot（推荐）
 
@@ -197,19 +202,19 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 
 默认 core profile 精确注册以下 11 个业务工具。所有工具优先使用 `default_vault`，多库时传逻辑 `vault` 名；`vault_root`/`vaultRoot` 仅保留一个兼容发布周期，并会返回 `deprecated_vault_root` warning。
 
-| 工具                      | 说明                                                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `wiki_status`           | 返回 logical vault、配置来源、索引和运行状态摘要；不回显绝对路径、模型路径、凭据或脱敏规则正文。                   |
-| `wiki_list`             | 只读 metadata catalog；使用`store_scope=active\|raw\|archive`、page size 和 opaque cursor，不读取正文或 passages。 |
-| `wiki_get`              | 只读精确读取；required 输入是 opaque`content_ref`，正文默认关闭，显式 body budget 受硬上限约束。                 |
-| `wiki_ingest`           | UTF-8 Markdown/纯文本写入`raw/sources/` 并同步 raw FTS；二进制只保存字节/hash，不建立语义索引。                  |
-| `wiki_write_note`       | 仅创建人工知识页，已有目标不会被覆盖。                                                                             |
-| `wiki_update`           | 对既有页面执行`preview/apply`，正文 hash、结构 plan 和 CAS 都由服务端校验。                                      |
-| `wiki_query`            | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；检索策略来自启动时配置快照。              |
-| `wiki_archive`          | 归档生命周期的`plan/apply`。                                                                                     |
-| `wiki_restore`          | 不可变归档包的`plan/apply`。                                                                                     |
-| `wiki_sync_specs`       | 预览/应用/舍弃调用方指定规范目录（`source_root`，不限于 `.trellis/spec`）到 `wiki/projects/<project>/specs/` 的精确镜像计划，包含删除过期页面。 |
-| `wiki_manage_shared_spec` | 预览/应用/舍弃 `wiki/entities/shared-specs/` 单页公共规范的新建、更新或删除计划。                             |
+| 工具                        | 说明                                                                                                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wiki_status`             | 返回 logical vault、配置来源、索引和运行状态摘要；不回显绝对路径、模型路径、凭据或脱敏规则正文。                                                      |
+| `wiki_list`               | 只读 metadata catalog；使用`store_scope=active\|raw\|archive`、page size 和 opaque cursor，不读取正文或 passages。                                    |
+| `wiki_get`                | 只读精确读取；required 输入是 opaque`content_ref`，正文默认关闭，显式 body budget 受硬上限约束。                                                    |
+| `wiki_ingest`             | UTF-8 Markdown/纯文本写入`raw/sources/` 并同步 raw FTS；二进制只保存字节/hash，不建立语义索引。                                                     |
+| `wiki_write_note`         | 仅创建人工知识页，已有目标不会被覆盖。                                                                                                                |
+| `wiki_update`             | 对既有页面执行`preview/apply`，正文 hash、结构 plan 和 CAS 都由服务端校验。                                                                         |
+| `wiki_query`              | 只接受问题、`scope`、`project`、`filters`、`top_k` 与逻辑 vault；检索策略来自启动时配置快照。                                                 |
+| `wiki_archive`            | 归档生命周期的`plan/apply`。                                                                                                                        |
+| `wiki_restore`            | 不可变归档包的`plan/apply`。                                                                                                                        |
+| `wiki_sync_specs`         | 预览/应用/舍弃调用方指定规范目录（`source_root`，不限于 `.trellis/spec`）到 `wiki/projects/<project>/specs/` 的精确镜像计划，包含删除过期页面。 |
+| `wiki_manage_shared_spec` | 预览/应用/舍弃 `wiki/entities/shared-specs/` 单页公共规范的新建、更新或删除计划。                                                                   |
 
 `wiki_write_note` 可选参数 `aliases`（字符串列表）为新页面写入 frontmatter `aliases`（紧跟 `title`）：逐项去首尾空白、去掉空串，数量 ≤ 20、每项 ≤ 120 字符，按 frontmatter 同一脱敏规则处理，大小写不敏感去重并去掉与标题相同的项；非字符串或超限返回 `invalid_aliases` 且不写入，chat 类型不接受。结果为空或不传时不写 `aliases` 键，页面与不传该参数时逐字节相同。别名进入检索投影（FTS `aliases` 列、`link_suggestions` 目标）并参与新建时的 `duplicate_warnings` 检查。
 

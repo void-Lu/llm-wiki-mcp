@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -337,9 +338,10 @@ def test_stale_edges_fall_back_to_the_snapshot_body(tmp_path: Path, monkeypatch:
 def test_previous_schema_requires_an_explicit_rebuild(tmp_path: Path) -> None:
     root = _vault("synthetic", tmp_path)
     store = RetrievalIndexStore(root)
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection:
         connection.execute("DROP TABLE links")
         connection.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(RETRIEVAL_SCHEMA_VERSION - 1),))
+        connection.commit()
 
     assert store.status()["code"] == "index_incompatible"
     update = store.update_page_from_file(root / "wiki" / "concepts" / "hub.md")

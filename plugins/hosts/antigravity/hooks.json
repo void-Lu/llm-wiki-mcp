@@ -1,0 +1,12 @@
+{
+  "llm-wiki": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "uv run --no-project --no-python-downloads python ./session_hook.py antigravity",
+        "timeout": 10
+      }
+    ]
+  }
+}

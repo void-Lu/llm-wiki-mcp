@@ -1,0 +1,3 @@
+- insert:
+    - id: llm-wiki
+      name: dsh-llm-wiki
