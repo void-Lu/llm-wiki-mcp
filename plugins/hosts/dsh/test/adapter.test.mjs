@@ -83,7 +83,12 @@ test('declares an installable DSH bundle with bundled server files and no python
   assert.ok(manifest.files.includes('session-guidance.md'))
   assert.ok(!manifest.files.includes('session_hook.py'))
   assert.ok(manifest.files.includes('skills/shared-spec-vault/**'))
-  assert.match(patch, /id: llm-wiki\s+name: dsh-llm-wiki/)
+  // DSH loader patches use insert rows, not RFC 6902 op/path/value objects.
+  assert.equal(patch.trim().replace(/\r\n/g, '\n'), [
+    '- insert:',
+    '    - id: llm-wiki',
+    '      name: dsh-llm-wiki',
+  ].join('\n'))
 })
 
 test('registers only the created-agent event and adds scoped system guidance without waking', () => {
