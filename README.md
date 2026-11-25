@@ -92,6 +92,7 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | VS Code / GitHub Copilot | 项目根`.vscode/mcp.json`                                  | `${env:VAR}` |
 | Claude Code              | 项目根`.mcp.json` 或 `~/.claude.json` 的 `mcpServers` | `${VAR}`     |
 | Codex                    | `~/.codex/config.toml`                                    | `$VAR`       |
+| Antigravity / cc-switch  | `~/.gemini/config/mcp_config.json` 或 `cc-switch`         | `cmd /c` + `%VAR%` |
 
 #### VS Code / GitHub Copilot（推荐）
 
@@ -160,7 +161,28 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 
 启动 Codex 前，确保 `LLM_WIKI_MCP_DIR` 和 `LLM_WIKI_VAULT_ROOT` 已设置在 User 或 System 环境变量中；修改环境变量后需要重启 Codex 会话。
 
-> 三种配置都只引用环境变量，不包含任何工作区相关路径或具体绝对路径，可以原样复制到任意工作区使用。
+#### Antigravity / cc-switch（Windows 多客户端通用）
+
+Antigravity 的 `~/.gemini/config/mcp_config.json` 不会展开 `${VAR}` 或 `${env:VAR}` 占位符，若写入 `env: {"LLM_WIKI_VAULT_ROOT": "${LLM_WIKI_VAULT_ROOT}"}` 反而会把环境变量覆盖成字面量字符串。在 Windows 下可通过 `cmd /c` 展开 `%LLM_WIKI_MCP_DIR%`，并省略 `env` 让子进程直接继承系统的 `LLM_WIKI_VAULT_ROOT`：
+
+```json
+{
+  "mcpServers": {
+    "llm-wiki": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "uv --directory \"%LLM_WIKI_MCP_DIR%\" run llm-wiki-mcp-server"
+      ],
+      "disabled": false
+    }
+  }
+}
+```
+
+> 若使用 `cc-switch` 统一同步到 Claude Code、Codex 与 Antigravity（仅限 Windows），在 `cc-switch` UI 中将命令设为 `cmd`，参数设为 `/c` 与 `uv --directory "%LLM_WIKI_MCP_DIR%" run llm-wiki-mcp-server`，并清空 `env` 中的占位符即可。
+
+> 以上配置均只引用环境变量，不包含任何工作区相关路径或具体绝对路径，可以原样复制到任意工作区使用。
 
 ## 工具
 
