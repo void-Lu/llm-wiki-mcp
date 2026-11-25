@@ -85,14 +85,14 @@ server 按以下顺序解析 wiki 根目录（vault）：
 | `LLM_WIKI_MCP_DIR`    | 本仓库（MCP server 安装目录）的绝对路径 | `c:\Users\<you>\VSCodeProjects\llm-wiki-mcp`         |
 | `LLM_WIKI_VAULT_ROOT` | Obsidian wiki vault 的绝对路径          | `c:\Users\<you>\Documents\Obsidian Vault\codingwork` |
 
-设好后再用各客户端对应的变量引用语法取值。三家客户端的变量替换语法不同：
+设好后再按各客户端方式引用变量：
 
-| 客户端                   | 配置文件                                                    | 变量语法       |
-| ------------------------ | ----------------------------------------------------------- | -------------- |
-| VS Code / GitHub Copilot | 项目根`.vscode/mcp.json`                                  | `${env:VAR}` |
-| Claude Code              | 项目根`.mcp.json` 或 `~/.claude.json` 的 `mcpServers` | `${VAR}`     |
-| Codex                    | `~/.codex/config.toml`                                    | `$VAR`       |
-| Antigravity / cc-switch  | `~/.gemini/config/mcp_config.json` 或 `cc-switch`         | `cmd /c` + `%VAR%` |
+| 客户端                   | 配置文件                                                    | 变量引用方式                               |
+| ------------------------ | ----------------------------------------------------------- | ------------------------------------------ |
+| VS Code / GitHub Copilot | 项目根 `.vscode/mcp.json`                                   | `${env:VAR}`                               |
+| Claude Code              | 项目根 `.mcp.json` 或 `~/.claude.json` 的 `mcpServers`     | `${VAR}`（或下方 `cc-switch` 通用配置）     |
+| Codex                    | `~/.codex/config.toml`                                      | `powershell.exe` + `$env:VAR` + `env_vars`（或下方 `cc-switch` 通用配置） |
+| Antigravity / cc-switch  | `~/.gemini/config/mcp_config.json` 或 `cc-switch`           | `powershell.exe` + 进程/User/Machine 环境变量回退 |
 
 #### VS Code / GitHub Copilot（推荐）
 
@@ -163,16 +163,25 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 
 #### Antigravity / cc-switch（Windows 多客户端通用）
 
-Antigravity 的 `~/.gemini/config/mcp_config.json` 不会展开 `${VAR}` 或 `${env:VAR}` 占位符，若写入 `env: {"LLM_WIKI_VAULT_ROOT": "${LLM_WIKI_VAULT_ROOT}"}` 反而会把环境变量覆盖成字面量字符串。在 Windows 下可通过 `cmd /c` 展开 `%LLM_WIKI_MCP_DIR%`，并省略 `env` 让子进程直接继承系统的 `LLM_WIKI_VAULT_ROOT`：
+在 Windows 下同时使用 **Claude Code、Codex、Antigravity** 并通过 `cc-switch` 统一管理时，存在两个客户端差异：
+
+- Antigravity 的 `~/.gemini/config/mcp_config.json` 不会展开 `${VAR}` / `${env:VAR}` 占位符，若写入 `env` 占位符会把环境变量覆盖成字面量字符串；
+- Codex 默认会裁剪 MCP 子进程的自定义环境变量（未配置 `env_vars` 时子进程读不到 `LLM_WIKI_MCP_DIR` / `LLM_WIKI_VAULT_ROOT`），而 `cc-switch` 跨端同步依赖标准 `stdio` 字段（`command` + `args`）。
+
+因此推荐使用 `powershell.exe` 优先继承进程环境变量，缺失时回退读取 Windows `User` / `Machine` 环境变量，再调用 `uv --directory $env:LLM_WIKI_MCP_DIR run llm-wiki-mcp-server`。该写法无绝对路径、无内嵌双引号转义问题、支持含空格路径，且无需写 `env` 占位符或 Codex 专属 `env_vars`，一套配置可在 Claude Code、Codex 与 Antigravity 中通用：
 
 ```json
 {
   "mcpServers": {
     "llm-wiki": {
-      "command": "cmd",
+      "type": "stdio",
+      "command": "powershell.exe",
       "args": [
-        "/c",
-        "uv --directory \"%LLM_WIKI_MCP_DIR%\" run llm-wiki-mcp-server"
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "foreach($k in 'LLM_WIKI_MCP_DIR','LLM_WIKI_VAULT_ROOT'){if(-not [Environment]::GetEnvironmentVariable($k)){$v=[Environment]::GetEnvironmentVariable($k,'User');if(-not $v){$v=[Environment]::GetEnvironmentVariable($k,'Machine')};if($v){[Environment]::SetEnvironmentVariable($k,$v)}}}; uv --directory $env:LLM_WIKI_MCP_DIR run llm-wiki-mcp-server"
       ],
       "disabled": false
     }
@@ -180,7 +189,7 @@ Antigravity 的 `~/.gemini/config/mcp_config.json` 不会展开 `${VAR}` 或 `${
 }
 ```
 
-> 若使用 `cc-switch` 统一同步到 Claude Code、Codex 与 Antigravity（仅限 Windows），在 `cc-switch` UI 中将命令设为 `cmd`，参数设为 `/c` 与 `uv --directory "%LLM_WIKI_MCP_DIR%" run llm-wiki-mcp-server`，并清空 `env` 中的占位符即可。
+> 若使用 `cc-switch` 统一同步到 Claude Code、Codex 与 Antigravity（仅限 Windows），在 `cc-switch` 中将 `type` 设为 `stdio`、`command` 设为 `powershell.exe`、`args` 设为上述 5 项，并移除 `env` 中的占位符与硬编码 `cwd` 即可。同步到 `~/.gemini/config/mcp_config.json` 时保留 `"disabled": false`，同步到 `~/.codex/config.toml` 时为 `command` + `args` + `enabled = true`。
 
 > 以上配置均只引用环境变量，不包含任何工作区相关路径或具体绝对路径，可以原样复制到任意工作区使用。
 
