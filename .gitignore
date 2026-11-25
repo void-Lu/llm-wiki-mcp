@@ -9,7 +9,7 @@ rag/
 .codegraph
 .codex
 .github
-.netsuite-mcp/logs
+.netsuite-mcp
 .pytest_cache
 .ruff_cache
 .trellis
@@ -29,7 +29,6 @@ docs/superpowers/
 docs/*
 !docs/adr/
 !docs/wiki-plugin-installation.md
-/.netsuite-mcp/logs/
 /.vscode/mcp.json
 /.mcp.json
 .eval

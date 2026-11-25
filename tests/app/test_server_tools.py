@@ -947,3 +947,136 @@ def test_query_passes_rrf_weights_with_env_override(monkeypatch: pytest.MonkeyPa
     rejected = wiki_query(question="invoice", vault_root=str(vault_root))
     assert rejected["ok"] is False
     assert rejected["code"] == "invalid_config"
+
+
+def _assert_validation_error_result(result: object) -> tuple[str, dict[str, object]]:
+    assert getattr(result, "is_error", None) is True
+    text = getattr(result, "content")[0].text
+    payload = _tool_result_payload(result)
+    assert json.loads(text) == payload
+    assert payload["ok"] is False
+    assert payload["code"] == "validation_error"
+    assert payload["retryable"] is False
+    assert payload["error"] == payload["message"]
+    return text, payload
+
+
+def test_wiki_list_rejects_unknown_top_level_arguments_with_safe_names() -> None:
+    async def assert_rejected() -> None:
+        async with Client(mcp) as client:
+            single = await client.call_tool(
+                "wiki_list",
+                {"store_scope": "active", "path_prefix": "wiki/projects/secret-value"},
+            )
+            single_text, single_payload = _assert_validation_error_result(single)
+            assert single_payload["unknown_arguments"] == ["path_prefix"]
+            assert single_payload["message"] == "unknown arguments: path_prefix"
+            assert "secret-value" not in single_text
+            assert "wiki/projects" not in single_text
+
+            multiple = await client.call_tool(
+                "wiki_list",
+                {
+                    "store_scope": "active",
+                    "query": "confidential-query",
+                    "scope": "raw",
+                    "pathPrefix": "wiki/private/",
+                },
+            )
+            multiple_text, multiple_payload = _assert_validation_error_result(multiple)
+            assert multiple_payload["unknown_arguments"] == ["pathPrefix", "query", "scope"]
+            assert multiple_payload["message"] == "unknown arguments: pathPrefix, query, scope"
+            assert "confidential-query" not in multiple_text
+            assert "wiki/private" not in multiple_text
+
+    anyio.run(assert_rejected)
+
+
+def test_wiki_list_rejects_malformed_unknown_keys_without_echoing_them() -> None:
+    async def assert_rejected() -> None:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "wiki_list",
+                {
+                    "store_scope": "active",
+                    "C:\\Users\\alice\\vault": "secret-val",
+                    "a" * 80: "secret-val-2",
+                    "api_key_1234567890": "secret-val-3",
+                },
+            )
+            text, payload = _assert_validation_error_result(result)
+            assert payload["message"] == "the request is invalid"
+            assert "unknown_arguments" not in payload
+            for forbidden in ("alice", "secret-val", "a" * 80, "api_key_1234567890", "REDACTED_SECRET"):
+                assert forbidden not in text
+
+    anyio.run(assert_rejected)
+
+
+def test_wiki_list_accepts_valid_filters_aliases_and_cursor_over_mcp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry, _ = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    calls: list[dict[str, object]] = []
+
+    def fake_list(
+        self: object,
+        *,
+        scope: object,
+        filters: object,
+        page_size: object,
+        cursor: object,
+    ) -> dict[str, object]:
+        calls.append(
+            {
+                "scope": scope,
+                "filters": filters,
+                "page_size": page_size,
+                "cursor": cursor,
+            }
+        )
+        return {"ok": True, "scope": scope, "items": [], "page_size": page_size}
+
+    monkeypatch.setattr("app.server.ContentCatalogService.list_items", fake_list)
+
+    async def assert_allowed() -> None:
+        async with Client(mcp) as client:
+            filtered = await client.call_tool(
+                "wiki_list",
+                {
+                    "store_scope": "active",
+                    "filters": {"path_prefix": "wiki/projects/"},
+                    "cursor": "cur-1",
+                },
+            )
+            assert filtered.is_error is False
+            assert _tool_result_payload(filtered)["ok"] is True
+
+            aliased = await client.call_tool("wiki_list", {"storeScope": "active"})
+            assert aliased.is_error is False
+            assert _tool_result_payload(aliased)["ok"] is True
+
+    anyio.run(assert_allowed)
+    assert calls[0]["scope"] == "active"
+    assert calls[0]["filters"] == {"path_prefix": "wiki/projects/"}
+    assert calls[0]["cursor"] == "cur-1"
+    assert calls[1]["scope"] == "active"
+    assert calls[1]["filters"] is None
+    assert calls[1]["cursor"] is None
+
+
+def test_wiki_list_schema_and_description_document_filters_path_prefix() -> None:
+    async def assert_description() -> None:
+        async with Client(mcp) as client:
+            tools = {item.name: item for item in (await client.list_tools()).tools}
+            list_tool = tools["wiki_list"]
+            properties = list_tool.input_schema.get("properties", {})
+            assert "path_prefix" not in properties
+            assert "pathPrefix" not in properties
+            assert "filters" in properties
+            description = list_tool.description or ""
+            assert "filters.path_prefix" in description
+            assert "pathPrefix" in description
+
+    anyio.run(assert_description)

@@ -5,13 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import re
 from pathlib import Path
-from typing import Any, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 from uuid import uuid4
 
 from common.privacy_policy import PrivacyPolicy, project_public_result as _project_public_result
+from common.redaction import redact_sensitive_text
 
 
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_SAFE_ARGUMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_MAX_PUBLIC_UNKNOWN_ARGUMENTS = 10
 _ERROR_MESSAGES: dict[str, str] = {
     "ambiguous_vault_selector": "vault selectors are ambiguous",
     "archive_state_incompatible": "archive state is incompatible",
@@ -229,11 +233,36 @@ def public_error(
     normalized = _safe_code(code)
     error = PublicError(
         normalized,
-        message if message is not None and "\\" not in message and "\n" not in message else _message_for(normalized),
+        message
+        if message is not None and "\\" not in message and "\n" not in message and "\r" not in message
+        else _message_for(normalized),
         _RETRYABLE_CODES.__contains__(normalized) if retryable is None else retryable,
         correlation or new_correlation_id(),
     )
     return error.to_payload()
+
+
+def unknown_arguments_error(unknown_keys: Iterable[object]) -> dict[str, object]:
+    """Build a privacy-safe validation_error payload for unknown top-level argument names."""
+
+    safe_names = sorted(
+        {
+            key
+            for key in unknown_keys
+            if isinstance(key, str)
+            and _SAFE_ARGUMENT_NAME.fullmatch(key)
+            and redact_sensitive_text(key) == key
+        }
+    )
+    if not safe_names:
+        return public_error("validation_error")
+
+    reported = safe_names[:_MAX_PUBLIC_UNKNOWN_ARGUMENTS]
+    suffix = ", ..." if len(safe_names) > _MAX_PUBLIC_UNKNOWN_ARGUMENTS else ""
+    message = f"unknown arguments: {', '.join(reported)}{suffix}"
+    payload = public_error("validation_error", message=message)
+    payload["unknown_arguments"] = reported
+    return payload
 
 
 def public_error_from_exception(exc: BaseException, *, fallback_code: str = "internal_error") -> dict[str, object]:
@@ -257,4 +286,5 @@ __all__ = [
     "project_public_result",
     "public_error",
     "public_error_from_exception",
+    "unknown_arguments_error",
 ]
