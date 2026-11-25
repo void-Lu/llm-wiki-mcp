@@ -206,7 +206,7 @@ env_vars = ["LLM_WIKI_MCP_DIR", "LLM_WIKI_VAULT_ROOT"]
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `wiki_status`             | 返回 logical vault、配置来源、索引和运行状态摘要；不回显绝对路径、模型路径、凭据或脱敏规则正文。                                                      |
 | `wiki_list`               | 只读 metadata catalog；使用`store_scope=active\|raw\|archive`、page size 和 opaque cursor，不读取正文或 passages。                                    |
-| `wiki_get`                | 只读精确读取；required 输入是 opaque`content_ref`，正文默认关闭，显式 body budget 受硬上限约束。                                                    |
+| `wiki_get`                | 只读精确读取；required 输入是 opaque`content_ref`，正文默认关闭，显式 body budget 受硬上限约束。正文续读把返回的`next_body_cursor`值作为`cursor`或`body_cursor`（或`bodyCursor`）回传，不要把`next_body_cursor`当作入参名。 |
 | `wiki_ingest`             | UTF-8 Markdown/纯文本写入`raw/sources/` 并同步 raw FTS；二进制只保存字节/hash，不建立语义索引。                                                     |
 | `wiki_write_note`         | 仅创建人工知识页，已有目标不会被覆盖。                                                                                                                |
 | `wiki_update`             | 对既有页面执行`preview/apply`，正文 hash、结构 plan 和 CAS 都由服务端校验。                                                                         |

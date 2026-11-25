@@ -265,6 +265,29 @@ def unknown_arguments_error(unknown_keys: Iterable[object]) -> dict[str, object]
     return payload
 
 
+def conflicting_arguments_error(names: Iterable[object]) -> dict[str, object]:
+    """Build a privacy-safe validation_error for conflicting alias values.
+
+    Only argument names are reported. Values are never included, and the public
+    message stays on the catalog text because tool-result projection rewrites
+    known error-code messages.
+    """
+
+    safe_names = sorted(
+        {
+            key
+            for key in names
+            if isinstance(key, str)
+            and _SAFE_ARGUMENT_NAME.fullmatch(key)
+            and redact_sensitive_text(key) == key
+        }
+    )
+    payload = public_error("validation_error")
+    if safe_names:
+        payload["conflicting_arguments"] = safe_names[:_MAX_PUBLIC_UNKNOWN_ARGUMENTS]
+    return payload
+
+
 def public_error_from_exception(exc: BaseException, *, fallback_code: str = "internal_error") -> dict[str, object]:
     return PublicError.from_exception(exc, fallback_code=fallback_code).to_payload()
 
@@ -287,4 +310,5 @@ __all__ = [
     "public_error",
     "public_error_from_exception",
     "unknown_arguments_error",
+    "conflicting_arguments_error",
 ]

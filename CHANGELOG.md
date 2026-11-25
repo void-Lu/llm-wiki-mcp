@@ -1,5 +1,9 @@
 # 变更记录
 
+## 2026-11-26 — wiki_get 接受 body_cursor 作为 cursor 别名
+
+- `wiki_get` 增加 `body_cursor` / `bodyCursor` 作为 canonical `cursor` 的别名，便于把上次返回的 `next_body_cursor` 值回传；`next_body_cursor` 仍只是输出字段，不是入参名。若同时传入 `cursor` 与别名且值冲突，返回 `validation_error`，并在 `conflicting_arguments` 中列出参数名，错误信息不回显游标值。
+
 ## 2026-11-25 — v1.1.0：自包含宿主插件内置 MCP 服务 wheel
 
 - **版本升级**：包版本与各宿主插件模板统一升至 **1.1.0**。

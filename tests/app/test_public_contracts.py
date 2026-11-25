@@ -5,6 +5,7 @@ from app.public_contracts import (
     project_public_result,
     public_error,
     public_error_from_exception,
+    conflicting_arguments_error,
     unknown_arguments_error,
 )
 
@@ -114,6 +115,17 @@ def test_unknown_arguments_error_caps_reported_key_count() -> None:
     assert result["unknown_arguments"] == expected_names
     assert result["message"] == f"unknown arguments: {', '.join(expected_names)}, ..."
     assert result["error"] == result["message"]
+
+
+def test_conflicting_arguments_error_reports_sorted_safe_names() -> None:
+    result = conflicting_arguments_error(["body_cursor", "cursor", "body_cursor", 123, "C:\\Users\\alice"])
+
+    assert result["ok"] is False
+    assert result["code"] == "validation_error"
+    assert result["message"] == "the request is invalid"
+    assert result["error"] == result["message"]
+    assert result["conflicting_arguments"] == ["body_cursor", "cursor"]
+    assert "alice" not in str(result)
 
 
 def test_public_error_rejects_carriage_return_in_custom_message() -> None:

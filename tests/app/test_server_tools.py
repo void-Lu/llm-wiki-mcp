@@ -655,7 +655,8 @@ def test_registry_exposes_strict_ingest_schema_and_tool_contract_annotations() -
             list_tool = tools["wiki_list"]
             get_tool = tools["wiki_get"]
             get_properties = get_tool.input_schema.get("properties", {})
-            assert {"content_ref", "contentRef", "max_total_bytes", "maxTotalBytes"} <= set(get_properties)
+            assert {"content_ref", "contentRef", "max_total_bytes", "maxTotalBytes", "cursor", "body_cursor", "bodyCursor"} <= set(get_properties)
+            assert "next_body_cursor" not in get_properties
             assert {"store_scope", "storeScope", "page_size", "pageSize"} <= set(list_tool.input_schema.get("properties", {}))
             assert not get_tool.input_schema.get("required", [])
             assert "all" not in str(list_tool.input_schema)
@@ -1078,5 +1079,175 @@ def test_wiki_list_schema_and_description_document_filters_path_prefix() -> None
             description = list_tool.description or ""
             assert "filters.path_prefix" in description
             assert "pathPrefix" in description
+
+    anyio.run(assert_description)
+
+
+def test_wiki_get_cursor_aliases_are_equivalent_for_body_paging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from retrieval.retrieval_index import RetrievalIndexStore
+
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    page = root / "wiki" / "concepts" / "long.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: concept\ntitle: Long\n---\n\n" + "0123456789" * 20, encoding="utf-8")
+    store = RetrievalIndexStore(root)
+    store.build(store.iter_vault_pages())
+
+    listed = wiki_list(store_scope="active", vault_root=str(root))
+    assert listed["ok"] is True
+    items = listed["items"]
+    assert items
+    reference = items[0]["content_ref"]
+    assert isinstance(reference, str)
+
+    first = wiki_get(
+        content_ref=reference,
+        include_body=True,
+        max_bytes=7,
+        vault_root=str(root),
+    )
+    assert first["ok"] is True
+    assert first["truncated"] is True
+    next_cursor = first["next_body_cursor"]
+    assert isinstance(next_cursor, str)
+    assert next_cursor.startswith("bc1_")
+
+    resumed = []
+    for kwargs in (
+        {"cursor": next_cursor},
+        {"body_cursor": next_cursor},
+        {"bodyCursor": next_cursor},
+        {"cursor": next_cursor, "body_cursor": next_cursor},
+    ):
+        result = wiki_get(
+            content_ref=reference,
+            include_body=True,
+            max_bytes=7,
+            vault_root=str(root),
+            **kwargs,
+        )
+        assert result["ok"] is True
+        resumed.append(result)
+
+    assert resumed[0]["body"] == resumed[1]["body"] == resumed[2]["body"] == resumed[3]["body"]
+    assert resumed[0]["body"] != first["body"]
+
+
+def test_wiki_get_accepts_body_cursor_aliases_over_mcp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+    captured: list[object] = []
+
+    def fake_get(self: object, content_ref: str, *, include_body: object, max_bytes: object, cursor: object) -> dict[str, object]:
+        captured.append(cursor)
+        return {"ok": True, "content_ref": content_ref, "cursor": cursor}
+
+    monkeypatch.setattr("app.server.ContentCatalogService.get_item", fake_get)
+    token = "bc1_alias-token"
+
+    async def assert_aliases() -> None:
+        async with Client(mcp) as client:
+            for arguments in (
+                {"content_ref": "cr1_abc", "include_body": True, "cursor": token, "vault_root": str(root)},
+                {"content_ref": "cr1_abc", "include_body": True, "body_cursor": token, "vault_root": str(root)},
+                {"contentRef": "cr1_abc", "includeBody": True, "bodyCursor": token, "vaultRoot": str(root)},
+            ):
+                result = await client.call_tool("wiki_get", arguments)
+                assert result.is_error is False
+                payload = _tool_result_payload(result)
+                assert payload["ok"] is True
+
+    anyio.run(assert_aliases)
+    assert captured == [token, token, token]
+
+
+def test_wiki_get_rejects_unknown_argument_names_over_mcp() -> None:
+    async def assert_rejected() -> None:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "wiki_get",
+                {
+                    "content_ref": "cr1_abc",
+                    "include_body": True,
+                    "next_body_cursor": "bc1_secret-cursor-value",
+                },
+            )
+            text, payload = _assert_validation_error_result(result)
+            assert payload["unknown_arguments"] == ["next_body_cursor"]
+            assert payload["message"] == "unknown arguments: next_body_cursor"
+            assert "bc1_secret-cursor-value" not in text
+
+            typo = await client.call_tool(
+                "wiki_get",
+                {"content_ref": "cr1_abc", "bodycursor": "bc1_secret-cursor-value"},
+            )
+            typo_text, typo_payload = _assert_validation_error_result(typo)
+            assert typo_payload["unknown_arguments"] == ["bodycursor"]
+            assert "bc1_secret-cursor-value" not in typo_text
+
+    anyio.run(assert_rejected)
+
+
+def test_wiki_get_rejects_conflicting_cursor_aliases_without_echoing_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry, root = _registry(tmp_path)
+    monkeypatch.setattr("app.server.CONFIG_REGISTRY", registry)
+
+    def fail_if_called(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("conflicting aliases must be rejected before catalog access")
+
+    monkeypatch.setattr("app.server.ContentCatalogService.get_item", fail_if_called)
+
+    result = wiki_get(
+        content_ref="cr1_abc",
+        include_body=True,
+        cursor="bc1_left-secret",
+        body_cursor="bc1_right-secret",
+        vault_root=str(root),
+    )
+    assert result["ok"] is False
+    assert result["code"] == "validation_error"
+    assert result["message"] == "the request is invalid"
+    assert result["error"] == result["message"]
+    assert result["conflicting_arguments"] == ["body_cursor", "cursor"]
+    text = json.dumps(result, ensure_ascii=False)
+    assert "bc1_left-secret" not in text
+    assert "bc1_right-secret" not in text
+
+    camel = wiki_get(
+        content_ref="cr1_abc",
+        include_body=True,
+        body_cursor="bc1_left-secret",
+        bodyCursor="bc1_right-secret",
+        vault_root=str(root),
+    )
+    assert camel["ok"] is False
+    assert camel["code"] == "validation_error"
+    assert camel["message"] == "the request is invalid"
+    assert camel["conflicting_arguments"] == ["bodyCursor", "body_cursor"]
+    camel_text = json.dumps(camel, ensure_ascii=False)
+    assert "bc1_left-secret" not in camel_text
+    assert "bc1_right-secret" not in camel_text
+
+
+def test_wiki_get_schema_and_description_document_body_cursor_aliases() -> None:
+    async def assert_description() -> None:
+        async with Client(mcp) as client:
+            tools = {item.name: item for item in (await client.list_tools()).tools}
+            get_tool = tools["wiki_get"]
+            properties = get_tool.input_schema.get("properties", {})
+            assert {"cursor", "body_cursor", "bodyCursor"} <= set(properties)
+            assert "next_body_cursor" not in properties
+            description = get_tool.description or ""
+            assert "next_body_cursor" in description
+            assert "body_cursor" in description
+            assert "cursor" in description
+            assert "not an input name" in description
 
     anyio.run(assert_description)

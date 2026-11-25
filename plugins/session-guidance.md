@@ -4,7 +4,7 @@ Use the configured logical vault (`vault`); do not pass local vault paths. Wiki 
 
 ## When to consult Wiki
 
-For a task involving existing project decisions, troubleshooting, reusable concepts, named entities, source provenance, or a Wiki page that may have been superseded, query only the relevant subject. Do not query unrelated work. Use `wiki_query(question, scope="auto", project=...)`; narrow the scope to `knowledge`, `history`, `raw`, or `archive` when that store is specifically needed. Use `wiki_get(content_ref, include_body=true)` to read a selected result. Use `wiki_list(store_scope="active"|"raw"|"archive")` when a direct listing is needed. `wiki_status(detail="summary")` can diagnose vault configuration.
+For a task involving existing project decisions, troubleshooting, reusable concepts, named entities, source provenance, or a Wiki page that may have been superseded, query only the relevant subject. Do not query unrelated work. Use `wiki_query(question, scope="auto", project=...)`; narrow the scope to `knowledge`, `history`, `raw`, or `archive` when that store is specifically needed. Use `wiki_get(content_ref, include_body=true)` to read a selected result. If the result includes `next_body_cursor`, pass that value back as `cursor` or `body_cursor` (or `bodyCursor`); do not pass `next_body_cursor` as an input name. Use `wiki_list(store_scope="active"|"raw"|"archive")` when a direct listing is needed. `wiki_status(detail="summary")` can diagnose vault configuration.
 
 ## Current-request approval boundaries
 

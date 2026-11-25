@@ -19,6 +19,7 @@ from app.public_contracts import (
     PublicError,
     PublicResult,
     project_public_result,
+    conflicting_arguments_error,
     public_error,
     public_error_from_exception,
     unknown_arguments_error,
@@ -567,6 +568,18 @@ def wiki_list(
     )
 
 
+def _select_unique_alias_value(*named: tuple[str, object]) -> tuple[object, dict[str, object] | None]:
+    """Return the single provided alias value, or a public validation error on conflict."""
+
+    provided = [(name, value) for name, value in named if value is not None]
+    if not provided:
+        return None, None
+    values = {value for _, value in provided}
+    if len(values) > 1:
+        return None, conflicting_arguments_error(name for name, _ in provided)
+    return provided[0][1], None
+
+
 @_register(
     aliases={
         "contentRef": "content_ref",
@@ -591,11 +604,26 @@ def wiki_get(
     includeBody: bool | None = None,
     maxBytes: int | None = None,
     maxTotalBytes: int | None = None,
+    body_cursor: str | None = None,
+    bodyCursor: str | None = None,
 ) -> dict[str, Any]:
-    """Read an opaque reference with optional bounded automatic body paging."""
+    """Read an opaque reference with optional bounded automatic body paging.
+
+    The canonical paging input is ``cursor``. ``body_cursor`` and ``bodyCursor``
+    are aliases of ``cursor``. If a previous result included ``next_body_cursor``,
+    pass that value back as ``cursor`` or ``body_cursor`` (or ``bodyCursor``);
+    ``next_body_cursor`` is a response field, not an input name.
+    """
 
     if not content_ref:
         return {"ok": False, "code": "invalid_content_ref", "error": "content_ref is required"}
+    cursor, cursor_error = _select_unique_alias_value(
+        ("cursor", cursor),
+        ("body_cursor", body_cursor),
+        ("bodyCursor", bodyCursor),
+    )
+    if cursor_error is not None:
+        return cursor_error
     resolution = _registered_resolution()
     kwargs: dict[str, Any] = {
         "include_body": include_body,
