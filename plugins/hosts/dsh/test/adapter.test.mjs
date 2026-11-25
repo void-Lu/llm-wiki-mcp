@@ -27,7 +27,7 @@ test('uses the literal stdio command and expands ${PLUGIN_ROOT} placeholders', (
           '--with-requirements',
           '${PLUGIN_ROOT}/server/constraints.txt',
           '--from',
-          '${PLUGIN_ROOT}/server/llm_wiki_mcp-1.0.0-py3-none-any.whl',
+          '${PLUGIN_ROOT}/server/llm_wiki_mcp-1.1.0-py3-none-any.whl',
           'llm-wiki-mcp-server',
         ],
         cwd: '${PLUGIN_ROOT}',
@@ -45,7 +45,7 @@ test('uses the literal stdio command and expands ${PLUGIN_ROOT} placeholders', (
       '--with-requirements',
       'C:\\Users\\demo\\plugin bundle/server/constraints.txt',
       '--from',
-      'C:\\Users\\demo\\plugin bundle/server/llm_wiki_mcp-1.0.0-py3-none-any.whl',
+      'C:\\Users\\demo\\plugin bundle/server/llm_wiki_mcp-1.1.0-py3-none-any.whl',
       'llm-wiki-mcp-server',
     ],
     cwd: 'C:\\Users\\demo\\plugin bundle',
@@ -73,7 +73,7 @@ test('declares an installable DSH bundle with bundled server files and no python
   const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
   assert.equal(manifest.name, 'dsh-llm-wiki')
-  assert.equal(manifest.version, '1.0.0')
+  assert.equal(manifest.version, '1.1.0')
   assert.deepEqual(manifest.dsh.bundle, { patch: './cordis.patch.yml' })
   const supportedVersions = '0.2.2-rc.5 || 0.2.3-alpha.2'
   assert.equal(manifest.engines.node, '>=24.9.0')

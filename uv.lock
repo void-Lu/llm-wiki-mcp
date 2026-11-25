@@ -478,6 +478,34 @@ wheels = [
 ]
 
 [[package]]
+name = "llm-wiki-mcp"
+version = "1.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "mcp" },
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+vector = [
+    { name = "sentence-transformers" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mcp", specifier = ">=2,<3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
+    { name = "sentence-transformers", marker = "extra == 'vector'", specifier = ">=3.0.0,<6" },
+]
+provides-extras = ["dev", "vector"]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -627,34 +655,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/2b/1d/58946e5aab18393e7
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7e/85/a5bfaebfd305ac18b57b0854d74e37e586809061a91fda62f0bd50c8518e/narwhals-2.24.0-py3-none-any.whl", hash = "sha256:42fdedf44e5b2ca7505630d45b4ac3058f38d8485cba9fe1652ca23152df7489", size = 461030, upload-time = "2026-07-13T10:49:17.571Z" },
 ]
-
-[[package]]
-name = "llm-wiki-mcp"
-version = "1.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "mcp" },
-    { name = "pyyaml" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-vector = [
-    { name = "sentence-transformers" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mcp", specifier = ">=2,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
-    { name = "sentence-transformers", marker = "extra == 'vector'", specifier = ">=3.0.0,<6" },
-]
-provides-extras = ["dev", "vector"]
 
 [[package]]
 name = "networkx"

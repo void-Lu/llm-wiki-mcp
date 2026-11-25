@@ -5,20 +5,32 @@ This is a DeepSeek Harness profile bundle. The shared assembler supplies
 the complete `skills/shared-spec-vault/` tree at this package root. DSH reads
 the guidance file directly; it does not ship or execute the Python hook.
 
-## Prerequisites and first-time vault registration
+## Prerequisites and vault setup
 
 `uv` must be available on `PATH`, with network access on first run so `uvx` can
 download pinned runtime dependencies (and Python 3.11+ if not already present).
 The bundled server includes lexical and wikilink retrieval only (no optional
 `vector` extra).
 
-Register your vault once against the bundled wheel to write user-level
-`config.yaml` and warm the `uv` cache before opening a DSH session:
+On a fresh machine with no `config.yaml` and no `LLM_WIKI_VAULT_ROOT`, starting
+the bundled MCP server automatically creates `~/Documents/llm-wiki-vault`
+(`%USERPROFILE%\Documents\llm-wiki-vault` on Windows), writes user-level
+`config.yaml`, and persists `LLM_WIKI_VAULT_ROOT` on Windows. Existing user
+configuration is always respected. All runtime state and caches stay inside
+`<vault>/.llm-wiki/`.
+
+You can also run `init` (zero-arg or custom `--vault`/`--root`, auto-creating
+missing folders) to warm the `uv` cache before opening DSH, or rename an
+existing vault with `config rename-vault`:
 
 ```sh
 uvx --python ">=3.11" --with-requirements "/path/to/assembled/dsh/server/constraints.txt" \
   --from "/path/to/assembled/dsh/server/{{WHEEL_NAME}}" \
-  llm-wiki-mcp init --vault my-wiki --root /path/to/wiki --default
+  llm-wiki-mcp init
+
+uvx --python ">=3.11" --with-requirements "/path/to/assembled/dsh/server/constraints.txt" \
+  --from "/path/to/assembled/dsh/server/{{WHEEL_NAME}}" \
+  llm-wiki-mcp config rename-vault --to my-wiki
 ```
 
 ## Install in an isolated profile

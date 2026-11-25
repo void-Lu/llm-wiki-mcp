@@ -21,17 +21,30 @@ $wikiPluginBundle = (Resolve-Path dist/wiki-plugins).Path
 
 输出包含 `codex`、`claude`、`copilot`、`antigravity`、`dsh` 五个自包含安装目录以及本地市场清单。每个宿主目录自带 `server/llm_wiki_mcp-<version>-py3-none-any.whl`、`server/constraints.txt` 与简短的 `README.md`，MCP 配置均通过 `uvx` 与宿主插件目录变量启动，不含本机绝对路径。构建新版本时请使用新的输出目录，升级后重开宿主会话。建议在宿主中只保留一个 `llm-wiki` MCP 注册，避免插件与原手工配置同时暴露同一套工具。
 
-## 首次注册 Vault 并预热缓存
+## 零配置 Vault、自定义初始化与重命名
 
-安装插件后（或构建完成后），建议用内置 wheel 执行一次 `init`（已有 `default_vault` 时可执行 `status`）。这会在用户级配置目录写入 `config.yaml`，同时把依赖预热进 `uv` 缓存，避免宿主首次拉起 MCP 时因下载超时：
+- **全新环境免 `init` 自动启动**：若本机既未配置 `config.yaml`（`default_vault`）也未设置 `LLM_WIKI_VAULT_ROOT`，首次拉起内置 MCP 服务会自动创建默认目录 `%USERPROFILE%\Documents\llm-wiki-vault`（macOS/Linux 为 `~/Documents/llm-wiki-vault`），写入用户级 `config.yaml`，并在 Windows 上同步设置用户级环境变量 `LLM_WIKI_VAULT_ROOT`。
+- **尊重已有用户配置**：如果本机已存在 `config.yaml` 的 `default_vault` 或已设置 `LLM_WIKI_VAULT_ROOT`，服务端直接沿用用户配置，不会覆盖或新建默认目录。
+- **运行数据与缓存落在 Vault 内**：所有 SQLite 状态库、检索索引、缓存和归档都位于 `<vault>/.llm-wiki/` 与 `<vault>/archives/`，不写入插件目录。
+
+如需预先温热 `uv` 缓存（避免宿主首次启动下载依赖超时）、自定义 vault 路径，或重命名本地 vault：
 
 ```powershell
 $hostDir = Join-Path $wikiPluginBundle "codex"
 $wheel = (Get-ChildItem (Join-Path $hostDir "server") -Filter "*.whl").FullName
 $req = Join-Path $hostDir "server\constraints.txt"
-uvx --python ">=3.11" --with-requirements $req --from $wheel llm-wiki-mcp init --vault my-wiki --root 'C:\path with spaces\wiki' --default
-uvx --python ">=3.11" --with-requirements $req --from $wheel llm-wiki-mcp status
+
+# 无参一键初始化（自动 mkdir 默认目录，兼预热缓存）；也可传 --vault / --root
+uvx --python ">=3.11" --with-requirements $req --from $wheel llm-wiki-mcp init
+
+# 修改本地 vault 名称（默认同步重命名本地目录、config.yaml 与 LLM_WIKI_VAULT_ROOT；仅改逻辑名可加 --keep-dir）
+uvx --python ">=3.11" --with-requirements $req --from $wheel llm-wiki-mcp config rename-vault --to my-wiki
 ```
+
+## 与 `cc-switch` 共存（推荐）
+
+- 各宿主通过原生插件入口安装本插件包，获得完整的内置 MCP 服务、`SessionStart` 工作流 hook 与 `shared-spec-vault` skill。
+- `cc-switch` 仅用于切换模型与 API Provider；**不要**在 `cc-switch` 的 MCP 面板中重复注册 `llm-wiki`，以免同一宿主暴露两套同名工具。
 
 ## 安装入口
 

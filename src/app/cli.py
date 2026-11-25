@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Sequence
 
-from runtime.platform_paths import global_config_path
+from runtime.platform_paths import (
+    default_vault_root,
+    global_config_path,
+    persist_user_env_var,
+    read_user_env_var,
+)
 from wiki.ingest_service import sync_retrieval_index
 from retrieval.retrieval_index import RetrievalIndexStore
 from retrieval.bench_runner import run_bench
@@ -27,7 +33,18 @@ from retrieval.query_quality_calibration import (
     write_calibration_outputs,
 )
 from retrieval.retrieval_gold import RetrievalGoldError, finalize_retrieval_gold, sample_retrieval_gold
-from runtime.runtime_config import ConfigRegistry, ResolvedVault, RuntimeConfig, RuntimeConfigError, VaultSettings, resolve_runtime_config, vault_storage_id, write_global_config
+from runtime.runtime_config import (
+    VAULT_ROOT_ENV,
+    ConfigRegistry,
+    ResolvedVault,
+    RuntimeConfig,
+    RuntimeConfigError,
+    VaultSettings,
+    rename_global_config_vault,
+    resolve_runtime_config,
+    vault_storage_id,
+    write_global_config,
+)
 from retrieval.query_recall_policy import DEFAULT_TOP_K
 from retrieval.vector_index import VectorIndexError, VectorIndexStore, default_vector_index_path, parse_vector_settings, vector_index_records
 from retrieval.vector_provider import LocalBgeM3Provider, VectorProviderError, local_provider_readiness
@@ -100,10 +117,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="llm-wiki-mcp")
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="Create or update the user-level vault config.")
-    init_parser.add_argument("--vault", required=True, help="Name to register for this vault.")
-    init_parser.add_argument("--root", required=True, help="Path to the Obsidian vault root.")
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Create or update the user-level vault config (auto-creates default vault when omitted).",
+    )
+    init_parser.add_argument(
+        "--vault",
+        help="Logical name to register for this vault (defaults to the vault folder name).",
+    )
+    init_parser.add_argument(
+        "--root",
+        help="Absolute path to the Obsidian vault root (auto-created if missing; defaults to LLM_WIKI_VAULT_ROOT, configured default_vault, or ~/Documents/llm-wiki-vault).",
+    )
     init_parser.add_argument("--default", action="store_true", help="Mark this vault as the default vault.")
+    init_parser.add_argument(
+        "--no-set-env",
+        action="store_true",
+        help="Skip persisting LLM_WIKI_VAULT_ROOT to the user environment.",
+    )
 
     status_parser = subparsers.add_parser("status", help="Print resolved runtime diagnostics.")
     status_parser.add_argument("--root", help="Optional vault root override for diagnostics.")
@@ -137,6 +168,22 @@ def _build_parser() -> argparse.ArgumentParser:
     archive.add_argument("--archive-index-disabled", action="store_true")
     archive.add_argument("--automatic-purge", action="store_true")
     archive.add_argument("--purge-after-days", type=int)
+    rename_vault = config_actions.add_parser(
+        "rename-vault",
+        help="Rename a registered vault in config.yaml, rename its local folder by default, and sync LLM_WIKI_VAULT_ROOT.",
+    )
+    rename_vault.add_argument("--from", dest="from_vault", help="Existing logical vault name; defaults to default_vault.")
+    rename_vault.add_argument("--to", dest="to_vault", required=True, help="New vault name.")
+    rename_vault.add_argument(
+        "--keep-dir",
+        action="store_true",
+        help="Rename only the logical vault name in config.yaml without renaming the local folder.",
+    )
+    rename_vault.add_argument(
+        "--no-set-env",
+        action="store_true",
+        help="Skip updating LLM_WIKI_VAULT_ROOT in the user environment.",
+    )
 
     evaluation_parser = subparsers.add_parser("retrieval-eval", help="Run a read-only retrieval evaluation dataset.")
     evaluation_parser.add_argument("--vault", required=True, help="Path to the vault to query without modifying it.")
@@ -283,19 +330,67 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_init(args: argparse.Namespace) -> int:
-    root = Path(args.root).expanduser()
-    if not root.exists() or not root.is_dir():
-        _print_json(_error_payload("invalid_vault_root", f"Vault root does not exist or is not a directory: {root}"))
+    cfg_path = global_config_path()
+    registry = ConfigRegistry.from_file(cfg_path)
+    existing_env_root = os.environ.get(VAULT_ROOT_ENV) or read_user_env_var(VAULT_ROOT_ENV)
+
+    if args.root:
+        root = Path(args.root).expanduser()
+    elif existing_env_root:
+        root = Path(existing_env_root).expanduser()
+    elif registry.config.default_vault is not None:
+        root = registry.config.vaults[registry.config.default_vault].root
+    elif args.vault:
+        cleaned = args.vault.strip()
+        if (
+            not cleaned
+            or cleaned in {".", ".."}
+            or "/" in cleaned
+            or "\\" in cleaned
+            or any(char in cleaned for char in '<>:"|?*')
+        ):
+            _print_json(_error_payload("invalid_config", f"Invalid vault name: {args.vault!r}", config_path=cfg_path))
+            return 2
+        root = default_vault_root().parent / cleaned
+    else:
+        root = default_vault_root()
+
+    if not root.is_absolute():
+        _print_json(_error_payload("invalid_vault_root", f"Vault root must be an absolute path: {root}", config_path=cfg_path))
+        return 2
+    if root.exists() and not root.is_dir():
+        _print_json(_error_payload("invalid_vault_root", f"Vault root exists and is not a directory: {root}", config_path=cfg_path))
         return 2
 
+    root.mkdir(parents=True, exist_ok=True)
+    resolved_root = root.resolve()
+
+    if args.vault:
+        vault_name = args.vault.strip()
+    elif (
+        registry.config.default_vault is not None
+        and registry.config.vaults[registry.config.default_vault].root == resolved_root
+    ):
+        vault_name = registry.config.default_vault
+    else:
+        vault_name = resolved_root.name
+
+    make_default = bool(args.default) or registry.config.default_vault is None
     config_path = write_global_config(
-        global_config_path(),
-        vault_name=args.vault,
-        vault_root=root,
-        make_default=bool(args.default),
+        cfg_path,
+        vault_name=vault_name,
+        vault_root=resolved_root,
+        make_default=make_default,
     )
-    runtime = resolve_runtime_config(vault_root_arg=root, config_path=config_path, require_sources_config=False)
-    _print_json(_runtime_payload(runtime))
+    env_var_persisted = False
+    if not args.no_set_env and (make_default or not existing_env_root):
+        os.environ[VAULT_ROOT_ENV] = str(resolved_root)
+        env_var_persisted = persist_user_env_var(VAULT_ROOT_ENV, str(resolved_root))
+
+    runtime = resolve_runtime_config(vault_root_arg=resolved_root, config_path=config_path, require_sources_config=False)
+    payload = _runtime_payload(runtime)
+    payload["env_var_persisted"] = env_var_persisted
+    _print_json(payload)
     return 0
 
 
@@ -330,6 +425,38 @@ def _run_config(args: argparse.Namespace) -> int:
     if args.config_action == "show":
         resolved = registry.resolve_vault(args.vault)
         _print_json({"ok": True, "config_path": str(registry.config_path), "config": registry.public_status(resolved)})
+        return 0
+    if args.config_action == "rename-vault":
+        config_path, old_name, old_root, new_root, directory_renamed = rename_global_config_vault(
+            global_config_path(),
+            old_name=args.from_vault,
+            new_name=args.to_vault,
+            rename_directory=not args.keep_dir,
+        )
+        updated_registry = ConfigRegistry.from_file(config_path)
+        new_name = args.to_vault.strip()
+        existing_env_root = os.environ.get(VAULT_ROOT_ENV) or read_user_env_var(VAULT_ROOT_ENV)
+        should_sync_env = updated_registry.config.default_vault == new_name or (
+            existing_env_root is not None
+            and Path(existing_env_root).expanduser().resolve() == old_root
+        )
+        env_var_persisted = False
+        if not args.no_set_env and should_sync_env:
+            os.environ[VAULT_ROOT_ENV] = str(new_root)
+            env_var_persisted = persist_user_env_var(VAULT_ROOT_ENV, str(new_root))
+        _print_json(
+            {
+                "ok": True,
+                "old_vault": old_name,
+                "vault": new_name,
+                "old_root": str(old_root),
+                "vault_root": str(new_root),
+                "directory_renamed": directory_renamed,
+                "env_var_persisted": env_var_persisted,
+                "config_path": str(config_path),
+                "restart_required": True,
+            }
+        )
         return 0
     resolved = registry.resolve_vault(args.vault)
     if args.config_action == "set-retrieval":

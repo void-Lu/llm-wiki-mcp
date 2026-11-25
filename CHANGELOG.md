@@ -1,11 +1,14 @@
 # 变更记录
 
-## 2026-11-25 — v1.1.0（开发中）：自包含宿主插件内置 MCP 服务 wheel
+## 2026-11-25 — v1.1.0：自包含宿主插件内置 MCP 服务 wheel
+
+- **版本升级**：包版本与各宿主插件模板统一升至 **1.1.0**。
 
 - **插件自包含打包**：`scripts/build_wiki_plugins.py` 改为先构建 sdist 再由 sdist 构建纯 Python wheel，导出 `uv.lock` 锁定的运行时依赖 `server/constraints.txt`（不含 `dev` 与可选 `vector`），并随各宿主插件一起分发；同步对 wheel 顶层条目做 `src/` 白名单校验，防止残留构建产物混入。
 - **统一可移植启动**：各宿主 MCP 配置改用 `uvx --python ">=3.11" --with-requirements "<ROOT>/server/constraints.txt" --from "<ROOT>/server/<wheel>" llm-wiki-mcp-server`（Claude 用 `${CLAUDE_PLUGIN_ROOT}`，其余宿主用 `${PLUGIN_ROOT}`，DSH 由 `adapter.mjs` / `index.mjs` 在加载时按插件目录展开），兼容含空格路径且不含本机绝对路径；移除 `--server-command` / `--server-arg` 外部安装模式。
 - **构建门禁与目录精简**：默认拒绝脏 Git 工作区构建（显式传 `--allow-dirty` 放行）；同步版本号到各宿主 manifest 与本地市场清单；按宿主裁剪冗余文件（`session-guidance.md` 仅入 DSH，`session_hook.py` 不入 DSH，`agents/openai.yaml` 仅入 Codex），并附带面向插件用户的简短 `README.md`；`MANIFEST.in` 增加 `prune tests`。
-- **宿主范围**：Codex、Claude Code、GitHub Copilot、Antigravity CLI、DSH 已完成打包与验证；Google Antigravity for VS Code 因扩展未原生暴露插件内置 MCP 且不采用绝对路径兜底，暂缓支持。详见 `docs/adr/0016-bundle-mcp-server-wheel-in-host-plugins.md` 与 `docs/wiki-plugin-installation.md`。
+- **零配置默认 Vault 与重命名**：全新环境首次启动 MCP 服务（无 `config.yaml` 且无 `LLM_WIKI_VAULT_ROOT`）时自动创建 `%USERPROFILE%\Documents\llm-wiki-vault`（macOS/Linux 为 `~/Documents/llm-wiki-vault`）、写入 `config.yaml` 并在 Windows 上持久化用户级 `LLM_WIKI_VAULT_ROOT`；已有用户配置优先沿用不被覆盖。`llm-wiki-mcp init` 支持无参一键初始化与自动 `mkdir`，新增 `llm-wiki-mcp config rename-vault` 同步修改本地 vault 名称（及目录）、`config.yaml` 与 `LLM_WIKI_VAULT_ROOT`。运行期状态与缓存保持在 `<vault>/.llm-wiki/` 内，不影响插件目录。
+- **宿主范围与 `cc-switch` 共存**：Codex、Claude Code、GitHub Copilot、Antigravity CLI、DSH 已完成打包与验证；Google Antigravity for VS Code 因扩展未原生暴露插件内置 MCP 且不采用绝对路径兜底，暂缓支持。推荐各宿主原生安装本插件包、`cc-switch` 仅切模型 Provider，不在 `cc-switch` 重复注册 `llm-wiki` MCP。详见 `docs/adr/0016-bundle-mcp-server-wheel-in-host-plugins.md` 与 `docs/wiki-plugin-installation.md`。
 
 ## 2026-11-09 — v1.0.0：SAG2 hop 默认主路径
 

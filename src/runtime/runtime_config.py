@@ -10,7 +10,12 @@ from typing import Any, Literal, Mapping
 
 import yaml
 
-from runtime.platform_paths import global_config_path
+from runtime.platform_paths import (
+    default_vault_root,
+    global_config_path,
+    persist_user_env_var,
+    read_user_env_var,
+)
 
 VAULT_ROOT_ENV = "LLM_WIKI_VAULT_ROOT"
 CONFIG_SCHEMA_VERSION = 1
@@ -589,6 +594,143 @@ def write_global_config(config_path: str | Path | None, *, vault_name: str, vaul
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return path
+
+
+def _validate_vault_directory_name(name: str, config_path: Path) -> str:
+    cleaned = name.strip()
+    if (
+        not cleaned
+        or cleaned in {".", ".."}
+        or "/" in cleaned
+        or "\\" in cleaned
+        or any(char in cleaned for char in '<>:"|?*')
+    ):
+        raise RuntimeConfigError(
+            f"invalid vault name: {name!r}",
+            code="invalid_config",
+            config_path=config_path,
+        )
+    return cleaned
+
+
+def rename_global_config_vault(
+    config_path: str | Path | None,
+    *,
+    old_name: str | None,
+    new_name: str,
+    rename_directory: bool = True,
+) -> tuple[Path, str, Path, Path, bool]:
+    """Rename a registered vault in config.yaml and optionally its local folder."""
+
+    path = _resolved_path(config_path) if config_path is not None else global_config_path()
+    raw = load_global_config(path)
+    if not raw:
+        raise RuntimeConfigError(
+            "No Obsidian vault root is configured.",
+            code="missing_default_vault",
+            config_path=path,
+        )
+    decoded = decode_global_config(raw, path)
+    source_name = old_name or decoded.default_vault
+    if not source_name or source_name not in decoded.vaults:
+        raise RuntimeConfigError(
+            f"unknown vault: {source_name or '(none)'}",
+            code="unknown_vault",
+            config_path=path,
+        )
+
+    target_name = _validate_vault_directory_name(new_name, path)
+    if target_name != source_name and target_name in decoded.vaults:
+        raise RuntimeConfigError(
+            f"vault already exists: {target_name}",
+            code="invalid_config",
+            config_path=path,
+        )
+
+    old_root = decoded.vaults[source_name].root
+    new_root = old_root
+    directory_renamed = False
+    if rename_directory:
+        candidate_root = (old_root.parent / target_name).resolve()
+        if candidate_root != old_root:
+            if not old_root.exists() or not old_root.is_dir():
+                raise RuntimeConfigError(
+                    f"Vault root does not exist or is not a directory: {old_root}",
+                    code="invalid_vault_root",
+                    config_path=path,
+                )
+            if candidate_root.exists():
+                raise RuntimeConfigError(
+                    f"Target vault directory already exists: {candidate_root}",
+                    code="invalid_vault_root",
+                    config_path=path,
+                )
+            old_root.rename(candidate_root)
+            new_root = candidate_root
+            directory_renamed = True
+
+    vaults = dict(raw.get("vaults") or {})
+    entry = dict(vaults.pop(source_name))
+    entry["root"] = str(new_root)
+    vaults[target_name] = entry
+    raw["vaults"] = vaults
+    raw["schema_version"] = CONFIG_SCHEMA_VERSION
+    if raw.get("default_vault") == source_name:
+        raw["default_vault"] = target_name
+
+    decode_global_config(raw, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return path, source_name, old_root, new_root, directory_renamed
+
+
+def ensure_default_vault(
+    config_path: str | Path | None = None,
+    *,
+    persist_env: bool = True,
+) -> tuple[ConfigRegistry, bool]:
+    """Ensure a usable default vault exists on a fresh machine without manual init.
+
+    Existing user configuration (``config.yaml`` ``default_vault`` or
+    ``LLM_WIKI_VAULT_ROOT`` in process or Windows User environment) always takes
+    precedence and is never overwritten.
+    """
+
+    path = _resolved_path(config_path) if config_path is not None else global_config_path()
+    registry = ConfigRegistry.from_file(path)
+    if registry.config.default_vault is not None:
+        return registry, False
+
+    env_root = os.environ.get(VAULT_ROOT_ENV)
+    if env_root:
+        _resolve_required_absolute_path(env_root, description=VAULT_ROOT_ENV)
+        return registry, False
+
+    if config_path is None:
+        user_env_root = read_user_env_var(VAULT_ROOT_ENV)
+        if user_env_root:
+            _resolve_required_absolute_path(user_env_root, description=VAULT_ROOT_ENV)
+            os.environ[VAULT_ROOT_ENV] = user_env_root
+            return registry, False
+
+    root = default_vault_root()
+    if root.exists() and not root.is_dir():
+        raise RuntimeConfigError(
+            f"Default vault root is not a directory: {root}",
+            code="invalid_vault_root",
+            config_path=path,
+        )
+    root.mkdir(parents=True, exist_ok=True)
+    written_path = write_global_config(
+        path,
+        vault_name=root.name,
+        vault_root=root,
+        make_default=True,
+    )
+    if persist_env:
+        os.environ[VAULT_ROOT_ENV] = str(root)
+        persist_user_env_var(VAULT_ROOT_ENV, str(root))
+    return ConfigRegistry.from_file(written_path), True
 
 
 def _missing_sources_error(vault_root: Path, sources_config_path: Path) -> RuntimeConfigError:

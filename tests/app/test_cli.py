@@ -246,24 +246,119 @@ def test_archive_status_existing_vault_reports_ready_operations(tmp_path: Path, 
     ]
 
 
-def test_init_returns_nonzero_when_vault_root_is_missing(
+def test_init_auto_creates_missing_explicit_root_and_rejects_file_target(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ):
     config_dir = tmp_path / "config"
-    missing_root = tmp_path / "missing-vault"
+    missing_root = tmp_path / "auto-created-vault"
     monkeypatch.setenv("LLM_WIKI_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LLM_WIKI_USER_DATA_DIR", str(tmp_path / "user-data"))
 
     exit_code = main(["init", "--vault", "homework", "--root", str(missing_root), "--default"])
 
-    assert exit_code != 0
-    assert not (config_dir / "config.yaml").exists()
+    assert exit_code == 0
+    assert missing_root.is_dir()
+    assert (config_dir / "config.yaml").is_file()
     output = json.loads(capsys.readouterr().out)
-    assert output["ok"] is False
-    assert output["code"] == "invalid_vault_root"
-    assert str(missing_root) in output["error"]
+    assert output["ok"] is True
+    assert output["vault"] == "homework"
+    assert output["vault_root"] == str(missing_root.resolve())
+
+    file_target = tmp_path / "not-a-dir.txt"
+    file_target.write_text("file", encoding="utf-8")
+    bad_code = main(["init", "--vault", "bad", "--root", str(file_target)])
+    assert bad_code != 0
+    bad_output = json.loads(capsys.readouterr().out)
+    assert bad_output["ok"] is False
+    assert bad_output["code"] == "invalid_vault_root"
+
+
+def test_init_zero_arg_creates_default_vault_and_persists_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    default_dir = tmp_path / "Documents" / "llm-wiki-vault"
+    monkeypatch.setenv("LLM_WIKI_DEFAULT_VAULT_ROOT", str(default_dir))
+    persisted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.cli.persist_user_env_var",
+        lambda name, value: persisted.append((name, value)) or True,
+    )
+
+    exit_code = main(["init"])
+
+    assert exit_code == 0
+    assert default_dir.is_dir()
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["vault"] == "llm-wiki-vault"
+    assert output["vault_root"] == str(default_dir.resolve())
+    assert output["env_var_persisted"] is True
+    assert persisted == [("LLM_WIKI_VAULT_ROOT", str(default_dir.resolve()))]
+
+
+def test_init_respects_existing_env_vault_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    existing_vault = tmp_path / "my-existing-vault"
+    existing_vault.mkdir()
+    default_dir = tmp_path / "Documents" / "llm-wiki-vault"
+    monkeypatch.setenv("LLM_WIKI_DEFAULT_VAULT_ROOT", str(default_dir))
+    monkeypatch.setenv("LLM_WIKI_VAULT_ROOT", str(existing_vault))
+
+    exit_code = main(["init"])
+
+    assert exit_code == 0
+    assert not default_dir.exists()
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["vault"] == "my-existing-vault"
+    assert output["vault_root"] == str(existing_vault.resolve())
+
+
+def test_config_rename_vault_updates_directory_config_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    original = tmp_path / "Documents" / "llm-wiki-vault"
+    monkeypatch.setenv("LLM_WIKI_DEFAULT_VAULT_ROOT", str(original))
+    persisted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.cli.persist_user_env_var",
+        lambda name, value: persisted.append((name, value)) or True,
+    )
+
+    assert main(["init"]) == 0
+    capsys.readouterr()
+
+    exit_code = main(["config", "rename-vault", "--to", "team-wiki"])
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    renamed = (tmp_path / "Documents" / "team-wiki").resolve()
+    assert output["ok"] is True
+    assert output["old_vault"] == "llm-wiki-vault"
+    assert output["vault"] == "team-wiki"
+    assert output["vault_root"] == str(renamed)
+    assert output["directory_renamed"] is True
+    assert output["env_var_persisted"] is True
+    assert not original.exists()
+    assert renamed.is_dir()
+    assert persisted[-1] == ("LLM_WIKI_VAULT_ROOT", str(renamed))
+
+    # --keep-dir renames only the logical name in config.yaml
+    keep_code = main(["config", "rename-vault", "--to", "work-notes", "--keep-dir"])
+    assert keep_code == 0
+    keep_output = json.loads(capsys.readouterr().out)
+    assert keep_output["vault"] == "work-notes"
+    assert keep_output["vault_root"] == str(renamed)
+    assert keep_output["directory_renamed"] is False
+    assert renamed.is_dir()
 
 
 def test_init_reports_missing_sources_without_creating_starter_file(

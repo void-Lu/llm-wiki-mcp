@@ -18,21 +18,44 @@ and `shared-spec-vault` skill.
 - Network access on first run so `uvx` can download pinned dependencies (and
   Python 3.11+ if not already installed locally)
 
-## First-time setup (register vault & warm cache)
+## Zero-config vault & optional setup
 
-Run `init` once against the bundled wheel. This registers your Obsidian wiki
-vault in your user config directory and pre-warms the `uv` cache so the host
-starts the MCP server quickly without hitting startup timeouts:
+- **Fresh machine (no manual `init` required)**: when the MCP server starts with
+  neither `config.yaml` (`default_vault`) nor `LLM_WIKI_VAULT_ROOT`, it
+  automatically creates `%USERPROFILE%\Documents\llm-wiki-vault` (or
+  `~/Documents/llm-wiki-vault` on macOS/Linux), registers it in user
+  `config.yaml`, and on Windows persists the User environment variable
+  `LLM_WIKI_VAULT_ROOT`.
+- **Existing vault respected**: if you already configured `default_vault` in
+  `config.yaml` or set `LLM_WIKI_VAULT_ROOT`, the server uses your existing
+  configuration without creating the default directory.
+- **Runtime state stays inside your vault**: SQLite state, search indexes,
+  caches, and archives are stored inside `<vault>/.llm-wiki/` and
+  `<vault>/archives/`, never inside the plugin directory.
+
+Optional one-click `init` (also pre-warms the `uv` cache to avoid first-launch
+timeouts; missing target directories are created automatically):
 
 ```powershell
+# Zero-arg default init (or add --vault <name> --root '<path>' --default)
 uvx --python ">=3.11" --with-requirements "<plugin-dir>/server/constraints.txt" `
     --from "<plugin-dir>/server/{{WHEEL_NAME}}" `
-    llm-wiki-mcp init --vault my-wiki --root 'C:\path\to\wiki' --default
+    llm-wiki-mcp init
+
+# Rename the local vault folder, config.yaml entry, and LLM_WIKI_VAULT_ROOT
+uvx --python ">=3.11" --with-requirements "<plugin-dir>/server/constraints.txt" `
+    --from "<plugin-dir>/server/{{WHEEL_NAME}}" `
+    llm-wiki-mcp config rename-vault --to my-wiki
 ```
 
-Replace `<plugin-dir>` with this installed plugin directory (and adjust quotes
-for your shell on macOS/Linux). If you already have a registered `default_vault`,
-you can warm the cache with `llm-wiki-mcp status` instead.
+Pass `--keep-dir` to `rename-vault` if you only want to rename the logical name
+in `config.yaml` without renaming the folder on disk.
+
+## Using alongside `cc-switch`
+
+Install this plugin natively in each host for MCP + `SessionStart` hook +
+`shared-spec-vault`, and use `cc-switch` only for switching API/model providers.
+Do **not** add a duplicate `llm-wiki` entry in `cc-switch`'s MCP panel.
 
 ## Verify
 

@@ -1,3 +1,5 @@
-- insert:
-    - id: llm-wiki
-      name: dsh-llm-wiki
+- op: add
+  path: /-
+  value:
+    id: llm-wiki
+    name: dsh-llm-wiki

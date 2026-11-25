@@ -664,3 +664,51 @@ def test_bundled_stdio_server_handshake_and_concurrent_writes(
             assert (vault / data_b["path"]).is_file()
 
     asyncio.run(asyncio.wait_for(_exercise(), timeout=180))
+
+
+def test_bundled_server_zero_config_auto_creates_default_vault(
+    real_bundle: Path, tmp_path: Path
+) -> None:
+    """Fresh environment with no init and no LLM_WIKI_VAULT_ROOT auto-bootstraps default vault."""
+
+    default_vault = tmp_path / "Documents" / "llm-wiki-vault"
+    config_dir = tmp_path / "fresh config"
+    isolated_env = {
+        k: v for k, v in os.environ.items() if k != "LLM_WIKI_VAULT_ROOT"
+    } | {
+        "LLM_WIKI_CONFIG_DIR": str(config_dir),
+        "LLM_WIKI_DEFAULT_VAULT_ROOT": str(default_vault),
+    }
+    command, args = _expand_host_mcp(real_bundle / "codex", "codex")
+    params = StdioServerParameters(command=command, args=args, env=isolated_env, cwd=tmp_path)
+
+    async def _exercise() -> None:
+        async with stdio_client(params) as (read, write), ClientSession(
+            read, write
+        ) as session:
+            await session.initialize()
+            res = await session.call_tool("wiki_status", {})
+            assert not res.is_error, res.content
+            data = res.structured_content or json.loads(res.content[0].text)
+            assert data["ok"] is True
+            assert data["vault"] == "llm-wiki-vault"
+
+            write_res = await session.call_tool(
+                "wiki_write_note",
+                {
+                    "note_type": "knowledge",
+                    "domain": "common-errors",
+                    "filename": "zero-config-check",
+                    "title": "Zero Config Check",
+                    "content": "Verifies zero-config vault stores runtime state inside vault.",
+                },
+            )
+            assert not write_res.is_error, write_res.content
+            write_data = write_res.structured_content or json.loads(write_res.content[0].text)
+            assert write_data["ok"] is True, write_data
+
+    asyncio.run(asyncio.wait_for(_exercise(), timeout=120))
+    assert default_vault.is_dir()
+    assert (default_vault / ".llm-wiki").is_dir()
+    assert (config_dir / "config.yaml").is_file()
+    assert not (real_bundle / "codex" / ".llm-wiki").exists()
